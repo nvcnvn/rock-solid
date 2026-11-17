@@ -7316,10 +7316,11 @@ Each invariant is shown to fire: a planted bug for each must fail at least one s
   the next carve of its size (`TestASlabCarvesAgainWhatItWasGivenBack`).
 - Every dropped tree closes, checked by counting the page bytes out where tests drop stores and
   shards (`looptest.Pages`): the chunk store harness's reopen and small-disk runs, the replica
-  cluster at each reboot, the chunk index tests' trees, the MetaStore group's restarts and the
-  control-plane host's. Planted: without `Restore` closing the tree it replaces,
-  `TestASnapshotHoldsTheEntriesHandedOverInItsCall` fails; without recovery closing the index it
-  replaces, `TestRecoveryAndRebuildEqualLiveIndex` does.
+  cluster at each reboot, a node's device starts that format or fail, the chunk index tests'
+  trees, the MetaStore group's restarts and the control-plane host's. Planted: without `Restore`
+  closing the tree it replaces, `TestASnapshotHoldsTheEntriesHandedOverInItsCall` fails; without
+  recovery closing the index it replaces, `TestRecoveryAndRebuildEqualLiveIndex` does; without a
+  failed device closing its store, `TestADeviceWhoseFormatFailsGivesItsPagesBack` does.
 - Every LSM test runs its trees on one off-heap slab per test binary (the package's `TestMain`),
   seeded runs included: each seed of `TestMetamorphic`, the range-removal model, the memtable model
   and the copy-on-write views closes its trees and checks its page bytes out are back to zero.
@@ -8021,8 +8022,9 @@ The node's machine, `internal/node`, fed events with no network, and its message
 | A replica's ask for a new interval reaches the leading host from a node not heard from, then from one heard from; then its activation of the new interval | Nothing moves; the PG moves to a new interval whose delta goes to the node; the next table holds it activated (`TestAReplicasAskAndActivationReachTheControl`, `internal/meta`) |
 | Two replicas, one removed; then the device opened again under another log, then a membership naming it | After the removal a table goes to the other alone, the removed one's held version no longer pins the report, and the report names its device once, with the new log, its replica counted only once the membership names it; before the removal it got every table and its version counted (`TestARemovedReplicaGetsNoTableAndLeavesTheReport`) |
 | A disk membership from a voter, and one from a node that is no voter | The voter's handed on whole; the other dropped (`TestTheDiskMembershipIsHandedOn`) |
-| A blank device's format cut by a crash after each of its disk actions, then a start with another seed | The second start formats under a log ID of its own source, or opens the first's log once its format landed; the device is reported opened, with its device, log, size, reserve and class, only once a format settles (`TestTwoStartsOverAFormatCutShortDrawDifferentLogIDs`) |
-| A device whose block 0 and superblock copy hold junk | Reported failed, both blocks left as they were, and no replica runs whatever the membership says (`TestADeviceWithNoValidSuperblockFailsUntouched`) |
+| A blank device's format cut by a crash after each of its disk actions, then a start with another seed | The second start formats under a log ID of its own source, or opens the first's log once its format landed; the device is reported opened, with its device, log, size, reserve and class, only once a format settles; once its store closes, no page slab is out (`TestTwoStartsOverAFormatCutShortDrawDifferentLogIDs`) |
+| A device whose block 0 and superblock copy hold junk | Reported failed, both blocks left as they were, no page slab out, and no replica runs whatever the membership says (`TestADeviceWithNoValidSuperblockFailsUntouched`) |
+| A blank device whose writes all fail | Its format fails, the device is reported failed and the format's store has given its page slabs back (`TestADeviceWhoseFormatFailsGivesItsPagesBack`) |
 | A session table, a placement table at epoch 2 whose PG has disk 5 as primary and disk 4 as member, and the authority handed to an opened device, then a message, then a membership without its log, then one naming it disk 5 and disk 4 at another node's loop | Nothing runs and the message is dropped until the membership names the device's log; then the replica runs as disk 5, holding session version 3 and epoch 2, reports to the authority and, as the PG's primary, peers with disk 4's loop (`TestTheReplicaStartsAsTheDiskTheMembershipNames`) |
 | A device the process could not open, as a drive gone from the bus, beside one that opened | Reported failed with no disk action; the node's report lists it failed and the other opened (`TestADeviceThatCannotBeOpenedIsReportedFailed`) |
 | A node's start | Sends a table fetch beside its first heartbeat: its replicas start with no placement table, and a leader that sent the node the whole table before a restart within `node_down_after` sends it only deltas (`TestAStartFetchesThePlacementTable`) |

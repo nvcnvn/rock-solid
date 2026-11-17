@@ -10,6 +10,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/chunkstore/storetest"
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/loop/looptest"
 	"github.com/nvcnvn/rock-solid/internal/meta"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
@@ -29,6 +30,7 @@ type devRun struct {
 	sent   []core.Action
 	opened *meta.OpenedDisk
 	failed bool
+	pages  looptest.Pages
 }
 
 func newDevRun(t *testing.T, disk *sim.Disk) *devRun {
@@ -40,8 +42,18 @@ func (r *devRun) start(seed uint64) {
 	r.out.Reset()
 	cfg := storetest.Config()
 	cfg.Log.NoReserve = false
+	cfg.Pages = &r.pages
 	r.d = NewDevice(&r.ctx, DeviceConfig{Device: 7, Blocks: devBlocks, Class: "ssd", Loop: 3, Store: cfg, Seed: seed, Group: group}, &r.out)
 	r.take()
+}
+
+// pagesBack checks that the device holds no page slab but its store's, which then gives all back.
+func (r *devRun) pagesBack() {
+	r.t.Helper()
+	r.d.closeStore()
+	if r.pages.Out != 0 {
+		r.t.Fatalf("the device kept %d bytes of page slabs", r.pages.Out)
+	}
 }
 
 func (r *devRun) take() {
@@ -103,6 +115,7 @@ func TestTwoStartsOverAFormatCutShortDrawDifferentLogIDs(t *testing.T) {
 		again := newDevRun(t, disk)
 		again.start(2)
 		again.settle()
+		again.pagesBack()
 		switch {
 		case again.opened == nil || again.failed:
 			t.Fatalf("%d disk actions: the second start opened %+v, failed %v", k, again.opened, again.failed)
@@ -131,6 +144,7 @@ func TestADeviceWithNoValidSuperblockFailsUntouched(t *testing.T) {
 	if !r.failed || r.opened != nil || r.d.Store() != nil {
 		t.Fatalf("failed %v, opened %+v", r.failed, r.opened)
 	}
+	r.pagesBack()
 	if !bytes.Equal(disk.Read(0, 1), junk) || !bytes.Equal(disk.Read(g.SuperblockCopyLBA(), 1), junk) {
 		t.Fatal("a failed device was written")
 	}
@@ -139,6 +153,19 @@ func TestADeviceWithNoValidSuperblockFailsUntouched(t *testing.T) {
 	if r.d.Replica() != nil {
 		t.Fatal("a failed device runs a replica")
 	}
+}
+
+// A blank device whose format cannot write is reported failed and keeps none of the format's pages.
+func TestADeviceWhoseFormatFailsGivesItsPagesBack(t *testing.T) {
+	disk := sim.NewDisk(devBlocks)
+	disk.Inject(sim.Fault{Effect: sim.FailIO, When: sim.OnKind(core.ActDiskWrite)})
+	r := newDevRun(t, disk)
+	r.start(1)
+	r.settle()
+	if !r.failed || r.opened != nil || r.d.Store() != nil {
+		t.Fatalf("failed %v, opened %+v", r.failed, r.opened)
+	}
+	r.pagesBack()
 }
 
 // A device the process could not open, as a drive gone from the bus, is reported failed and the
