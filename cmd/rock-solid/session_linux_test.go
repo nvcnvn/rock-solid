@@ -239,8 +239,9 @@ func untilOK(t *testing.T, p *ctl, devices []string, within time.Duration, op fu
 // starts a session through the session-start kind, and its write, from a session newer than the
 // node's table, waits for the node's fetch and succeeds. The node is killed and started again at
 // once over its opened stores, within node_down_after, so the control plane never marks its PG's
-// member down: a new session's write to the same PG succeeds once the PG moves to the one new
-// interval the restarted replica asks for, and the replica activates it. Once the first session's
+// member down: the block written before the kill reads back, and a new session's write to the same
+// PG succeeds, once the PG moves to the one new interval the restarted replica asks for and the
+// replica activates it. Once the first session's
 // lease runs out unrenewed and the leader fences it, its write is refused.
 func TestASessionWritesOverTCPAndARestartedNodeWritesToTheSamePGAgain(t *testing.T) {
 	dir := testDir(t)
@@ -280,8 +281,9 @@ func TestASessionWritesOverTCPAndARestartedNodeWritesToTheSamePGAgain(t *testing
 	if !ok {
 		t.Fatal("no session started through the session-start kind")
 	}
-	if rp, ok := writeOK(t, p, cl, devices, s1, 8*time.Second); !ok {
-		t.Fatalf("session %d's write was never acknowledged, the last answer %+v; the node said:\n%s", s1, rp, out.String())
+	written, ok := writeOK(t, p, cl, devices, s1, 8*time.Second)
+	if !ok {
+		t.Fatalf("session %d's write was never acknowledged, the last answer %+v; the node said:\n%s", s1, written, out.String())
 	}
 	before := onCtl(t, p, func(_ *core.Context, c *meta.Control) uint32 { return c.Table().Pools[0].PGs[0].Interval })
 
@@ -291,6 +293,14 @@ func TestASessionWritesOverTCPAndARestartedNodeWritesToTheSamePGAgain(t *testing
 	_ = cmd.Wait()
 	var again output
 	startNode(t, flags, &again)
+	var got byte
+	if rp, ok := untilOK(t, p, devices, 15*time.Second, func(u chunkstore.Update, to core.NodeID) (chunkstore.Response, bool) {
+		rp, b, ok := cl.read(u, to, 5*time.Second)
+		got = b
+		return rp, ok
+	}); !ok || got != byte(written.ID) {
+		t.Fatalf("the block written before the kill read back %#x, want %#x, the last answer %+v; the node said:\n%s", got, byte(written.ID), rp, again.String())
+	}
 	s2, ok := cl.start(10 * time.Second)
 	if !ok {
 		t.Fatal("no session started after the restart")
