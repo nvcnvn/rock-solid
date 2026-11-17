@@ -95,11 +95,7 @@ func TestAGroupMessageIsNeverAChunkstoreFrame(t *testing.T) {
 }
 
 func fuzzNodeWire(f *testing.F, seed func(pool core.BufPool, m *core.Msg), decode func(pool core.BufPool, m *core.Msg) (core.Msg, bool)) {
-	pool := sim.NewPool(1<<20, 0)
-	var m core.Msg
-	seed(pool, &m)
-	all := wireBytes(pool, &m)
-	f.Add(all[:m.Len], all[m.Len:])
+	addWire(f, seed)
 	f.Fuzz(func(t *testing.T, inline, body []byte) {
 		pool := sim.NewPool(1<<20, 0)
 		m, ok := wireMsg(pool, inline, body)
@@ -118,6 +114,15 @@ func fuzzNodeWire(f *testing.F, seed func(pool core.BufPool, m *core.Msg), decod
 			pool.Free(m.Buf)
 		}
 	})
+}
+
+// addWire adds the message seed encodes to f's corpus.
+func addWire(f *testing.F, seed func(pool core.BufPool, m *core.Msg)) {
+	pool := sim.NewPool(1<<20, 0)
+	var m core.Msg
+	seed(pool, &m)
+	all := wireBytes(pool, &m)
+	f.Add(all[:m.Len], all[m.Len:])
 }
 
 func FuzzDecodeNodeReport(f *testing.F) {

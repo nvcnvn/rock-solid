@@ -325,6 +325,9 @@ func TestAdminCrossesTheWireWhole(t *testing.T) {
 }
 
 func FuzzDecodeAdmin(f *testing.F) {
+	for _, a := range []Admin{{Op: AdminLost, Disk: 2}, {Op: AdminRemove, Disk: 3}, {Op: AdminFailed}} {
+		addWire(f, func(pool core.BufPool, m *core.Msg) { _ = EncodeAdmin(pool, 1, 4, &a, m) })
+	}
 	fuzzNodeWire(f, func(pool core.BufPool, m *core.Msg) {
 		_ = EncodeAdmin(pool, 1, 4, &Admin{Op: AdminPool, Pool: 1, Spec: chunkstore.PoolSpec{Replicas: new(2), Overcommit: new(true), DiskClass: "ssd"}}, m)
 	}, func(pool core.BufPool, m *core.Msg) (core.Msg, bool) {
@@ -342,6 +345,9 @@ func FuzzDecodeAdmin(f *testing.F) {
 }
 
 func FuzzDecodeAdminAnswer(f *testing.F) {
+	for _, a := range []AdminAnswer{{}, {Refused: "disk 2: chunkstore: disk not down"}, {Failed: []FailedDevice{{Node: 2, Device: 9}, {Node: 3, Device: 1 << 40}}}} {
+		addWire(f, func(pool core.BufPool, m *core.Msg) { _ = EncodeAdminAnswer(pool, 1, 4, &a, m) })
+	}
 	fuzzNodeWire(f, func(pool core.BufPool, m *core.Msg) {
 		_ = EncodeAdminAnswer(pool, 1, 4, &AdminAnswer{Refused: "no", Failed: []FailedDevice{{Node: 2, Device: 9}}}, m)
 	}, func(pool core.BufPool, m *core.Msg) (core.Msg, bool) {
