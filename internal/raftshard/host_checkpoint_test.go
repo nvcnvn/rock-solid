@@ -189,10 +189,35 @@ func TestARemovedOwnerIsReusableOnceTheFloorPassesItsBlobs(t *testing.T) {
 		t.Fatal("after a restart that replayed its blobs a removed owner is reusable")
 	}
 	r.checkpoint()
+	r.roll()
 	if !r.host.Reusable(5) {
 		t.Fatal("a removed owner whose blobs lie before the floor is not reusable")
 	}
 	r.host.Add(5, NewStorage())
+}
+
+// A manifest made durable is not loaded until a segment header names it, so an owner whose removed
+// shard's blobs only that manifest's floor passes is not given to a new shard until then, which
+// would replay them as its own.
+func TestARemovedOwnerIsNotReusableBeforeASegmentHeaderNamesTheManifest(t *testing.T) {
+	r := newRig(t)
+	st := NewStorage()
+	r.host.Add(5, st)
+	r.commit(st, 5, 1, Round{Entries: entries(1, 1, 1, 100), HardState: raftpb.HardState{Term: 1, Vote: 1, Commit: 1}})
+	r.host.Remove(5)
+	r.checkpoint()
+	if r.host.Reusable(5) {
+		t.Fatal("owner 5 is reusable while recovery would still load the manifest before the one whose floor passes its blobs")
+	}
+	r.roll()
+	fresh := NewStorage()
+	r.host.Add(5, fresh)
+	hs := raftpb.HardState{Term: 3, Vote: 2}
+	r.commit(fresh, 5, 1, Round{HardState: hs})
+	sts := r.crash(5)
+	if l, _ := sts[5].LastIndex(); l != 0 || sts[5].HardState() != hs {
+		t.Fatalf("the new shard of owner 5 recovered last index %d and hard state %+v, want 0 and %+v", l, sts[5].HardState(), hs)
+	}
 }
 
 // A shard hosted on a restored base takes its compaction index from it, so a replayed round the

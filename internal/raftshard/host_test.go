@@ -97,7 +97,6 @@ func (r *rig) absorb() {
 			r.done, err = r.host.Durable(&r.ctx, ev, &more, r.done)
 			r.queue = append(r.queue, more.Actions...)
 		case disklog.CheckpointDone:
-			r.host.Checkpointed(r.floor)
 			r.checkpoints++
 		case disklog.ManifestLoaded:
 			if m, ok := r.rec.Manifest(); ok {

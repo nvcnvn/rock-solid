@@ -29,9 +29,8 @@ type Host struct {
 	rec     []byte
 	items   []disklog.Item
 	dead    []disklog.BlobRef
-	// floor is the replay floor of the newest durable manifest, and retired the owners of removed
-	// shards with the LSN of each one's newest blob, kept until the floor reaches it.
-	floor   uint64
+	// retired is the owners of removed shards with the LSN of each one's newest blob, kept until
+	// the log's replay floor reaches it.
 	retired []retiredOwner
 }
 
@@ -332,20 +331,15 @@ func (h *Host) Recovered(log *disklog.Log) {
 	h.bury()
 }
 
-// Loaded takes the manifest a restart's recovery loaded, before its replay: a hosted shard it
-// names skips its blobs at or before its replay LSN, which earlier compactions and hard states
-// made dead.
+// Loaded takes the manifest a restart's recovery loaded, before its replay and after every shard
+// it names is added: a hosted shard it names skips its blobs at or before its replay LSN, which
+// earlier compactions and hard states made dead.
 func (h *Host) Loaded(m *disklog.Manifest) {
-	floor := m.BaseLSN
-	for i, ix := range m.Indexes {
+	for _, ix := range m.Indexes {
 		if k, ok := h.at[ix.Owner]; ok {
 			h.shards[k].from = ix.ReplayLSN
 		}
-		if i == 0 || ix.ReplayLSN < floor {
-			floor = ix.ReplayLSN
-		}
 	}
-	h.Checkpointed(floor)
 }
 
 // Indexes appends each hosted shard's index for a checkpoint whose base is the durable LSN
@@ -389,22 +383,8 @@ func (h *Host) Rewrite(ctx *core.Context, lsn uint64, out *disklog.Output) error
 	return nil
 }
 
-// Checkpointed takes the replay floor of a manifest made durable: an owner whose removed shard's
-// blobs all lie at or before it may be given to a shard again.
-func (h *Host) Checkpointed(floor uint64) {
-	h.floor = max(h.floor, floor)
-	keep := 0
-	for _, r := range h.retired {
-		if r.lsn > h.floor {
-			h.retired[keep] = r
-			keep++
-		}
-	}
-	h.retired = h.retired[:keep]
-}
-
 // Reusable reports whether owner may be given to a new shard: no shard holds it, no blob of it is
-// in flight, and no blob of a removed shard of it can replay.
+// in flight, and no blob of a removed shard of it lies past the log's replay floor.
 func (h *Host) Reusable(owner uint32) bool {
 	if _, ok := h.at[owner]; ok {
 		return false
@@ -414,18 +394,23 @@ func (h *Host) Reusable(owner uint32) bool {
 			return false
 		}
 	}
+	var floor uint64
+	if h.Log != nil {
+		floor = h.Log.ReplayFloor()
+	}
+	keep, ok := 0, true
 	for _, r := range h.retired {
-		if r.owner == owner {
-			return false
+		if r.lsn > floor {
+			ok = ok && r.owner != owner
+			h.retired[keep] = r
+			keep++
 		}
 	}
-	return true
+	h.retired = h.retired[:keep]
+	return ok
 }
 
 func (h *Host) retire(owner uint32, lsn uint64) {
-	if lsn <= h.floor {
-		return
-	}
 	for i := range h.retired {
 		if h.retired[i].owner == owner {
 			h.retired[i].lsn = max(h.retired[i].lsn, lsn)

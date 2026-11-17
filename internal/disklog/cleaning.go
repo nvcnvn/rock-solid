@@ -192,6 +192,15 @@ func (l *Log) Cleanable(segment uint32) bool {
 	return l.usage[segment].Newest <= l.live[0].replay || l.cfg.Plants.CleanableIgnoresReplay
 }
 
+// ReplayFloor is the LSN the oldest manifest recovery may still load replays after, 0 before a
+// segment header names one: a restart may replay any record past it.
+func (l *Log) ReplayFloor() uint64 {
+	if len(l.live) == 0 || l.live[0].pos.LSN > l.namedLSN {
+		return 0
+	}
+	return l.live[0].replay
+}
+
 // Free frees segment once the cleaner has moved everything live out of it: it must be cleanable,
 // count no live block and hold no piece. Its row turns free for the next checkpoint's edit, and
 // it may be opened again at once, by the rounds waiting for room that it starts; its header stays
