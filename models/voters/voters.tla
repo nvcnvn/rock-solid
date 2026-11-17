@@ -16,8 +16,21 @@
 \* which is what pre-vote gives: a candidate that could not win raises no term. A
 \* configuration takes effect on a replica when it applies the entry, as in etcd-raft;
 \* entries hold the configuration they result in, which equals etcd-raft's delta while
-\* the leader proposes one change at a time. A crash keeps the replica's log, term,
-\* commit and applied indexes (its restart from a base is not modelled here).
+\* the leader proposes one change at a time.
+\*
+\* A crash keeps the replica's log and term. It restarts from its base, the index of its last
+\* compaction, at or below what its state machine applied: its applied index and
+\* configuration are the base's, and its commit index is the one its hard state was last
+\* written with, which a Ready that only moves the commit index never writes, or the base's
+\* if higher. The log is kept whole, since no step reads an entry at or below the base
+\* except as the base's configuration and last term, both kept.
+\*
+\* A replica halts at a committed entry its state machine cannot decode. Raft goes on
+\* applying configuration changes, but the replica acts as a down one: it takes no append,
+\* votes and campaigns in no election and fortifies no leader. While it leads it still takes
+\* its followers' answers, commits, counts the support it had, and its node renews the
+\* grants, so its followers neither campaign nor learn from its node that it is gone. Its
+\* base stays below the entry, so after a restart it halts again on reaching it.
 \*
 \* Fortification is held as two sides of one grant: a follower's support (it campaigns in
 \* no election and votes in none but its leader's own or a transfer target's) and the
@@ -35,7 +48,8 @@ CONSTANTS
     Plan,           \* the voters the Control-plane group's plan names for the group
     Stopped,        \* replicas down from the start, for good
     MaxTerm,        \* elections stop at this term
-    MaxCrashes      \* crashes of replicas, in all
+    MaxCrashes,     \* crashes of replicas, in all
+    MaxHalts        \* replicas that halt, in all
 
 CONSTANTS
     LearnerFirst,       \* a planned replica joins as a learner (FALSE: as a voter)
@@ -54,7 +68,10 @@ CONSTANTS
                         \* configuration holds it
     AskLeaderNode,      \* a follower that hears nothing from the leader it supports asks the
                         \* leader's node, and stops supporting it once it deleted its state
-    RemovedStopsLease   \* a leader serves no lease read once it applied its own removal
+    RemovedStopsLease,  \* a leader serves no lease read once it applied its own removal
+    HaltHandsOff,       \* a halted leader hands its leadership to a voter it replicates to
+    DurableCommit       \* a restart takes the commit index its hard state was written with
+                        \* (FALSE: the base's alone)
 
 ASSUME BaseVoters \subseteq Replicas /\ Plan \subseteq Replicas /\ Stopped \subseteq Replicas
 
@@ -96,15 +113,27 @@ VARIABLES
     chosen,     \* history: the committed log, each entry [e, t] with the term it first committed in
     early,      \* history: replicas made voters before they held what they had to
     support,    \* per replica: {the leader of its term it supports}, or {}
-    fort        \* per leader: the replicas whose support of its term it counts
+    fort,       \* per leader: the replicas whose support of its term it counts
+    hsCommit,   \* per replica: the commit index its hard state was last written with
+    haltAt      \* per replica: the committed entry it cannot decode, or 0
 
 vars == <<term, leader, log, commit, applied, match, hbCommit, up, gone, crashes,
-          elected, chosen, early, support, fort>>
+          elected, chosen, early, support, fort, hsCommit, haltAt>>
+
+Min(S) == CHOOSE x \in S : \A y \in S : x <= y
 
 AppliedConf(r) == ConfOf(SubSeq(log[r], 1, applied[r]))
 LastConf(r) == ConfOf(log[r])
 Live(r) == up[r] /\ ~gone[r]
 Leads(r) == Live(r) /\ leader[r]
+Halted(r) == haltAt[r] # 0 /\ applied[r] >= haltAt[r]
+
+\* A Ready that appends or changes the term or vote of the replicas in S writes their hard
+\* state with commit index c. Once no crash is left nothing reads hsCommit, so it stays.
+Persist(S, c) ==
+    hsCommit' = IF crashes < MaxCrashes
+                THEN [r \in Replicas |-> IF r \in S THEN c[r] ELSE hsCommit[r]]
+                ELSE hsCommit
 \* A replica holds what its leader had committed a heartbeat earlier.
 CaughtUp(i, r) == IsPrefix(SubSeq(log[i], 1, hbCommit[i]), log[r])
 
@@ -126,6 +155,8 @@ Init ==
     /\ early = {}
     /\ support = [r \in Replicas |-> {}]
     /\ fort = [r \in Replicas |-> {}]
+    /\ hsCommit = [r \in Replicas |-> 0]
+    /\ haltAt = [r \in Replicas |-> 0]
 
 \* Two states Spec reaches with no crash, every replica having applied the swap's joint
 \* configuration. In JointInit a voter the plan keeps leads term 1, having proposed the
@@ -140,6 +171,8 @@ Dropped == CHOOSE x \in BaseVoters \ Plan : TRUE
 
 \* l leads term t: Kept term 1, which knows every log matches its own and last advanced its
 \* commit from 2, or Dropped term 2, which appended its empty entry and knows nothing yet.
+\* Each hard state was last written with the commit index entry 3 came with, 2, or, in term
+\* 2, with the vote, 3.
 JointState(l, t) ==
     /\ term = [r \in Replicas |-> t]
     /\ leader = [r \in Replicas |-> r = l]
@@ -160,6 +193,8 @@ JointState(l, t) ==
     /\ early = {}
     /\ support = [r \in Replicas |-> {}]
     /\ fort = [r \in Replicas |-> {}]
+    /\ hsCommit = [r \in Replicas |-> IF t = 1 THEN 2 ELSE 3]
+    /\ haltAt = [r \in Replicas |-> 0]
 
 JointInit == JointState(Kept, 1)
 OutgoingInit == JointState(Dropped, 2)
@@ -169,7 +204,8 @@ OutgoingInit == JointState(Dropped, 2)
 \* its own configuration, as an etcd-raft learner does when a candidate counts it, so
 \* the voters are drawn from the candidate's configuration. A voter that supports a leader
 \* votes only for that leader itself, which asks only once it no longer leads, or, on a
-\* transfer, for the target of the leader in from, which steps down.
+\* transfer, for the target of the leader in from, which steps down. A halted replica votes
+\* and campaigns in none.
 UpToDate(i, j) ==
     \/ LastTerm(log[i]) > LastTerm(log[j])
     \/ LastTerm(log[i]) = LastTerm(log[j]) /\ Len(log[i]) >= Len(log[j])
@@ -177,7 +213,7 @@ UpToDate(i, j) ==
 Run(i, Q, from) ==
     LET nt == 1 + Max({term[j] : j \in Q}) IN
     /\ Live(i) /\ i \in Q
-    /\ \A j \in Q : support[j] \subseteq {i} \cup from
+    /\ \A j \in Q : support[j] \subseteq {i} \cup from /\ ~Halted(j)
     /\ CampaignApplied => ConfIndex(SubSeq(log[i], 1, commit[i])) <= applied[i]
     /\ Q \subseteq Voters(AppliedConf(i))
     /\ \A j \in Q : Live(j)
@@ -195,28 +231,31 @@ Run(i, Q, from) ==
     /\ support' = [j \in Replicas |-> IF j \in Q THEN {} ELSE support[j]]
     /\ fort' = [j \in Replicas |-> IF j \in Q \cup from THEN {} ELSE fort[j]]
     /\ elected' = elected \cup {<<nt, i>>}
-    /\ UNCHANGED <<commit, applied, up, gone, crashes, chosen, early>>
+    /\ Persist(Q, commit)
+    /\ UNCHANGED <<commit, applied, up, gone, crashes, chosen, early, haltAt>>
 
 Elect(i, Q) == Run(i, Q, {})
 
 \* A leader the plan drops, out of any joint configuration, hands its leadership to a
-\* planned voter, and serves no lease read from then on.
+\* planned voter, and a halted leader to any voter it replicates to (handOff), joint or
+\* not; either serves no lease read from then on.
 Transfer(l, i, Q) ==
-    /\ Leads(l) /\ l \notin Plan /\ i \in Plan /\ i # l
-    /\ AppliedConf(l).out = {}
+    /\ Leads(l) /\ i # l
+    /\ \/ l \notin Plan /\ i \in Plan /\ AppliedConf(l).out = {}
+       \/ HaltHandsOff /\ Halted(l) /\ i \in Voters(AppliedConf(l))
     /\ Run(i, Q, {l})
 
 \* A leader asks the voters of its term for support, and each gives it: a grant to the
 \* leader's node that holds is taken as given, and Lapse ends one, so any subset of them
-\* supporting the leader is reached.
+\* supporting the leader is reached. A halted replica drops the ask and its answer.
 Fortify(i) ==
-    LET F == {j \in Voters(AppliedConf(i)) \ {i} : Live(j) /\ term[j] = term[i]} IN
-    /\ Leads(i)
+    LET F == {j \in Voters(AppliedConf(i)) \ {i} : Live(j) /\ ~Halted(j) /\ term[j] = term[i]} IN
+    /\ Leads(i) /\ ~Halted(i)
     /\ \E j \in F : support[j] # {i} \/ j \notin fort[i]
     /\ support' = [j \in Replicas |-> IF j \in F THEN {i} ELSE support[j]]
     /\ fort' = [fort EXCEPT ![i] = @ \cup F]
     /\ UNCHANGED <<term, leader, log, commit, applied, match, hbCommit, up, gone, crashes,
-                   elected, chosen, early>>
+                   elected, chosen, early, hsCommit, haltAt>>
 
 \* j's node's grant to i's node lapses.
 Lapse(j, i) ==
@@ -224,7 +263,7 @@ Lapse(j, i) ==
     /\ support' = [support EXCEPT ![j] = @ \ {i}]
     /\ fort' = [fort EXCEPT ![i] = @ \ {j}]
     /\ UNCHANGED <<term, leader, log, commit, applied, match, hbCommit, up, gone, crashes,
-                   elected, chosen, early>>
+                   elected, chosen, early, hsCommit, haltAt>>
 
 \* The highest index a leader may commit given what each replica is known to hold: an entry
 \* of its term that a quorum of its applied configuration holds.
@@ -242,9 +281,10 @@ CommitTo(i, n) ==
                                     [e |-> log[i][Len(chosen) + k], t |-> term[i]]]
 
 \* The leader sends its log to a member of its applied configuration, learners included;
-\* the replica keeps a longer log that agrees with it, and takes the leader's otherwise.
+\* the replica keeps a longer log that agrees with it, and takes the leader's otherwise; a
+\* halted replica drops it. The replica writes its hard state when its log or term changes.
 Replicate(i, j) ==
-    /\ Leads(i) /\ Live(j) /\ j # i
+    /\ Leads(i) /\ Live(j) /\ j # i /\ ~Halted(j)
     /\ j \in Members(AppliedConf(i))
     /\ term[j] <= term[i]
     /\ \/ ~IsPrefix(log[i], log[j]) \/ term[j] < term[i]
@@ -259,7 +299,8 @@ Replicate(i, j) ==
           /\ CommitTo(i, n)
     /\ support' = [support EXCEPT ![j] = IF term[j] < term[i] THEN {} ELSE @]
     /\ fort' = [fort EXCEPT ![j] = {}]
-    /\ UNCHANGED <<applied, up, gone, crashes, elected, early>>
+    /\ Persist(IF log'[j] # log[j] \/ term[j] < term[i] THEN {j} ELSE {}, commit')
+    /\ UNCHANGED <<applied, up, gone, crashes, elected, early, haltAt>>
 
 \* The leader commits on an answer, and again when it applies a configuration that a
 \* quorum of already holds (etcd-raft's maybeCommit on a configuration switch).
@@ -269,21 +310,30 @@ Commit(i) ==
     /\ commit' = [commit EXCEPT ![i] = n]
     /\ hbCommit' = [hbCommit EXCEPT ![i] = HbCommit(i, n)]
     /\ CommitTo(i, n)
-    /\ UNCHANGED <<term, leader, log, applied, match, up, gone, crashes, elected, early, support, fort>>
+    /\ UNCHANGED <<term, leader, log, applied, match, up, gone, crashes, elected, early, support, fort,
+                   hsCommit, haltAt>>
 
 \* A replica applies every entry it knows committed. One that applies its own removal knows
 \* from its log that the removal committed, and deletes its state; a leader that does keeps
 \* its flag and its count of support, which RemovedStopsLease alone keeps from a lease read.
 \* etcd-raft leaves a joint configuration on its own, so a leader elected from the outgoing
 \* half applies its own removal, in the Ready that sends the commit: every follower may
-\* miss that commit, and none hears from the leader again.
-Apply(r) ==
+\* miss that commit, and none hears from the leader again. A halted replica applies them too.
+ApplyEntries(r) ==
     LET c == ConfOf(SubSeq(log[r], 1, commit[r])) IN
     /\ Live(r) /\ applied[r] < commit[r]
     /\ applied' = [applied EXCEPT ![r] = commit[r]]
     /\ gone' = [gone EXCEPT ![r] = r \in Members(AppliedConf(r)) /\ r \notin Members(c)]
     /\ UNCHANGED <<term, leader, log, commit, match, hbCommit, up, crashes, elected, chosen, early,
-                   support, fort>>
+                   support, fort, hsCommit>>
+
+Apply(r) == ApplyEntries(r) /\ UNCHANGED haltAt
+
+\* One of the entries r applies is one its state machine cannot decode.
+Halt(r) ==
+    /\ haltAt[r] = 0 /\ Cardinality({x \in Replicas : haltAt[x] # 0}) < MaxHalts
+    /\ ApplyEntries(r)
+    /\ \E h \in applied[r] + 1 .. commit[r] : haltAt' = [haltAt EXCEPT ![r] = h]
 
 \* etcd-raft refuses a change while an earlier one is unapplied, and a new leader counts
 \* every entry before its empty one, those of earlier terms, as such (raft.go,
@@ -300,8 +350,9 @@ Propose(i, c, promoted) ==
     /\ log' = [log EXCEPT ![i] = Append(@, [t |-> term[i], cfg |-> c])]
     /\ match' = [match EXCEPT ![i][i] = Len(log[i]) + 1]
     /\ early' = early \cup {p \in promoted : ~CaughtUp(i, p)}
+    /\ Persist({i}, commit)
     /\ UNCHANGED <<term, leader, commit, applied, hbCommit, up, gone, crashes, elected, chosen,
-                   support, fort>>
+                   support, fort, haltAt>>
 
 \* A planned replica joins as a learner: as a voter it would join every quorum while it
 \* holds nothing, so with a voter down every commit would wait for it to catch up.
@@ -342,7 +393,8 @@ Notice(r, p) ==
     /\ gone' = [gone EXCEPT ![r] = TRUE]
     /\ leader' = [leader EXCEPT ![r] = FALSE]
     /\ fort' = [fort EXCEPT ![r] = {}]
-    /\ UNCHANGED <<term, log, commit, applied, match, hbCommit, up, crashes, elected, chosen, early, support>>
+    /\ UNCHANGED <<term, log, commit, applied, match, hbCommit, up, crashes, elected, chosen, early, support,
+                   hsCommit, haltAt>>
 
 \* A follower that heard nothing from the leader it supports for an election timeout asks
 \* the leader's node, as a replica asks its peers whether it is still a member. Once the
@@ -352,7 +404,7 @@ AskLeader(r, l) ==
     /\ AskLeaderNode /\ Live(r) /\ support[r] = {l} /\ up[l] /\ gone[l]
     /\ support' = [support EXCEPT ![r] = {}]
     /\ UNCHANGED <<term, leader, log, commit, applied, match, hbCommit, up, gone, crashes,
-                   elected, chosen, early, fort>>
+                   elected, chosen, early, fort, hsCommit, haltAt>>
 
 \* The shard map runs ahead of the group: the plan dropping a replica does not show that
 \* the group removed it. Enabled only with DeleteOnCommitted off.
@@ -361,7 +413,8 @@ DeleteOnPlan(r) ==
     /\ gone' = [gone EXCEPT ![r] = TRUE]
     /\ leader' = [leader EXCEPT ![r] = FALSE]
     /\ fort' = [fort EXCEPT ![r] = {}]
-    /\ UNCHANGED <<term, log, commit, applied, match, hbCommit, up, crashes, elected, chosen, early, support>>
+    /\ UNCHANGED <<term, log, commit, applied, match, hbCommit, up, crashes, elected, chosen, early, support,
+                   hsCommit, haltAt>>
 
 Crash(r) ==
     /\ up[r] /\ crashes < MaxCrashes
@@ -372,13 +425,19 @@ Crash(r) ==
     /\ crashes' = crashes + 1
     /\ support' = [j \in Replicas |-> IF j = r THEN {} ELSE support[j] \ {r}]
     /\ fort' = [j \in Replicas |-> IF j = r THEN {} ELSE fort[j] \ {r}]
-    /\ UNCHANGED <<term, log, commit, applied, gone, elected, chosen, early>>
+    /\ UNCHANGED <<term, log, commit, applied, gone, elected, chosen, early, hsCommit, haltAt>>
 
+\* The replica restarts from a base at or below what its state machine applied, which a
+\* halted one never applied past the entry before its halt.
 Restart(r) ==
+    LET top == IF haltAt[r] = 0 THEN applied[r] ELSE Min({applied[r], haltAt[r] - 1}) IN
     /\ ~up[r] /\ r \notin Stopped
     /\ up' = [up EXCEPT ![r] = TRUE]
-    /\ UNCHANGED <<term, leader, log, commit, applied, match, hbCommit, gone, crashes, elected, chosen, early,
-                   support, fort>>
+    /\ \E b \in 0 .. top :
+          /\ applied' = [applied EXCEPT ![r] = b]
+          /\ commit' = [commit EXCEPT ![r] = IF DurableCommit THEN Max({b, hsCommit[r]}) ELSE b]
+    /\ UNCHANGED <<term, leader, log, match, hbCommit, gone, crashes, elected, chosen, early,
+                   support, fort, hsCommit, haltAt>>
 
 LiveSteps ==
     \/ \E i, j \in Replicas : Replicate(i, j)
@@ -391,7 +450,7 @@ LiveSteps ==
 
 Next ==
     \/ LiveSteps
-    \/ \E r \in Replicas : DeleteOnPlan(r) \/ Crash(r)
+    \/ \E r \in Replicas : DeleteOnPlan(r) \/ Crash(r) \/ Halt(r)
     \/ \E r, p \in Replicas : Notice(r, p)
     \/ \E i \in Replicas, Q \in SUBSET Replicas : Elect(i, Q)
     \/ \E l, i \in Replicas, Q \in SUBSET Replicas : Transfer(l, i, Q)
@@ -402,18 +461,21 @@ Spec == Init /\ [][Next]_vars
 \* Liveness: no grant lapses but by a crash, since a running node renews its grants, and
 \* nobody campaigns while a replica leads, since its followers hear from it well within
 \* an election timeout, and a candidate wins every vote it can. Only a leader crashes,
-\* and it restarts. No replica deletes its state but by applying its removal. Every step
-\* but crashes and fortification is weakly fair, and elections stop at MaxTerm.
+\* and it restarts, and only a leader halts. No replica deletes its state but by applying
+\* its removal. Every step but crashes, halts and fortification is weakly fair, and
+\* elections stop at MaxTerm.
 Leaderless == \A r \in Replicas : ~Leads(r)
 Votes(i, from) ==
-    {j \in Voters(AppliedConf(i)) : Live(j) /\ support[j] \subseteq {i} \cup from /\ UpToDate(i, j)}
+    {j \in Voters(AppliedConf(i)) :
+        Live(j) /\ ~Halted(j) /\ support[j] \subseteq {i} \cup from /\ UpToDate(i, j)}
 LiveElect == Leaderless /\ \E i \in Replicas : Elect(i, Votes(i, {}))
 LiveTransfer(l) == \E i \in Replicas : Transfer(l, i, Votes(i, {l}))
 FairCrash(r) == Leads(r) /\ Crash(r)
+FairHalt(r) == Leads(r) /\ Halt(r)
 
 FairSpec ==
     /\ Init
-    /\ [][LiveSteps \/ LiveElect \/ \E r \in Replicas : LiveTransfer(r) \/ FairCrash(r)]_vars
+    /\ [][LiveSteps \/ LiveElect \/ \E r \in Replicas : LiveTransfer(r) \/ FairCrash(r) \/ FairHalt(r)]_vars
     /\ WF_vars(LiveElect)
     /\ \A l \in Replicas : WF_vars(LiveTransfer(l))
     /\ \A i, j \in Replicas : WF_vars(Replicate(i, j))
@@ -427,6 +489,10 @@ FairSpec ==
 \* votes for, so every election and commit stays reachable, and lease reads go unchecked.
 Unfortified == \A r \in Replicas : fort[r] = {}
 
+\* Only the follower of JointInit that both configurations keep crashes (a state
+\* constraint): its restart from a base can rewind it past both changes.
+KeptFollowerCrashes == \A r \in Replicas : ~up[r] => r \in (BaseVoters \cap Plan) \ {Kept}
+
 \* The voters the plan keeps are interchangeable (safety configurations only).
 Symmetry == Permutations(BaseVoters \cap Plan)
 
@@ -436,6 +502,7 @@ TypeOK ==
     /\ commit \in [Replicas -> Nat] /\ applied \in [Replicas -> Nat]
     /\ support \in [Replicas -> SUBSET Replicas] /\ fort \in [Replicas -> SUBSET Replicas]
     /\ \A r \in Replicas : applied[r] <= commit[r] /\ commit[r] <= Len(log[r])
+    /\ \A r \in Replicas : haltAt[r] <= Len(log[r])
 
 \* At most one leader per term.
 AtMostOneLeader == \A a, b \in elected : a[1] = b[1] => a[2] = b[2]
@@ -474,7 +541,8 @@ LeaseReadsCurrent == \A i \in Replicas : LeaseRead(i) => Len(chosen) <= commit[i
 \* With a voter down for good, the swap commits on the survivors.
 SwapCommits == <>(ChosenConf = Conf(Plan, {}, {}))
 
-\* After the swap, the group has a leader in the new configuration, even when the leader
-\* that commits the leave is the dropped voter.
-NewLeader == <>[](\E r \in Plan : Leads(r) /\ AppliedConf(r) = Conf(Plan, {}, {}))
+\* After the swap, the group has a leader in the new configuration that has not halted, even
+\* when the leader that commits the leave is the dropped voter or halts.
+NewLeader ==
+    <>[](\E r \in Plan : Leads(r) /\ ~Halted(r) /\ AppliedConf(r) = Conf(Plan, {}, {}))
 =============================================================================

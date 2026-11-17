@@ -139,3 +139,4 @@ voters/neg-notice-any-index	open	Plants for the voter replacement model
 voters/neg-notice-non-member	open	Plants for the voter replacement model
 voters/neg-no-support-ask	raftshard.noSupportAsk	TestFollowersThatNeverAskKeepARemovedLeader
 voters/neg-removed-keeps-lease	raftshard.removedKeepsLease	TestARemovedLeaderThatKeepsReadingBreaksTheLeaseInvariant
+voters/neg-restart-commit-at-base	open	Plants for the voter replacement model
