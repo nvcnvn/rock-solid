@@ -110,11 +110,13 @@ type Node struct {
 	fetchAt  core.Tick
 	report   meta.NodeReport
 	// ctl is the voter the node talks to, moveAt when it may move to another, tableAt when it may
-	// fetch the placement table again, and placed and delta the last placement table and delta it
-	// received, and epoch the newest epoch received.
+	// fetch the placement table again, wanted whether a fetch has had no table or delta since, and
+	// placed and delta the last placement table and delta it received, and epoch the newest epoch
+	// received.
 	ctl     int
 	moveAt  core.Tick
 	tableAt core.Tick
+	wanted  bool
 	placed  chunkstore.Table
 	delta   chunkstore.Delta
 	epoch   uint64
@@ -141,11 +143,17 @@ func (n *Node) move(ctx *core.Context, at core.NodeID, known bool, out *Output) 
 		n.fetching = false
 		n.fetch(ctx, out)
 	}
+	if n.wanted {
+		n.tableAt = 0
+		n.FetchTable(ctx, out)
+	}
 }
 
 // FetchTable takes a replica's ReplicaOutput.Fetch or Whole and fetches the whole placement table,
-// at most once an Interval until a table or delta arrives.
+// at most once an Interval, and again on each heartbeat and move until a table or delta arrives,
+// since a replica with no table never asks for one.
 func (n *Node) FetchTable(ctx *core.Context, out *Output) {
+	n.wanted = true
 	if ctx.Now < n.tableAt {
 		return
 	}
@@ -251,6 +259,9 @@ func (n *Node) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
 		switch {
 		case ev.Timer == HeartbeatTimer:
 			n.heartbeat(ctx, out)
+			if n.wanted {
+				n.FetchTable(ctx, out)
+			}
 		case ev.Timer == FetchTimer && n.fetching && ctx.Now >= n.fetchAt:
 			n.fetching = false
 			n.fetch(ctx, out)
@@ -273,12 +284,12 @@ func (n *Node) recv(ctx *core.Context, ev *core.Event, out *Output) {
 		return
 	case meta.KindTable:
 		if n.placed, err = meta.DecodeTable(ctx.Pool, &ev.Msg); err == nil {
-			out.Table, n.tableAt, n.epoch = &n.placed, 0, max(n.epoch, n.placed.Epoch)
+			out.Table, n.tableAt, n.wanted, n.epoch = &n.placed, 0, false, max(n.epoch, n.placed.Epoch)
 		}
 		return
 	case meta.KindDelta:
 		if n.delta, err = meta.DecodeDelta(ctx.Pool, &ev.Msg); err == nil {
-			out.Delta, n.tableAt, n.epoch = &n.delta, 0, max(n.epoch, n.delta.Epoch)
+			out.Delta, n.tableAt, n.wanted, n.epoch = &n.delta, 0, false, max(n.epoch, n.delta.Epoch)
 		}
 		return
 	case meta.KindDisks:

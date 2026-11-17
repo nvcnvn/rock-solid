@@ -485,6 +485,46 @@ func TestAMoveSendsTheFetchInFlightToTheNewVoter(t *testing.T) {
 	}
 }
 
+// A table fetch whose answer gets lost goes again on the heartbeat and on a move, until a table
+// arrives; then neither sends it.
+func TestALostTableFetchGoesAgainUntilATableArrives(t *testing.T) {
+	r := three(t)
+	r.out.Reset()
+	r.n.Start(&r.ctx, &r.out)
+	r.sends(meta.KindTableFetch)
+	tableFetches := func() []core.NodeID {
+		var to []core.NodeID
+		for _, a := range r.out.Actions {
+			if _, k, _, _ := meta.Peek(&a.Msg); a.Kind == core.ActNetSend && k == meta.KindTableFetch {
+				to = append(to, a.Peer)
+			}
+			free(&r.ctx, &a.Msg)
+		}
+		return to
+	}
+	r.ctx.Now += Interval
+	r.event(core.Event{Kind: core.EvTimer, Timer: HeartbeatTimer})
+	if to := tableFetches(); len(to) != 1 || to[0] != ctl {
+		t.Fatalf("the heartbeat after a lost table fetch sent it to %v", to)
+	}
+	r.from(ctl, leader(other, true))
+	if to := tableFetches(); len(to) != 1 || to[0] != other {
+		t.Fatalf("a move with no table sent the fetch to %v", to)
+	}
+	tbl := chunkstore.Table{Epoch: 4}
+	r.from(other, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeTable(pool, group, &tbl, m) })
+	r.ctx.Now += Interval
+	r.event(core.Event{Kind: core.EvTimer, Timer: HeartbeatTimer})
+	if to := tableFetches(); len(to) != 0 {
+		t.Fatalf("the heartbeat after a table sent a fetch to %v", to)
+	}
+	r.ctx.Now += Interval
+	r.from(other, leader(ctl, true))
+	if to := tableFetches(); len(to) != 0 {
+		t.Fatalf("a move after a table sent a fetch to %v", to)
+	}
+}
+
 // A replica removed, as a device opened again in the same process, gets no more tables and leaves
 // the report, and the device opened again is reported once; a replica not yet removed, whatever
 // its store, keeps getting tables and its version pins the report.

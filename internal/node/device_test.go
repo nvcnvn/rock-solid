@@ -414,3 +414,67 @@ func TestADeviceReportsToTheVoterItStartsWith(t *testing.T) {
 		t.Fatal("the replica reported to no authority")
 	}
 }
+
+// A node whose start's table fetch gets lost fetches again on its next heartbeat: the replica,
+// holding no table, refuses a write, and once the retry's answer lands the same write is
+// acknowledged.
+func TestALostTableFetchIsMadeUpBeforeAWriteIsAcknowledged(t *testing.T) {
+	d := newDevRun(t, sim.NewDisk(devBlocks))
+	d.start(1)
+	d.settle()
+	n := newRun(t, 1)
+	n.out.Reset()
+	n.n.Take(&n.ctx, 7, &DeviceOutput{Opened: d.opened}, &n.out)
+	ds := []meta.DiskAddr{{Disk: 5, Log: d.opened.Log, At: core.NodeID{Node: 4, Loop: 3}}}
+	n.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeDisks(pool, group, ds, m) })
+	toDevice(n, d)
+	n.table(0, chunkstore.SessionTable{Version: 1, Next: 6, Live: []uint64{5}})
+	toDevice(n, d)
+	n.out.Reset()
+	n.n.Start(&n.ctx, &n.out)
+	if len(n.sends(meta.KindTableFetch)) != 1 {
+		t.Fatal("the start sent no table fetch")
+	}
+
+	write := func(id core.RequestID) []chunkstore.Response {
+		u := chunkstore.Update{Kind: chunkstore.KindWrite, ID: id, PG: chunkstore.PGFields{Epoch: 2, PG: core.PGID{Pool: 1}, Interval: 1},
+			Session: 5, Incarnation: 1, Chunk: core.ChunkID{Volume: 1, Inode: 7}, Len: core.BlockSize}
+		ev := core.Event{Kind: core.EvNetRecv, Peer: client}
+		ev.Msg.Len = uint16(copy(ev.Msg.Body[:], chunkstore.AppendUpdate(nil, &u)))
+		buf, err := d.ctx.Pool.AllocZeroed(core.BlockSize)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ev.Msg.Buf = buf
+		d.sent = nil
+		d.out.Reset()
+		d.d.OnEvent(&d.ctx, &ev, &d.out)
+		d.take()
+		o, _ := d.out.Clone()
+		n.out.Reset()
+		n.n.Take(&n.ctx, 7, &o, &n.out)
+		d.settle()
+		return d.replies()
+	}
+	if rps := write(1); len(rps) != 1 || rps[0].Status == chunkstore.StatusOK {
+		t.Fatalf("a write with no table answered %+v", rps)
+	}
+
+	n.ctx.Now += Interval
+	n.event(core.Event{Kind: core.EvTimer, Timer: HeartbeatTimer})
+	if len(n.sends(meta.KindTableFetch)) != 1 {
+		t.Fatal("the heartbeat after a lost table fetch sent none")
+	}
+	tbl := chunkstore.Table{Epoch: 2, Pools: []chunkstore.PoolTable{{ID: 1, Replicas: 1, MinLive: 1,
+		PGs: []chunkstore.PGEntry{{Members: []chunkstore.Member{{Disk: 5}}, Interval: 1, Activated: 1}}}}}
+	n.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeTable(pool, group, &tbl, m) })
+	toDevice(n, d)
+	d.ctx.Now, d.ctx.Raw = d.ctx.Now+60_000_000, d.ctx.Raw+60_000_000
+	d.out.Reset()
+	d.d.OnEvent(&d.ctx, &core.Event{Kind: core.EvTimer, Timer: chunkstore.PeerTimer}, &d.out)
+	d.take()
+	d.settle()
+	if rps := write(2); len(rps) != 1 || rps[0].Status != chunkstore.StatusOK {
+		t.Fatalf("a write after the retry's table answered %+v", rps)
+	}
+}
