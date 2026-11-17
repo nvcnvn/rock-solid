@@ -27,17 +27,31 @@ const (
 // cut-off replica is reconnected, in half the runs up to a second after the plan, mid-swap, and
 // otherwise a second after a replica applies the configuration without it; either way it must
 // learn that it was removed. With outgoing, the leader that proposes the swap, once the cut-off
-// replica is reconnected, hands that replica its leadership, and every raft message the cut-off
-// replica sends that carries the commit of the leave of the joint configuration is lost, so no
-// follower learns from it that its removal committed.
+// replica is reconnected, hands that replica its leadership, and every MsgTimeoutNow the cut-off
+// replica sends is lost, so it cannot hand its leadership on. With wedge, a leader that is the
+// first replica to apply the plan's configuration while the cut-off replica is reconnected sends
+// the messages carrying that commit, and every later one, to the cut-off replica alone, until the
+// faults stop; once that replica learned its removal, the leader halts, or with die, its node
+// stands still for good. The run stands in for the control plane: once
+// every planned voter applied the plan's configuration, the node of the cut-off replica, if that
+// replica learned its removal, deletes it.
 type replacement struct {
-	crash, pauseD, early, cutLeader, outgoing bool
-	cutAt, planDelay, healDelay               core.Tick
-	dead                                      int
-	planAt                                    core.Tick
-	plan                                      []Peer
-	swappedAt                                 core.Tick
-	healed                                    bool
+	crash, pauseD, early, cutLeader, outgoing, wedge, die bool
+	cutAt, planDelay, healDelay                           core.Tick
+	dead                                                  int
+	planAt                                                core.Tick
+	plan                                                  []Peer
+	swappedAt                                             core.Tick
+	healed, deleted                                       bool
+	// wedged is the leader the wedge fault took, or -1, wedgeLeave the index of the leave it
+	// applied, and stopped whether it halted or stood still.
+	wedged     int
+	wedgeLeave uint64
+	stopped    bool
+	// noLeader reports a run in which no replica led having applied the plan's configuration
+	// within newLeaderBound of the faults stopping, and planLed whether one did.
+	noLeader error
+	planLed  bool
 	// removed is whether the cut-off replica reported itself removed, sinceSwap the first value
 	// proposed after the swap, and caughtUp whether the fourth replica applied one from then on.
 	removed   bool
@@ -49,11 +63,9 @@ type replacement struct {
 	// commits is, per replica, its commit index after each pass of the last two heartbeats.
 	commits [simNodes + 1][]commitAt
 	// swapBy is the leader that proposed the swap, or -1, handed whether it handed its leadership
-	// on, leave the index of the leave the cut-off replica sent, and leadRemoved whether the cut-off
-	// replica applied its removal leading.
+	// on, and leadRemoved whether the cut-off replica learned its removal leading.
 	swapBy      int
 	handed      bool
-	leave       uint64
 	leadRemoved bool
 	// With regress, the first old voter that runs, follows and applied the joint configuration
 	// while holding the leave beyond its commit index crashes, regressed, at regressAt; until
@@ -94,9 +106,10 @@ func faults() sim.Settings {
 // newReplaceCluster runs a replacement cut 2 to 4 s in and planned up to 2 s later; with crash the first leader to apply crashAt values also crashes, and with pauseD the fourth node is suspended for 2 s once the plan names it.
 func newReplaceCluster(seed uint64, p plants, set sim.Settings, crash, pauseD bool) *simCluster {
 	rng := core.NewRand(seed ^ 0x7e91ace)
-	return newCluster(seed, p, set, &replacement{crash: crash, pauseD: pauseD, dead: -1, swapBy: -1, regressed: -1,
+	return newCluster(seed, p, set, &replacement{crash: crash, pauseD: pauseD, dead: -1, swapBy: -1, regressed: -1, wedged: -1,
 		cutAt: 2_000_000 + core.Tick(rng.Below(2_000_001)), planDelay: core.Tick(rng.Below(2_000_001)),
-		early: rng.Chance(1, 2), healDelay: core.Tick(rng.Below(1_000_001)), cutLeader: crash && rng.Chance(1, 2), outgoing: rng.Chance(1, 2)}, nil)
+		early: rng.Chance(1, 2), healDelay: core.Tick(rng.Below(1_000_001)), cutLeader: crash && rng.Chance(1, 2), outgoing: rng.Chance(1, 2),
+		wedge: rng.Chance(1, 2), die: rng.Chance(1, 2)}, nil)
 }
 
 // replace moves the replacement on after a step: cut a follower off, hand every replica the plan, reconnect the removed one.
@@ -149,6 +162,42 @@ func (c *simCluster) replace() {
 	if p.regress {
 		c.regress()
 	}
+	if p.wedged >= 0 && !p.stopped && c.reps[p.dead].s.removed {
+		p.stopped = true
+		if nd := c.s.Node(uint32(p.wedged)); p.die && nd.Up() && !nd.Paused() {
+			c.s.Pause(uint32(p.wedged), clock.Suspend, 100_000_000, true)
+		} else {
+			c.reps[p.wedged].s.Halt()
+		}
+	}
+	if p.plan != nil && !p.deleted && c.reps[p.dead].s.removed && !slices.ContainsFunc(p.plan, func(v Peer) bool { return !p.holds(c.reps[v.ID-1]) }) {
+		d := c.reps[p.dead]
+		p.deleted, d.deleted, d.leads = true, true, false
+	}
+	if c.quietAt != 0 && p.plan != nil && !p.planLed {
+		if slices.ContainsFunc(c.reps, func(r *simReplica) bool {
+			nd := c.s.Node(uint32(r.id))
+			return r.leads && nd.Up() && !nd.Paused() && !r.s.halted && p.holds(r)
+		}) {
+			p.planLed = true
+		} else if now > c.quietAt+newLeaderBound && p.noLeader == nil {
+			p.noLeader = fmt.Errorf("no replica led having applied the plan's configuration within %v of the faults stopping", newLeaderBound.Duration())
+		}
+	}
+}
+
+// holds reports whether r applied the plan's configuration.
+func (p *replacement) holds(r *simReplica) bool {
+	return p.plan != nil && len(r.s.conf.VotersOutgoing) == 0 && slices.Equal(sorted(r.s.conf.Voters), planned(p.plan))
+}
+
+// take has the wedge fault take r if it is an old voter that leads and is the first replica to
+// apply the plan's configuration while the cut-off replica is reconnected: the run ends only once
+// the fourth replica applies a value.
+func (p *replacement) take(r *simReplica) {
+	if p.wedge && p.wedged < 0 && p.healed && p.swappedAt == 0 && r.id != p.dead && r.id != simNodes && p.holds(r) && r.s.rn.BasicStatus().RaftState == raft.StateLeader {
+		p.wedged, p.wedgeLeave = r.id, r.s.confAt
+	}
 }
 
 // regress moves the regress fault on.
@@ -170,7 +219,7 @@ func (c *simCluster) regress() {
 			}
 			break
 		}
-	case p.regressed >= 0 && !p.handed && l >= 0 && l != simNodes && len(c.reps[l].s.conf.VotersOutgoing) == 0 && slices.Equal(sorted(c.reps[l].s.conf.Voters), planned(p.plan)):
+	case p.regressed >= 0 && !p.handed && l >= 0 && l != simNodes && p.holds(c.reps[l]):
 		p.handed = true
 		c.transfer(l, simNodes+1)
 	case p.regressed >= 0 && !p.healed && now >= p.regressAt+10_000_000:
@@ -248,7 +297,7 @@ func (c *simCluster) replaced(r *simReplica, st *raft.BasicStatus) {
 		p.removed = p.removed || r.id == p.dead
 		p.leadRemoved = p.leadRemoved || r.id == p.dead && st.RaftState == raft.StateLeader
 	}
-	if p.plan != nil && p.swappedAt == 0 && len(r.s.conf.VotersOutgoing) == 0 && slices.Equal(sorted(r.s.conf.Voters), planned(p.plan)) {
+	if p.swappedAt == 0 && p.holds(r) {
 		p.swappedAt, p.sinceSwap = now, c.next
 		p.gap = max(p.gap, p.swappedAt-p.last)
 	}
@@ -260,23 +309,23 @@ func (c *simCluster) replaced(r *simReplica, st *raft.BasicStatus) {
 	}
 }
 
-// lost reports whether a, sent by the cut-off replica, is lost to the outgoing fault: a raft
-// message carrying the commit of the leave of the joint configuration.
-func (p *replacement) lost(ctx *core.Context, a *core.Action) bool {
-	if !p.outgoing || a.Kind != core.ActNetSend || a.Msg.Buf == core.NoBuf && le.Uint64(a.Msg.Body[1:]) == leaseGroup {
+// lost reports whether a, sent by r, is lost to a fault: under the outgoing fault, a MsgTimeoutNow
+// of the cut-off replica once it learned its removal, and under the wedge fault, until the faults
+// stop, a raft message from the wedged leader to any but the cut-off replica carrying the commit
+// of the leave it applied.
+func (c *simCluster) lost(ctx *core.Context, r *simReplica, a *core.Action) bool {
+	p := c.rep
+	if r.id != p.dead && (r.id != p.wedged || c.quietAt != 0) || a.Kind != core.ActNetSend || a.Msg.Buf == core.NoBuf && le.Uint64(a.Msg.Body[1:]) == leaseGroup {
 		return false
 	}
 	var m raftpb.Message
 	if _, kind, err := decode(ctx.Pool, &a.Msg, &m, &fortify{}); err != nil || kind != kindRaft {
 		return false
 	}
-	for _, e := range m.Entries {
-		var cc raftpb.ConfChangeV2
-		if p.leave == 0 && e.Type == raftpb.EntryConfChangeV2 && cc.Unmarshal(e.Data) == nil && len(cc.Changes) == 0 {
-			p.leave = e.Index
-		}
+	if r.id == p.wedged {
+		return a.Peer.Node != uint32(p.dead) && m.Commit >= p.wedgeLeave
 	}
-	return p.leave != 0 && m.Commit >= p.leave
+	return p.outgoing && r.s.removed && m.Type == raftpb.MsgTimeoutNow
 }
 
 func planned(plan []Peer) []uint64 {
@@ -323,6 +372,7 @@ func TestVoterReplacementRunsReplayFromTheirSeed(t *testing.T) {
 // without committing between the plan and the swap.
 func stallGap(t *testing.T, seed uint64, p plants) core.Tick {
 	c := newReplaceCluster(seed, p, sim.DefaultSettings(), false, true)
+	c.rep.outgoing, c.rep.wedge = false, false
 	for !c.done && c.s.Time() < simRunFor && c.s.Step() {
 		c.after(t, seed)
 	}
@@ -372,13 +422,13 @@ func outgoingCluster(seed uint64, p plants) *simCluster {
 }
 
 // The voter model's neg-no-support-ask: followers that never ask the node of the leader they
-// support whether its replica still exists keep supporting it once it applied its own removal
-// leading and its commit of the leave was lost, so no follower ever leads again; the same seed
-// finishes when they ask.
+// support whether its replica still exists keep supporting it once it learned its removal leading,
+// could not hand its leadership on, and was deleted when the plan completed, so no follower leads
+// again; the same seed finishes when they ask.
 func TestFollowersThatNeverAskKeepARemovedLeader(t *testing.T) {
 	for seed := range uint64(20) {
-		c := outgoingCluster(seed, plants{noSupportAsk: true}).run(t, seed)
-		if p := c.rep; c.done || p.leave == 0 || !p.leadRemoved {
+		c := outgoingCluster(seed, plants{noSupportAsk: true})
+		if !c.breaks(t, seed, invNewLeader) || !c.rep.leadRemoved {
 			continue
 		}
 		if !outgoingCluster(seed, plants{}).run(t, seed).done {
@@ -386,30 +436,55 @@ func TestFollowersThatNeverAskKeepARemovedLeader(t *testing.T) {
 		}
 		return
 	}
-	t.Fatal("20 seeds whose followers never ask all elected a leader after a leader applied its own removal")
+	t.Fatal("20 seeds whose followers never ask all elected a leader after a removed leader was deleted")
 }
 
-// The voter model's neg-removed-keeps-lease: a leader that keeps serving lease reads after it
-// applied its own removal overlaps the leader its old followers elect.
-func TestARemovedLeaderThatKeepsReadingBreaksTheLeaseInvariant(t *testing.T) {
-	for seed := range uint64(20) {
-		c := outgoingCluster(seed, plants{removedKeepsLease: true})
-		c.inv.Only(invOneLeaseReader)
-		for c.s.Time() < simRunFor && c.s.Step() {
-			c.pause()
-			if c.inv.Check() != nil {
-				return
-			}
-			c.after(t, seed)
+// wedgeCluster is seed's replacement run with the wedge fault's leader standing still: a halted
+// one's heartbeats tell the others the leave committed once the faults stop, so only a dead one
+// leaves the outgoing half needing the cut-off replica for good.
+func wedgeCluster(seed uint64, p plants) *simCluster {
+	c := newReplaceCluster(seed, p, faults(), true, false)
+	c.rep.wedge, c.rep.die = true, true
+	return c
+}
+
+// noLeaderWithout reports whether, on one of n seeds of wedgeCluster, planting p leaves no leader
+// of the plan's configuration, failing the test unless the same seed finishes with p off.
+func noLeaderWithout(t *testing.T, n uint64, p plants) bool {
+	for seed := range n {
+		if !wedgeCluster(seed, p).breaks(t, seed, invNewLeader) {
+			continue
 		}
+		if !wedgeCluster(seed, plants{}).run(t, seed).done {
+			t.Fatalf("seed %d: the run does not finish with the plant off", seed)
+		}
+		return true
 	}
-	t.Fatal("20 seeds whose removed leader keeps serving lease reads broke no lease reader invariant")
+	return false
+}
+
+// The voter model's neg-removed-deletes-at-once: a cut-off replica that stops once it learns its
+// removal, as if its node deleted it, leaves the outgoing half one voter when the wedge fault's
+// leader told it alone that the leave committed, and no voter of the plan leads again.
+func TestARemovedVoterDeletedAtOnceLeavesNoLeader(t *testing.T) {
+	if !noLeaderWithout(t, 40, plants{deletesAtOnce: true}) {
+		t.Fatal("40 seeds deleting a removed voter at once all elected a leader of the plan's configuration")
+	}
+}
+
+// The voter model's neg-removed-applies-removal: a cut-off replica that applies its removal
+// campaigns no more, so once the wedge fault's leader appended to it alone it holds the outgoing
+// half's newest entry and refuses every voter of the plan its vote.
+func TestARemovedVoterThatAppliesItsRemovalLeavesNoLeader(t *testing.T) {
+	if !noLeaderWithout(t, 40, plants{appliesRemoval: true}) {
+		t.Fatal("40 seeds applying a removed voter's removal all elected a leader of the plan's configuration")
+	}
 }
 
 // regressCluster is seed's replacement run with no fault but the regress one.
 func regressCluster(seed uint64, p plants) *simCluster {
 	c := newReplaceCluster(seed, p, sim.DefaultSettings(), false, false)
-	c.rep.outgoing, c.rep.early, c.rep.regress = false, false, true
+	c.rep.outgoing, c.rep.wedge, c.rep.early, c.rep.regress = false, false, false, true
 	return c
 }
 

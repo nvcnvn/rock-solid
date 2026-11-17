@@ -143,7 +143,7 @@ voters/neg-no-support-ask	raftshard.noSupportAsk	TestFollowersThatNeverAskKeepAR
 voters/neg-removed-keeps-lease	raftshard.removedKeepsLease	TestARemovedLeaderThatKeepsReadingBreaksTheLeaseInvariant
 voters/neg-restart-commit-at-base	open	Plants for the voter replacement model
 voters/neg-halted-keeps-leading	open	Plants for the voter replacement model
-voters/neg-removed-deletes-at-once	open	Voter replacement: a removed voter stays a voter until the plan is complete
-voters/neg-removed-applies-removal	open	Voter replacement: a removed voter stays a voter until the plan is complete
+voters/neg-removed-deletes-at-once	raftshard.deletesAtOnce	TestARemovedVoterDeletedAtOnceLeavesNoLeader
+voters/neg-removed-applies-removal	raftshard.appliesRemoval	TestARemovedVoterThatAppliesItsRemovalLeavesNoLeader
 voters/neg-conf-commit-not-durable	raftshard.noConfRound	TestAConfigurationChangeAppliedBeforeItsCommitIsDurableIsForgotten
 voters/neg-hard-state-old	raftshard.oldHardState	TestRoundsThatLeaveTheCommitOfASwapBehindElectTwoLeaders

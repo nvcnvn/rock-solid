@@ -79,7 +79,7 @@ type Output struct {
 	Reads []raft.ReadState
 	// Snapshot, when not empty, is a snapshot the replica restored, which its state machine restores before applying Committed.
 	Snapshot raftpb.Snapshot
-	// Removed reports that the group's committed configuration no longer holds this replica: the driver deletes its state, and the shard does nothing more.
+	// Removed reports that this replica learned the group's committed configuration no longer holds it, from its log or a peer's notice. It stays a voter of the configuration it applied, and its node deletes it only once the control plane says the group's plan is complete.
 	Removed bool
 }
 
@@ -120,17 +120,21 @@ type Shard struct {
 	lead    core.NodeID
 	leadID  uint64
 	lapseAt core.Tick
-	// plan is the voters the control plane drives the group toward, confTerm the term of a configuration change this leader proposed and has not applied, mark the commit index at markAt less a heartbeat, applied the index of the last entry handed over to apply, heard when this replica last heard from its leader, and removed whether it learned it left the group.
+	// plan is the voters the control plane drives the group toward, confTerm the term of a configuration change this leader proposed and has not applied, mark the commit index at markAt less a heartbeat, applied the index of the last entry handed over to apply, confAt an index at which the applied configuration holds, heard when this replica last heard from its leader, removed whether it learned it left the group, leave the index of the committed change that would take it out of the configuration, which it holds unapplied and before which it hands nothing over, and saving whether the round in flight records the removal.
 	plan     []Peer
 	confTerm uint64
 	mark     uint64
 	markAt   core.Tick
 	applied  uint64
+	confAt   uint64
 	heard    core.Tick
 	removed  bool
-	// applying is set while etcd-raft applies a configuration change, and snaps are the snapshots sent but not yet reported.
+	leave    uint64
+	saving   bool
+	// applying is set while etcd-raft applies a configuration change, snaps are the snapshots sent but not yet reported, and kept a leader the applied configuration dropped that stays in Peers while it leads.
 	applying bool
 	snaps    []sentSnap
+	kept     uint64
 	// halted is whether the state machine halted; a halted leader next hands its leadership on at handAt, to the voter after handedTo.
 	halted   bool
 	handAt   core.Tick
@@ -142,11 +146,12 @@ type fortified struct {
 	term, run, support uint64
 }
 
-// plants are bugs a test plants: election timeouts from crypto/rand, every message of a Ready sent before its flush, followers that vote and campaign while they support a leader, a learner promoted before it caught up, a replacement added as a voter, a learner held to the current commit index, lease reads before an entry of the leader's term commits, snapshots kept from the last compaction instead of built at the applied index, a leader counting a fortification under whatever support epoch its lease from the peer now runs, as if grantors renewed a lapsed grant under its old epoch, a leader serving lease reads after MsgTimeoutNow left, a vote granted to every candidate, a follower serving lease reads while it supports its leader, a follower that never asks its leader's node about the leader, a leader serving lease reads after it applied its own removal, rounds that write only their own Ready's hard state and none for a Ready that commits a configuration change and moves only the commit index, and a configuration change applied, and its commit sent, before that commit index is durable.
+// plants are bugs a test plants: a removed replica that stops at once, as if its node deleted it, and one that applies its removal to its Raft configuration and so campaigns no more; election timeouts from crypto/rand, every message of a Ready sent before its flush, followers that vote and campaign while they support a leader, a learner promoted before it caught up, a replacement added as a voter, a learner held to the current commit index, lease reads before an entry of the leader's term commits, snapshots kept from the last compaction instead of built at the applied index, a leader counting a fortification under whatever support epoch its lease from the peer now runs, as if grantors renewed a lapsed grant under its old epoch, a leader serving lease reads after MsgTimeoutNow left, a vote granted to every candidate, a follower serving lease reads while it supports its leader, a follower that never asks its leader's node about the leader, a leader serving lease reads after it applied its own removal, rounds that write only their own Ready's hard state and none for a Ready that commits a configuration change and moves only the commit index, and a configuration change applied, and its commit sent, before that commit index is durable.
 type plants struct {
 	unseeded, early, disloyal, eager, voterFirst, current, uncommitted, staleSnapshot bool
 	noEpochBump, transferKeepsLease, voteEveryone, followerReads                      bool
 	noSupportAsk, removedKeepsLease, oldHardState, noConfRound                        bool
+	deletesAtOnce, appliesRemoval                                                     bool
 }
 
 // New starts a replica from its storage.
@@ -165,7 +170,7 @@ func newShard(cfg Config, p plants) (*Shard, error) {
 		return nil, err
 	}
 	cfg.Peers = slices.Clone(cfg.Peers)
-	s := &Shard{cfg: cfg, rn: rn, plant: p, rng: rand.New(rand.NewPCG(cfg.Seed, 1)), conf: base.ConfState, applied: base.Index, fort: make([]fortified, len(cfg.Peers)), hs: rn.BasicStatus().HardState}
+	s := &Shard{cfg: cfg, rn: rn, plant: p, rng: rand.New(rand.NewPCG(cfg.Seed, 1)), conf: base.ConfState, applied: base.Index, confAt: base.Index, removed: cfg.Storage.Removed(), fort: make([]fortified, len(cfg.Peers)), hs: rn.BasicStatus().HardState}
 	cfg.Storage.build = s.snapshot
 	return s, nil
 }
@@ -227,7 +232,7 @@ func (s *Shard) Stats() Stats { return s.stats }
 
 // OnEvent ticks the replica up to ctx.Now, then handles ev: a peer's message, or a lost connection to a peer.
 func (s *Shard) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
-	if s.removed {
+	if s.gone() {
 		if ev.Kind == core.EvNetRecv {
 			s.answerGone(ev, out)
 			if ev.Msg.Buf != core.NoBuf {
@@ -248,12 +253,24 @@ func (s *Shard) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
 			}
 		}
 	}
-	if s.ready(ctx, out); !s.removed {
+	if s.ready(ctx, out); !s.gone() {
 		s.fortify(ctx, out)
 	}
 }
 
-// Propose appends data to the group's log if this replica leads, and returns raft.ErrProposalDropped otherwise.
+// gone reports whether the replica stopped for good on learning its removal, as only the
+// deletesAtOnce plant has it: a removed replica runs on as a voter until its node deletes it.
+func (s *Shard) gone() bool { return s.removed && s.plant.deletesAtOnce }
+
+// Removed reports whether the replica learned its removal, and the index of the change that removed
+// it, which it holds unapplied, or 0 for one that learned it from a peer's notice.
+func (s *Shard) Removed() (bool, uint64) { return s.removed, s.leave }
+
+// ConfIndex is an index at which the applied configuration holds: that of the last configuration
+// change applied, or the log's base.
+func (s *Shard) ConfIndex() uint64 { return s.confAt }
+
+// Propose appends data to the group's log if this replica leads and has not learned its removal, and returns raft.ErrProposalDropped otherwise.
 func (s *Shard) Propose(ctx *core.Context, data []byte, out *Output) error {
 	if s.removed {
 		return raft.ErrProposalDropped
@@ -265,7 +282,7 @@ func (s *Shard) Propose(ctx *core.Context, data []byte, out *Output) error {
 
 // Durable reports the round in flight durable: the shard writes it to storage, sends the messages it held, hands over its committed entries and takes the next Ready.
 func (s *Shard) Durable(ctx *core.Context, round uint64, out *Output) {
-	if s.removed {
+	if s.gone() {
 		return
 	}
 	if round == 0 || round != s.round {
@@ -273,6 +290,9 @@ func (s *Shard) Durable(ctx *core.Context, round uint64, out *Output) {
 	}
 	rd := s.rd
 	s.round, s.rd = 0, raft.Ready{}
+	if s.saving {
+		s.cfg.Storage.removed, s.saving = true, false
+	}
 	s.done(ctx, &rd, s.hold, out)
 	s.ready(ctx, out)
 	if s.round == 0 && s.timeoutTerm != 0 {
@@ -306,7 +326,7 @@ func (s *Shard) Node(id uint64) (core.NodeID, bool) {
 // Term is the replica's current term, which every entry it appends while it leads carries.
 func (s *Shard) Term() uint64 { return s.rn.BasicStatus().Term }
 
-// Halt reports that the state machine stopped applying, at an entry it cannot decode. The replica then acts as a down one, so its log stops growing and the control plane replaces it: it takes no Raft message but, while it leads, its followers' answers, campaigns in no election and fortifies no leader, hands its leadership on while it leads, and still learns of its removal.
+// Halt reports that the state machine stopped applying, at an entry it cannot decode. The replica then acts as a down one, so its log stops growing and the control plane replaces it: it takes no Raft message but, while it leads, its followers' answers, campaigns in no election and fortifies no leader, hands its leadership on while it leads, answers an ask about it as gone once it no longer leads, since a follower still supporting it would refuse every other candidate for good, and still learns of its removal.
 func (s *Shard) Halt() { s.halted, s.timeoutTerm, s.timeoutFrom = true, 0, 0 }
 
 // Flushing reports whether a round is in flight, so the next Ready waits for its Durable.
@@ -370,7 +390,7 @@ func (s *Shard) fortify(ctx *core.Context, out *Output) {
 			s.sendFortify(&fortify{kind: kindAsk, from: s.cfg.ID, to: s.leadID}, s.lead, out)
 		}
 		for _, p := range s.cfg.Peers {
-			if p.ID != s.cfg.ID && member(&s.conf, s.cfg.ID) {
+			if p.ID != s.cfg.ID && !s.removed && member(&s.conf, s.cfg.ID) {
 				s.sendFortify(&fortify{kind: kindMember, from: s.cfg.ID, to: p.ID}, p.Node, out)
 			}
 		}
@@ -472,9 +492,13 @@ func (s *Shard) recv(ctx *core.Context, ev *core.Event, out *Output) {
 			s.sendFortify(&fortify{kind: kindRemoved, from: s.cfg.ID, to: from, term: s.applied}, ev.Peer, out)
 		}
 	case kind == kindRemoved:
-		s.removed = f.term >= s.applied && member(&s.conf, s.cfg.ID)
-		out.Removed = s.removed
+		if !s.removed && f.term >= s.applied && member(&s.conf, s.cfg.ID) {
+			s.removed, out.Removed = true, true
+		}
 	case kind == kindAsk:
+		if s.removed || s.halted && s.rn.BasicStatus().RaftState != raft.StateLeader {
+			s.sendFortify(&fortify{kind: kindGone, from: f.to, to: f.from}, ev.Peer, out)
+		}
 	case kind == kindGone:
 		if s.support.term != 0 && f.from == s.leadID && ev.Peer == s.lead {
 			s.support = fortified{}
@@ -522,7 +546,7 @@ func (s *Shard) sender(id uint64, node core.NodeID, out *Output) {
 	}
 }
 
-// answerGone answers, once this replica applied its removal, an ask that names it.
+// answerGone answers, once this replica stopped on learning its removal, an ask that names it.
 func (s *Shard) answerGone(ev *core.Event, out *Output) {
 	b := ev.Msg.Inline()
 	if len(b) != fortBytes || le.Uint64(b[1:]) != s.cfg.Group || le.Uint64(b[kindBytes+8:]) != s.cfg.ID {
@@ -607,7 +631,13 @@ func (s *Shard) ready(ctx *core.Context, out *Output) {
 		s.reconcile(ctx)
 		s.handOff(ctx)
 	}
-	for s.round == 0 && !s.removed && s.rn.HasReady() {
+	if s.round == 0 && s.removed && !s.cfg.Storage.Removed() && !s.gone() {
+		s.rounds++
+		s.round, s.rd, out.Flush, s.hold, s.saving = s.rounds, raft.Ready{HardState: s.hs}, s.rounds, held, true
+		out.Round = Round{HardState: s.hs, Removed: true}
+		return
+	}
+	for s.round == 0 && !s.gone() && s.rn.HasReady() {
 		rd := s.rn.Ready()
 		if rd.SoftState != nil && rd.SoftState.RaftState == raft.StateLeader {
 			s.fortifyAt = 0
@@ -627,8 +657,8 @@ func (s *Shard) ready(ctx *core.Context, out *Output) {
 				rd.HardState = s.hs
 			}
 			s.rounds++
-			s.round, s.rd, out.Flush, s.hold = s.rounds, rd, s.rounds, held
-			out.Round = Round{HardState: rd.HardState, Entries: rd.Entries, Snapshot: rd.Snapshot}
+			s.round, s.rd, out.Flush, s.hold, s.saving = s.rounds, rd, s.rounds, held, s.removed
+			out.Round = Round{HardState: rd.HardState, Entries: rd.Entries, Snapshot: rd.Snapshot, Removed: s.removed}
 			if conf {
 				s.hold = all
 			} else {
@@ -657,8 +687,10 @@ func (s *Shard) passesConf(ents []raftpb.Entry) bool {
 }
 
 // done writes a Ready to storage, sends its messages, applies its configuration changes and hands
-// over its committed entries; a replica whose own log takes it out of the configuration reports
-// itself removed.
+// over its committed entries. A committed change that would take this replica out of the
+// configuration it holds unapplied, reporting itself removed, and from that change on it hands
+// nothing over: its state machine stops before it, so the log compacts no further and a snapshot it
+// sends holds the configuration the replica stays a voter of.
 func (s *Shard) done(ctx *core.Context, rd *raft.Ready, p part, out *Output) {
 	st := s.cfg.Storage
 	in := member(&s.conf, s.cfg.ID)
@@ -678,23 +710,30 @@ func (s *Shard) done(ctx *core.Context, rd *raft.Ready, p part, out *Output) {
 	}
 	st.Append(rd.Entries)
 	s.send(ctx, rd.Messages, p, out)
-	for i := range rd.CommittedEntries {
-		if e := &rd.CommittedEntries[i]; e.Type != raftpb.EntryNormal {
-			s.applyConf(e)
+	ents := rd.CommittedEntries
+	if s.leave != 0 {
+		ents = nil
+	}
+	for i := range ents {
+		if e := &ents[i]; e.Type != raftpb.EntryNormal && s.applyConf(e, out) {
+			ents = ents[:i]
+			break
 		}
 	}
 	if s.cfg.Apply == nil {
-		out.Committed = append(out.Committed, rd.CommittedEntries...)
-	} else if !raft.IsEmptySnap(rd.Snapshot) || len(rd.CommittedEntries) > 0 {
-		s.cfg.Apply(rd.Snapshot, rd.CommittedEntries)
+		out.Committed = append(out.Committed, ents...)
+	} else if !raft.IsEmptySnap(rd.Snapshot) || len(ents) > 0 {
+		s.cfg.Apply(rd.Snapshot, ents)
 	}
 	if n := len(rd.CommittedEntries); n > 0 {
 		s.committed = max(s.committed, rd.CommittedEntries[n-1].Term)
-		s.applied = rd.CommittedEntries[n-1].Index
+	}
+	if n := len(ents); n > 0 {
+		s.applied = ents[n-1].Index
 	}
 	out.Reads = append(out.Reads, rd.ReadStates...)
 	s.rn.Advance(*rd)
-	if in && !member(&s.conf, s.cfg.ID) {
+	if in && !member(&s.conf, s.cfg.ID) && !s.removed {
 		s.removed, out.Removed = true, true
 	}
 }
@@ -766,17 +805,35 @@ type sentSnap struct {
 	at core.Tick
 }
 
-// applyConf applies a committed configuration change: a replica it adds joins Peers at the node its context names, and one it takes out of the configuration leaves them.
-func (s *Shard) applyConf(e *raftpb.Entry) {
+// applyConf applies a committed configuration change: a replica it adds joins Peers at the node its
+// context names, and one it takes out of the configuration leaves them. It reports true, applying
+// nothing, for a change that would take this replica out: the replica stays a voter of the
+// configuration it holds, joint for a swap's leave, since a voter that holds the leave but applied
+// only the joint configuration can lead and needs the outgoing half to commit. A leave of a
+// configuration that is not joint changes nothing: a replica holding its own removal, leading and
+// still joint, proposes the leave again each time it applies the last one, and etcd-raft panics on
+// leaving a configuration that is not joint.
+func (s *Shard) applyConf(e *raftpb.Entry, out *Output) bool {
 	var cc raftpb.ConfChangeV2
 	if e.Type != raftpb.EntryConfChangeV2 || cc.Unmarshal(e.Data) != nil {
 		panic(fmt.Sprintf("raftshard: group %d committed configuration change %d/%d, which no replica proposes", s.cfg.Group, e.Index, e.Term))
+	}
+	joint := len(s.conf.VotersOutgoing) != 0
+	if len(cc.Changes) == 0 && !joint {
+		return false
+	}
+	if s.removes(&cc, joint) && !s.plant.deletesAtOnce && !s.plant.appliesRemoval {
+		s.leave, s.confTerm = e.Index, 0
+		if !s.removed {
+			s.removed, out.Removed = true, true
+		}
+		return true
 	}
 	was := s.conf
 	s.applying = true
 	s.conf = *s.rn.ApplyConfChange(cc)
 	s.applying = false
-	s.confTerm = 0
+	s.confTerm, s.confAt = 0, e.Index
 	if node, ok := decodeNode(cc.Context); ok {
 		for _, c := range cc.Changes {
 			if c.Type != raftpb.ConfChangeRemoveNode && s.peer(c.NodeID) < 0 {
@@ -786,12 +843,38 @@ func (s *Shard) applyConf(e *raftpb.Entry) {
 		}
 	}
 	s.prune(&was)
+	return false
 }
 
-// prune drops from Peers each replica that was holds and the applied configuration does not.
+// removes reports whether cc would take this replica out of the configuration: a leave of the
+// joint configuration whose incoming half lacks it, or a change outside a joint one that removes it.
+func (s *Shard) removes(cc *raftpb.ConfChangeV2, joint bool) bool {
+	id := s.cfg.ID
+	if len(cc.Changes) == 0 {
+		return joint && !slices.Contains(s.conf.Voters, id) && !slices.Contains(s.conf.Learners, id) && !slices.Contains(s.conf.LearnersNext, id)
+	}
+	if _, enters := cc.EnterJoint(); enters {
+		return false
+	}
+	return slices.ContainsFunc(cc.Changes, func(c raftpb.ConfChangeSingle) bool {
+		return c.Type == raftpb.ConfChangeRemoveNode && c.NodeID == id
+	})
+}
+
+// prune drops from Peers each replica that was holds and the applied configuration does not, but
+// the leader, kept until the next change applies: a removed leader holds its leave unapplied and
+// re-proposes it, so it hands its leadership on only once the target acknowledged that entry, and
+// steps down only once a follower answers its heartbeat with the next leader's term, since that
+// leader's configuration lacks it.
 func (s *Shard) prune(was *raftpb.ConfState) {
+	lead, kept := s.rn.BasicStatus().Lead, s.kept
+	s.kept = 0
 	for i := len(s.cfg.Peers) - 1; i >= 0; i-- {
-		if id := s.cfg.Peers[i].ID; id != s.cfg.ID && member(was, id) && !member(&s.conf, id) {
+		switch id := s.cfg.Peers[i].ID; {
+		case id == s.cfg.ID || member(&s.conf, id):
+		case id == lead && member(was, id):
+			s.kept = id
+		case id == kept || member(was, id):
 			s.cfg.Peers = slices.Delete(s.cfg.Peers, i, i+1)
 			s.fort = slices.Delete(s.fort, i, i+1)
 		}
@@ -806,19 +889,31 @@ func member(cs *raftpb.ConfState, id uint64) bool {
 // reconcile has a leader that applied an entry of its term, with no configuration change in flight
 // and none joint, propose the next change toward its plan. A leader never removes itself: one the
 // plan drops hands its leadership to a planned voter once one is ready, and until a planned voter
-// exists it adds and swaps in the planned replicas for the other dropped voters. A learner counts as caught up once it
+// exists it adds and swaps in the planned replicas for the other dropped voters. A leader that
+// learned its removal proposes nothing and, once an entry of its term committed, hands its
+// leadership to a caught-up planned voter, joint or not: it holds the leave unapplied, so it stays
+// joint. A learner counts as caught up once it
 // holds every entry committed by mark, the commit index of at most a heartbeat ago: one held to
 // the current commit index never catches up under steady writes over a slower link.
 func (s *Shard) reconcile(ctx *core.Context) {
 	now := ctx.Now
-	if len(s.plan) == 0 || s.settled() {
+	if len(s.plan) == 0 && s.leave == 0 || s.settled() {
 		return
 	}
 	st := s.rn.BasicStatus()
 	if now >= s.markAt {
 		s.mark, s.markAt = st.Commit, now+HeartbeatTick*TickInterval
 	}
-	if s.confTerm == st.Term || st.RaftState != raft.StateLeader || s.committed != st.Term || len(s.conf.VotersOutgoing) != 0 {
+	if st.RaftState != raft.StateLeader || s.committed != st.Term {
+		return
+	}
+	if s.removed {
+		if id := s.target(lease.Now(ctx)); id != 0 {
+			s.rn.TransferLeader(id)
+		}
+		return
+	}
+	if s.confTerm == st.Term || len(s.conf.VotersOutgoing) != 0 {
 		return
 	}
 	if !s.planned(s.cfg.ID) && slices.ContainsFunc(s.conf.Voters, s.planned) {
@@ -839,11 +934,14 @@ func (s *Shard) reconcile(ctx *core.Context) {
 // target is a planned voter to hand leadership to, or 0: one this leader holds a node-pair lease
 // from, so its node runs, being sent appends and caught up as a learner must be. etcd-raft drops
 // proposals while a transfer waits for its target to reach the leader's last index, so a down or
-// lagging target would stall them; a caught-up one makes that wait about a round trip.
+// lagging target would stall them; a caught-up one makes that wait about a round trip. A replica
+// holding its own leave also takes a voter of the leave's configuration, the joint one's incoming
+// half, as planned, since its node may hand it no plan.
 func (s *Shard) target(t lease.Time) uint64 {
 	var to uint64
 	s.rn.WithProgress(func(id uint64, _ raft.ProgressType, pr tracker.Progress) {
-		if to == 0 && s.planned(id) && s.replicating(id, &pr) && s.cfg.Holder.Valid(s.cfg.Peers[s.peer(id)].Node, t) {
+		planned := s.planned(id) || s.leave != 0 && slices.Contains(s.conf.Voters, id)
+		if to == 0 && planned && s.replicating(id, &pr) && s.cfg.Holder.Valid(s.cfg.Peers[s.peer(id)].Node, t) {
 			to = id
 		}
 	})
@@ -859,7 +957,7 @@ func (s *Shard) replicating(id uint64, pr *tracker.Progress) bool {
 // voter in ID order, at most once an election timeout: when every replica halts, each would
 // otherwise hand it on as soon as it wins, a term and a durable hard state per round trip.
 func (s *Shard) handOff(ctx *core.Context) {
-	if !s.halted || s.removed || ctx.Now < s.handAt {
+	if !s.halted || s.gone() || ctx.Now < s.handAt {
 		return
 	}
 	if st := s.rn.BasicStatus(); st.RaftState != raft.StateLeader || st.LeadTransferee != 0 {

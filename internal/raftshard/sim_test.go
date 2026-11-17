@@ -36,8 +36,9 @@ type simCluster struct {
 	inv     sim.Invariants
 	storage []*Storage
 	reps    []*simReplica
-	// rep is the voter replacement the run makes, if any.
-	rep *replacement
+	// rep is the voter replacement the run makes, if any, and quietAt when run stopped the faults.
+	rep     *replacement
+	quietAt core.Tick
 	// crashes is whether the first leader to apply crashAt values crashes; afterCrash whether a value proposed after that crash, if any, applied.
 	crashes    bool
 	afterCrash bool
@@ -79,7 +80,10 @@ type simReplica struct {
 	s       *Shard
 	out     Output
 	applied int
+	// leads is whether it leads, and deleted whether its node deleted it, after which the node
+	// only renews its leases and answers asks about it.
 	leads   bool
+	deleted bool
 	// index is the last index it applied, confAt the last configuration change's, flight the round in
 	// flight or 0, taken the index it had applied when it took that round, and kept the same for its
 	// last durable round.
@@ -142,6 +146,7 @@ func newCluster(seed uint64, p plants, set sim.Settings, rep *replacement, disk 
 	nodes := simNodes
 	if rep != nil {
 		nodes++
+		c.inv.Register(invNewLeader, func() error { return rep.noLeader })
 	}
 	c.storage, c.reps = make([]*Storage, nodes), make([]*simReplica, nodes)
 	disks := []sim.DiskSpec{{Blocks: 16, Settings: sim.DefaultDiskSettings()}}
@@ -187,6 +192,11 @@ func (r *simReplica) start(ctx *core.Context) {
 		panic(err)
 	}
 	r.s = s
+	if p := r.c.rep; p != nil && p.deleted && r.id == p.dead {
+		r.deleted = true
+		r.out.Actions = append(r.out.Actions, core.Action{Kind: core.ActSetTimer, Timer: r.cfg.Timer, At: ctx.Now + TickInterval})
+		return
+	}
 	if r.c.rep != nil {
 		s.SetPlan(r.c.rep.plan)
 	}
@@ -196,24 +206,50 @@ func (r *simReplica) start(ctx *core.Context) {
 // run steps the group under faults for simRunFor, then, if it is not done, heals every partition
 // and runs it with only drops left for simRunFor more, since a partition that never heals stops it.
 func (c *simCluster) run(t *testing.T, seed uint64) *simCluster {
+	c.drive(func() bool {
+		c.after(t, seed)
+		return false
+	})
+	return c
+}
+
+// breaks runs c as run does, checking inv alone, and reports whether inv broke.
+func (c *simCluster) breaks(t *testing.T, seed uint64, inv string) bool {
+	c.inv.Only(inv)
+	broke := false
+	c.drive(func() bool {
+		if broke = c.inv.Check() != nil; !broke {
+			c.after(t, seed)
+		}
+		return broke
+	})
+	return broke
+}
+
+// drive is run's schedule, calling each after every step until it reports true.
+func (c *simCluster) drive(each func() bool) {
 	for c.s.Time() < simRunFor && !(c.disk != nil && c.done) && c.s.Step() {
 		c.pause()
-		c.after(t, seed)
+		if each() {
+			return
+		}
 	}
 	for a := range uint32(len(c.reps)) {
 		for b := range uint32(len(c.reps)) {
 			c.s.Heal(a, b)
 		}
 	}
+	c.quietAt = c.s.Time()
 	for end := c.s.Time() + simRunFor; c.s.Time() < end && !c.done; {
 		cs := c.s.Choices()
 		if len(cs) == 0 {
 			break
 		}
 		c.s.Take(cs[0])
-		c.after(t, seed)
+		if each() {
+			return
+		}
 	}
-	return c
 }
 
 // pauseStops are the stops a run draws: every kind but a stop in place on kvm-clock, which no
@@ -352,6 +388,13 @@ const (
 	invDurableCommit          = "a replica's storage holds the commit index of each configuration change it applied, and of each entry it applied before its last durable round"
 	invOneLeaseReader         = "no two replicas of a shard serve lease reads at overlapping times"
 	invLeaseReadsCurrent      = "a lease read sees every applied entry"
+	invNewLeader              = "a replica leads having applied the plan's configuration within newLeaderBound of the faults stopping"
+	// newLeaderBound is 15 election timeouts, past the longest wait a run allows once its faults
+	// stop: a pause drawn before then holds a leader's node up to 5 s, its followers' grants to it
+	// lapse primary_lease and a heartbeat after its last renewal, they campaign raft_lapse_campaign
+	// later, and two split votes cost an election timeout of up to 2 s each, 14.3 s in all. Over
+	// 2,000 seeds the longest was 7.8 s.
+	newLeaderBound = 15 * ElectionTick * TickInterval
 )
 
 func (r *simReplica) sendLease(kind byte, to core.NodeID, id, run uint64, raw core.Tick, support uint64) {
@@ -426,9 +469,19 @@ func (r *simReplica) onEvent(ctx *core.Context, ev *core.Event, acts []core.Acti
 	}
 	if ev.Kind == core.EvTimer {
 		r.leaseTick(ctx)
-		if r.s.removed {
+		if r.s.gone() || r.deleted {
 			r.out.Actions = append(r.out.Actions, core.Action{Kind: core.ActSetTimer, Timer: r.cfg.Timer, At: ctx.Now + TickInterval})
 		}
+	}
+	if r.deleted {
+		var a core.Action
+		if _, id, ok := Asked(&ev.Msg); ev.Kind == core.EvNetRecv && ok && id == uint64(r.id)+1 && Gone(&ev.Msg, ev.Peer, &a) {
+			r.out.Actions = append(r.out.Actions, a)
+		}
+		if ev.Kind == core.EvNetRecv && ev.Msg.Buf != core.NoBuf {
+			ctx.Pool.Free(ev.Msg.Buf)
+		}
+		return r.finish(ctx, acts)
 	}
 	if ev.Kind == core.EvDiskDone {
 		if ev.Err != core.DiskOK {
@@ -438,7 +491,7 @@ func (r *simReplica) onEvent(ctx *core.Context, ev *core.Event, acts []core.Acti
 		return r.finish(ctx, acts)
 	}
 	r.s.OnEvent(ctx, ev, &r.out)
-	if c := r.c; ev.Kind == core.EvTimer && r.leads && !c.done {
+	if c := r.c; ev.Kind == core.EvTimer && r.leads && !r.s.halted && !c.done {
 		v := binary.LittleEndian.AppendUint64(nil, c.next)
 		if c.next%3 == 0 {
 			v = append(v, make([]byte, 300)...)
@@ -470,9 +523,10 @@ func (r *simReplica) finish(ctx *core.Context, acts []core.Action) []core.Action
 			c.timeoutNows++
 		}
 	}
-	if p := c.rep; p != nil && r.id == p.dead {
+	if p := c.rep; p != nil {
+		p.take(r)
 		r.out.Actions = slices.DeleteFunc(r.out.Actions, func(a core.Action) bool {
-			if !p.lost(ctx, &a) {
+			if !c.lost(ctx, r, &a) {
 				return false
 			}
 			if a.Msg.Buf != core.NoBuf {
@@ -527,7 +581,7 @@ func (r *simReplica) finish(ctx *core.Context, acts []core.Action) []core.Action
 	}
 	c.done = c.afterCrash && (c.rep == nil || c.rep.removed && c.rep.caughtUp) && (c.disk == nil || c.disk.crashes == diskCrashes)
 	st := r.s.rn.BasicStatus()
-	r.leads = st.RaftState == raft.StateLeader
+	r.leads = st.RaftState == raft.StateLeader && !r.deleted
 	if c.rep != nil {
 		c.replaced(r, &st)
 	}

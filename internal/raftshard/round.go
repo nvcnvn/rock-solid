@@ -10,16 +10,18 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 )
 
-// Round is what one round makes durable: a restored snapshot, entries and a hard state, any of them empty.
+// Round is what one round makes durable: a restored snapshot, entries and a hard state, any of them empty, and whether the replica learned its removal.
 type Round struct {
 	HardState raftpb.HardState
 	Entries   []raftpb.Entry
 	Snapshot  raftpb.Snapshot
+	Removed   bool
 }
 
 // A round's record is a flags byte, then, if flagged, the snapshot (its index, term, configuration
 // and data), the entries (the first index, the count, and each entry's term, type, length and
-// payload) and the hard state (term, vote, commit), little-endian, in that order: replaying a
+// payload) and the hard state (term, vote, commit), little-endian, in that order; flagRemoved
+// marks a replica that learned its removal, which a replay keeps. Replaying a
 // snapshot drops the entries before it, and a hard state's commit index needs its entries. It goes
 // to the log as blobs of at most a record each, every one but the last of kind BlobRaftEntries
 // and the last of kind BlobRaftState, so a round torn at the log's tail is dropped whole. Each
@@ -29,6 +31,7 @@ const (
 	flagSnapshot byte = 1 << iota
 	flagEntries
 	flagHardState
+	flagRemoved
 )
 
 // ErrBadRound reports a round record that does not decode.
@@ -45,6 +48,9 @@ func AppendRound(dst []byte, r *Round) []byte {
 	}
 	if r.HardState.Term != 0 || r.HardState.Vote != 0 || r.HardState.Commit != 0 {
 		flags |= flagHardState
+	}
+	if r.Removed {
+		flags |= flagRemoved
 	}
 	dst = append(dst, flags)
 	if flags&flagSnapshot != 0 {
@@ -151,18 +157,20 @@ func (s *Storage) replay(kind disklog.BlobKind, payload []byte) (summary, error)
 	if r.HardState != (raftpb.HardState{}) {
 		s.hs = r.HardState
 	}
+	s.removed = s.removed || r.Removed
 	return summarize(&r), nil
 }
 
 // summary is what decides when a round's blobs die: the highest index it holds, an entry's or its
-// snapshot's, and whether it holds a hard state; done marks a whole round.
+// snapshot's, and whether it holds a hard state or the removal, which stays live as one does; done
+// marks a whole round.
 type summary struct {
 	last     uint64
 	hs, done bool
 }
 
 func summarize(r *Round) summary {
-	sum := summary{last: r.Snapshot.Metadata.Index, hs: !raft.IsEmptyHardState(r.HardState), done: true}
+	sum := summary{last: r.Snapshot.Metadata.Index, hs: !raft.IsEmptyHardState(r.HardState) || r.Removed, done: true}
 	if n := len(r.Entries); n > 0 {
 		sum.last = r.Entries[n-1].Index
 	}
@@ -174,7 +182,8 @@ func DecodeRound(rec []byte, r *Round) error {
 	*r = Round{}
 	d := decoder{b: rec}
 	flags := d.byte()
-	if flags&^(flagSnapshot|flagEntries|flagHardState) != 0 {
+	r.Removed = flags&flagRemoved != 0
+	if flags&^(flagSnapshot|flagEntries|flagHardState|flagRemoved) != 0 {
 		return ErrBadRound
 	}
 	if flags&flagSnapshot != 0 {
