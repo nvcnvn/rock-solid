@@ -146,12 +146,12 @@ type fortified struct {
 	term, run, support uint64
 }
 
-// plants are bugs a test plants: a removed replica that stops at once, as if its node deleted it, and one that applies its removal to its Raft configuration and so campaigns no more; election timeouts from crypto/rand, every message of a Ready sent before its flush, followers that vote and campaign while they support a leader, a learner promoted before it caught up, a replacement added as a voter, a learner held to the current commit index, lease reads before an entry of the leader's term commits, snapshots kept from the last compaction instead of built at the applied index, a leader counting a fortification under whatever support epoch its lease from the peer now runs, as if grantors renewed a lapsed grant under its old epoch, a leader serving lease reads after MsgTimeoutNow left, a vote granted to every candidate, a follower serving lease reads while it supports its leader, a follower that never asks its leader's node about the leader, a leader serving lease reads after it applied its own removal, rounds that write only their own Ready's hard state and none for a Ready that commits a configuration change and moves only the commit index, and a configuration change applied, and its commit sent, before that commit index is durable.
+// plants are bugs a test plants: a removed replica that stops at once, as if its node deleted it, and one that applies its removal to its Raft configuration and so campaigns no more; election timeouts from crypto/rand, every message of a Ready sent before its flush, followers that vote and campaign while they support a leader, a learner promoted before it caught up, a replacement added as a voter, a learner held to the current commit index, lease reads before an entry of the leader's term commits, snapshots kept from the last compaction instead of built at the applied index, a leader counting a fortification under whatever support epoch its lease from the peer now runs, as if grantors renewed a lapsed grant under its old epoch, a leader serving lease reads after MsgTimeoutNow left, a vote granted to every candidate, a follower serving lease reads while it supports its leader, a follower that never asks its leader's node about the leader, a halted replica that no longer leads answering an ask about it with silence, a leader serving lease reads after it applied its own removal, rounds that write only their own Ready's hard state and none for a Ready that commits a configuration change and moves only the commit index, and a configuration change applied, and its commit sent, before that commit index is durable.
 type plants struct {
 	unseeded, early, disloyal, eager, voterFirst, current, uncommitted, staleSnapshot bool
 	noEpochBump, transferKeepsLease, voteEveryone, followerReads                      bool
 	noSupportAsk, removedKeepsLease, oldHardState, noConfRound                        bool
-	deletesAtOnce, appliesRemoval                                                     bool
+	deletesAtOnce, appliesRemoval, haltedSilent                                       bool
 }
 
 // New starts a replica from its storage.
@@ -496,7 +496,7 @@ func (s *Shard) recv(ctx *core.Context, ev *core.Event, out *Output) {
 			s.removed, out.Removed = true, true
 		}
 	case kind == kindAsk:
-		if s.removed || s.halted && s.rn.BasicStatus().RaftState != raft.StateLeader {
+		if s.removed || s.halted && s.rn.BasicStatus().RaftState != raft.StateLeader && !s.plant.haltedSilent {
 			s.sendFortify(&fortify{kind: kindGone, from: f.to, to: f.from}, ev.Peer, out)
 		}
 	case kind == kindGone:

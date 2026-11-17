@@ -4071,8 +4071,8 @@ A TLA+ specification of a metadata group's voter replacement ([Replica placement
 - A leader elected from the outgoing half commits its own removal and goes on leading the joint configuration until it hands its leadership on; its node deletes it once the plan is complete, possibly while it still leads, and its followers keep supporting it while its node renews their grants. A follower that hears nothing from the leader it supports asks the leader's node, which answers once the leader learned its removal, and the follower then stops supporting it.
 - A replica learns its removal when it applies the entry, or on a peer's notice: the peer's applied configuration lacks it, the peer's applied index is at least its own, and its own applied configuration holds it. It never applies its removal to its configuration, but stays a voter of the joint one, campaigning, leading, voting, taking appends and fortifying, and serves no lease read; a leader that learns it from a notice goes on leading, as one that applies it does. Each voter of the plan reports once it applied the configuration that leaves the joint one, and the replica deletes its state only once all have.
 - A crashed replica restarts from its base, its last compaction, at or below what its state machine applied: its applied index and configuration are the base's, and its commit index is the one its hard state was last written with, or the base's if higher. etcd-raft hands out a hard state only when it changed, and a Ready that only moves the commit index writes it only when it commits a configuration change, so a Ready that appends writes it only when it changes the term or vote or moves the commit index too: the commit index an earlier commit-only Ready carried can be missing from the write, and the durable commit index lags. The code writes the newest hard state on each durable round, at least as often. The log is kept whole, since no step reads an entry at or below the base but as the base's configuration and last term.
-- A replica halts at a committed entry its state machine cannot decode. Raft goes on applying configuration changes, but the replica takes no append, votes and campaigns in no election and fortifies no leader. A halted leader still takes its followers' answers, commits and counts the support it had, and its node renews the grants, so its followers neither campaign nor hear from its node that it is gone; it hands its leadership to a voter of its applied configuration (`handOff`), joint or not, and serves no lease read from then on. Its base stays below the entry, so after a restart it halts again on reaching it.
-- Faults: crashes and restarts from a base, a voter down from the start or dying later, a halt, a lapse of any grant, and a removed leader's commit that reaches no follower.
+- A replica halts at a committed entry its state machine cannot decode. Raft goes on applying configuration changes, but the replica takes no append, votes and campaigns in no election and fortifies no leader. A halted leader still takes its followers' answers, commits and counts the support it had, and its node renews the grants, so its followers neither campaign nor hear from its node that it is gone; it hands its leadership to a voter of its applied configuration (`handOff`), joint or not, and serves no lease read from then on. When that election fails, the target's term rises, since a transfer's campaign skips pre-vote, and the leader steps down on hearing it (`HandOffFails`); it never campaigns again, and its node answers a follower's ask about it that it is gone. Its base stays below the entry, so after a restart it halts again on reaching it.
+- Faults: crashes and restarts from a base, a voter down from the start or dying later, a halt, a halted leader's hand-off whose election fails, a lapse of any grant, and a removed leader's commit that reaches no follower.
 
 **Properties**
 
@@ -4109,6 +4109,7 @@ A TLA+ specification of a metadata group's voter replacement ([Replica placement
 | `neg-removed-deletes-at-once` | A removed replica keeps its state until every voter of the plan reported the leave | a commits the leave on a, b and c and halts, handing its leadership to b or d, which holds the leave but applied only the joint configuration; c applies its removal and deletes its state, so of the outgoing half only b is left, a halted and c gone, and the new leader never commits. With a death in place of the halt (`ci-die-live`) the same rule off fails the same way. In the code the same plant leaves the replacement run's wedge fault without a leader of the new configuration, halt and death alike in a scripted run | `NewLeader` |
 | `neg-removed-applies-removal` | A removed replica never applies its removal to its configuration, but stays a voter of the joint one | c, leading term 2 from `LeaveInit`, applies its removal and campaigns no more; b, which holds the leave but has not applied it, wins term 3 in the joint configuration, sends its empty entry to c alone and dies; a and d, which applied only the joint configuration, need c's vote for the outgoing half, which their older logs never win. In the code the same plant fails this trace scripted, and the replacement run's wedge fault once its leader appended to c alone | `NewLeader` |
 | `neg-halted-keeps-leading` | A halted leader hands its leadership on | a halts at the leave and keeps leading, its node renewing its followers' grants, so none of them campaigns | `NewLeader` |
+| `neg-halted-silent` | The node of a halted replica that no longer leads answers an ask about it as gone | a, leading and fortified by b, c and d, commits the leave on a and b and halts at it; its hand-off to b fails, raising b's term, and a steps down on hearing it; c and d, their grants to a's node renewed, support a for good, so b wins no quorum of either half. In the code the same plant leaves seeds 770 and 1388 of the replacement run, which found it, without a leader of the new configuration | `NewLeader` |
 
 **Configurations** (runs as in [TLA+ and TLC](#tla-and-tlc); results in the [Model-to-simulator map](#model-to-simulator-map)). Voters a, b and c, the plan swapping d in for c:
 
@@ -4116,8 +4117,8 @@ A TLA+ specification of a metadata group's voter replacement ([Replica placement
 - `ci-live`: c down for good, up to term 2, `SwapCommits` under weak fairness.
 - `ci-lease`: from `JointInit`, a leading term 1 with every replica having applied the joint configuration, a state the spec reaches from its start with no crash; up to term 2, no crash, under any interleaving, grant lapses included, safety only: c wins term 2 while a leads, and lease reads across that election. The next leader after a removed one needs a third term, so `ci-live-moved` checks its reads against the removed leader's.
 - `ci-live-moved`: from `OutgoingInit`, `JointInit` after c won term 2 on every replica, one step of the spec; every replica up, no crash, up to term 3: c leaves the joint configuration, commits its own removal and hands its leadership on, and `NewLeader` holds under weak fairness, with the safety invariants. That fairness lets nobody campaign while a replica leads, an assumption about the steps after the start, not about how the group reached it. `neg-no-support-ask` is this configuration with one rule off, and `neg-removed-keeps-lease` its start and constants under any interleaving with one rule off.
-- `ci-halt`: `ci-lease` with one replica that may halt, safety only: a halted leader, still supported by its followers, hands its leadership on, and lease reads across the hand-off.
-- `ci-halt-live`: from `JointInit` under weak fairness, every replica up, no crash, up to term 3, and the leader of any term may halt: `NewLeader` holds, the halted leader handing its leadership on and the dropped voter keeping its state for a leader that holds the leave but applied only the joint configuration. `neg-removed-deletes-at-once` and `neg-halted-keeps-leading` are this configuration with one rule off.
+- `ci-halt`: `ci-lease` with one replica that may halt, safety only: a halted leader, still supported by its followers, hands its leadership on, or steps down when that election fails and its followers drop their support once its node answers that it is gone, and lease reads across either.
+- `ci-halt-live`: from `JointInit` under weak fairness, every replica up, no crash, up to term 4, and the leader of any term may halt: `NewLeader` holds, the halted leader handing its leadership on, or, when that election fails and it steps down, its node telling the followers that ask that it is gone, and the dropped voter keeping its state for a leader that holds the leave but applied only the joint configuration. Term 4 leaves room for the election after a failed hand-off to be the dropped voter's, which hands off in turn. `neg-removed-deletes-at-once`, `neg-halted-keeps-leading` and `neg-halted-silent` are this configuration with one rule off.
 - `ci-die-live`: `ci-halt-live` with any one replica dying for good in place of the halt.
 - `ci-leave-die-live`: from `LeaveInit`, `OutgoingInit` three steps on, where c, leading term 2, has committed the leave on b and d, which do not yet know it committed, while a lags behind both; every replica up, no crash, no leader fortified, up to term 5, and any one replica dying for good. c can hold the outgoing half's newest entry once its removal committed, and `NewLeader` holds because c stays a voter of the joint configuration: it wins the votes a and d need, commits the leave on them and hands its leadership on. Each fault can cost two elections when c leads between, hence term 5. `neg-removed-applies-removal` is this configuration with one rule off.
 - `ci-leave`: from `LeaveInit`, every replica up, no crash, up to term 3, under any interleaving, grant lapses included, safety only: c leads the joint configuration after its removal committed, a voter that applied only the joint configuration or the new one wins term 3, and lease reads across that election.
@@ -4217,16 +4218,16 @@ next milestone's run, which is also the twins' first.
 | Purge | `deep-list` | `ci-list` with 2 crashes, safety only | 74 | 38,193,992 | 384 s |
 | Purge | `deep-write` | `ci-write` with 3 crashes, `PurgeSettles` | 43 | 6,337,400 | 430 s |
 | Purge | `deep-orphan` | `ci-orphan` with 3 writes and 2 crashes, `PurgeSettles` | 38 | 935,148 | 44 s |
-| Voter replacement | `ci-swap` | [Voter replacement model](#voter-replacement-model) | 25 | 533,097 | 578 s at 1 worker beside other runs, load average near 15 |
-| Voter replacement | `ci-live` | [Voter replacement model](#voter-replacement-model) | 21 | 2,623 | 3 s |
-| Voter replacement | `ci-live-moved` | [Voter replacement model](#voter-replacement-model) | 25 | 45,904 | 48 s |
-| Voter replacement | `ci-lease` | [Voter replacement model](#voter-replacement-model) | 21 | 330,009 | 52 s |
-| Voter replacement | `ci-halt` | [Voter replacement model](#voter-replacement-model) | 22 | 1,090,739 | 181 s, load average near 15 |
-| Voter replacement | `ci-restart` | [Voter replacement model](#voter-replacement-model) | 20 | 801,361 | 153 s |
-| Voter replacement | `ci-halt-live` | [Voter replacement model](#voter-replacement-model) | 18 | 1,473 | 2 s |
+| Voter replacement | `ci-swap` | [Voter replacement model](#voter-replacement-model) | 25 | 533,097 | 128 s |
+| Voter replacement | `ci-live` | [Voter replacement model](#voter-replacement-model) | 20 | 2,623 | 3 s |
+| Voter replacement | `ci-live-moved` | [Voter replacement model](#voter-replacement-model) | 24 | 45,904 | 58 s |
+| Voter replacement | `ci-lease` | [Voter replacement model](#voter-replacement-model) | 22 | 330,009 | 66 s |
+| Voter replacement | `ci-halt` | [Voter replacement model](#voter-replacement-model) | 22 | 1,091,547 | 201 s |
+| Voter replacement | `ci-restart` | [Voter replacement model](#voter-replacement-model) | 20 | 801,361 | 160 s |
+| Voter replacement | `ci-halt-live` | [Voter replacement model](#voter-replacement-model) | 22 | 5,550 | 5 s |
 | Voter replacement | `ci-die-live` | [Voter replacement model](#voter-replacement-model) | 22 | 11,980 | 11 s |
-| Voter replacement | `ci-leave-die-live` | [Voter replacement model](#voter-replacement-model) | 22 | 30,999 | 22 s |
-| Voter replacement | `ci-leave` | [Voter replacement model](#voter-replacement-model) | 18 | 146,007 | 29 s |
+| Voter replacement | `ci-leave-die-live` | [Voter replacement model](#voter-replacement-model) | 22 | 30,999 | 30 s |
+| Voter replacement | `ci-leave` | [Voter replacement model](#voter-replacement-model) | 18 | 146,007 | 37 s |
 | Epoch change | `heavy-peering` | [Epoch change model](#epoch-change-model) | 31 | 13,717,707 | 8,923 s |
 | Epoch change | `deep-leases` | [Epoch change model](#epoch-change-model) | 132 | 48,516,248 | 5,577 s |
 | Epoch change | `deep-slow` | [Epoch change model](#epoch-change-model) | 72 | 20,909,636 | 2,265 s |
@@ -6596,14 +6597,20 @@ a snapshot taken at the leader's applied index in for the point-in-time view the
 | The same, and B halts before the round is durable | B steps the `MsgTimeoutNow` no more and stays a follower (`TestAReplicaThatHaltsDropsTheTransferItDeferred`) |
 | A, holding the joint entry, hears B's acknowledgment of it, a quorum of the first configuration | A round of its own: A sends no append, none carrying the new commit index, and stays in the first configuration until the round is durable, then applies the joint configuration and sends its appends (`TestALeaderSendsTheCommitOfAConfigurationChangeOnlyOnceDurable`) |
 | B applied the joint configuration and holds the leave; it crashes before it hears the leave commit, A hands D its leadership on A and D, and B, restarted from its base and the rounds it made durable, campaigns cut off from A and D | B restarts in the joint configuration and wins no term on its vote and C's. Planted, rounds that write only their own `Ready`'s hard state bring B back in the first configuration, where it leads the term D leads (`TestARestartDoesNotTakeAReplicaBackAcrossACommittedConfigurationChange`) |
-| C restarts after the swap | Within a second, inside its restart wait, C asks its peers whether it is a member; their answer at an applied index past its own makes C report `Removed`. It sends no pre-vote or vote, and nothing in 10 s after |
+| C, cut off through the whole swap, restarts after it | Within a second, inside its restart wait and with no pre-vote or vote sent, C asks its peers whether it is a member; their answer at an applied index past its own makes C report `Removed` and write a round recording it. It never leads over the next 100 heartbeats, while A leads on (`TestARemovedReplicaThatReturnsRecordsItsRemovalAndNeverLeads`) |
+| C learns its removal from a peer's notice and restarts | Its disk log replays the round recording the removal, and C reports `Removed` again (`TestARemovalLearnedFromANoticeSurvivesARestart`) |
 | A removal notice at an index below the replica's applied index | Ignored: a peer that has not applied the change that added it says nothing of its removal |
 | B has committed D's addition, its commit index at D's applied index, but not applied it; D asks B, or sends B a Raft message | B answers at its applied index, which D ignores; an answer at its commit index would have D delete its state |
 | C started with Peers that lack the leader, as one restored from a snapshot; the leader sends to it | C learns the leader's node from the message, and its reply reaches it |
-| A, B, C and D in the joint configuration that swaps C for D, every node holding a lease from every other; C, in the outgoing half alone, wins an election, leaves the joint configuration and applies its own removal, and every message it sends from then on is lost, so no follower learns that the leave committed. C's node keeps renewing their grants | Within an election timeout each follower asks C's node about replica ID 3, which answers that it is gone; the followers stop supporting C and campaign after `raft_lapse_campaign`, and one leads voters 1, 2 and 4 within an election timeout, a heartbeat, `raft_lapse_campaign` and three heartbeats. No two replicas could serve a lease read at once (`TestFollowersOfALeaderThatAppliedItsOwnRemovalCampaign`) |
+| A, B, C and D in the joint configuration that swaps C for D, every node holding a lease from every other; C, in the outgoing half alone, wins an election and commits the leave | C holds its removal unapplied, so it stays a voter of the joint configuration and leads on, proposes nothing, and hands its leadership to a caught-up voter of the plan, which applies the leave. The followers that applied the leave keep C's node until the next change applies, so the target acknowledges C's re-proposed leave (`TestALeaderThatCommittedItsOwnRemovalHandsItsLeadershipOn`) |
+| The same, with C's `MsgTimeoutNow` lost, so it cannot hand its leadership on; every voter of the plan applies the leave and C's node deletes C while it leads, still renewing the followers' grants | Within an election timeout each follower asks C's node about replica ID 3, which answers that it is gone; the followers stop supporting C and campaign after `raft_lapse_campaign`, and one leads voters 1, 2 and 4 within an election timeout, a heartbeat, `raft_lapse_campaign` and three heartbeats. No two replicas could serve a lease read at once (`TestFollowersOfALeaderThatAppliedItsOwnRemovalCampaign`) |
 | Then an ask about replica 3 to C, and asks about 4 and about 3 to D | C, removed, answers that 3 is gone; D, live, answers neither and counts the ask about another replica misrouted: the ask names the replica ID, never the group alone, so a new replica of the group on a node is not taken for the old one. `Gone`, the node's answer for a replica it no longer holds, answers the ask and nothing else |
 | B, supporting C, gets an answer that 4 is gone, then that 3 is | B keeps its support, then drops it (`TestANodeAnswersGoneOnlyForTheReplicaItNoLongerHolds`) |
 | Replica 1 of group 5, live, through the control-plane host that holds it, gets asks about replica 9 of group 5, replica 1 of group 7 and itself | The first two, naming replicas its node does not hold, reach `Gone`, which answers each from the replica asked about; the ask about itself is not answered (`TestAReplicaItIsNotIsAnsweredGone`) |
+| C, leading the joint configuration from the outgoing half, holds its removal and is then cut off from the others' Raft messages, its node renewing every grant | The followers ask C's node, hear that C is gone and elect a leader, which serves lease reads; C, which learned its removal, serves none. Planted, it keeps serving them at once with the new leader (`TestARemovedLeaderThatKeepsReadingBreaksTheLeaseInvariant`, the voter model's `neg-removed-keeps-lease`) |
+| A leads the joint configuration, commits the leave with B, tells C alone that it committed, and halts or dies | B or D, holding the leave with only the joint configuration applied, leads with C's vote, the outgoing half's last one up, and applies the leave: after an election timeout and a round trip when A halts and hands its leadership on, once the grants to A's node lapse when it dies. Planted, a C that stops once it learns its removal, as if its node deleted it, leaves the outgoing half one voter, and no leader of the plan's configuration follows (`TestARemovedVoterKeepsTheOutgoingHalfsVoteForAVoterThatHoldsTheLeave`, the voter model's `ci-halt-live` and `neg-removed-deletes-at-once`) |
+| C leads term 2 from the outgoing half and commits the leave on B and D while A lags; B wins term 3 before applying it, appends its entry to C alone and dies | C, holding the outgoing half's newest entry, wins, commits the leave on A and D and hands its leadership to one of them. Planted, a C that applies its removal campaigns no more, and A and D, which applied only the joint configuration, never win its vote (`TestARemovedVoterThatHoldsTheOutgoingHalfsNewestEntryLeadsAndHandsOff`, the voter model's `ci-leave-die-live` and `neg-removed-applies-removal`) |
+| A leader that applied the leave crashes | It restarts with the leave committed, in the plan's configuration (`TestALeaderThatCrashesAfterCommittingTheLeaveRestartsWithItCommitted`) |
 | Planted: the learner promoted at once | D swapped in holding nothing (`TestAnEagerLeaderPromotesALearnerThatHoldsNothing`) |
 | Planted: D added as a voter | With C down, nothing commits while D hears nothing (`TestAReplacementAddedAsAVoterStallsProposals`) |
 
@@ -6617,14 +6624,25 @@ from every other node, and up to 2 s later every replica gets the plan naming th
 replica's storage takes a snapshot at its applied index after each pass and compacts all but 10
 entries below it, so the new replica, and any lagging voter, catches up from snapshots. The
 replaced replica is reconnected up to a second after the plan, mid-swap, in half the seeds, and a
-second after the swap in the rest. In half the seeds (`outgoing`), the leader that proposes the
-swap, once the replaced replica is reconnected mid-swap, hands it its leadership, and every Raft
-message the replaced replica sends carrying the commit of the leave of the joint configuration is
-lost; when it then leads the leave, it applies its own removal with no follower learning of it, as in the
-[Voter replacement model](#voter-replacement-model)'s `ci-live-moved`. Every node renews its
-node-pair leases while it runs, whatever its replicas do, as a node does in production. A seed
-passes once the replaced replica reported itself removed and the new one applied a value proposed after the swap, and replays to the same trace and
-history. After every step it checks the Raft runs' properties and:
+second after the swap in the rest. Two faults are drawn independently, each in half the seeds:
+
+- `outgoing`: the leader that proposes the swap, once the replaced replica is reconnected
+  mid-swap, hands it its leadership, and every `MsgTimeoutNow` the replaced replica sends is lost,
+  so it cannot hand its leadership on, as in the [Voter replacement model](#voter-replacement-model)'s
+  `ci-live-moved`.
+- `wedge`: a leader that is the first replica to apply the plan's configuration while the
+  replaced replica is reconnected sends the messages carrying that commit, and every later one, to
+  the replaced replica alone until the faults stop; once that replica learned its removal, the
+  leader halts, or in half of these seeds (`die`) its node stands still for good, as in
+  `ci-halt-live`.
+
+The run stands in for the control plane: once every voter of the plan applied its configuration,
+the node of the replaced replica, if that replica learned its removal, deletes it, renews its
+grants still and answers an ask about it that it is gone. Every node renews its node-pair leases
+while it runs, whatever its replicas do, as a node does in production. A seed passes once the
+replaced replica reported itself removed and the new one applied a value proposed after the swap,
+and replays to the same trace and history. After every step it checks the Raft runs' properties
+and:
 
 - [property] "no learner is promoted to voter before it has caught up with its leader's log": a
   leader's round holding a `ConfChangeV2` that promotes a learner leaves only while the learner's
@@ -6632,14 +6650,25 @@ history. After every step it checks the Raft runs' properties and:
   it within 20 seeds (`TestPromotingALearnerBeforeItCaughtUpBreaksTheInvariant`).
 - "only a replica the group's configuration removed deletes its state": no replica but the
   replaced one reports `Removed`.
+- [property] "a replica leads having applied the plan's configuration within 15 election timeouts
+  of the faults stopping", the model's `NewLeader`. Fifteen is past the longest wait a run allows
+  once its faults stop: a pause drawn before then holds a leader's node up to 5 s, its followers'
+  grants lapse `primary_lease` and a heartbeat after its last renewal, they campaign
+  `raft_lapse_campaign` later, and two split votes cost up to 2 s each, 14.3 s in all; the longest
+  over 2,000 seeds was 7.8 s.
 
-Planted, on runs that always draw `outgoing`, each of the voter model's two rules about a removed
-leader fails within 20 seeds, on those that reconnect the replaced replica mid-swap: followers that never ask (`neg-no-support-ask`) leave the run without
-a leader of the new configuration, so it never finishes, while the same seed finishes unplanted
-(`TestFollowersThatNeverAskKeepARemovedLeader`; 8 of the first 20 seeds); a removed leader that
-keeps serving lease reads (`neg-removed-keeps-lease`) breaks "no two replicas of a shard serve
-lease reads at overlapping times" (`TestARemovedLeaderThatKeepsReadingBreaksTheLeaseInvariant`;
-7 of the first 20 seeds).
+Planted, each of the voter model's rules about a removed or halted leader breaks one of them:
+
+| Plant | Model | Found by |
+| --- | --- | --- |
+| Followers never ask the node of the leader they support about it: once the removed leader's node deletes it, they support it for good | `neg-no-support-ask` | `TestFollowersThatNeverAskKeepARemovedLeader`, runs that always draw `outgoing` |
+| A removed replica stops at once, as if its node deleted it: the wedge leaves the outgoing half one voter | `neg-removed-deletes-at-once` | `TestARemovedVoterDeletedAtOnceLeavesNoLeader`, runs that always draw `wedge` and `die`; seed 1 |
+| A removed replica applies its removal and campaigns no more: holding the outgoing half's newest entry, it refuses every voter of the plan its vote | `neg-removed-applies-removal` | `TestARemovedVoterThatAppliesItsRemovalLeavesNoLeader`, the same runs; seed 30 |
+| A halted replica that no longer leads leaves an ask about it unanswered: a halted leader whose hand-off fails steps down on the target's later term and never campaigns, and a follower still supporting it refuses every candidate | `neg-halted-silent` | `TestAHaltedLeaderThatStepsDownAndKeepsSilentLeavesNoLeader`, seeds 770 and 1388 of the run, which found the bug |
+
+Each breaks "a replica leads having applied the plan's configuration", and the same seed finishes
+unplanted. A halted wedge leader's heartbeats tell the others the leave committed once the faults
+stop, so only a dead one wedges the planted runs.
 
 With the regress fault (`TestAVoterRestartedMidSwapKeepsTheConfigurationItKnewCommitted`, 20 seeds
 in `go test` and 2,000 per commit in `scripts/seeds.sh`, with no other fault but the pauses), the first old voter that follows, applied the joint

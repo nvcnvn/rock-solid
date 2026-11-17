@@ -481,6 +481,21 @@ func TestARemovedVoterThatAppliesItsRemovalLeavesNoLeader(t *testing.T) {
 	}
 }
 
+// The voter model's neg-halted-silent: a halted leader whose hand-off fails steps down on its
+// target's later term and never campaigns again, and a follower that still supports it, its node
+// renewing the grant, refuses every candidate unless that node answers that the replica is gone.
+// Seeds 770 and 1388 found it.
+func TestAHaltedLeaderThatStepsDownAndKeepsSilentLeavesNoLeader(t *testing.T) {
+	for _, seed := range []uint64{770, 1388} {
+		if !newReplaceCluster(seed, plants{haltedSilent: true}, faults(), true, false).breaks(t, seed, invNewLeader) {
+			t.Fatalf("seed %d: a silent halted ex-leader still left a leader of the plan's configuration", seed)
+		}
+		if !newReplaceCluster(seed, plants{}, faults(), true, false).run(t, seed).done {
+			t.Fatalf("seed %d: the run does not finish when the halted ex-leader's node answers", seed)
+		}
+	}
+}
+
 // regressCluster is seed's replacement run with no fault but the regress one.
 func regressCluster(seed uint64, p plants) *simCluster {
 	c := newReplaceCluster(seed, p, sim.DefaultSettings(), false, false)
