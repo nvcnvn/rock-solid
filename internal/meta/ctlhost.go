@@ -12,6 +12,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lease"
+	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/raftshard"
 )
 
@@ -42,7 +43,9 @@ func (o *CtlHostOutput) Reset() {
 // placement tables and session tables the Control hands out, a session table pushed with token 0.
 // Without a Control it answers a node's report or fetch with the leader it knows. It keeps its
 // group's log on a disk log of its own and tells the replica a round is durable only once the
-// disk is; a restart replays the log before the replica starts. A disk that fails stops it.
+// disk is. Once max_replay_bytes of records follow the last manifest it checkpoints the group's
+// tree and compacts the log to what the tree's runs hold; a restart loads the runs and replays the
+// log after the group's replay LSN before the replica starts. A disk or checkpoint that fails stops it.
 type CtlHost struct {
 	shard *Shard
 	// cfg is the replica's settings until the replica starts.
@@ -83,13 +86,11 @@ type CtlHost struct {
 	disks   []chunkstore.Disk
 	dels    []ReplicaRef
 	stepAt  core.Tick
+	cp      ctlCheckpoint
 }
 
 // ctlOwner is the owner the group's blobs carry on the host's disk log.
 const ctlOwner = 1
-
-// ErrLogFull reports a host whose log reached max_replay_bytes, which nothing checkpoints yet.
-var ErrLogFull = errors.New("meta: the control-plane log reached max_replay_bytes and is never checkpointed")
 
 // ErrVoters reports a host restarted with voters other than those its disk was formatted with.
 var ErrVoters = errors.New("meta: the voters given are not those the control-plane log was formatted with")
@@ -122,12 +123,16 @@ type adminWait struct {
 
 // FormatCtlHost starts a host on a new disk, which it formats with sb. Its first round is the
 // group's boot state on cfg's storage, the voters' configuration, and the replica starts on that
-// storage once the round is durable.
+// storage once the round is durable. A tree whose MaxPiece passes the log's MaxBlobBytes is
+// lsm.ErrBadConfig here, and stops a restart once its log is recovered.
 func FormatCtlHost(ctx *core.Context, cfg Config, lc disklog.Config, sb disklog.Superblock, out *CtlHostOutput) (*CtlHost, error) {
 	h := newCtlHost(cfg)
 	log, err := disklog.Format(ctx, lc, sb, 1, &h.lout)
 	if err != nil {
 		return nil, err
+	}
+	if uint64(cfg.Tree.MaxPiece) > log.MaxBlobBytes() {
+		return nil, lsm.ErrBadConfig
 	}
 	h.disk.Log = log
 	if err := h.writeBoot(ctx, cfg.Raft.Storage.Base()); err != nil {
@@ -187,6 +192,10 @@ func (h *CtlHost) Close() {
 		h.shard.Close()
 		h.shard = nil
 	}
+	if h.cfg.State != nil {
+		h.cfg.State.Close()
+		h.cfg.State = nil
+	}
 }
 
 // Err is why the host stopped for good, or nil.
@@ -222,6 +231,9 @@ func (h *CtlHost) OnEvent(ctx *core.Context, ev *core.Event, out *CtlHostOutput)
 		if ctx.Now >= h.stepAt {
 			h.arm(ctx, out)
 			h.fail(h.disk.Retry(ctx, &h.lout), out)
+			if h.cp.pieceWait {
+				h.fail(h.nextPiece(ctx), out)
+			}
 			h.step(ctx, out)
 		}
 	default:
@@ -533,8 +545,8 @@ func (h *CtlHost) after(ctx *core.Context, out *CtlHostOutput) {
 		if r := h.sout.Raft.Flush; r != 0 && h.err == nil {
 			h.sout.Raft.Flush = 0
 			h.fail(h.disk.Write(ctx, ctlOwner, r, &h.sout.Raft.Round, &h.lout), out)
-			if h.disk.Log.CheckpointDue() {
-				h.fail(ErrLogFull, out)
+			if h.shard != nil && h.err == nil && !h.cp.running && h.disk.Log.CheckpointDue() {
+				h.fail(h.checkpoint(ctx), out)
 			}
 		}
 		if h.shard == nil || h.err != nil {
@@ -572,6 +584,9 @@ func (h *CtlHost) logEvents(ctx *core.Context, out *CtlHostOutput) {
 		var err error
 		switch ev.Kind {
 		case disklog.Durable:
+			if err = h.pieceDurable(ctx, &ev); err != nil {
+				break
+			}
 			h.dones, err = h.disk.Durable(ctx, &ev, &h.lout, h.dones[:0])
 			for _, d := range h.dones {
 				if h.shard == nil {
@@ -581,13 +596,19 @@ func (h *CtlHost) logEvents(ctx *core.Context, out *CtlHostOutput) {
 				}
 			}
 		case disklog.ManifestLoaded:
-			err = h.rec.Replay(ctx, &h.lout)
+			err = h.loadManifest(ctx)
+		case disklog.BlobRead:
+			err = h.blobRead(ctx, &ev)
+		case disklog.CheckpointDone:
+			err = h.checkpointDone(ctx)
 		case disklog.Replayed:
 			h.replayed = true
 			err = h.disk.Replayed(&ev)
 		case disklog.Recovered:
 			var log *disklog.Log
-			if log, err = h.rec.Log(ctx); err == nil {
+			if log, err = h.rec.Log(ctx); err == nil && uint64(h.cfg.Tree.MaxPiece) > log.MaxBlobBytes() {
+				err = lsm.ErrBadConfig
+			} else if err == nil {
 				h.disk.Recovered(log)
 				h.rec = nil
 				st := h.cfg.Raft.Storage
@@ -601,7 +622,7 @@ func (h *CtlHost) logEvents(ctx *core.Context, out *CtlHostOutput) {
 					err = h.start(ctx, out)
 				}
 			}
-		case disklog.Failed, disklog.InDoubt, disklog.RecoveryFailed:
+		case disklog.Failed, disklog.InDoubt, disklog.RecoveryFailed, disklog.CheckpointFailed:
 			err = ev.Err
 		}
 		h.fail(err, out)

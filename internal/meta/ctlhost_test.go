@@ -1,6 +1,7 @@
 package meta
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"slices"
@@ -55,6 +56,15 @@ type hostRun struct {
 	work []hostWork
 	// failing lets a host hand out errors, which out gathers, without failing the test.
 	failing bool
+	geo     disklog.Geometry
+	// keep lands a crash's unflushed writes, which a restart otherwise loses.
+	keep bool
+	// states is, per host, its state's data at each index it applied, which its state at that
+	// index must equal across every crash; nil checks nothing.
+	states   []map[uint64][]byte
+	diverged int
+	// plant plants a bug in each host a restart opens.
+	plant func(h *CtlHost)
 }
 
 // hostWork is a disk action of host at, or a message from host from to host at.
@@ -71,10 +81,15 @@ func newHostGroup(t *testing.T, voters int) *hostRun {
 
 // newHostGroupOn is newHostGroup, each host's disk log on lc.
 func newHostGroupOn(t *testing.T, voters int, lc disklog.Config) *hostRun {
-	r := &hostRun{t: t, lc: lc, hs: make([]*CtlHost, voters), pool: sim.NewPool(16<<20, 0), now: 5_000_000}
+	return newHostGroupOnDisks(t, voters, lc, ctlGeometry)
+}
+
+// newHostGroupOnDisks is newHostGroupOn, each host's disk of geometry geo.
+func newHostGroupOnDisks(t *testing.T, voters int, lc disklog.Config, geo disklog.Geometry) *hostRun {
+	r := &hostRun{t: t, lc: lc, geo: geo, hs: make([]*CtlHost, voters), pool: sim.NewPool(16<<20, 0), now: 5_000_000}
 	for i := range voters {
-		r.disks = append(r.disks, sim.NewDisk(ctlGeometry.DiskBlocks()))
-		sb := disklog.Superblock{LogID: uint64(i) + 1, Geometry: ctlGeometry}
+		r.disks = append(r.disks, sim.NewDisk(geo.DiskBlocks()))
+		sb := disklog.Superblock{LogID: uint64(i) + 1, Geometry: geo}
 		r.do(i, func(ctx *core.Context, out *CtlHostOutput) {
 			h, err := FormatCtlHost(ctx, r.config(i), r.lc, sb, out)
 			if err != nil {
@@ -97,7 +112,7 @@ func (r *hostRun) config(i int) Config {
 	}
 	return Config{Raft: raftshard.Config{Group: hostGroup, ID: uint64(i) + 1, Storage: bootStorage(r.t, cs), Seed: uint64(i), Timer: 1, Peers: peers,
 		Holder: lease.NewHolder(lease.DefaultConfig), Grantor: lease.NewGrantor(lease.DefaultConfig, uint64(i)+1, lease.Time{})},
-		Tree: lsm.Config{MaxPiece: 64 << 10, Check: true, Pages: r.pagesOf(i)}}
+		Tree: lsm.Config{MaxPiece: 32 << 10, Check: true, Pages: r.pagesOf(i)}}
 }
 
 // pagesOf is host i's page slabs.
@@ -114,7 +129,7 @@ func (r *hostRun) restart(i int) { r.restartWith(i, r.config(i)) }
 // restartWith is restart, the host recovering on cfg.
 func (r *hostRun) restartWith(i int, cfg Config) {
 	r.t.Helper()
-	r.disks[i].Crash(func(int, core.LBA) bool { return false })
+	r.disks[i].Crash(func(int, core.LBA) bool { return r.keep })
 	r.work = slices.DeleteFunc(r.work, func(w hostWork) bool { return w.at == i || w.from == i })
 	if r.hs[i] != nil {
 		r.hs[i].Close()
@@ -123,14 +138,38 @@ func (r *hostRun) restartWith(i int, cfg Config) {
 		r.t.Fatalf("host %d kept %d bytes of page slabs once closed", i, out)
 	}
 	r.do(i, func(ctx *core.Context, out *CtlHostOutput) {
-		h, err := OpenCtlHost(ctx, cfg, r.lc, ctlGeometry.DiskBlocks(), out)
+		h, err := OpenCtlHost(ctx, cfg, r.lc, r.geo.DiskBlocks(), out)
 		if err != nil {
 			r.t.Fatal(err)
+		}
+		if r.plant != nil {
+			r.plant(h)
 		}
 		r.hs[i] = h
 	})
 	r.h = r.hs[0]
 	r.drain()
+}
+
+// checkState records host i's state at the index it applied, or fails if it differs from the
+// state recorded there before; with a bug planted it counts the difference in diverged.
+func (r *hostRun) checkState(i int) {
+	r.t.Helper()
+	h := r.hs[i]
+	if r.states == nil || h == nil || h.Shard() == nil {
+		return
+	}
+	for len(r.states) <= i {
+		r.states = append(r.states, map[uint64][]byte{})
+	}
+	st := h.Shard().State()
+	data := st.SnapshotData(st.Applied())
+	if was, ok := r.states[i][st.Applied()]; ok && !bytes.Equal(was, data) {
+		if r.diverged++; r.plant == nil {
+			r.t.Fatalf("host %d's state at index %d is not what it was before the crash", i, st.Applied())
+		}
+	}
+	r.states[i][st.Applied()] = data
 }
 
 // do calls into host i and sorts what it hands out.
@@ -139,6 +178,7 @@ func (r *hostRun) do(i int, f func(ctx *core.Context, out *CtlHostOutput)) {
 	ctx := core.Context{Now: r.now, Raw: r.now, Pool: r.pool}
 	var o CtlHostOutput
 	f(&ctx, &o)
+	r.checkState(i)
 	for _, err := range o.Errs {
 		if !r.failing {
 			r.t.Fatal(err)
@@ -704,7 +744,7 @@ func TestARestartAfterAFormatCutShortWritesTheBootRound(t *testing.T) {
 	empty := 0
 	for _, keep := range []bool{false, true} {
 		for steps := 0; ; steps++ {
-			r := &hostRun{t: t, lc: ctlLogConfig(), hs: make([]*CtlHost, 1), pool: sim.NewPool(16<<20, 0), now: 5_000_000}
+			r := &hostRun{t: t, lc: ctlLogConfig(), geo: ctlGeometry, hs: make([]*CtlHost, 1), pool: sim.NewPool(16<<20, 0), now: 5_000_000}
 			r.disks = append(r.disks, sim.NewDisk(ctlGeometry.DiskBlocks()))
 			r.do(0, func(ctx *core.Context, out *CtlHostOutput) {
 				h, err := FormatCtlHost(ctx, r.config(0), r.lc, disklog.Superblock{LogID: 1, Geometry: ctlGeometry}, out)
@@ -794,30 +834,6 @@ func TestAVoterRestartedWithOtherVotersStops(t *testing.T) {
 	}
 	if a := r.txnAt(o, 11, "z"); a == nil || a.Err != nil {
 		t.Fatalf("the other two voters answered %+v", a)
-	}
-}
-
-// A log that reaches max_replay_bytes, which nothing checkpoints yet, stops the host with
-// ErrLogFull, so its process exits rather than keep a Control that never commits again, and
-// stops again once restarted.
-func TestAHostWhoseLogFillsStops(t *testing.T) {
-	lc := ctlLogConfig()
-	lc.MaxReplayBytes = 64 << 10
-	r := newHostGroupOn(t, 1, lc)
-	r.lead()
-	r.failing = true
-	for k := range 200 {
-		if a := r.txnAt(0, uint64(100+k), "v"); a == nil {
-			break
-		}
-	}
-	if !errors.Is(r.h.Err(), ErrLogFull) || r.h.Control() != nil {
-		t.Fatalf("a full log left the host with error %v and Control %v", r.h.Err(), r.h.Control())
-	}
-	r.restart(0)
-	r.run(raftshard.TickInterval * 400)
-	if !errors.Is(r.h.Err(), ErrLogFull) {
-		t.Fatalf("restarted on a full log, the host has error %v", r.h.Err())
 	}
 }
 

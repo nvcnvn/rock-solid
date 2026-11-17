@@ -23,6 +23,8 @@ type Config struct {
 	Raft raftshard.Config
 	// Tree is the settings of the state's LSM tree, with MaxPiece at least 4 KiB.
 	Tree lsm.Config
+	// State is the state a checkpoint's runs restored, which the shard takes, or nil for an empty one.
+	State *State
 }
 
 // Answer is the outcome of the Txn proposed under Token.
@@ -77,12 +79,17 @@ type proposal struct {
 	buf  []byte
 }
 
-// NewShard starts a replica from its Raft storage, its state at the storage's base: the restored snapshot's a replay made it, or else empty.
+// NewShard starts a replica from its Raft storage and cfg's State, or an empty state at the
+// storage's base; a restored snapshot a replay made the base replaces either. The replica hands
+// over again the entries after the base, and the state skips those it applied.
 func NewShard(cfg Config) (*Shard, error) {
 	base := cfg.Raft.Storage.Base().Index
-	st, err := NewState(cfg.Tree, base)
-	if err != nil {
-		return nil, err
+	st := cfg.State
+	if st == nil {
+		var err error
+		if st, err = NewState(cfg.Tree, base); err != nil {
+			return nil, err
+		}
 	}
 	if data := cfg.Raft.Storage.TakeBaseData(); data != nil {
 		if err := st.Restore(base, data); err != nil {
@@ -93,6 +100,7 @@ func NewShard(cfg Config) (*Shard, error) {
 	s := &Shard{state: st, log: cfg.Raft.Storage, id: cfg.Raft.ID, group: cfg.Raft.Group}
 	s.newest = entryFormat
 	cfg.Raft.SnapshotData, cfg.Raft.Apply, cfg.Raft.CheckSnapshot = s.snapshotData, s.apply, CheckSnapshot
+	var err error
 	if s.raft, err = raftshard.New(cfg.Raft); err != nil {
 		st.Close()
 		return nil, err
@@ -285,6 +293,9 @@ func (s *Shard) apply(snap raftpb.Snapshot, ents []raftpb.Entry) {
 // applyEntry applies e's Txns, answering those this replica proposed, or halts at e if it does
 // not decode whole: skipping it would leave this replica's state apart from those that applied it.
 func (s *Shard) applyEntry(e *raftpb.Entry) {
+	if e.Index <= s.state.applied {
+		return
+	}
 	// A proposal of an earlier term than e's still waiting never committed, since a log's terms only rise.
 	for len(s.waits) > 0 && s.waits[0].term < e.Term {
 		s.settle(0, raft.ErrProposalDropped)

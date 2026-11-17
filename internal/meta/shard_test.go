@@ -326,7 +326,7 @@ func (c *group) answer(i int, token uint64) Answer {
 
 func create(dir string, name int, inode uint64, now uint64) Txn {
 	entry := []byte(fmt.Sprintf("%s/d/%04d", dir, name))
-	return ops(CheckAbsent(entry, true), Put(entry, be(inode)), Put(append(be(inode), 'a'), be(now)), Update([]byte(dir+"/a"), 0, Bump, now), Update([]byte(dir+"/a"), 8, Bump, now))
+	return ops(CheckAbsent(entry, true), Put(entry, be(inode)), Put(append([]byte("i"), be(inode)...), be(now)), Update([]byte(dir+"/a"), 0, Bump, now), Update([]byte(dir+"/a"), 8, Bump, now))
 }
 
 // The Txns that arrive at a leader during a round go out as one entry in its next round; of two

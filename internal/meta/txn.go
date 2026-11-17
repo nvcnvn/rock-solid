@@ -36,7 +36,7 @@ var (
 	ErrTooLarge = errors.New("meta: too large")
 	// ErrEmptyRange reports a DeleteRange or CheckEmpty whose start is not below its end.
 	ErrEmptyRange = errors.New("meta: empty range")
-	// ErrBadOp reports an op of an unknown kind or Update mode.
+	// ErrBadOp reports an op of an unknown kind or Update mode, or whose key is empty or in space 0.
 	ErrBadOp = errors.New("meta: bad op")
 	// ErrBadReplay reports a replay key that is no replay-tagged key, an oldest outstanding request above its own, or too many Updates for its record.
 	ErrBadReplay = errors.New("meta: bad replay key")
@@ -170,7 +170,7 @@ func (t *Txn) Check() (int, error) {
 		if len(op.Key) == 0 || op.Key[0] != SpaceCtl {
 			limit = MaxTxnBytes
 		}
-		if op.Kind < OpPut || op.Kind > OpUpdate || !carries(op) {
+		if op.Kind < OpPut || op.Kind > OpUpdate || !carries(op) || bytes.Compare(op.Key, userStart) < 0 {
 			return 0, ErrBadOp
 		}
 		n += 1 + bytesLen(op.Key)

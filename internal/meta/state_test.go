@@ -295,7 +295,7 @@ func TestScanStopsAtItsByteBudget(t *testing.T) {
 	val := bytes.Repeat([]byte("v"), MaxValue)
 	n := 0
 	for total := 0; total < 1<<20; n++ {
-		k := binary.BigEndian.AppendUint32(nil, uint32(n))
+		k := binary.BigEndian.AppendUint32([]byte{SpaceCtl}, uint32(n))
 		must(s.tree.Put(k, val))
 		total += len(k) + len(val)
 	}
@@ -307,12 +307,12 @@ func TestScanStopsAtItsByteBudget(t *testing.T) {
 		}
 		size := 0
 		for i, kv := range r.KVs {
-			if binary.BigEndian.Uint32(kv.Key) != uint32(got+i) || !bytes.Equal(kv.Value, val) {
+			if binary.BigEndian.Uint32(kv.Key[1:]) != uint32(got+i) || !bytes.Equal(kv.Value, val) {
 				t.Fatalf("scan %d returned key %x at %d", scans, kv.Key, got+i)
 			}
 			size += len(kv.Key) + len(kv.Value)
 		}
-		if size > MaxScanBytes || r.More && size+4+MaxValue <= MaxScanBytes {
+		if size > MaxScanBytes || r.More && size+5+MaxValue <= MaxScanBytes {
 			t.Fatalf("scan %d returned %d bytes, more %v", scans, size, r.More)
 		}
 		got += len(r.KVs)

@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"fmt"
 
+	"go.etcd.io/raft/v3/raftpb"
+
 	"github.com/nvcnvn/rock-solid/internal/lsm"
 )
 
@@ -15,18 +17,64 @@ const minPiece = 4 << 10
 
 // State is a shard's state machine: its LSM tree and the index of the last entry applied to it.
 type State struct {
-	cfg     lsm.Config
 	tree    *lsm.Tree
 	applied uint64
 	it      lsm.Iter
 	val     []byte
 	rec     []byte
+	keys    [][]byte
 	plant   statePlants
 }
 
-// statePlants are bugs a test plants: a replay record ignored, and a failed check that is not final stored as the request's result.
+// statePlants are bugs a test plants: a replay record ignored, a failed check that is not final
+// stored as the request's result, and a restore from runs that takes the base for the applied index.
 type statePlants struct {
-	replayIgnored, nonFinalStored bool
+	replayIgnored, nonFinalStored, appliedIsBase bool
+}
+
+// markKey holds the index applied and the log's base in key space 0, which no Txn, scan or
+// snapshot reaches, so the runs a checkpoint flushes carry them; userStart is the first key a Txn
+// may name.
+var (
+	markKey   = []byte{0}
+	userStart = []byte{SpaceCtl}
+)
+
+// markBytes is a mark's index applied, base index and base term; the base's configuration follows.
+const markBytes = 24
+
+// Mark records in the tree the index applied and base, the index, term and configuration of the
+// log's last compaction, so the next flush carries them.
+func (s *State) Mark(base raftpb.SnapshotMetadata) {
+	s.rec = binary.BigEndian.AppendUint64(s.rec[:0], s.applied)
+	s.rec = binary.BigEndian.AppendUint64(s.rec, base.Index)
+	s.rec = binary.BigEndian.AppendUint64(s.rec, base.Term)
+	cs, err := base.ConfState.Marshal()
+	if err != nil {
+		panic(fmt.Sprintf("meta: a configuration does not encode: %v", err))
+	}
+	s.rec = append(s.rec, cs...)
+	if v, ok := s.tree.Get(markKey); !ok || !bytes.Equal(v, s.rec) {
+		must(s.tree.Put(markKey, s.rec))
+	}
+}
+
+// Loaded takes the index applied from the mark in the runs loaded into the tree, and returns the
+// base it records; ErrMalformed for runs that hold no mark.
+func (s *State) Loaded() (raftpb.SnapshotMetadata, error) {
+	var md raftpb.SnapshotMetadata
+	v, ok := s.tree.Get(markKey)
+	if !ok || len(v) < markBytes || md.ConfState.Unmarshal(v[markBytes:]) != nil {
+		return md, ErrMalformed
+	}
+	md.Index, md.Term = binary.BigEndian.Uint64(v[8:]), binary.BigEndian.Uint64(v[16:])
+	if s.applied = binary.BigEndian.Uint64(v); s.applied < md.Index {
+		return md, ErrMalformed
+	}
+	if s.plant.appliedIsBase {
+		s.applied = md.Index
+	}
+	return md, nil
 }
 
 // NewState is an empty state at index applied.
@@ -38,7 +86,7 @@ func NewState(cfg lsm.Config, applied uint64) (*State, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &State{cfg: cfg, tree: tree, applied: applied}, nil
+	return &State{tree: tree, applied: applied}, nil
 }
 
 // Tree is the state's LSM tree.
@@ -172,6 +220,9 @@ func (s *State) Scan(start, end []byte, limit int, r *ScanResult) error {
 		return ErrTooLarge
 	}
 	r.KVs, r.More, r.buf = r.KVs[:0], false, r.buf[:0]
+	if bytes.Compare(start, userStart) < 0 {
+		start = userStart
+	}
 	if end != nil && bytes.Compare(start, end) >= 0 {
 		return nil
 	}
@@ -215,7 +266,7 @@ func (s *State) SnapshotData(index uint64) []byte {
 	data := []byte{snapshotFormat}
 	s.tree.Iter(&s.it)
 	s.it.SetUpperBound(nil)
-	for ok := s.it.SeekGE(nil); ok; ok = s.it.Next() {
+	for ok := s.it.SeekGE(userStart); ok; ok = s.it.Next() {
 		data = appendBytes(appendBytes(data, s.it.Key()), s.it.Value())
 	}
 	return data
@@ -226,18 +277,23 @@ func CheckSnapshot(data []byte) bool {
 	return walkSnapshot(data, nil) == nil
 }
 
-// Restore replaces the state with snapshot data at index; data that does not restore leaves the state as it was.
+// Restore replaces the state with snapshot data at index; data that does not restore leaves the
+// state as it was. The keys change in place, so the tree's runs and a flush running stay.
 func (s *State) Restore(index uint64, data []byte) error {
-	tree, err := lsm.New(s.cfg)
-	if err != nil {
+	if err := walkSnapshot(data, nil); err != nil {
 		return err
 	}
-	if err := walkSnapshot(data, tree); err != nil {
-		tree.Close()
-		return err
+	s.keys = s.keys[:0]
+	s.tree.Iter(&s.it)
+	s.it.SetUpperBound(nil)
+	for ok := s.it.SeekGE(userStart); ok; ok = s.it.Next() {
+		s.keys = append(s.keys, append([]byte(nil), s.it.Key()...))
 	}
-	s.tree.Close()
-	s.tree, s.applied = tree, index
+	for _, k := range s.keys {
+		must(s.tree.Delete(k))
+	}
+	must(walkSnapshot(data, s.tree))
+	s.applied = index
 	return nil
 }
 
@@ -251,7 +307,7 @@ func walkSnapshot(data []byte, tree *lsm.Tree) error {
 	var prev []byte
 	for first := true; len(d.b) > 0; first = false {
 		k, v := d.bytes(), d.bytes()
-		if d.bad || len(k) > MaxKey || len(v) > MaxValue || !first && bytes.Compare(prev, k) >= 0 {
+		if d.bad || len(k) > MaxKey || len(v) > MaxValue || bytes.Compare(k, userStart) < 0 || !first && bytes.Compare(prev, k) >= 0 {
 			return ErrMalformed
 		}
 		if tree != nil {
