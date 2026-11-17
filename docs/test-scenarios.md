@@ -1644,15 +1644,26 @@ call, time from `ctx.Now`:
   simulated disk's latencies; a reserve of 8; the disk filled in order, then overwritten at random
   and measured over the last three quarters of the overwrites. Without admission is a planted bug
   that admits every write.
-- Review at 90 and 95% full (`TestWriteAdmissionHoldsAt90And95PercentFull`, seeded, in
-  `scripts/seeds.sh`): data at 90 and 95% of a 16 GiB disk of 1,024 segments of 16 MiB, filled in
-  64-block writes whose 264 KiB records pack a segment whole, then overwritten in 16 KiB writes
+- The reviews near full share one check (`checkHeld`): each run fails unless free segments outside
+  the reserve fall to 8 or fewer, the slow-down band, so the writers outran the cleaner; free
+  segments outside the reserve are none at most 1% of the time, no write fails with NoSpace, and
+  the wait from a writer's last answer to its next is at most 200 ms at the 99th percentile and one
+  window, 1 s, at the most.
+- Review under uniform overwrites at 90% full
+  (`TestWriteAdmissionHoldsUniformOverwritesAt90PercentFull`, skipped unless `ROCKSOLID_LONG_SIM`
+  is set): the disk's fill counting the index's runs, as `TestCleanerWriteAmplification` counts it,
+  on its 2,048 segments of 8 MiB in records of 192 KiB, filled in 32-block writes, then overwritten
+  uniformly in 16 KiB writes for two disk capacities. Measured, seed 1: 3,494 s of simulated time,
+  99.0% of it in the slow-down band, as few as 1 free, none free 0%; writes waited 40.8 ms at the
+  99th percentile and 91.5 ms at the most. The run takes 10 minutes on one core of the Mac mini and
+  peaks at 2.3 GB resident.
+- Review with data at 90 and 95% full and a hot 30% (`TestWriteAdmissionHoldsAt90And95PercentFull`,
+  seeded, in `scripts/seeds.sh`): data at 90 and 95% of a 16 GiB disk of 1,024 segments of 16 MiB, filled
+  in 64-block writes whose 264 KiB records pack a segment whole, then overwritten in 16 KiB writes
   within the first 30% of the data, as block volumes overwrite a hot share, for a tenth of a disk
-  capacity. Each run fails unless free segments outside the reserve fall to 8 or fewer, the
-  slow-down band, so the writers outran the cleaner; free segments outside the reserve are none
-  at most 1% of the time, no write fails with NoSpace, and the wait from a writer's last answer to
-  its next is at most 200 ms at the 99th percentile and one window, 1 s, at the most. Measured over
-  8 seeds:
+  capacity. The cold 70% packs whole segments the cleaner never takes, so the hot data works in
+  the space it leaves, about 73% full at 90% and 85% at 95%, and the run measures the transient
+  from a freshly packed disk. Measured over 8 seeds:
 
   | Data | In the slow-down band | Fewest free | None free | Wait, 99th percentile | Slowest wait | Measured |
   | --- | --- | --- | --- | --- | --- | --- |

@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"cmp"
 	"errors"
+	"fmt"
 	"os"
 	"slices"
 	"testing"
@@ -229,28 +230,35 @@ func p99(waits []core.Tick) core.Tick {
 	return w[len(w)*99/100]
 }
 
-// [property] With data at 90 and 95% of the disk, closed-loop writers outrun a cleaner whose worker
-// takes 20 ms a victim, so free segments outside the reserve fall into the slow-down band: there
-// admission keeps one free all but 1% of the time, no write fails while the cleaner has a victim,
-// and the writers' wait from one answer to the next stays within 200 ms at the 99th percentile and
-// one admission window, 1 s, at the most. Each run fails unless it reaches the band. With ROCKSOLID_LONG_SIM
+// checkHeld fails the test unless run res reached the slow-down band, where admission kept a
+// segment free outside the reserve all but 1% of the time, no write failed while the cleaner had
+// a victim, and the writers' wait from one answer to the next stayed within 200 ms at the 99th
+// percentile and one admission window, 1 s, at the most.
+func (res admitResult) checkHeld(t *testing.T, run string) {
+	t.Helper()
+	const fullP99, fullSlowest = core.Tick(200_000), admitWindow
+	switch {
+	case res.fewest > DefaultCleanFree/2:
+		t.Fatalf("%s: free segments outside the reserve never fell below %d, so the run never reached the slow-down band", run, res.fewest)
+	case res.zero > res.total/100 || res.noSpace > 0:
+		t.Fatalf("%s: no free segment for %d of %d µs, %d writes failed", run, res.zero, res.total, res.noSpace)
+	case p99(res.waits) > fullP99 || res.slowest > fullSlowest:
+		t.Fatalf("%s: writes waited %d µs at the 99th percentile and %d µs at the most", run, p99(res.waits), res.slowest)
+	}
+}
+
+// [property] With data at 90 and 95% of the disk and overwrites in its first 30%, closed-loop
+// writers outrun a cleaner whose worker takes 20 ms a victim, so free segments outside the reserve
+// fall into the slow-down band, where admission holds as checkHeld checks. With ROCKSOLID_LONG_SIM
 // set, the default seed also runs without admission, where no segment is free for a tenth of the
 // time or more.
 func TestWriteAdmissionHoldsAt90And95PercentFull(t *testing.T) {
-	const fullP99, fullSlowest = core.Tick(200_000), admitWindow
 	fills := []float64{0.9, 0.95}
 	sum := make([]admitResult, len(fills))
 	seeds.Run(t, 0, 1, func(seed uint64) {
 		for i, fill := range fills {
 			res := fullRun(fill).run(t, seed)
-			switch {
-			case res.fewest > DefaultCleanFree/2:
-				t.Fatalf("seed %d, %.0f%% full: free segments outside the reserve never fell below %d, so the run never reached the slow-down band", seed, 100*fill, res.fewest)
-			case res.zero > res.total/100 || res.noSpace > 0:
-				t.Fatalf("seed %d, %.0f%% full: no free segment for %d of %d µs, %d writes failed", seed, 100*fill, res.zero, res.total, res.noSpace)
-			case p99(res.waits) > fullP99 || res.slowest > fullSlowest:
-				t.Fatalf("seed %d, %.0f%% full: writes waited %d µs at the 99th percentile and %d µs at the most", seed, 100*fill, p99(res.waits), res.slowest)
-			}
+			res.checkHeld(t, fmt.Sprintf("seed %d, %.0f%% full", seed, 100*fill))
 			s := &sum[i]
 			if s.total == 0 || res.fewest < s.fewest {
 				s.fewest = res.fewest
@@ -278,4 +286,20 @@ func TestWriteAdmissionHoldsAt90And95PercentFull(t *testing.T) {
 			t.Fatalf("%.0f%% full: without admission the cleaner kept a free segment all but %d of %d µs; it is not the slower", 100*fill, without.zero, without.total)
 		}
 	}
+}
+
+// Uniform overwrites at 90% full, the disk's fill counting the index's runs, on
+// TestCleanerWriteAmplification's 2,048 segments of 8 MiB in records of 192 KiB: closed-loop
+// writers of 16 KiB outrun a cleaner whose worker takes 20 ms a victim, for two disk capacities,
+// and admission holds as checkHeld checks over the last three quarters of them.
+func TestWriteAdmissionHoldsUniformOverwritesAt90PercentFull(t *testing.T) {
+	if os.Getenv(longSimEnv) == "" {
+		t.Skip("set " + longSimEnv + " to run")
+	}
+	r := admitRun{geo: disklog.Geometry{SegmentBlocks: 2048, SegmentCount: 2048}, fill: 0.9 - waIndex, extent: 4, fillRun: 8, record: 192 << 10,
+		writers: 8, jobTime: 20_000, overwrites: 2}
+	res := r.run(t, 1)
+	t.Logf("%.1f s measured, %.1f%% of it in the slow-down band, as few as %d free; no free segment %.2f%%; writes waited %.1f ms at the 99th percentile, %.1f ms at the most",
+		float64(res.total)/1e6, 100*float64(res.slowed)/float64(res.total), res.fewest, 100*float64(res.zero)/float64(res.total), float64(p99(res.waits))/1e3, float64(res.slowest)/1e3)
+	res.checkHeld(t, "uniform 90% full")
 }
