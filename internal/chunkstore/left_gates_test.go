@@ -191,3 +191,35 @@ func TestALeftMemberDropsItsGatedWritesAgainAfterARebuild(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A table that names the left member in no interval of the PG, arriving while a write of Z's chunk has records in
+// flight there, leaves Z gated: the replica drops it once those records are durable.
+func TestALeftMemberDropsItsGatedWritesOnceTheirChunkIsResolved(t *testing.T) {
+	l := newLeftRun(t, 1, noPlant)
+	l.isolated[l.leaving] = true
+	l.tick(10_000_000)
+	if _, e := l.c.table.entry(pg0); namesDisk(e, l.leaving) {
+		t.Fatalf("the table still names the left disk: %+v", e)
+	}
+	tbl := l.c.table
+	l.c.call(l.n, func(ctx *core.Context, rep *Replica, out *ReplicaOutput) {
+		buf, err := ctx.Pool.Alloc(core.ChunkSize)
+		if err != nil {
+			t.Fatal(err)
+		}
+		copy(ctx.Pool.Bytes(buf), bytes.Repeat([]byte{0x44}, core.ChunkSize))
+		rep.st.Write(ctx, Request{ID: 1 << 40, Chunk: l.ch, Len: core.ChunkSize, Buf: buf, Version: MakeVersion(intervalOf(l.z)+1, 1)}, &rep.sout)
+		rep.SetTable(ctx, tbl, out)
+		if !unresolved(rep.st, l.ch) || !slices.Contains(rep.st.Unsettled(nil), l.ch) {
+			t.Fatalf("Z's chunk resolved before the table: %v gated", rep.st.Unsettled(nil))
+		}
+	})
+	delete(l.isolated, l.leaving)
+	l.c.runFor(1_000_000)
+	if err := l.c.leftGated(); err != nil {
+		t.Fatal(err)
+	}
+	if st, at, _ := l.gated(); at != 0 {
+		t.Fatalf("the left member keeps Z gated: %v", st.Unsettled(nil))
+	}
+}
