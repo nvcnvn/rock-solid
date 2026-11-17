@@ -25,9 +25,14 @@ type leftRun struct {
 // newLeftRun builds a leftRun; the restarted member's first table is the one removing it, which still names it in the
 // interval the move ran in, its last activated.
 func newLeftRun(t *testing.T, seed uint64, plant func(*replicaPlants)) *leftRun {
+	return newLeftRunWith(t, seed, plant, nil)
+}
+
+// newLeftRunWith is newLeftRun with each store's configuration changed by edit.
+func newLeftRunWith(t *testing.T, seed uint64, plant func(*replicaPlants), edit func(*Config)) *leftRun {
 	set := sim.DefaultSettings()
 	set.PoolBytes = 64 << 20
-	r := seededSoleRunOn(t, seed, 2, 3, set, slotSeedGeometry)
+	r := seededSoleRunOn(t, seed, 2, 3, set, slotSeedGeometry, edit)
 	c := r.c
 	plantAll(c, plant)
 	ms := r.members()
@@ -267,4 +272,36 @@ func TestALeftMemberSettledEarlyLosesAnAcknowledgedWrite(t *testing.T) {
 			t.Fatalf("seed %d planted: %v", seed, err)
 		}
 	})
+}
+
+// The cluster's half of the review case: once the left member has dropped Z, a later move puts its disk back into the
+// PG, and the writes it takes there roll Z's segment, the slot lane's open one, closed; checkpoints, due every 16 MiB
+// here, pass it, and the cleaner frees it.
+func TestALeftMembersDroppedWriteSegmentIsCleanedOnceItTakesWrites(t *testing.T) {
+	l := newLeftRunWith(t, 1, noPlant, func(c *Config) { c.Log.MaxReplayBytes = 16 << 20 })
+	_, at, seg := l.gated()
+	l.tick(10_000_000)
+	st := l.c.reps[l.n].Store()
+	if got := st.Unsettled(nil); len(got) != 0 || at == 0 {
+		t.Fatalf("the left member keeps %v gated, Z at LSN %d", got, at)
+	}
+	ms := l.members()
+	delete(l.a.drain, l.leaving)
+	l.a.drain[ms[0].Disk] = true
+	l.publish()
+	for i := 0; ; i++ {
+		if u, _ := st.Log().Usage(seg); u.State == disklog.SegmentFree {
+			break
+		}
+		if i == 2000 {
+			t.Fatalf("segment %d of dropped Z's record is not freed after %d writes", seg, i)
+		}
+		id := l.c.write(pg0, chunkIn(pg0, 1, uint32(i%8)), 0, bytes.Repeat([]byte{byte(i + 1)}, core.ChunkSize))
+		if _, ok := l.answered(id, 30_000_000); !ok {
+			t.Fatalf("write %d never answered", i)
+		}
+	}
+	if _, e := l.c.table.entry(pg0); !namesDisk(e, l.leaving) || st.replayPoint() < at {
+		t.Fatalf("members %+v, replay point %d short of Z at LSN %d", e.Members, st.replayPoint(), at)
+	}
 }

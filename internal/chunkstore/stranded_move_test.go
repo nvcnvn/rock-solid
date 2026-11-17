@@ -35,11 +35,11 @@ func seededSoleRun(t *testing.T, seed uint64, replicas, disks int) *soleRun {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return seededSoleRunOn(t, seed, replicas, disks, sim.DefaultSettings(), geo)
+	return seededSoleRunOn(t, seed, replicas, disks, sim.DefaultSettings(), geo, nil)
 }
 
-// seededSoleRunOn is seededSoleRun under set, on disks cut as geo.
-func seededSoleRunOn(t *testing.T, seed uint64, replicas, disks int, set sim.Settings, geo disklog.Geometry) *soleRun {
+// seededSoleRunOn is seededSoleRun under set, on disks cut as geo, each store's configuration changed by edit if set.
+func seededSoleRunOn(t *testing.T, seed uint64, replicas, disks int, set sim.Settings, geo disklog.Geometry, edit func(*Config)) *soleRun {
 	a := &authority{pool: Pool{Replicas: replicas, MinLive: 2, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 1},
 		down: map[uint32]core.Tick{}, drain: map[uint32]bool{}}
 	for n := range disks {
@@ -56,7 +56,7 @@ func seededSoleRunOn(t *testing.T, seed uint64, replicas, disks int, set sim.Set
 			sized.Pools[0].PGs = append(sized.Pools[0].PGs, PGEntry{Members: []Member{{Disk: d}}, Interval: 1})
 		}
 	}
-	c := newRClusterOnDisks(t, sized, sim.New(seed, set), nil, geo)
+	c := newRClusterOnDisks(t, sized, sim.New(seed, set), edit, geo)
 	if len(sized.Pools[0].PGs) > 1 {
 		next := cloneTable(tbl)
 		next.Epoch = sized.Epoch + 1

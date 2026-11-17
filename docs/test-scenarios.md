@@ -5842,9 +5842,13 @@ own ([Testing strategy](design.md#testing-strategy)).
     (`TestALeftMemberDropsItsGatedWritesOnceTheirChunkIsResolved`). With `leftNeverSettles` Z stays gated
     (`TestALeftMemberThatNeverSettlesKeepsItsGatedWrites`).
     In the store, a version replayed gated and settled to nothing frees its record's segment to the cleaner once later
-    writes roll it closed and a checkpoint passes it (`TestADroppedGatedWriteLeavesItsSegmentToTheCleaner`). A slot write's record lies in the slot lane's open
-    segment, which closes only after a segment's worth of whole-chunk writes, 1,023 on the slot geometry, like any
-    slot record's.
+    writes roll it closed and a checkpoint passes it (`TestADroppedGatedWriteLeavesItsSegmentToTheCleaner`). A slot
+    write's record lies in the slot lane's open segment, which closes only once later slot writes fill it. In the
+    cluster, once the left member dropped Z, a later move puts its disk back into the PG, and the whole-chunk
+    writes it takes there, with checkpoints due every 16 MiB, get Z's segment freed by the cleaner, the replay
+    point past Z's record, within 2,000 writes, 685 on seed 1 (`TestALeftMembersDroppedWriteSegmentIsCleanedOnceItTakesWrites`).
+    The rcluster's stores otherwise take a 1 TiB replay budget, so they never checkpoint, and a run of about 410
+    whole-chunk writes fills the slot geometry's 512 segments on the primary, whose gated writes take no slot.
   - `neg-settle-left-early`'s trace on `rep2` disks 2 and 3, seeded: W is acknowledged in interval 1, which
     activates; disk 3 restarts, its replay gating W, and interval 2 replaces it with disk 1, whose messages to the
     primary are held up, so interval 2's peering hears disk 3 through interval 1, the last activated. Under the
