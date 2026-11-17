@@ -105,9 +105,11 @@ func TestADroppedReplicaIsKeptWhileAPlannedVoterIsDownForGood(t *testing.T) {
 // beat is how often each node heartbeats in these tests.
 const beat = core.Tick(1_000_000)
 
-// A, B and C run group 5 and the plan swaps D in for C, the shard map's plan the Control holds. On
-// every tick each replica's report goes to the Control, which names C for deletion only once A, B
-// and D applied the leave and C learned its removal, and does within a few heartbeats of the swap.
+// A, B and C run group 5 and the plan swaps D in for C, the shard map's plan the Control holds. The
+// one of A and B that does not lead hears nothing for 10 heartbeats once it applied the joint
+// configuration, while the others commit the leave without it. On every tick each replica's report
+// goes to the Control, which names C for deletion only once A, B and D applied the leave and C
+// learned its removal, and does within a few heartbeats of the lagging voter hearing again.
 func TestShardReportsDeleteTheDroppedReplicaOnceThePlanIsComplete(t *testing.T) {
 	c := newGroup(t, 4, false)
 	for i := range 4 {
@@ -126,8 +128,16 @@ func TestShardReportsDeleteTheDroppedReplicaOnceThePlanIsComplete(t *testing.T) 
 		plan = append(plan, raftshard.Peer{ID: v.ID, Node: core.NodeID{Node: uint32(v.ID) - 1}})
 	}
 	c.n[l].s.Raft().SetPlan(plan)
+	lag, until := 1-l, -1
+	c.drop = func(e envelope) bool { return e.to == lag && until != 0 && len(c.conf(lag).VotersOutgoing) != 0 }
 	for tick := range 50 * raftshard.HeartbeatTick {
 		c.tick()
+		switch {
+		case until < 0 && len(c.conf(lag).VotersOutgoing) != 0:
+			until = tick + 10*raftshard.HeartbeatTick
+		case tick == until:
+			until = 0
+		}
 		for i, r := range c.n {
 			rp := r.s.Report(nil)
 			if err := ctl.Heartbeat(c.now, &NodeReport{Node: uint32(i) + 1, Replicas: []ReplicaReport{rp}}, &ControlOutput{}); err != nil {
@@ -136,6 +146,9 @@ func TestShardReportsDeleteTheDroppedReplicaOnceThePlanIsComplete(t *testing.T) 
 		}
 		if len(ctl.Deletes(3, true, nil)) == 0 {
 			continue
+		}
+		if until < 0 {
+			t.Fatalf("at tick %d C is deleted before replica %d applied the joint configuration", tick, lag+1)
 		}
 		for _, i := range []int{0, 1, 3} {
 			if cs := c.conf(i); len(cs.VotersOutgoing) != 0 || !slices.Equal(cs.Voters, []uint64{1, 2, 4}) {

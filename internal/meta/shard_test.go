@@ -53,6 +53,8 @@ type group struct {
 	cut   []bool
 	// late builds shards that apply what Raft hands over once each call returns, not within it.
 	late bool
+	// drop, when set, loses every message it returns true for.
+	drop func(e envelope) bool
 }
 
 func newGroup(t testing.TB, size int, late bool) *group {
@@ -190,7 +192,7 @@ func (c *group) call(i int, f func(ctx *core.Context, out *Output)) {
 func (c *group) deliver(keep func(e envelope) bool) {
 	for k := 0; k < len(c.inbox); k++ {
 		e := c.inbox[k]
-		if c.cut[e.from] || c.cut[e.to] || keep != nil && !keep(e) {
+		if c.cut[e.from] || c.cut[e.to] || keep != nil && !keep(e) || c.drop != nil && c.drop(e) {
 			if e.msg.Buf != core.NoBuf {
 				c.n[e.to].pool.Free(e.msg.Buf)
 			}
