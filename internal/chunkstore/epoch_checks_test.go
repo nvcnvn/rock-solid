@@ -228,7 +228,7 @@ func (x *epochChecks) answers(d int) {
 	}
 }
 
-// copies checks that version v of ch, which node d acknowledged, is on min_live disks: d's, whose store may have stopped since it logged v, those that acknowledged it or whose index holds it, each only while its index lists the chunk for no interval up to d's, and those in maintenance in its interval or d's. The min_live is the lower of those two intervals', for a version acknowledged late across a change of it.
+// copies checks that version v of ch, which node d acknowledged, is on min_live disks: d's, whose store may have stopped since it logged v, those that acknowledged it or whose index holds it, each only while its index lists nothing of the chunk or it persisted the decision of a later interval than the one answering v (v's own, or the one d's lead activated in, as AckIv has it), and those in maintenance in its interval or d's. The min_live is the lower of those two intervals', for a version acknowledged late across a change of it.
 func (x *epochChecks) copies(d int, ch core.ChunkID, v uint64) {
 	r := x.c.reps[d]
 	p, ok := r.pgOf(ch)
@@ -253,6 +253,10 @@ func (x *epochChecks) copies(d int, ch core.ChunkID, v uint64) {
 		need = min(need, int(e.Past[j].MinLive))
 		maint(e.Past[j].Members)
 	}
+	answer := intervalOf(v)
+	if l := r.lead(p); l >= 0 && r.leads[l].active {
+		answer = max(answer, r.leads[l].interval)
+	}
 	for n, o := range x.c.reps {
 		if o == nil {
 			continue
@@ -260,7 +264,7 @@ func (x *epochChecks) copies(d int, ch core.ChunkID, v uint64) {
 		holds := x.held[heldAt{ch, v, n}] || n == d
 		if o.Store().Serving() {
 			c, _ := o.Store().Index().Chunk(r.st.cfg.Pool, ch)
-			holds = (holds || c.Whole >= v) && (c.ListedIn == 0 || c.ListedIn > e.Interval)
+			holds = (holds || c.Whole >= v) && (c.ListedIn == 0 || o.Store().Index().Decided(p.Pool, p.Index, uint32(len(pool.PGs))) > answer)
 		}
 		if holds {
 			disks[o.cfg.Disk] = true
