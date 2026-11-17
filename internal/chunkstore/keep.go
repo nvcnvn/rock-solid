@@ -129,7 +129,7 @@ func keepChunk(e *PGEntry, replies []peerReply, g []replyChunk, ls uint32, plant
 	return k
 }
 
-// keeps reports whether peering keeps v: every reached member up in its interval holds v or later, whole or listed. A member lacking it gives way if an up member of e's interval holds v clean, since dropping v would have that one list the chunk too: when the member lacking it lists the chunk, so is no source of what it holds, or when every up member of e's interval holds v, so it is a disk recovery cannot read. With no such holder the member lacking it stands, as it may hold what is acknowledged.
+// keeps reports whether peering keeps v: every reached member up in its interval holds v or later, whole or listed. A member lacking it gives way, since dropping v would have its holders list the chunk too, when it lists the chunk, so is no source of what it holds, or when every up member of e's interval holds v, so it is a disk recovery cannot read.
 func keeps(e *PGEntry, replies []peerReply, g []replyChunk, v uint64, plant replicaPlants) bool {
 	lister, other := false, false
 	for i, r := range replies {
@@ -143,9 +143,6 @@ func keeps(e *PGEntry, replies []peerReply, g []replyChunk, v uint64, plant repl
 	}
 	if !lister && !other {
 		return true
-	}
-	if !plant.keepNoSource && !hasSource(e, replies, g, v) {
-		return false
 	}
 	if !other && !plant.listerVetoes {
 		return true

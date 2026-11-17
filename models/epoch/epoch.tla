@@ -734,15 +734,11 @@ Reply(d, c) ==
 \* nothing, holds that version as its newest below LS. A version of LS or later
 \* is kept unless a reached member live in its interval reports neither it nor
 \* a later version, and every version a kept one rests on is kept. Two cases keep
-\* a version such a member lacks, when an up member of k holds it, lists nothing
-\* and logged nothing above it (is not in U), so could be its source: dropping it
-\* would leave that member listing the chunk too, where one in U lists it anyway.
-\* The member lacking it lists the chunk, so is no source of what it holds, or
-\* every up member of k holds the version, so the one lacking it is a disk
-\* recovery cannot read. With no such member the veto stands: it may be the one
-\* holding what is acknowledged. ListerVetoes and KeepPastMember remove the cases,
-\* KeepNoSource the condition.
-Kept(p, L, J, c, k, U) ==
+\* a version such a member lacks, as dropping it would leave its holders listing
+\* the chunk too: the member lacking it lists the chunk, so is no source of what
+\* it holds, or every up member of k holds the version, so the one lacking it is
+\* a disk recovery cannot read. ListerVetoes and KeepPastMember remove them.
+Kept(p, L, J, c, k) ==
     LET r == [d \in J |-> Reply(d, c)]
         LS == Max({r[d].decided : d \in J} \cup {L})
         RS == {d \in J : r[d].decided = LS}
@@ -751,12 +747,9 @@ Kept(p, L, J, c, k, U) ==
         wholes == {r[d].whole : d \in J} \ {0}
         listed == {r[d].list : d \in J} \ {NoMiss, 0}
         holds(d, v) == r[d].whole >= v \/ r[d].list >= v
-        source(v) == Bug("KeepNoSource") \/ \E d \in UpIn(p, k) : r[d].whole = v /\ r[d].list = NoMiss
-                                                                    /\ [d |-> d, c |-> c] \notin U
         keep(v) == \/ \A d \in J \cap UpIn(p, IvOfV(v)) : holds(d, v)
-                   \/ /\ source(v)
-                      /\ \/ ~Bug("ListerVetoes") /\ \A d \in J \cap UpIn(p, IvOfV(v)) : holds(d, v) \/ r[d].list # NoMiss
-                         \/ ~Bug("KeepPastMember") /\ \A d \in UpIn(p, k) : holds(d, v)
+                   \/ ~Bug("ListerVetoes") /\ \A d \in J \cap UpIn(p, IvOfV(v)) : holds(d, v) \/ r[d].list # NoMiss
+                   \/ ~Bug("KeepPastMember") /\ \A d \in UpIn(p, k) : holds(d, v)
     IN IF Bug("DecideByOwnInterval")
        THEN Newest({v \in wholes \cup listed : keep(v)})
        ELSE Newest({base} \cup {v \in wholes : IvOfV(v) >= LS /\ keep(v)})
@@ -946,7 +939,7 @@ TornSets(n, p) ==
 PeerOn(n, p, J, P, U) ==
     LET k == IvAt(n, p)
         L == LaAt(n, p)
-        K == [c \in Chunk |-> IF c \in ChunksOf(p) THEN Kept(p, L, J, c, k, U) ELSE 0]
+        K == [c \in Chunk |-> IF c \in ChunksOf(p) THEN Kept(p, L, J, c, k) ELSE 0]
         T == {x \in U : Entry(x.d, x.c, K[x.c]) = NoMiss}
         \* The members the decision counts as holding the kept version:
         \* the recovery sources it reached, and the live members it

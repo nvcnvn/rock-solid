@@ -23,7 +23,6 @@ epoch/neg-holder-slower-clock	lease.slowerClock	TestPlantedLeaseBugsBreakThePair
 epoch/neg-instant-reboot	sim.RebootInstantly	TestPlantedBugsBreakTheirTraces
 epoch/neg-keep-disk-id	chunkstore.keepID	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-keep-lease-on-new-run	lease.keepOnNewRun	TestALeaseKeptAcrossANewRunBreaksItsTrace
-epoch/neg-keep-no-source	chunkstore.keepNoSource	TestKeepHoldsAListerVetoWithNoSource
 epoch/neg-keep-past-member	chunkstore.keepPastMember	TestKeepPastMemberLeavesAMoveUnfound
 epoch/neg-lease-before-bound	lease.beforeBound	TestPlantedLeaseBugsBreakThePair
 epoch/neg-lease-before-bound-half-drift	lease.beforeBound,halfStep	TestPlantedLeaseBugsBreakThePair

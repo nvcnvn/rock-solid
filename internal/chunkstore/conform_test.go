@@ -299,7 +299,6 @@ var conformPlants = []struct {
 	{"readOldDisk", func(r *primaryRun) { r.c.replicaPlants.readOldDisk = true }},
 	{"listerVetoes", func(r *primaryRun) { r.c.replicaPlants.listerVetoes = true }},
 	{"keepPastMember", func(r *primaryRun) { r.c.replicaPlants.keepPastMember = true }},
-	{"keepNoSource", func(r *primaryRun) { r.c.replicaPlants.keepNoSource = true }},
 	{"writeOnUnfound", func(r *primaryRun) { r.c.replicaPlants.writeOnUnfound = true }},
 	{"forgetImage", func(r *primaryRun) { r.c.replicaPlants.forgetImage = true }},
 	{"mapOnReplay", func(r *primaryRun) { r.c.storePlants.mapOnReplay = true }},

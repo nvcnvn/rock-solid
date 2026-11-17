@@ -393,34 +393,6 @@ func TestListerVetoesLeavesNoMemberASource(t *testing.T) {
 	}
 }
 
-// A lister's veto stands against a version no up member of the interval holds clean, which only a member listing the chunk reported: with keepNoSource it goes, and the disk holding X clean would list the chunk too.
-func TestKeepHoldsAListerVetoWithNoSource(t *testing.T) {
-	x, z := MakeVersion(1, 1), MakeVersion(2, 1)
-	up := func(ds ...uint32) []Member {
-		ms := make([]Member, len(ds))
-		for i, d := range ds {
-			ms[i] = Member{Disk: d}
-		}
-		return ms
-	}
-	e := &PGEntry{Interval: 3, Members: up(1, 2, 3), Past: []PastInterval{{Interval: 2, Members: up(1, 2)}}}
-	ch := chunkIn(pg0, 1, 0)
-	replies := []peerReply{
-		{disk: 1, chunks: []ChunkPeer{{Chunk: ch, Whole: z, Logged: z, Listed: true, Kept: x}}},
-		{disk: 2, chunks: []ChunkPeer{{Chunk: ch, Whole: x, Logged: x, Listed: true, Kept: x}}},
-		{disk: 3, chunks: []ChunkPeer{{Chunk: ch, Whole: x, Logged: x}}},
-	}
-	for _, tc := range []struct {
-		plant replicaPlants
-		want  uint64
-	}{{replicaPlants{}, x}, {replicaPlants{keepNoSource: true}, z}} {
-		_, kept := keep(e, replies, nil, nil, tc.plant)
-		if len(kept) != 1 || kept[0].kept != tc.want {
-			t.Fatalf("plant %+v: kept %+v", tc.plant, kept)
-		}
-	}
-}
-
 // tornMember has a member of a rep3 PG crash with part of Y, a whole-chunk write the third member never gets, durable and its last record lost. A peering without the member drops Y, and the member, restarted while cut off, comes back reporting X whole and Y logged. It returns the chunk, X's version and the member's node.
 func tornMember(t *testing.T, seed uint64, plant func(*replicaPlants)) (*soleRun, core.ChunkID, uint64, int) {
 	r := seededSoleRun(t, seed, 3, 3)
