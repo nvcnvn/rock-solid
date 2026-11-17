@@ -7,8 +7,10 @@
 \* removal, and the plan's completion, on which a removed replica deletes its state.
 \*
 \* What the Control-plane group keeps is taken as given: the plan (Plan) is committed
-\* before any replica sees it and never changes, and a replica ID is never handed out
-\* twice, so the replacement is a replica no configuration has named before.
+\* before any replica sees it, and a replica ID is never handed out twice, so the
+\* replacement is a replica no configuration has named before. A second plan (Plan2), when
+\* given, replaces the first as soon as the first's leave commits, while the voter it dropped
+\* still lives: the next swap does not wait for the earlier plan to complete.
 \*
 \* Messages are not modelled: an election, an append and a membership question each act
 \* in one step on the state of the replicas they involve, as etcd-raft's own TLA+ spec
@@ -49,9 +51,9 @@
 \* appends and fortifying, and serves no lease read; while it leads it hands its leadership
 \* to a planned voter. A voter that holds the leave but applied only the joint
 \* configuration can still win an election and needs the outgoing half's quorum to commit,
-\* and the dropped voter can hold that half's newest entry. Each voter of the plan reports
-\* once it applied the leave, and the plan is complete once all have; only then does the
-\* node of a replica that learned its removal delete it. The authority that
+\* and the dropped voter can hold that half's newest entry. Each voter of the current plan
+\* reports once it applied its leave, and the plan is complete once all have; only then does
+\* the node of a replica that learned its removal delete it, whichever plan dropped it. The authority that
 \* collects the reports is whichever leader runs the control plane, the group's own for the
 \* Control-plane group, and a leader that applied only the joint configuration never
 \* commits an entry of its term, so never runs it.
@@ -70,6 +72,7 @@ CONSTANTS
     Replicas,       \* every replica ID the group's plans name
     BaseVoters,     \* the voters of the configuration the group starts with
     Plan,           \* the voters the Control-plane group's plan names for the group
+    Plan2,          \* the voters of the plan that replaces it once its leave commits, or {}
     Stopped,        \* replicas down from the start, for good
     MaxTerm,        \* elections stop at this term
     MaxCrashes,     \* crashes of replicas, in all
@@ -112,7 +115,8 @@ CONSTANTS
                         \* stays a voter of the joint one, campaigning and leading, until its
                         \* node deletes it (FALSE: it applies it and campaigns no more)
 
-ASSUME BaseVoters \subseteq Replicas /\ Plan \subseteq Replicas /\ Stopped \subseteq Replicas
+ASSUME BaseVoters \subseteq Replicas /\ Plan \subseteq Replicas /\ Plan2 \subseteq Replicas
+       /\ Stopped \subseteq Replicas
 
 Max(S) == CHOOSE x \in S : \A y \in S : x >= y
 
@@ -164,7 +168,7 @@ VARIABLES
     haltAt,     \* per replica: the committed entry it cannot decode, or 0
     out,        \* per replica: it learned its removal; set wherever gone is
     dead,       \* the replicas that died
-    reported    \* the voters of the plan that reported the leave applied
+    reported    \* the voters of the current plan that reported its leave applied
 
 vars == <<term, leader, log, commit, applied, match, hbCommit, up, gone, crashes,
           elected, chosen, early, support, fort, hsCommit, haltAt, out, dead, reported>>
@@ -228,6 +232,11 @@ JointLog ==
       [t |-> 1, cfg |-> Conf(Plan, BaseVoters, {})]>>
 Kept == CHOOSE x \in BaseVoters \cap Plan : TRUE
 Dropped == CHOOSE x \in BaseVoters \ Plan : TRUE
+
+\* The plan the Control-plane group holds: Plan2 once Plan's leave committed, if given.
+CurPlan ==
+    IF Plan2 # {} /\ \E k \in 1 .. Len(chosen) : chosen[k].e.cfg = Conf(Plan, {}, {})
+    THEN Plan2 ELSE Plan
 
 \* l leads term t: Kept term 1, which knows every log matches its own and last advanced its
 \* commit from 2, or Dropped term 2, which appended its empty entry and knows nothing yet.
@@ -330,14 +339,16 @@ Run(i, Q, from) ==
 Elect(i, Q) == Run(i, Q, {})
 
 \* A leader the plan drops, out of any joint configuration or past its own removal, hands
-\* its leadership to a planned voter, and a halted leader to any voter it replicates to
+\* its leadership to a planned voter, or, past its removal, to a voter of the incoming half
+\* it applied, since its node may hand it no plan; a halted leader to any voter it replicates to
 \* (handOff), joint or not; either serves no lease read from then on. The target is a voter
 \* that took an append of the leader's term, which the code's bar, a voter replicating at or
 \* past the mark, implies; the dropped leader hands off only once it committed an entry of
 \* its term (reconcile).
 Transfer(l, i, Q) ==
     /\ Leads(l) /\ i # l /\ match[l][i] > 0
-    /\ \/ l \notin Plan /\ i \in Plan /\ (AppliedConf(l).out = {} \/ (RemovedStaysVoter /\ out[l]))
+    /\ \/ l \notin CurPlan /\ (AppliedConf(l).out = {} \/ (RemovedStaysVoter /\ out[l]))
+          /\ (i \in CurPlan \/ (out[l] /\ i \in AppliedConf(l).in))
           /\ commit[l] > 0 /\ log[l][commit[l]].t = term[l]
        \/ HaltHandsOff /\ Halted(l) /\ i \in Voters(AppliedConf(l))
     /\ Run(i, Q, {l})
@@ -446,7 +457,7 @@ Commit(i) ==
 \* A voter of the plan that applies the configuration leaving the joint one reports it, at
 \* once here, the earliest a deletion can follow; with DurableConfCommit its hard state
 \* already holds the leave's commit, so no restart rewinds what it reported.
-Left(c) == c.in = Plan /\ c.out = {}
+Left(c) == c.in = CurPlan /\ c.out = {}
 
 ApplyEntries(r) ==
     LET c == ConfAt(log[r], commit[r])
@@ -456,7 +467,7 @@ ApplyEntries(r) ==
     /\ applied' = [applied EXCEPT ![r] = commit[r]]
     /\ out' = [out EXCEPT ![r] = @ \/ removal]
     /\ gone' = [gone EXCEPT ![r] = removal /\ ~RemovedWaitsForPlan]
-    /\ reported' = IF RemovedWaitsForPlan /\ r \in Plan /\ Left(c) THEN reported \cup {r} ELSE reported
+    /\ reported' = IF RemovedWaitsForPlan /\ r \in CurPlan /\ Left(c) THEN reported \cup {r} ELSE reported
     /\ UNCHANGED <<term, leader, log, commit, match, hbCommit, up, crashes, elected, chosen, early,
                    support, fort, hsCommit, dead>>
 
@@ -491,7 +502,7 @@ Propose(i, c, promoted) ==
 \* holds nothing, so with a voter down every commit would wait for it to catch up.
 AddLearner(i, p) ==
     LET c == LastConf(i) IN
-    /\ CanChange(i) /\ c.out = {} /\ p \in Plan \ Members(c)
+    /\ CanChange(i) /\ c.out = {} /\ p \in CurPlan \ Members(c)
     /\ IF LearnerFirst THEN Propose(i, Conf(c.in, {}, c.lrn \cup {p}), {})
        ELSE Propose(i, Conf(c.in \cup {p}, {}, c.lrn), {p})
 
@@ -501,7 +512,7 @@ AddLearner(i, p) ==
 Swap(i, l, d) ==
     LET c == LastConf(i) IN
     /\ CanChange(i) /\ c.out = {}
-    /\ l \in c.lrn \cap Plan /\ d \in c.in \ Plan /\ d # i
+    /\ l \in c.lrn \cap CurPlan /\ d \in c.in \ CurPlan /\ d # i
     /\ CatchUpFirst => match[i][l] >= hbCommit[i]
     /\ Propose(i, Conf((c.in \ {d}) \cup {l}, c.in, c.lrn \ {l}), {l})
 
@@ -544,10 +555,10 @@ AskLeader(r, l) ==
     /\ UNCHANGED <<term, leader, log, commit, applied, match, hbCommit, up, gone, crashes,
                    elected, chosen, early, fort, hsCommit, haltAt, out, dead, reported>>
 
-\* Once every voter of the plan reported, the leader that runs the control plane tells the
-\* node of a replica that learned its removal to delete it: no voter can lead the joint
-\* configuration any more.
-PlanDone == Plan \subseteq reported
+\* Once every voter of the current plan reported, the leader that runs the control plane
+\* tells the node of a replica that learned its removal to delete it, whichever plan dropped
+\* it: no voter of the plan can lead a configuration before the plan's any more.
+PlanDone == CurPlan \subseteq reported
 
 Delete(r) ==
     /\ RemovedWaitsForPlan /\ Live(r) /\ out[r] /\ PlanDone
@@ -560,7 +571,7 @@ Delete(r) ==
 \* The shard map runs ahead of the group: the plan dropping a replica does not show that
 \* the group removed it. Enabled only with DeleteOnCommitted off.
 DeleteOnPlan(r) ==
-    /\ ~DeleteOnCommitted /\ Live(r) /\ r \notin Plan
+    /\ ~DeleteOnCommitted /\ Live(r) /\ r \notin CurPlan
     /\ gone' = [gone EXCEPT ![r] = TRUE]
     /\ out' = [out EXCEPT ![r] = TRUE]
     /\ leader' = [leader EXCEPT ![r] = FALSE]
@@ -680,7 +691,7 @@ TypeOK ==
     /\ support \in [Replicas -> SUBSET Replicas] /\ fort \in [Replicas -> SUBSET Replicas]
     /\ \A r \in Replicas : applied[r] <= commit[r] /\ commit[r] <= Len(log[r])
     /\ \A r \in Replicas : haltAt[r] <= Len(log[r])
-    /\ out \in [Replicas -> BOOLEAN] /\ dead \subseteq Replicas /\ reported \subseteq Plan
+    /\ out \in [Replicas -> BOOLEAN] /\ dead \subseteq Replicas /\ reported \subseteq CurPlan
     /\ \A r \in Replicas : gone[r] => out[r]
 
 \* At most one leader per term.
@@ -722,10 +733,10 @@ OneLeaseReader == \A i, j \in Replicas : LeaseRead(i) /\ LeaseRead(j) => i = j
 LeaseReadsCurrent == \A i \in Replicas : LeaseRead(i) => Len(chosen) <= commit[i]
 
 \* With a voter down for good, the swap commits on the survivors.
-SwapCommits == <>(ChosenConf = Conf(Plan, {}, {}))
+SwapCommits == <>(ChosenConf = Conf(CurPlan, {}, {}))
 
 \* After the swap, the group has a leader in the new configuration that has not halted, even
 \* when the leader that commits the leave is the dropped voter or halts.
-HasNewLeader == \E r \in Plan : Leads(r) /\ ~Halted(r) /\ AppliedConf(r) = Conf(Plan, {}, {})
+HasNewLeader == \E r \in CurPlan : Leads(r) /\ ~Halted(r) /\ AppliedConf(r) = Conf(CurPlan, {}, {})
 NewLeader == <>[]HasNewLeader
 =============================================================================
