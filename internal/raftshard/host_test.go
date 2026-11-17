@@ -36,6 +36,35 @@ type rig struct {
 	// written is every blob a Durable event placed, cleaned those a crash's replay skips.
 	written []disklog.BlobRef
 	cleaned map[disklog.BlobRef]bool
+	// floor is the replay floor of the running checkpoint, and checkpoints counts those done.
+	floor       uint64
+	checkpoints int
+	// bases is the base a crash restores each owner's storage on, as its manifest's runs would.
+	bases map[uint32]raftpb.SnapshotMetadata
+}
+
+// checkpoint writes a manifest naming the host's shards, and returns its replay floor.
+func (r *rig) checkpoint() uint64 {
+	r.t.Helper()
+	durable := r.host.Log.DurableLSN()
+	idx := r.host.Indexes(nil, durable)
+	r.floor = durable
+	for _, ix := range idx {
+		r.floor = min(r.floor, ix.ReplayLSN)
+	}
+	if err := r.host.Log.BeginCheckpoint(idx); err != nil {
+		r.t.Fatal(err)
+	}
+	if err := r.host.Log.EndCheckpoint(&r.ctx, &r.out); err != nil {
+		r.t.Fatal(err)
+	}
+	r.absorb()
+	n := r.checkpoints
+	r.run()
+	if r.checkpoints != n+1 {
+		r.t.Fatal("the checkpoint did not finish")
+	}
+	return r.floor
 }
 
 func newRig(t testing.TB) *rig {
@@ -67,7 +96,13 @@ func (r *rig) absorb() {
 			var more disklog.Output
 			r.done, err = r.host.Durable(&r.ctx, ev, &more, r.done)
 			r.queue = append(r.queue, more.Actions...)
+		case disklog.CheckpointDone:
+			r.host.Checkpointed(r.floor)
+			r.checkpoints++
 		case disklog.ManifestLoaded:
+			if m, ok := r.rec.Manifest(); ok {
+				r.host.Loaded(&m)
+			}
 			var more disklog.Output
 			err = r.rec.Replay(&r.ctx, &more)
 			defer func() { r.out = more; r.absorb() }()
@@ -148,6 +183,11 @@ func (r *rig) crash(owners ...uint32) map[uint32]*Storage {
 	sts := map[uint32]*Storage{}
 	for _, o := range owners {
 		sts[o] = NewStorage()
+		if b, ok := r.bases[o]; ok {
+			if err := sts[o].ApplySnapshot(raftpb.Snapshot{Metadata: b}); err != nil {
+				r.t.Fatal(err)
+			}
+		}
 		r.host.Add(o, sts[o])
 	}
 	var err error
