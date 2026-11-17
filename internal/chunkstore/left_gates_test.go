@@ -7,6 +7,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
@@ -163,4 +164,30 @@ func TestADroppedGatedWriteLeavesItsSegmentToTheCleaner(t *testing.T) {
 		t.Fatalf("segment %d of dropped Z's record is %+v, cleanable %v", seg, u, h.s.Log().Cleanable(seg))
 	}
 	h.holds()
+}
+
+// A rebuild of the left member's index after the drop replays Z and gates it again, as a restart would; with the table
+// unchanged, the replica drops it again.
+func TestALeftMemberDropsItsGatedWritesAgainAfterARebuild(t *testing.T) {
+	l := newLeftRun(t, 1, noPlant)
+	l.tick(10_000_000)
+	if st, _, _ := l.gated(); len(st.Unsettled(nil)) != 0 {
+		t.Fatalf("the left member keeps %v gated before the rebuild", st.Unsettled(nil))
+	}
+	epoch := l.c.table.Epoch
+	l.c.call(l.n, func(ctx *core.Context, rep *Replica, out *ReplicaOutput) {
+		rep.st.indexBroken(ctx, lsm.ErrCheck, &rep.sout)
+		rep.st.pump(ctx, &rep.sout)
+		rep.drain(ctx, out)
+	})
+	l.tick(10_000_000)
+	if l.c.table.Epoch != epoch {
+		t.Fatalf("a table was published after the rebuild: epoch %d -> %d", epoch, l.c.table.Epoch)
+	}
+	if st := l.c.reps[l.n].Store(); !st.Serving() {
+		t.Fatal("the rebuilt store is not serving")
+	}
+	if err := l.c.leftGated(); err != nil {
+		t.Fatal(err)
+	}
 }

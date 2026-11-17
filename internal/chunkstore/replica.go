@@ -1398,6 +1398,7 @@ func (r *Replica) drainStore(ctx *core.Context, out *ReplicaOutput) {
 		}
 	}
 	if r.sout.Rebuilt {
+		r.leftDue = true
 		for i := range r.leads {
 			r.leads[i].active, r.leads[i].serving, r.leads[i].asking, r.leads[i].peer = false, false, true, nil
 		}
