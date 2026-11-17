@@ -179,7 +179,8 @@ func copiesPerRecord(recordBlocks uint32) (per, header uint64) {
 
 // Cleanable reports whether the cleaner may take segment: used, not the open segment of any lane,
 // and holding no record past the replay points of the oldest manifest recovery may still load,
-// which replay reads before it applies anything. Before any manifest is named, nothing is.
+// which replay reads before it applies anything. Before a segment header names a manifest,
+// nothing is.
 func (l *Log) Cleanable(segment uint32) bool {
 	if segment == 0 || segment >= l.sb.SegmentCount || l.usage[segment].State != SegmentUsed || len(l.live) == 0 {
 		return false
@@ -189,7 +190,7 @@ func (l *Log) Cleanable(segment uint32) bool {
 			return false
 		}
 	}
-	return l.usage[segment].Newest <= l.live[0].replay || l.cfg.Plants.CleanableIgnoresReplay
+	return l.usage[segment].Newest <= l.ReplayFloor() || l.cfg.Plants.CleanableIgnoresReplay
 }
 
 // ReplayFloor is the LSN the oldest manifest recovery may still load replays after, 0 before a

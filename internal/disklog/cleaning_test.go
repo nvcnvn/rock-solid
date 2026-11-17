@@ -116,6 +116,33 @@ func TestWhatTheCleanerMayFree(t *testing.T) {
 	}
 }
 
+// The first manifest is the oldest recovery may load only once a segment header names it: until
+// then a restart loads none and replays every record, so no segment is cleanable, although that
+// manifest's replay points pass a closed segment's records.
+func TestNoSegmentIsCleanableBeforeAHeaderNamesTheFirstManifest(t *testing.T) {
+	h := formatted(t, 1<<16*core.BlockSize, testConfig(0))
+	var hot uint32
+	roll := func() uint32 {
+		for i, from := 0, hot; ; i++ {
+			tk := h.submit(disklog.Hot, h.write(uint32(i%16), 1, uint64(i+1)))
+			h.run()
+			if hot = h.durableOf(tk).Segment; from != 0 && hot != from {
+				return from
+			}
+			from = hot
+		}
+	}
+	closed := roll()
+	h.checkpointPieces(nil, 1, 100)
+	if h.log.Cleanable(closed) {
+		t.Fatalf("segment %d is cleanable before a header names the first manifest (named LSN %d)", closed, h.log.NamedLSN())
+	}
+	roll()
+	if !h.log.Cleanable(closed) {
+		t.Fatalf("segment %d is not cleanable once a header names the manifest past it", closed)
+	}
+}
+
 // copyTrial hands the log one victim's copies of counts blocks each and returns the blocks they
 // took from the cleaner's open segment at (segment, block) on: the tail they left behind there when
 // they rolled, the header of the segment they opened and their records, and where the lane's open
