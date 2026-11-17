@@ -160,8 +160,8 @@ func TestHeldItemsFailWithTheirCheckpointForWantOfSpace(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.absorb()
-	if !h.log.Stalled() || len(h.pending) != 0 {
-		t.Fatalf("a piece with no segment free: stalled %v, %v", h.log.Stalled(), h.trace)
+	if !h.log.Stalled() || !h.log.CheckpointStalled() || len(h.pending) != 0 {
+		t.Fatalf("a piece with no segment free: stalled %v, checkpoint stalled %v, %v", h.log.Stalled(), h.log.CheckpointStalled(), h.trace)
 	}
 	h.log.FailStalled(&h.ctx, &h.out)
 	h.absorb()

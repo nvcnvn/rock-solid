@@ -401,8 +401,8 @@ func TestMergePiecesGoPastTheHoldAndIntoTheReserve(t *testing.T) {
 		h.put(disklog.Hot, h.write(uint32(i), 2, uint64(i)))
 	}
 	held = h.submit(disklog.Hot, h.write(5, 1, 5))
-	if m := h.putMerge(1, runOwner, 100, 6); m.Segment != 6 || !h.log.Stalled() {
-		t.Fatalf("merge piece in segment %d, write stalled %v: want the reserve's segment 6 and the write held", m.Segment, h.log.Stalled())
+	if m := h.putMerge(1, runOwner, 100, 6); m.Segment != 6 || !h.log.Stalled() || h.log.CheckpointStalled() {
+		t.Fatalf("merge piece in segment %d, write stalled %v, merge stalled %v: want the reserve's segment 6 and the write held", m.Segment, h.log.Stalled(), h.log.CheckpointStalled())
 	}
 	h.log.FailStalled(&h.ctx, &h.out)
 	h.absorb()

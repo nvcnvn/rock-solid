@@ -841,8 +841,13 @@ func (l *Log) Unstarted() Ticket {
 }
 
 // Stalled reports items waiting for room: ordinary items with only the reserve free or held behind a checkpoint that failed for want of space, or the checkpoint's or a merge's items with no segment free.
-func (l *Log) Stalled() bool {
-	for i := range l.lanes {
+func (l *Log) Stalled() bool { return l.stalledFrom(0) }
+
+// CheckpointStalled reports the checkpoint's or a merge's items waiting with no segment free, the reserve included.
+func (l *Log) CheckpointStalled() bool { return l.stalledFrom(laneMeta) }
+
+func (l *Log) stalledFrom(lane int) bool {
+	for i := lane; i < len(l.lanes); i++ {
 		if l.lanes[i].q.len() > 0 {
 			if _, p := l.place(i); p == placeNoRoom {
 				return true

@@ -1460,7 +1460,8 @@ victims per pass (4, as in the cleaner spikes), at least 8, with both byte setti
   event per stream (hot, then cold), and their buffers are freed.
 - A merge piece opens a segment of the reserve as the checkpoint's items do: on that disk with
   five 2-block writes in segments 1 to 5 and a sixth write held, a merge piece goes into segment 6
-  and the write stays held until the no-victim report fails it.
+  and the write stays held, `Stalled` but not `CheckpointStalled`, until the no-victim report fails
+  it.
 - A stall ends when a segment frees: on that disk with a reserve of 2, a hot write stalls with
   segments 6 and 7 free; a cold punch then takes the only round slot. Once segment 1 is freed the
   write is no longer `Stalled`, a no-victim report fails nothing, and the write goes into segment 1.
@@ -1821,8 +1822,8 @@ manifest, written or in flight, segment headers and the checkpoint's own records
 - A checkpoint that fails while items are held keeps them held, and the next checkpoint releases
   them. A failure for want of space, reported when the cleaner has no victim, fails the held items
   with NoSpace too, which bounds the wait: on a 16-block disk with `max_replay_bytes` 4 blocks,
-  three 2-block writes fill it and hold a fourth; the checkpoint's piece finds no segment, and the
-  no-victim report fails the piece, the checkpoint and the held write. A write submitted next is
+  three 2-block writes fill it and hold a fourth; the checkpoint's piece finds no segment, which is
+  `CheckpointStalled`, and the no-victim report fails the piece, the checkpoint and the held write. A write submitted next is
   `Stalled` at once, until a new checkpoint begins.
 - Merge pieces (`MergePiece`) stay out of the hold and are never held, as checkpoint items.
 - The chunk store stand-in of the recovery tests begins a new checkpoint after a failure once a
@@ -8182,6 +8183,7 @@ The host machine, `meta.CtlHost`, on a single-voter control-plane group of ID 25
 | Format cut short by a crash after each of its disk actions, keeping all or none of the unflushed writes, then two restarts | A log with no superblock stays `ErrNotFormatted`, for `-format` to make again; a log whose replay gave no record gets the boot round from the voters given, written to the disk, and the host leads and answers a `Txn` after each restart (`TestARestartAfterAFormatCutShortWritesTheBootRound`) |
 | A voter of three restarted with a configuration of itself alone | It stops with `ErrVoters` and answers nothing; the other two elect a leader that answers |
 | 16 rounds of 40 counter `Txn`s on a log whose `max_replay_bytes` is 64 KiB, on a disk of 16 segments of 256 KiB, each round ending in a crash mid-round or while a checkpoint runs, after 0 to 4 of the next disk actions, keeping the unflushed writes or not | The host checkpoints, compacts and frees segments, so the run writes the disk more than twice over. Each restart loads its manifest's runs, takes the base and applied index from their mark and replays after the group's replay LSN: the counter holds every increment answered, and the state at every index equals what it was before the crash (`TestAHostCompactsAndRestartsFromItsManifest`). Planted: a restore that takes the base for the applied index applies the entries after the base twice, and the state check fires (`TestARestoreThatReappliesEntriesBreaksTheStateCheck`) |
+| Distinct 900-byte keys put on that disk, none deleted, until the tree outgrows it | A checkpoint finds no segment free, the reserve included, and nothing else frees one: the host fails it (`FailStalled`) and stops with `ErrNoSpace` instead of waiting (`TestAHostWhoseCheckpointHasNoRoomStops`) |
 | A pool committed, then a node's table fetch, then heartbeats from a node behind the table and one current | The delta goes to every node that reported, the whole table to the node that fetched, and to the node behind alone, as the leader resends after a failover |
 | A heartbeat of a later term from another replica at the leading voter, then a fetch | The Control is dropped; the fetch is answered with the leader the replica knows |
 | A fetch at a leader whose lease does not run (a three-voter group with no grants) | No Control is read |

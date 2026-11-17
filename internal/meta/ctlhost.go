@@ -538,9 +538,13 @@ func (h *CtlHost) push(ctx *core.Context, to core.NodeID, token uint64, t *chunk
 
 // after takes the log's events, writes the replica's round to the log, follows the replica's
 // leadership, hands each answer to the Txn's proposer, the Server or the Control, which steps
-// again, and gathers the replica's and the log's actions.
+// again, and gathers the replica's and the log's actions. A checkpoint with no room fails, which
+// stops the host: only a checkpoint frees a segment.
 func (h *CtlHost) after(ctx *core.Context, out *CtlHostOutput) {
 	for {
+		if h.cp.running && h.err == nil && h.disk.Log.CheckpointStalled() {
+			h.disk.Log.FailStalled(ctx, &h.lout)
+		}
 		h.logEvents(ctx, out)
 		if r := h.sout.Raft.Flush; r != 0 && h.err == nil {
 			h.sout.Raft.Flush = 0

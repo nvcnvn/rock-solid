@@ -2,6 +2,7 @@ package meta
 
 import (
 	"encoding/binary"
+	"errors"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -158,3 +159,21 @@ func bigTreeRun(t *testing.T, stepBytes int) {
 // A tree whose merges take several steps of 8 KiB takes each step at a checkpoint until the merge
 // ends, so its runs stay few and the log keeps room across crashes.
 func TestAHostMergesItsTreeInStepsAcrossCrashes(t *testing.T) { bigTreeRun(t, 8<<10) }
+
+// A tree that outgrows its disk leaves a checkpoint with no free segment, the reserve included,
+// and nothing but a checkpoint frees one: the host stops with ErrNoSpace rather than wait.
+func TestAHostWhoseCheckpointHasNoRoomStops(t *testing.T) {
+	r := compactingRun(t, 0)
+	r.failing = true
+	val := make([]byte, 900)
+	for k := range uint64(20_000) {
+		r.ask(0, k+1, &Txn{Ops: []Op{Put(attr(1, 2, k+1), val)}})
+		if err := r.h.Err(); err != nil {
+			if !errors.Is(err, disklog.ErrNoSpace) {
+				t.Fatalf("the host stopped with %v", err)
+			}
+			return
+		}
+	}
+	t.Fatalf("the host still runs, its checkpoint running %v and its log stalled %v", r.h.cp.running, r.h.disk.Log.Stalled())
+}
