@@ -1673,9 +1673,10 @@ call, time from `ctx.Now`:
 
   Without admission (seed 0, with `ROCKSOLID_LONG_SIM` set, which the test checks finds none free
   a tenth of the time or more): none free 27% of the time at 90% and 97.9% at 95%, the slowest wait
-  349 ms and 4.2 s. A seed takes about 62 s on one core of the Mac mini and peaks at 1.2 GB
-  resident. Before the rate was smoothed across windows, 51 of 187 windows of seed 5 at 95%
-  measured nothing, up to 4 in a row, and its slowest wait was 4.0 s.
+  349 ms and 4.2 s. A seed takes about 62 s on one core of the Mac mini and peaks at 1.3 GB
+  resident. With each window's rate taken alone instead of smoothed, 58 of the 209 windows seed 5
+  at 95% cleaned through measured nothing, up to 3 in a row, and writes waited 99 ms at the 99th
+  percentile and 2.5 s at the most, over the 1 s bound.
 - Review on a small disk (`TestWriteAdmissionKeepsSegmentsFreeAheadOfASlowCleaner`): 512
   segments of 64 blocks, 64 KiB records, at 50 and 65% full, the most the cleaner's net-gain guard
   sustains on segments this small, overwritten uniformly for one disk capacity. Without admission

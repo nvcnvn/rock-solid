@@ -108,7 +108,7 @@ func TestTheBucketCarriesAWindowsDeficitWhileTheCleanerRuns(t *testing.T) {
 // reserve are free; clean_free then goes to 16 and the bucket starts afresh, as after a restart,
 // and a read starts passes whose jobs the harness holds, so the cleaner frees nothing more, and
 // the bucket's first window measures that, leaving it no rate.
-func slowedStore(t *testing.T) *harness {
+func slowedStore(t testing.TB) *harness {
 	h := primed(t)
 	r := core.NewRand(31)
 	for h.freeEmpty(); h.s.Log().FreeOutsideReserve() > 5; h.freeEmpty() {
@@ -263,4 +263,38 @@ func BenchmarkBucketTick(b *testing.B) {
 		k.tick(now, uint64(i)*16, uint64(i)*15, 0.75, true)
 		k.tokens -= 4
 	}
+}
+
+// BenchmarkAdmitWrite measures admitWrite in the slow-down band while the bucket charges a write
+// and while it holds one and then admits it from the held queue.
+func BenchmarkAdmitWrite(b *testing.B) {
+	h := slowedStore(b)
+	h.s.adm.rate = 1
+	ci := h.s.chunkOf[chunk(1)]
+	o := &op{kind: opWrite, chunk: ci, req: Request{Len: core.BlockSize}}
+	if _, charged := h.s.charging(h.ctx.Now); !charged {
+		b.Fatal("the bucket does not charge")
+	}
+	b.Run("charging", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			h.s.adm.tokens = 1
+			if !h.s.admitWrite(&h.ctx, ci, o) {
+				b.Fatal("the write was held")
+			}
+		}
+	})
+	b.Run("holding", func(b *testing.B) {
+		b.ReportAllocs()
+		for range b.N {
+			h.s.adm.tokens = 0
+			if h.s.admitWrite(&h.ctx, ci, o) {
+				b.Fatal("the write was not held")
+			}
+			h.s.adm.tokens = 1
+			if !h.s.admitWrite(&h.ctx, ci, o) {
+				b.Fatal("the held write was not admitted")
+			}
+		}
+	})
 }

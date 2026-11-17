@@ -102,9 +102,9 @@ func (h *harness) freeEmpty() {
 
 // primed is a store on the small disk whose cleaner does not run until a test sets CleanFree:
 // two chunks of 64 blocks written once and overwritten at random until several manifests are named.
-func primed(t *testing.T) *harness { return primedWith(t, cleanConfig()) }
+func primed(t testing.TB) *harness { return primedWith(t, cleanConfig()) }
 
-func primedWith(t *testing.T, cfg Config) *harness {
+func primedWith(t testing.TB, cfg Config) *harness {
 	cfg.CleanFree = -1
 	h := newHarnessOn(t, cfg, cleanGeo)
 	h.merging = true
