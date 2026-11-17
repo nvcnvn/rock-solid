@@ -421,3 +421,33 @@ func TestADroppedHeldSlotWriteFreesItsSlot(t *testing.T) {
 		}
 	}
 }
+
+// A slot waiting to go back on a held write that a decision then drops is queued once and freed once: TakeFreed keeps
+// out of its list only the slots it adds itself, so dropSlot must not queue a slot already waiting.
+func TestASlotWaitingOnADroppedHeldWriteIsFreedOnce(t *testing.T) {
+	h := newHarnessOn(t, testConfig(), slotGeometry)
+	a, b := chunk(2), chunk(3)
+	h.sync(h.persist(0, 1, 1, nil))
+	h.sync(h.memberWrite(a, 0, core.BlocksPerChunk, MakeVersion(1, 1), 0xaa))
+	first := h.slotsInUse()
+	h.sync(h.persist(0, 1, 2, nil))
+	h.sync(h.memberWrite(a, 0, core.BlocksPerChunk, MakeVersion(2, 1), 0xbb))
+	h.sync(h.memberWrite(a, 0, 1, MakeVersion(2, 2), 0xbc))
+	h.sync(h.memberWrite(b, 0, core.BlocksPerChunk, MakeVersion(2, 1), 0xcc))
+	if e, _ := h.s.Index().Lookup(testPool, b, 0); e.LBA != first[0] {
+		t.Fatalf("b took the slot at %d, not a's first at %v", e.LBA, first)
+	}
+	h.inv.Off(invReplay)
+	restart(h)
+	h.sync(h.persist(0, 1, 3, nil))
+	h.settleChunk(a, MakeVersion(2, 2))
+	if !slices.Contains(h.s.freed, first[0]) {
+		t.Fatalf("slot %d is not waiting on b's held write: waiting %v", first[0], h.s.freed)
+	}
+	h.sync(h.persist(0, 1, 4, []ChunkVersion{{Chunk: b, Version: 0}}))
+	h.settle()
+	h.holds()
+	h.checkSlots()
+	restart(h)
+	h.checkSlots()
+}

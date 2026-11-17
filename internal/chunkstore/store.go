@@ -2204,7 +2204,8 @@ func (s *Store) freeSlots(recovered bool) {
 }
 
 // dropSlot queues for freeSlots the chunk slot of a durable slot write it dropped: no map ever
-// refers to it, so the index never frees it.
+// refers to it, so the index never frees it. The slot may already wait in s.freed on this very
+// write, and TakeFreed keeps out only the duplicates it would add itself, so dropSlot checks.
 func (s *Store) dropSlot(it *item) {
 	if it.entry.Kind != disklog.EntrySlot || it.state != itemDurable {
 		return
