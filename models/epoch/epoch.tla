@@ -1053,7 +1053,9 @@ Persist(d) ==
 \* read and the write are overwritten. The source lists nothing, or is the
 \* primary, which lists the chunk only for dropped versions of its own, from
 \* this peering or one whose image it carries, and whose image is the kept
-\* version. A chunk no member keeps anything of needs no source. With
+\* version: the read returns what its map holds, which MergeOnDropped lets hold
+\* a version above the kept one of an earlier interval, mapped and dropped. A
+\* chunk no member keeps anything of needs no source. With
 \* RecoverFromListed, a primary that lists a chunk for what it lacks is a
 \* source too, and its image holds what it logged above the kept version; with
 \* RecoverNoSource, a chunk something was kept of needs none, so the write
@@ -1085,7 +1087,8 @@ RecoverFrom(n, p, c, d, m) ==
                /\ K = 0 \/ K \in dlog[s][c] \/ old \/ Bug("RecoverNoSource")
                /\ at = Ver(k, 0) \/ Bug("RecoveryCoversAtRead")
                /\ dlog' = [dlog EXCEPT ![d][c] =
-                             {v \in dlog[s][c] : v <= K \/ Bug("RecoverFromListed")}
+                             {v \in dlog[s][c] : v <= K \/ Bug("RecoverFromListed")
+                                                  \/ (s = PrimDisk(p, k) /\ c \in TheDec(n, p, k).img /\ v \in Held(s, c) /\ IvOfV(v) < k)}
                              \cup {v \in dlog[d][c] : IvOfV(v) = k /\ (v <= at \/ ~Bug("RecoveryCoversAtRead"))}]
        /\ miss' = [miss EXCEPT ![d][c] = NoMiss]
        /\ drp' = [drp EXCEPT ![d] = {g \in @ : g.c # c}]

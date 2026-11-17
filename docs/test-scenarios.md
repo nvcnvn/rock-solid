@@ -3659,7 +3659,7 @@ under fairness, as `heavy-peering` does, on the restart plan alone, and those fo
 | --- | --- | --- |
 | A member logs one version of a chunk out of order (1.2 before 1.1) | 5 | Peering keeps 1.2, which was merged on 1.1, from a member that lacks 1.1's block |
 | A new primary merges before it holds a kept version | 4 | With the hold on a primary that lists the chunk removed too, since it holds every write such a primary would merge: the new primary's partial write merges on its stale block, and the acknowledged result drops the kept version |
-| A new primary merges on a version it mapped that peering dropped | 8 | At `min_live` 1, since at 2 the partial write waits for recovery, its chunk having one clean copy, and with the hold on a primary that lists the chunk removed too, since it holds the write: 32,157 states, 4 s, where that removal alone passes (1,781,025 states, 291 s). PG 1: primary 1's 1.1 reaches node 2 alone; node 1 is marked down; node 2 peers, node 3 lacks 1.1, so the decision drops it, and node 2 merges a partial write on it. The clause it breaks nearly restates the rule, since `Content` is per block and shows no merged bytes: the Go plant `mergeOnDropped`, which breaks "a member listing nothing maps the kept writes applied in version order", is what backs the rule |
+| A new primary merges on a version it mapped that peering dropped | 8 | At `min_live` 1, since at 2 the partial write waits for recovery, its chunk having one clean copy. PG 1: primary 1's 1.1 reaches node 2 alone; node 1 is marked down; node 2 peers, node 3 lacks 1.1, so the decision drops it and lists node 2's copy; node 2, counting its image as the kept version, recovers its copy from itself, and the read returns its map, 1.1 still in it; then it merges a partial write on 1.1. The clause it breaks nearly restates the rule, since `Content` is per block and shows no merged bytes: the Go plant `mergeOnDropped`, which breaks "a member listing nothing maps the kept writes applied in version order", is what backs the rule |
 | Peering stops only the previous interval | 4 | PG 2: interval 2 replaces the primary, interval 3 puts the other member in `maintenance`; 3 reaches only a member live in 2, and the old primary's write tagged 1, which 3 dropped, completes |
 | Members compare member lists instead of interval numbers | 4 | [1,2,3] → [1,2] → [1,2,3]; members at interval 3 accept the old write tagged 1 that 3's peering dropped |
 | A disk ID kept across a new log ID | 4 | 1.1 acknowledged on all three; node 3's disk is formatted again and keeps its ID; node 1 is marked down; peering finds disk 3, live in 1, lacking 1.1, and drops it |
@@ -4646,7 +4646,7 @@ and `mapOnDemote`, which need a seed that reaches them; and the seven that never
 `settleSubset` needs a record of what `Settle` answered.
 
 Every relaxed path now has a plant: `img` in `Order` by `mergeOnDropped` and `mergeWhileLacking`, `img` as a
-recovery source by `recoverFromListed`, `Recover` at kept version 0 by `clearNoSource`, and `GoneRefuses` by
+recovery source by `recoverFromListed` and `mergeOnDropped`, `Recover` at kept version 0 by `clearNoSource`, and `GoneRefuses` by
 `goneWhileUp`. Each breaks a seeded invariant in `TestPlantedPeeringBugsBreakTheOracle` and fails its negative
 configuration. Of the 46 plant traces that passed to their end, checked again with each path removed, 3 stop
 where their baseline does not, and all three are schedules legitimately on the path, by a plant that does not
