@@ -52,13 +52,13 @@ type ctlMachine struct {
 	out  meta.CtlHostOutput
 }
 
-func newCtl(cfg ctlConfig) (p *ctl, err error) {
+func newCtl(cfg ctlConfig) (_ *ctl, err error) {
 	if cfg.Format {
 		if err := createDisk(cfg.Disk, cfg.DiskBytes); err != nil {
 			return nil, err
 		}
 	}
-	p = &ctl{cfg: cfg}
+	p := &ctl{cfg: cfg}
 	defer func() {
 		if err != nil {
 			p.close()

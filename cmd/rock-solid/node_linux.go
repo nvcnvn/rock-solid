@@ -40,8 +40,8 @@ type nodeLoop struct {
 	mail mail
 }
 
-func newNode(cfg nodeConfig) (p *storageNode, err error) {
-	p = &storageNode{cfg: cfg, addrs: map[uint32]netip.AddrPort{cfg.Node: cfg.Listen}}
+func newNode(cfg nodeConfig) (_ *storageNode, err error) {
+	p := &storageNode{cfg: cfg, addrs: map[uint32]netip.AddrPort{cfg.Node: cfg.Listen}}
 	defer func() {
 		if err != nil {
 			p.close()

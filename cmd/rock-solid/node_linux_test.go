@@ -44,6 +44,24 @@ func TestNodeProcess(t *testing.T) {
 	}
 }
 
+// A start that fails returns its error: a node whose port is taken, and a voter whose disk file
+// is missing.
+func TestAStartThatFailsReturnsItsError(t *testing.T) {
+	fd, port, err := tcp.ListenTCP(netip.MustParseAddrPort("127.0.0.1:0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+	taken := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(port))
+	free := netip.MustParseAddrPort("127.0.0.1:0")
+	if _, err := newNode(nodeConfig{Node: 2, Ctls: []voter{{1, free}}, Group: 1, Listen: taken, Devices: []string{filepath.Join(t.TempDir(), "dev")}, Class: "ssd", Pool: 1}); err == nil {
+		t.Error("a node started on a port taken")
+	}
+	if _, err := newCtl(ctlConfig{Node: 1, Voters: []voter{{1, free}}, Group: 1, Listen: free, Disk: filepath.Join(t.TempDir(), "missing")}); err == nil {
+		t.Error("a voter started on a missing disk")
+	}
+}
+
 // output is a child's output, read while it writes.
 type output struct {
 	mu sync.Mutex
