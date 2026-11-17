@@ -7300,9 +7300,7 @@ Each invariant is shown to fire: a planted bug for each must fail at least one s
   closed pool allocates nothing. A slice taken from `Bytes` must not outlive its handle.
 - The memtable's page store on slabs: a tree whose `Config.Pages` is a loop slab carves its page
   slabs from it and reads back 20,000 entries written in shuffled order. Every LSM tree test runs
-  with its trees' pages on a loop slab (the package's `TestMain`), except under the seed flags of
-  `scripts/seeds.sh`, where they run on the Go heap, since a slab never gets a dropped tree's pages
-  back ([Slabs for every tree](#slabs-for-every-tree)). A full collection with 20 million entries in
+  with its trees' pages on a loop slab ([Slabs for every tree](#slabs-for-every-tree)). A full collection with 20 million entries in
   slabs, half in runs, takes 0.4 ms (`BenchmarkCollection -lsm.entries 20000000`, under the 1 ms of
   the LSM tree section).
 - Slabs never hold a Go pointer: a slab and the pool hand out only `[]byte`, and the sans-IO
@@ -7312,18 +7310,38 @@ Each invariant is shown to fire: a planted bug for each must fail at least one s
 
 ## Slabs for every tree
 
-- `Tree.Close` gives the tree's page slabs back: a tree that `meta.State.Restore` replaces, and any
-  other dropped tree, leaves the slab's mapped bytes where they were once its replacement holds as
-  many pages. A plain `go test ./internal/lsm` and the seeded LSM tests then run every tree on
-  slabs, each test unmapping its own at its end, instead of mapping 16 GiB over the run.
-- The chunk index's trees take their pages from slabs: every chunk index scenario passes with it.
-- Collection takes 0.0% of CPU under request garbage with the memtable in slabs (Go memtable spike).
-- `GOMEMLIMIT` is set to the daemon's memory budget minus its mapped slabs, with `GOGC` at its
-  default: a daemon with a 4 GiB budget and 3 GiB of slabs runs with a 1 GiB limit. The daemon's
-  start sets it from `Slab.Mapped`.
-- With these in place, and runs and retained Raft entries in slabs, the tech debt "LSM pages, runs
-  and retained Raft entries on the Go heap" meets its exit condition and is deleted in the same
-  change.
+- `Tree.Close` gives the tree's page slabs back, and a slab carves a returned piece again: a tree
+  on its own slab, closed, leaves the next tree carving the same pieces without mapping more
+  (`TestATreeTakesItsPagesFromConfigPagesAndGivesThemBack`), and a slab hands a returned piece to
+  the next carve of its size (`TestASlabCarvesAgainWhatItWasGivenBack`).
+- Every dropped tree closes, checked by counting the page bytes out where tests drop stores and
+  shards (`looptest.Pages`): the chunk store harness's reopen and small-disk runs, the replica
+  cluster at each reboot, the chunk index tests' trees, the MetaStore group's restarts and the
+  control-plane host's. Planted: without `Restore` closing the tree it replaces,
+  `TestASnapshotHoldsTheEntriesHandedOverInItsCall` fails; without recovery closing the index it
+  replaces, `TestRecoveryAndRebuildEqualLiveIndex` does.
+- Every LSM test runs its trees on one off-heap slab per test binary (the package's `TestMain`),
+  seeded runs included: each seed of `TestMetamorphic`, the range-removal model, the memtable model
+  and the copy-on-write views closes its trees and checks its page bytes out are back to zero.
+  `TestMetamorphic`'s peak resident memory is the same over 100 and 400 seeds, 483 MiB.
+- The chunk index's trees take their pages from slabs: every chunk index scenario passes with
+  them. Under the seed flags the chunk store's and MetaStore's trees count their pages on the Go
+  heap instead, since a seed's last stores are dropped unclosed at its end.
+- Collection takes 0.0% of CPU under request garbage, read as the tree's share: a goroutine makes
+  256 MB/s of short-lived garbage beside lookups into a memtable on slabs, `GOMEMLIMIT` 512 MiB
+  above the live heap, and runtime/metrics gives collection's share of the process's CPU
+  (`BenchmarkCollectionUnderGarbage -benchtime 10s -cpu 4,14 -lsm.entries 4000000`, on a 14-core
+  Mac). A one-entry tree takes 0.35% and 0.37% at 4 and 14 Ps over 350 cycles, a 4-million-entry
+  tree on slabs 0.11% and 0.08% over 83: the tree adds nothing, and what remains is the garbage's
+  own cost per cycle, whose stop-the-world phases scale with the Ps (the spike's 4-vCPU VM showed
+  0.0%).
+- The daemons hold `GOMEMLIMIT` at `-memory` less the slabs mapped: with a 256 MiB budget, a
+  64 MiB pool at start sets 192 MiB and a page slab's 64 MiB region 128 MiB; a budget the start's
+  pools fill is refused, and with no budget no limit is set
+  (`TestTheHeapLimitIsTheBudgetLessTheMappedSlabs`).
+- A removed shard leaves the round driver told nothing more ([Round driver](#round-driver),
+  `TestRoundRemovedShardIsToldNothing`), and an ask about a replica its node does not hold is
+  answered by `raftshard.Gone` ([Voter replacement](#voter-replacement), `TestAReplicaItIsNotIsAnsweredGone`).
 
 ## Event loop
 
