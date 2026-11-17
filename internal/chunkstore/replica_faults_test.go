@@ -218,6 +218,9 @@ func (f *faultRun) p() int {
 func (f *faultRun) pass(d int, acts []core.Action) {
 	if f.slots != nil {
 		f.slots.see(f.c.reps[d].Store())
+		if err := slotsErr(f.c.reps[d].Store()); err != nil {
+			f.fail(invSlots, fmt.Errorf("node %d: %w", d, err))
+		}
 	}
 	if r := f.c.reps[d]; d == f.p() {
 		if i := r.lead(pg0); i >= 0 && r.leads[i].active && f.kept[r.leads[i].interval] == nil {
@@ -782,7 +785,7 @@ func runFaultsOn(t *testing.T, seed uint64, clients, writes int, plant *faultPla
 			}
 		}
 	}
-	for _, inv := range []string{invAckedWhole, invOneReply, invOneVersion} {
+	for _, inv := range []string{invAckedWhole, invOneReply, invOneVersion, invSlots} {
 		c.inv.Register(inv, func() error { return f.errs[inv] })
 	}
 	c.inv.Register(invMappedAnswers, f.mapped)

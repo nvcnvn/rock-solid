@@ -348,24 +348,30 @@ func TestCrashAtEveryActionReusingASlot(t *testing.T) {
 }
 
 // Planted bug: freeing a chunk slot also frees the next one (freeNextSlot), still another
-// chunk's, and the log writes a third chunk over it. The chunk overwritten has not changed, but its
-// map overlaps the blocks written, so the next settle compares it and names invReads.
-func TestFreeingTheNextSlotBreaksReads(t *testing.T) {
-	h := newHarnessOn(t, testConfig(), slotGeometry)
-	h.catch = true
-	y, z := core.ChunkID{Volume: 1, Inode: 50}, core.ChunkID{Volume: 1, Inode: 51}
-	err := violated(func() {
-		h.sync(h.write(y, 0, fill(core.ChunkSize, 0x11), 0))
-		h.sync(h.write(z, 0, fill(core.ChunkSize, 0x22), 0))
-		h.s.plant.freeNextSlot = true
-		h.sync(h.write(y, 0, fill(core.ChunkSize, 0x33), 0))
-		h.s.plant.freeNextSlot = false
-		for i := range 6 {
-			h.sync(h.write(core.ChunkID{Volume: 1, Inode: core.InodeID(60 + i)}, 0, fill(core.ChunkSize, byte(0x40+i)), 0))
+// chunk's, and the log writes a third chunk over it. The next settle finds a map referring to a
+// slot the log holds free and names invSlots; with that off, the chunk overwritten has not changed,
+// but its map overlaps the blocks written, so the settle compares it and names invReads.
+func TestFreeingTheNextSlotBreaksSlotsAndReads(t *testing.T) {
+	for _, want := range []string{invSlots, invReads} {
+		h := newHarnessOn(t, testConfig(), slotGeometry)
+		h.catch = true
+		if want == invReads {
+			h.inv.Off(invSlots)
 		}
-	})
-	if violationOf(err) != invReads {
-		t.Fatal(err)
+		y, z := core.ChunkID{Volume: 1, Inode: 50}, core.ChunkID{Volume: 1, Inode: 51}
+		err := violated(func() {
+			h.sync(h.write(y, 0, fill(core.ChunkSize, 0x11), 0))
+			h.sync(h.write(z, 0, fill(core.ChunkSize, 0x22), 0))
+			h.s.plant.freeNextSlot = true
+			h.sync(h.write(y, 0, fill(core.ChunkSize, 0x33), 0))
+			h.s.plant.freeNextSlot = false
+			for i := range 6 {
+				h.sync(h.write(core.ChunkID{Volume: 1, Inode: core.InodeID(60 + i)}, 0, fill(core.ChunkSize, byte(0x40+i)), 0))
+			}
+		})
+		if violationOf(err) != want {
+			t.Fatal(err)
+		}
+		t.Log(err)
 	}
-	t.Log(err)
 }

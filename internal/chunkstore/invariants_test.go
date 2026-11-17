@@ -25,6 +25,7 @@ const (
 	invIndex    = "the index passes its own check"
 	invOpenSeqs = "a recovered log opens its next segment past every open sequence on disk"
 	invUsage    = "each chunk segment counts the blocks the index refers to"
+	invSlots    = "every chunk slot in use is mapped, named by a pending durable slot write or queued to free, and every mapped slot is in use"
 	invPools    = "each pool's live blocks are its maps', sum to the chunk segments' count, and with the metadata's to the fill"
 	invReuse    = "no segment is reused while it holds a record the index needs"
 	invNamed    = "no segment is reused or trimmed while the named manifest needs it"
@@ -55,6 +56,7 @@ func (h *harness) register() {
 	})
 	found(invOpenSeqs)
 	h.inv.Register(invUsage, h.usageErr)
+	h.inv.Register(invSlots, func() error { return slotsErr(h.s) })
 	h.inv.Register(invPools, h.poolsErr)
 	h.inv.Register(invReuse, h.recordsInPlace)
 	found(invNamed)
@@ -66,6 +68,37 @@ func (h *harness) register() {
 	h.inv.Register(invPunched, h.punchesReadZeros)
 	h.inv.Register(invMove, h.movesKeepWrites)
 	h.inv.Register(invReads, h.readsMatchOracle)
+}
+
+// slotsErr checks store st's chunk slots: every slot the log holds in use is referred to by a map,
+// named by a durable slot write still pending, or queued to free, and every slot a map refers to is
+// in use.
+func slotsErr(st *Store) error {
+	if !st.Serving() || st.ix.segmentBlocks < core.BlocksPerChunk {
+		return nil
+	}
+	var referred []core.LBA
+	var it lsm.Iter
+	st.ix.Tree().Iter(&it)
+	for ok := it.SeekGE(nil); ok; ok = it.Next() {
+		if e, ok := decodeExtent(it.Key(), it.Value()); ok {
+			if slot, ok := st.ix.slotOf(e); ok {
+				referred = append(referred, slot)
+			}
+		}
+	}
+	inUse := st.Log().SlotsInUse(nil)
+	for _, r := range referred {
+		if !slices.Contains(inUse, r) {
+			return fmt.Errorf("slot %d is mapped but not in use (in use %v)", r, inUse)
+		}
+	}
+	for _, u := range inUse {
+		if !slices.Contains(referred, u) && !slices.Contains(st.freed, u) && !slices.Contains(st.ix.freed, u) && !st.heldIn(u) {
+			return fmt.Errorf("slot %d is in use, but no map refers to it, no pending write names it and none frees it (mapped %v)", u, referred)
+		}
+	}
+	return nil
 }
 
 // holds checks every invariant, comparing every chunk's reads with the byte-range oracle, and
