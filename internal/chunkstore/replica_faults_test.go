@@ -873,7 +873,7 @@ func runFaultsOn(t *testing.T, seed uint64, clients, writes int, plant *faultPla
 	return seen, c.found
 }
 
-// Clients pipeline sub-block writes and punches to two chunks while members are cut off and restarted, their disks and at times the primary's fail, the stand-in authority's failure detector marking them down and up, and they refuse, the primary's bases rot, the PG's interval changes and the primary crashes, rebuilds its index and moves, peering keeping some pending versions: every acknowledged version is whole on every member that acknowledged it, every write is answered once unless a crash of its primary lost it, the primary maps exactly the writes it answered OK in every chunk it lists nothing of, and once recovery settles every member lists nothing and maps them. One seed in 16 (seeds 2 and 18 of its own) runs on disks with chunk slots, its clients writing a whole chunk one write in 8, and the run fails if its slot seeds, more than one, wrote none.
+// Clients pipeline sub-block writes and punches to two chunks while members are cut off and restarted, their disks and at times the primary's fail, the stand-in authority's failure detector marking them down and up, and they refuse, the primary's bases rot, the PG's interval changes and the primary crashes, rebuilds its index and moves, peering keeping some pending versions: every acknowledged version is whole on every member that acknowledged it, every write is answered once unless a crash of its primary lost it, the primary maps exactly the writes it answered OK in every chunk it lists nothing of, and once recovery settles every member lists nothing and maps them. One seed in 16 (seeds 2 and 18 of its own) runs on disks with chunk slots, its clients writing a whole chunk one write in 8, and the run fails if its slot seeds, more than one, wrote none, or, eight or more, held none across a replay.
 func TestReplicatedWritesSurviveFaults(t *testing.T) {
 	var slots slotStats
 	seeds.Run(t, 0, 20, func(seed uint64) {
@@ -886,6 +886,10 @@ func TestReplicatedWritesSurviveFaults(t *testing.T) {
 		}
 	})
 	slots.check(t)
+	// About one slot seed in four holds no slot write, so fewer than eight may all miss by chance.
+	if slots.seeds >= 8 && slots.replayed == 0 {
+		t.Fatalf("none of %d slot seeds held a slot write across a replay", slots.seeds)
+	}
 }
 
 // A recovery write that leaves out the blocks covered when it read its source, not when it was
