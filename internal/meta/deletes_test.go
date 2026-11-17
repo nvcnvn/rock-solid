@@ -36,8 +36,9 @@ func deletes(c *Control, leased bool) []ReplicaRef { return c.Deletes(3, leased,
 // The plan swaps D, replica 4, in for C, replica 3. C, which learned its removal, is deleted only
 // once A, B and D each reported a configuration of the plan's voters alone at or past the leave:
 // reports of the joint configuration, whose incoming half is the plan's, do not count, since a
-// voter that applied only that can lead it and need C's vote. A leader without its lease tells no
-// node to delete anything, and a replica that has not learned its removal is never named.
+// voter that applied only that can lead it and need C's vote, nor do reports of an earlier
+// configuration of fewer voters. A leader without its lease tells no node to delete anything, and
+// neither a planned voter nor a replica last reported not having learned its removal is ever named.
 func TestADroppedReplicaIsDeletedOnlyOnceEveryPlannedVoterAppliedTheLeave(t *testing.T) {
 	c := deleting(1, 2, 4)
 	plan := []uint64{1, 2, 4}
@@ -52,6 +53,10 @@ func TestADroppedReplicaIsDeletedOnlyOnceEveryPlannedVoterAppliedTheLeave(t *tes
 	if d := deletes(c, true); len(d) != 0 {
 		t.Fatalf("C is deleted once every planned voter applied only the joint configuration: %v", d)
 	}
+	hear(t, c, 2, ReplicaReport{ID: 2, ConfIndex: 1, Voters: []uint64{1, 2}})
+	if d := deletes(c, true); len(d) != 0 {
+		t.Fatalf("C is deleted once B reported an earlier configuration of fewer voters: %v", d)
+	}
 	hear(t, c, 3, ReplicaReport{ID: 1, ConfIndex: 5, Voters: plan})
 	hear(t, c, 3, ReplicaReport{ID: 4, ConfIndex: 7, Voters: plan})
 	if d := deletes(c, true); len(d) != 0 {
@@ -64,8 +69,13 @@ func TestADroppedReplicaIsDeletedOnlyOnceEveryPlannedVoterAppliedTheLeave(t *tes
 	if d := deletes(c, true); !slices.Equal(d, []ReplicaRef{{Group: 5, ID: 3}}) {
 		t.Fatalf("once every planned voter applied the leave, the leader deletes %v, want C", d)
 	}
+	hear(t, c, 5, ReplicaReport{ID: 1, ConfIndex: 5, Removed: true, Voters: plan})
 	if d := c.Deletes(1, true, nil); len(d) != 0 {
-		t.Fatalf("a planned voter is deleted: %v", d)
+		t.Fatalf("a planned voter that reported its removal is deleted: %v", d)
+	}
+	hear(t, c, 5, ReplicaReport{ID: 3, ConfIndex: 3, Joint: true, Voters: plan})
+	if d := deletes(c, true); len(d) != 0 {
+		t.Fatalf("once the plan is complete, C, last reported not having learned its removal, is deleted: %v", d)
 	}
 }
 
