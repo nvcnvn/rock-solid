@@ -233,6 +233,8 @@ func TestARestartTakesTheCompactionIndexFromTheBase(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := len(r.host.shard(5).refs)
+	r.checkpoint()
+	r.roll()
 	r.bases = map[uint32]raftpb.SnapshotMetadata{5: st.Base()}
 	r.crash(5)
 	if hd := r.host.shard(5); hd.compacted != 3 || len(hd.refs) != want {
@@ -264,5 +266,24 @@ func TestARewriteWritesTheHostsNewestHardStateBeforeTheShardTakesIt(t *testing.T
 	sts := r.crashCleaned(6)
 	if got := sts[6]; got.HardState() != newer || !got.Removed() {
 		t.Fatalf("the restart recovered hard state %+v, removed %v; want %+v, removed", got.HardState(), got.Removed(), newer)
+	}
+}
+
+// A shard started on a base no run holds yet, as format's boot state or a snapshot is, keeps the
+// round that wrote the base live: only a restart that restores the base from its runs compacts to it.
+func TestTheRoundOfABaseNoRunHoldsStaysLive(t *testing.T) {
+	r := newRig(t)
+	st := NewStorage()
+	boot := raftpb.SnapshotMetadata{Index: 3, Term: 1, ConfState: raftpb.ConfState{Voters: []uint64{1, 2, 3}}}
+	if err := st.ApplySnapshot(raftpb.Snapshot{Metadata: boot}); err != nil {
+		t.Fatal(err)
+	}
+	r.host.Add(5, st)
+	r.commit(st, 5, 1, Round{Snapshot: raftpb.Snapshot{Metadata: boot}})
+	r.commit(st, 5, 2, Round{HardState: raftpb.HardState{Term: 2, Vote: 1, Commit: 3}})
+	r.commit(st, 5, 3, Round{HardState: raftpb.HardState{Term: 3, Vote: 2, Commit: 3}})
+	sts := r.crashCleaned(5)
+	if got := sts[5].Base(); got.Index != 3 || len(got.ConfState.Voters) != 3 {
+		t.Fatalf("the restart lost the boot base: %+v", got)
 	}
 }

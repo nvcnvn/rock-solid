@@ -83,15 +83,14 @@ type Done struct {
 // NewHost is a host writing to log, nil until a restart's replay ends.
 func NewHost(log *disklog.Log) *Host { return &Host{Log: log, at: map[uint32]int{}} }
 
-// Add hosts the shard whose blobs carry owner and whose storage is st, compacted to its base, as
-// a restart restores it with its runs; an owner Reusable does not allow is a broken invariant of
-// the caller.
+// Add hosts the shard whose blobs carry owner and whose storage is st; an owner Reusable does not
+// allow is a broken invariant of the caller.
 func (h *Host) Add(owner uint32, st *Storage) {
 	if !h.Reusable(owner) {
 		panic(fmt.Sprintf("raftshard: owner %d hosted, in flight or with blobs that can replay", owner))
 	}
 	h.at[owner] = len(h.shards)
-	h.shards = append(h.shards, hosted{owner: owner, st: st, newest: -1, compacted: st.base.Index})
+	h.shards = append(h.shards, hosted{owner: owner, st: st, newest: -1})
 }
 
 func (h *Host) shard(owner uint32) *hosted {
@@ -332,12 +331,13 @@ func (h *Host) Recovered(log *disklog.Log) {
 }
 
 // Loaded takes the manifest a restart's recovery loaded, before its replay and after every shard
-// it names is added: a hosted shard it names skips its blobs at or before its replay LSN, which
-// earlier compactions and hard states made dead.
+// it names is added on the base its runs restore: such a shard is compacted to that base, and
+// skips its blobs at or before its replay LSN, which earlier compactions and hard states made dead.
 func (h *Host) Loaded(m *disklog.Manifest) {
 	for _, ix := range m.Indexes {
 		if k, ok := h.at[ix.Owner]; ok {
-			h.shards[k].from = ix.ReplayLSN
+			hd := &h.shards[k]
+			hd.from, hd.compacted = ix.ReplayLSN, hd.st.base.Index
 		}
 	}
 }
@@ -346,6 +346,9 @@ func (h *Host) Loaded(m *disklog.Manifest) {
 // durable, with no runs: its owner, and its replay LSN, the LSN before its oldest round a restart
 // still needs or before a blob of it in flight, else durable. The memtable that applied an entry
 // starts no earlier, since a round's entries are compacted only once that memtable is durable.
+// That holds only if Indexes is called in the handler that captures the runs it is checkpointed
+// with, whose base is at least the last Compact's index, and if the checkpoint carries each
+// shard's base, the one it was started on included.
 func (h *Host) Indexes(dst []disklog.CheckpointIndex, durable uint64) []disklog.CheckpointIndex {
 	n := len(dst)
 	for k := range h.shards {
