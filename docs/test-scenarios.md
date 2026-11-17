@@ -1610,11 +1610,15 @@ call, time from `ctx.Now`:
   roll into a new segment add the tail they leave behind in the old one.
 - A write is admitted while the bucket holds a token and charged all its blocks: 18 MiB taken from
   14 leaves it 4 MiB in debt, and it next holds a token an eighth of a second later at 32 MiB/s.
-- A window that freed no more than it spent measures 0, which empties the bucket until the next
-  window ends, when the held writes are tried again, and carries the difference into the next:
+- Each window after the first sets the rate to the mean of the last rate and what it measured: a
+  window that freed nothing after one at 32 MiB/s leaves 16 MiB/s and the bucket at most 16 MiB.
+  A first window that freed no more than it spent leaves no rate, and a held write waits for the
+  window's end.
+- A window that freed no more than it spent measures 0 and carries the difference into the next:
   450 blocks spent in one window, then a 1,000-block segment freed and 450 more spent in the
-  next, measures 100 blocks a second, not 550. A window in which the cleaner stopped, with
-  `clean_free` segments free, carries nothing.
+  next, measures 100 blocks a second, not 550, for a rate of 50 after the first window's 0. A
+  window in which the cleaner stopped, with `clean_free` segments free, carries nothing: after it
+  halves the rate to 25, a freed 1,000-block segment sets it to 512.5.
 - Before the first window ends there is no rate and nothing is charged, also after an index
   rebuild restarts the log.
 - The bucket charges while the cleaner has a pass running or will start one: when its only pass
@@ -1629,30 +1633,45 @@ call, time from `ctx.Now`:
   write of another chunk waits behind them. The store reports it is not admitting while any is
   held and arms `AdmitTimer` for when the bucket next holds a token or the window ends. How the
   connection stops being read is the Event loop item's (phase 5).
-- Review in the simulator (`TestWriteAdmissionKeepsSegmentsFreeAheadOfASlowCleaner`): 8
-  closed-loop writers of 16 KiB, each sending its next write once its last is answered and the
-  store is admitting, the longest-waiting first; a cleaner worker taking 20 ms a victim; disk
-  actions one at a time at the simulated disk's latencies; 512 segments of 64 blocks, 64 KiB
-  records, a reserve of 8, at 50 and 65% full, overwritten at random for one disk capacity and
-  measured over the last three quarters. Without admission (a planted bug that admits every
-  write) the disk has no free segment outside the reserve at least half the time, so the cleaner
-  is the slower, and some writer waits two victims' cleaning, 40 ms, or longer from its last answer
-  to its next; with it, none for at most 1% of the time, no write fails with NoSpace, and no writer
-  waits 40 ms. Measured: none 0% with admission against 94 and 99.6% without, the slowest write
-  24 and 29 ms against 57 and 76. The 40 ms bar guards against regressions, not a bound on
-  latency: this cleaner frees many victims a window, and how long writers wait when it frees
-  fewer than one is the open question below.
-- Open: the item asks for 90 and 95% full. On segments small enough for the in-memory simulated
-  disk the cleaner's net-gain guard sustains about 65% (64-block segments) and 85% (1,024-block
-  segments; see [Cleaner write amplification in
-  simulation](#cleaner-write-amplification-in-simulation) for 90 and 95%). The 85% run
-  (`TestWriteAdmissionAt85PercentFull`, the same writers and cleaner on 320 segments of 1,024
-  blocks, 0.26 GB resident at peak, skipped unless `ROCKSOLID_LONG_SIM` is set, about 2.5 minutes)
-  checks that admission keeps a free segment
-  for a larger share of the time than without it and than a planted rate net of copied blocks
-  alone. Measured: no free
-  segment 0% of the time with admission, 97.6% net of copied blocks alone, 99.1% without; the
-  slowest write 5.0, 5.4 and 4.6 s. See the cleaning-debt question in design.md.
+- The simulated runs share their writers and cleaner: 8 closed-loop writers of 16 KiB, each
+  sending its next write once its last is answered and the store is admitting, the
+  longest-waiting first; a cleaner worker taking 20 ms a victim; disk actions one at a time at the
+  simulated disk's latencies; a reserve of 8; the disk filled in order, then overwritten at random
+  and measured over the last three quarters of the overwrites. Without admission is a planted bug
+  that admits every write.
+- Review at 90 and 95% full (`TestWriteAdmissionHoldsAt90And95PercentFull`, seeded, in
+  `scripts/seeds.sh`): data at 90 and 95% of a 16 GiB disk of 1,024 segments of 16 MiB, filled in
+  64-block writes whose 264 KiB records pack a segment whole, then overwritten in 16 KiB writes
+  within the first 30% of the data, as block volumes overwrite a hot share, for a tenth of a disk
+  capacity. Each run fails unless free segments outside the reserve fall to 8 or fewer, the
+  slow-down band, so the writers outran the cleaner; free segments outside the reserve are none
+  at most 1% of the time, no write fails with NoSpace, and the wait from a writer's last answer to
+  its next is at most 200 ms at the 99th percentile and one window, 1 s, at the most. Measured over
+  8 seeds:
+
+  | Data | In the slow-down band | Fewest free | None free | Wait, 99th percentile | Slowest wait | Measured |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | 90% | 60 to 62% of the time | 4 | 0% | 9.2 ms | 17 ms | 31 s |
+  | 95% | 99.2 to 100% | 2 | 0% | 92 ms | 447 ms | 198 to 211 s |
+
+  Without admission (seed 0, with `ROCKSOLID_LONG_SIM` set, which the test checks finds none free
+  a tenth of the time or more): none free 27% of the time at 90% and 97.9% at 95%, the slowest wait
+  349 ms and 4.2 s. A seed takes about 62 s on one core of the Mac mini and peaks at 1.2 GB
+  resident. Before the rate was smoothed across windows, 51 of 187 windows of seed 5 at 95%
+  measured nothing, up to 4 in a row, and its slowest wait was 4.0 s.
+- Review on a small disk (`TestWriteAdmissionKeepsSegmentsFreeAheadOfASlowCleaner`): 512
+  segments of 64 blocks, 64 KiB records, at 50 and 65% full, the most the cleaner's net-gain guard
+  sustains on segments this small, overwritten uniformly for one disk capacity. Without admission
+  the disk has no free segment outside the reserve at least half the time and some writer waits
+  two victims' cleaning, 40 ms, or longer; with it, none for at most 1% of the time, no write fails
+  with NoSpace, and the slowest wait is shorter than without. Measured: none 0% with admission
+  against 94 and 99.6% without, the slowest wait 38 and 57 ms against 57 and 76.
+- At 85% full under uniform overwrites (`TestWriteAdmissionAt85PercentFull`, 320 segments of
+  1,024 blocks, 64 KiB records, skipped unless `ROCKSOLID_LONG_SIM` is set, about 2.5 minutes,
+  0.26 GB resident at peak): admission keeps a free segment for a larger share of the time than
+  without it and than a planted rate net of copied blocks alone. Measured: no free segment 0% of
+  the time with admission, 98.6% net of copied blocks alone, 99.4% without; the slowest wait
+  2.3, 4.4 and 5.2 s. See the cleaning-debt question in design.md.
 - An index over its run limit never slows or stops writes (no run-count stall).
 - The same wait applies at twice `max_replay_bytes` (see Checkpoint backpressure); both
   conditions holding at once hold items until both clear.

@@ -33,8 +33,10 @@ const second = admitWindow
 
 // A cleaner that freed 2 segments of 64 MiB while its copies, checkpoints and merges took 1.5
 // segments' worth in [0, 1 s) refills the bucket from 1 s at 32 MiB/s at 8 free segments and 24 MiB/s at 4, up to a window's worth. A
-// write takes the bucket into debt, and the bucket says when it holds a token again. A window
-// that freed nothing measures 0, which empties the bucket.
+// write takes the bucket into debt, and the bucket says when it holds a token again. Each later
+// window's rate is the mean of the last rate and what the window measured, so one that freed
+// nothing halves the rate and what the bucket holds; a first window that freed nothing leaves no
+// rate, and a bucket in debt then waits for the window's end.
 func TestTheBucketRefillsAtTheCleanersNetRate(t *testing.T) {
 	const seg = 16384
 	mib := func(blocks float64) float64 { return blocks * core.BlockSize / (1 << 20) }
@@ -67,38 +69,44 @@ func TestTheBucketRefillsAtTheCleanersNetRate(t *testing.T) {
 	}
 	b.tick(4*second, 6*seg, 9*seg/2, 1, true)
 	b.tick(4*second+1, 6*seg, 9*seg/2, 1, true)
-	if b.rate != 0 || b.tokens != 0 {
-		t.Fatalf("a window that freed nothing measured %v and left %v tokens", b.rate, b.tokens)
+	if rate, tokens := mib(b.rate*float64(second)), mib(b.tokens); rate != 16 || tokens != 16 {
+		t.Fatalf("a window that freed nothing left the rate at %v MiB/s and the bucket %v MiB, not half of 32", rate, tokens)
 	}
-	b.tokens--
-	if at := b.refilled(1); at != b.windowAt+second {
-		t.Fatalf("a bucket in debt at no rate refills at %d, not at the window's end %d", at, b.windowAt+second)
+	var c bucket
+	c.tick(0, 0, 0, 1, true)
+	c.tick(second, 0, 0, 1, true)
+	c.tokens--
+	if at := c.refilled(1); c.rate != 0 || at != c.windowAt+second {
+		t.Fatalf("a bucket in debt at no rate refills at %d, not at the window's end %d", at, c.windowAt+second)
 	}
 }
 
 // A window that only spends carries its deficit into the next: a victim 90% live whose copies span
-// two windows nets the second a tenth of a segment, not the whole segment less only its own
-// copies. A window in which the cleaner stopped, with clean_free segments free, carries nothing,
-// so what merges spend meanwhile does not starve its next pass.
+// two windows nets the second a tenth of a segment, 100 blocks, not the whole segment less only
+// its own copies, 550, and the rate is the mean of that and the first window's 0. A window in
+// which the cleaner stopped, with clean_free segments free, carries nothing, so what merges spend
+// meanwhile does not starve its next pass: after it halves the rate to 25, a freed segment of
+// 1,000 blocks measures (25 + 1,000) / 2.
 func TestTheBucketCarriesAWindowsDeficitWhileTheCleanerRuns(t *testing.T) {
 	const seg = 1000
 	var b bucket
 	b.tick(0, 0, 0, 1, true)
 	b.tick(second, 0, 450, 1, true)
 	b.tick(2*second, seg, 900, 1, true)
-	if want := 100 / float64(second); b.rate != want {
+	if want := 50 / float64(second); b.rate != want {
 		t.Fatalf("a victim copied across two windows measured %v blocks/s, want %v", b.rate*float64(second), want*float64(second))
 	}
 	b.tick(3*second, seg, 1350, 1, false)
 	b.tick(4*second, 2*seg, 1350, 1, true)
-	if want := seg / float64(second); b.rate != want {
+	if want := (25 + seg) / 2.0 / float64(second); b.rate != want {
 		t.Fatalf("a deficit spent while the cleaner stopped cut the next window to %v blocks/s, want %v", b.rate*float64(second), want*float64(second))
 	}
 }
 
 // slowedStore is a store on the small disk, its cleaner off, written until 5 segments outside the
-// reserve are free; clean_free then goes to 16, and a read starts passes whose jobs the harness
-// holds, so the cleaner frees nothing more, and the bucket measures that over a whole window.
+// reserve are free; clean_free then goes to 16 and the bucket starts afresh, as after a restart,
+// and a read starts passes whose jobs the harness holds, so the cleaner frees nothing more, and
+// the bucket's first window measures that, leaving it no rate.
 func slowedStore(t *testing.T) *harness {
 	h := primed(t)
 	r := core.NewRand(31)
@@ -107,6 +115,7 @@ func slowedStore(t *testing.T) *harness {
 	}
 	h.hold = true
 	h.s.cfg.CleanFree = DefaultCleanFree
+	h.s.adm.bucket = bucket{}
 	h.s.cl.tried = false
 	h.read(chunk(1), 0, 1)
 	h.settle()
@@ -194,4 +203,17 @@ func TestAHeldWriteWaitsOnlyWhileTheCleanerCanFree(t *testing.T) {
 	h.s.cl.tried, h.s.cl.triedAt = true, h.s.Log().DurableLSN()
 	h.advance(second)
 	h.ok(a)
+}
+
+// BenchmarkBucketTick measures the bucket's refill and window close that every chunk write runs
+// while admission charges it.
+func BenchmarkBucketTick(b *testing.B) {
+	b.ReportAllocs()
+	var k bucket
+	var now core.Tick
+	for i := range b.N {
+		now += 1_000
+		k.tick(now, uint64(i)*16, uint64(i)*15, 0.75, true)
+		k.tokens -= 4
+	}
 }

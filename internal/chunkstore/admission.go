@@ -10,8 +10,9 @@ const (
 )
 
 // bucket is write admission's token bucket, in blocks: refilled at the net rate the cleaner freed
-// space over the last one-second window, the blocks of the segments it freed less those its
-// copies, checkpoints and merges took, and holding at most a window's worth. A window that spent
+// space over one-second windows, the blocks of the segments it freed less those its copies,
+// checkpoints and merges took, each window's rate the mean of the last rate and what the window
+// measured, and holding at most a window's worth. A window that spent
 // more than it freed carries the difference into the next, so a victim copied across windows is
 // credited only its net gain; a window in which the cleaner stopped carries nothing, so what
 // merges spent while it was idle does not starve its next pass. A write is taken while a token is
@@ -27,7 +28,7 @@ type bucket struct {
 	// the cleaner stopped during this one, which then carries nothing.
 	carry   float64
 	stopped bool
-	// rate is the net blocks freed per tick over the last window, never below 0.
+	// rate is the net blocks freed per tick, smoothed across windows, never below 0.
 	rate     float64
 	tokens   float64
 	filledAt core.Tick
@@ -47,7 +48,11 @@ func (b *bucket) tick(now core.Tick, freed, spent uint64, scale float64, cleanin
 	b.stopped = b.stopped || !cleaning
 	if now-b.windowAt >= admitWindow {
 		net := float64(freed-b.freed) - float64(spent-b.spent) + b.carry
-		b.carry, b.rate = min(net, 0), max(net, 0)/float64(now-b.windowAt)
+		rate := max(net, 0) / float64(now-b.windowAt)
+		if b.measured {
+			rate = (b.rate + rate) / 2
+		}
+		b.carry, b.rate = min(net, 0), rate
 		if b.stopped {
 			b.carry = 0
 		}
