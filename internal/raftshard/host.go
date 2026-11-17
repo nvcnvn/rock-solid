@@ -84,14 +84,15 @@ type Done struct {
 // NewHost is a host writing to log, nil until a restart's replay ends.
 func NewHost(log *disklog.Log) *Host { return &Host{Log: log, at: map[uint32]int{}} }
 
-// Add hosts the shard whose blobs carry owner and whose storage is st; an owner Reusable does not
-// allow is a broken invariant of the caller.
+// Add hosts the shard whose blobs carry owner and whose storage is st, compacted to its base, as
+// a restart restores it with its runs; an owner Reusable does not allow is a broken invariant of
+// the caller.
 func (h *Host) Add(owner uint32, st *Storage) {
 	if !h.Reusable(owner) {
 		panic(fmt.Sprintf("raftshard: owner %d hosted, in flight or with blobs that can replay", owner))
 	}
 	h.at[owner] = len(h.shards)
-	h.shards = append(h.shards, hosted{owner: owner, st: st, newest: -1})
+	h.shards = append(h.shards, hosted{owner: owner, st: st, newest: -1, compacted: st.base.Index})
 }
 
 func (h *Host) shard(owner uint32) *hosted {
@@ -317,7 +318,8 @@ func (h *Host) Replayed(ev *disklog.Event) error {
 }
 
 // Recovered ends a restart's replay with the log recovery handed over: a round torn at the log's
-// tail, missing its last blob, is dropped and its blobs are dead.
+// tail, missing its last blob, is dropped and its blobs are dead, as are those of the rounds the
+// base covers whose hard state a later round replaced.
 func (h *Host) Recovered(log *disklog.Log) {
 	h.Log = log
 	for k := range h.shards {
@@ -325,6 +327,7 @@ func (h *Host) Recovered(log *disklog.Log) {
 		h.dead = append(h.dead, hd.refs[hd.closed:]...)
 		hd.refs = hd.refs[:hd.closed]
 		hd.st.pending = hd.st.pending[:0]
+		h.collect(hd)
 	}
 	h.bury()
 }

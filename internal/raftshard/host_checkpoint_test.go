@@ -194,3 +194,23 @@ func TestARemovedOwnerIsReusableOnceTheFloorPassesItsBlobs(t *testing.T) {
 	}
 	r.host.Add(5, NewStorage())
 }
+
+// A shard hosted on a restored base takes its compaction index from it, so a replayed round the
+// base covers is dead after the restart, as it was before, and one past the base stays live.
+func TestARestartTakesTheCompactionIndexFromTheBase(t *testing.T) {
+	r := newRig(t)
+	st := NewStorage()
+	r.host.Add(5, st)
+	r.commit(st, 5, 1, Round{Entries: entries(1, 2, 1, 100), HardState: raftpb.HardState{Term: 1, Vote: 1}})
+	r.commit(st, 5, 2, Round{Entries: entries(3, 1, 1, 100)})
+	r.commit(st, 5, 3, Round{Entries: entries(4, 1, 1, 100), HardState: raftpb.HardState{Term: 1, Vote: 1, Commit: 4}})
+	if err := r.host.Compact(5, 3, raftpb.ConfState{Voters: []uint64{1}}); err != nil {
+		t.Fatal(err)
+	}
+	want := len(r.host.shard(5).refs)
+	r.bases = map[uint32]raftpb.SnapshotMetadata{5: st.Base()}
+	r.crash(5)
+	if hd := r.host.shard(5); hd.compacted != 3 || len(hd.refs) != want {
+		t.Fatalf("after the restart the host's compaction index is %d and it holds %d blobs; want 3 and %d", hd.compacted, len(hd.refs), want)
+	}
+}
