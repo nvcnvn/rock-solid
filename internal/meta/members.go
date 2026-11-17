@@ -240,7 +240,7 @@ func (c *Control) complete(g *Group) bool {
 	leave := uint64(math.MaxUint64)
 	for _, n := range c.nodes {
 		for _, r := range n.reps {
-			if r.Group == g.ID && !r.Joint && len(r.Voters) == len(g.Voters) && !slices.ContainsFunc(r.Voters, func(id uint64) bool {
+			if r.Group == g.ID && (!r.Joint || c.jointCounts) && len(r.Voters) == len(g.Voters) && !slices.ContainsFunc(r.Voters, func(id uint64) bool {
 				return !slices.ContainsFunc(g.Voters, func(v Replica) bool { return v.ID == id })
 			}) {
 				leave = min(leave, r.ConfIndex)

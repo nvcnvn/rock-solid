@@ -111,9 +111,11 @@ CONSTANTS
                         \* and is durable before the change applies or the commit leaves, so no
                         \* restart takes a replica back across a change it knew committed
                         \* (FALSE: a Ready that only moves the commit index writes nothing)
-    RemovedStaysVoter   \* a replica never applies its own removal to its configuration: it
+    RemovedStaysVoter,  \* a replica never applies its own removal to its configuration: it
                         \* stays a voter of the joint one, campaigning and leading, until its
                         \* node deletes it (FALSE: it applies it and campaigns no more)
+    ReportsLeave        \* a voter of the plan reports once it applied the leave (FALSE: also
+                        \* once it applied the joint configuration, whose incoming half is the plan)
 
 ASSUME BaseVoters \subseteq Replicas /\ Plan \subseteq Replicas /\ Plan2 \subseteq Replicas
        /\ Stopped \subseteq Replicas
@@ -276,12 +278,12 @@ OutgoingInit == JointState(Dropped, 2)
 \* it with its empty entry to the voters other than Kept, which lags, and commits both.
 LeaveLog == JointLog \o <<[t |-> 2, cfg |-> NoConf], [t |-> 2, cfg |-> Conf(Plan, {}, {})]>>
 
-LeaveInit ==
+LeaveState(ap) ==
     /\ term = [r \in Replicas |-> 2]
     /\ leader = [r \in Replicas |-> r = Dropped]
     /\ log = [r \in Replicas |-> IF r = Kept THEN JointLog ELSE LeaveLog]
     /\ commit = [r \in Replicas |-> IF r = Dropped THEN 5 ELSE 3]
-    /\ applied = [r \in Replicas |-> 3]
+    /\ applied = [r \in Replicas |-> IF r = Dropped THEN 3 ELSE ap]
     /\ match = [r \in Replicas |->
                   IF r # Dropped THEN NoMatch ELSE [k \in Replicas |-> IF k = Kept THEN 0 ELSE 5]]
     /\ hbCommit = [r \in Replicas |-> IF r = Dropped THEN 3 ELSE 0]
@@ -298,6 +300,12 @@ LeaveInit ==
     /\ out = [r \in Replicas |-> FALSE]
     /\ dead = {}
     /\ reported = {}
+
+LeaveInit == LeaveState(3)
+\* LeaveUnappliedInit is LeaveInit with the voters other than the dropped one yet to apply the
+\* joint configuration they know committed, so none of the plan's voters has reported, whatever
+\* counts as a report.
+LeaveUnappliedInit == LeaveState(2)
 
 \* A voter of its own applied configuration wins the votes of a quorum of it, each voter's
 \* log no newer than its own, in a term past every one of theirs. A replica votes whatever
@@ -457,7 +465,7 @@ Commit(i) ==
 \* A voter of the plan that applies the configuration leaving the joint one reports it, at
 \* once here, the earliest a deletion can follow; with DurableConfCommit its hard state
 \* already holds the leave's commit, so no restart rewinds what it reported.
-Left(c) == c.in = CurPlan /\ c.out = {}
+Left(c) == c.in = CurPlan /\ (ReportsLeave => c.out = {})
 
 ApplyEntries(r) ==
     LET c == ConfAt(log[r], commit[r])

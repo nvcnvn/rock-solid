@@ -69,6 +69,22 @@ func TestADroppedReplicaIsDeletedOnlyOnceEveryPlannedVoterAppliedTheLeave(t *tes
 	}
 }
 
+// Planted, a report of the joint configuration counts: C is deleted once A, B and D applied only
+// that, any of which can lead it and need C's vote, as the voter model's neg-joint-report-counts
+// finds.
+func TestCountingJointReportsDeletesWhileAVoterAppliedOnlyTheJointConfiguration(t *testing.T) {
+	c := deleting(1, 2, 4)
+	c.jointCounts = true
+	plan := []uint64{1, 2, 4}
+	for _, id := range []uint64{1, 2, 4} {
+		hear(t, c, 1, ReplicaReport{ID: id, ConfIndex: 3, Joint: true, Voters: plan})
+	}
+	hear(t, c, 1, ReplicaReport{ID: 3, ConfIndex: 3, Joint: true, Removed: true, Voters: plan})
+	if d := deletes(c, true); !slices.Equal(d, []ReplicaRef{{Group: 5, ID: 3}}) {
+		t.Fatalf("planted, the leader deletes %v, want C", d)
+	}
+}
+
 // The plan swaps D in for C while B is down for good: B never reports applying the leave, so C is
 // kept, however long A and D report. The next plan, swapping E, replica 5, in for B, is what
 // completes: once A, D and E report its leave applied, C is deleted, the earlier plan complete

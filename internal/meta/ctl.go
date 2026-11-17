@@ -121,7 +121,9 @@ type Control struct {
 	}
 	rep    chunkstore.Report
 	gplant grantPlants
-	watch  chunkstore.Watcher
+	// jointCounts is a bug a test plants: a report of the joint configuration counts toward a plan's completion.
+	jointCounts bool
+	watch       chunkstore.Watcher
 }
 
 // commit is the Txn in flight: the state it gives and how much of the staged reports it took.
