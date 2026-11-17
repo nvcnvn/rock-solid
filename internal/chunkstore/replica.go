@@ -808,7 +808,9 @@ func (r *Replica) names(pg core.PGID) bool {
 	if e == nil {
 		return true
 	}
-	in := func(ms []Member) bool { return slices.ContainsFunc(ms, func(m Member) bool { return m.Disk == r.cfg.Disk }) }
+	in := func(ms []Member) bool {
+		return slices.ContainsFunc(ms, func(m Member) bool { return m.Disk == r.cfg.Disk })
+	}
 	if in(e.Members) {
 		return true
 	}

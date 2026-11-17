@@ -205,7 +205,7 @@ func (h *harness) expectIndex(name string) {
 }
 
 // recoveredIndex compares the index a recovery finished with the one expectIndex kept. It leaves out the chunks either
-// index lists and those replay left gated, with the counts of the records their extents name: replay holds back every
+// index lists and those replay left gated, with the counts of the records and chunk slots their extents name: replay holds back every
 // version of an interval at or past its PG's newest decision, so it may drop or gate what the store had mapped.
 func (h *harness) recoveredIndex() {
 	if h.indexBefore == nil {
@@ -230,6 +230,9 @@ func (h *harness) recoveredIndex() {
 			out[kv[0]] = true
 			if e, ok := decodeExtent([]byte(kv[0]), []byte(kv[1])); ok {
 				out[string(binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint32(nil, uint32(RecordPool)), uint64(e.Header)))] = true
+				if slot, in := h.s.Index().slotOf(e); in {
+					out[string(binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint32(nil, uint32(RecordPool)), uint64(slot)))] = true
+				}
 			}
 		}
 	}

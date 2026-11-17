@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
@@ -53,7 +54,9 @@ func newLeftRun(t *testing.T, seed uint64, plant func(*replicaPlants)) *leftRun 
 	r.publish()
 	_, e = c.table.entry(pg0)
 	if slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == l.leaving }) ||
-		!slices.ContainsFunc(e.Past, func(p PastInterval) bool { return slices.ContainsFunc(p.Members, func(m Member) bool { return m.Disk == l.leaving }) }) {
+		!slices.ContainsFunc(e.Past, func(p PastInterval) bool {
+			return slices.ContainsFunc(p.Members, func(m Member) bool { return m.Disk == l.leaving })
+		}) {
 		t.Fatalf("seed %d: the table does not name the leaving disk in a past interval alone: %+v", seed, e)
 	}
 	c.s.Restart(uint32(l.n))
@@ -65,6 +68,12 @@ func newLeftRun(t *testing.T, seed uint64, plant func(*replicaPlants)) *leftRun 
 // gated is the restarted member's store and the LSN and segment of the oldest record of a version it keeps gated, 0 for none.
 func (l *leftRun) gated() (*Store, uint64, uint32) {
 	st := l.c.reps[l.n].Store()
+	at, seg := heldRecord(st)
+	return st, at, seg
+}
+
+// heldRecord is the LSN and segment of the oldest record of a version st keeps gated, 0 for none.
+func heldRecord(st *Store) (uint64, uint32) {
 	oldest, seg := uint64(0), uint32(0)
 	for i := range st.ops {
 		if o := &st.ops[i]; o.kind != 0 && o.req.Gated && !o.dropped {
@@ -75,7 +84,7 @@ func (l *leftRun) gated() (*Store, uint64, uint32) {
 			}
 		}
 	}
-	return st, oldest, seg
+	return oldest, seg
 }
 
 // A leaving member down when its move completes and then restarted keeps Z, a whole chunk in a slot, gated while a table
@@ -87,7 +96,7 @@ func TestALeftMemberDropsItsGatedWritesOnceNoIntervalNamesIt(t *testing.T) {
 		l := newLeftRun(t, seed, noPlant)
 		st, at, seg := l.gated()
 		u, _ := st.Log().Usage(seg)
-		if !slices.Contains(st.Unsettled(nil), l.ch) || at == 0 || len(st.pinned) == 0 {
+		if !slices.Contains(st.Unsettled(nil), l.ch) || at == 0 || len(st.pinned) == 0 || len(st.Log().SlotsInUse(nil)) != 1 {
 			t.Fatalf("seed %d: replay did not gate Z in a slot, or the first table dropped it: %v gated, %v pinned", seed, st.Unsettled(nil), st.pinned)
 		}
 		if st.replayPoint() >= at || u.Newest <= st.replayPoint() {
@@ -106,6 +115,9 @@ func TestALeftMemberDropsItsGatedWritesOnceNoIntervalNamesIt(t *testing.T) {
 		if got := st.replayPoint(); got < at || u.Newest > got {
 			t.Fatalf("seed %d: replay point %d short of dropped Z at LSN %d in segment %+v", seed, got, at, u)
 		}
+		if got := st.Log().SlotsInUse(nil); len(got) != 0 {
+			t.Fatalf("seed %d: the left member keeps chunk slots %v in use", seed, got)
+		}
 	}
 }
 
@@ -122,4 +134,33 @@ func TestALeftMemberSettledEarlyDropsWhatAPastIntervalNames(t *testing.T) {
 	if st, _, _ := l.gated(); slices.Contains(st.Unsettled(nil), l.ch) {
 		t.Fatalf("settleLeftEarly: the first table left Z gated")
 	}
+}
+
+// The store's half of a left PG's drop: a version Z of the interval the disk last decided, replayed gated, holds the
+// replay point short of its record and that record's segment from the cleaner. Settled to nothing, as a replica drops a
+// left PG's gated writes, Z holds neither: once later writes roll its segment closed and a checkpoint names a replay
+// point past it, the cleaner frees the segment.
+func TestADroppedGatedWriteLeavesItsSegmentToTheCleaner(t *testing.T) {
+	h := newHarness(t, cleanConfig())
+	h.oracle = sim.NewOracle[writtenRecord](0, newStoreModel())
+	z := chunk(2)
+	h.persist(0, 1, 2, nil)
+	h.sync(h.memberWrite(z, 0, 4, MakeVersion(2, 1), 0x7e))
+	restart(h)
+	at, seg := heldRecord(h.s)
+	if !slices.Contains(h.s.Unsettled(nil), z) || h.s.replayPoint() >= at {
+		t.Fatalf("replay left %v gated, replay point %d, Z at LSN %d", h.s.Unsettled(nil), h.s.replayPoint(), at)
+	}
+	h.settleChunk(z, 0)
+	if got := h.s.Unsettled(nil); len(got) != 0 || h.s.replayPoint() < at {
+		t.Fatalf("dropped Z: %v gated, replay point %d, Z at LSN %d", got, h.s.replayPoint(), at)
+	}
+	for i := range 300 {
+		h.sync(h.write(chunk(1), 0, fill(64*core.BlockSize, byte(i)), 0))
+	}
+	h.clean(h.s.Log().FreeOutsideReserve() + 1)
+	if u, _ := h.s.Log().Usage(seg); u.State != disklog.SegmentFree {
+		t.Fatalf("segment %d of dropped Z's record is %+v, cleanable %v", seg, u, h.s.Log().Cleanable(seg))
+	}
+	h.holds()
 }
