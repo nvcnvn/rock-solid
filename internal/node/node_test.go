@@ -525,6 +525,22 @@ func TestALostTableFetchGoesAgainUntilATableArrives(t *testing.T) {
 	}
 }
 
+// A delta ends a lost table fetch's resend as a table does: the replicas take it or, before one
+// runs, fetch the table themselves.
+func TestADeltaEndsTheTableFetchResend(t *testing.T) {
+	r := three(t)
+	r.out.Reset()
+	r.n.Start(&r.ctx, &r.out)
+	r.sends(meta.KindTableFetch)
+	dl := chunkstore.Delta{Epoch: 2}
+	r.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeDelta(pool, group, &dl, m) })
+	r.ctx.Now += Interval
+	r.event(core.Event{Kind: core.EvTimer, Timer: HeartbeatTimer})
+	if len(r.sends(meta.KindTableFetch)) != 0 {
+		t.Fatal("the heartbeat after a delta fetched the table")
+	}
+}
+
 // A replica removed, as a device opened again in the same process, gets no more tables and leaves
 // the report, and the device opened again is reported once; a replica not yet removed, whatever
 // its store, keeps getting tables and its version pins the report.

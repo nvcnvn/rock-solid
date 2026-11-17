@@ -81,15 +81,17 @@ type Device struct {
 	restarted bool
 	// held and epoch are the session version and placement epoch last output.
 	held, epoch uint64
-	opened      meta.OpenedDisk
-	sess        chunkstore.SessionTable
-	table       chunkstore.Table
-	auth        core.NodeID
-	hasAuth     bool
-	sout        chunkstore.Output
-	rout        chunkstore.ReplicaOutput
-	rp          chunkstore.Report
-	frame       []byte
+	// dropped is the newest epoch of a delta dropped before the replica ran.
+	dropped uint64
+	opened  meta.OpenedDisk
+	sess    chunkstore.SessionTable
+	table   chunkstore.Table
+	auth    core.NodeID
+	hasAuth bool
+	sout    chunkstore.Output
+	rout    chunkstore.ReplicaOutput
+	rp      chunkstore.Report
+	frame   []byte
 }
 
 // NewDevice starts recovering the device's store, or fails it at once on cfg.Err.
@@ -170,7 +172,8 @@ func (d *Device) flush(out *DeviceOutput) {
 }
 
 // Disks takes the committed membership: the replica starts as the disk named for the device's
-// log, once the store serves, and learns the loop of every disk.
+// log, once the store serves, and learns the loop of every disk. One that starts on a table older
+// than a delta dropped before it ran fetches the whole table.
 func (d *Device) Disks(ctx *core.Context, ds []meta.DiskAddr, out *DeviceOutput) {
 	if d.phase != opened {
 		return
@@ -191,6 +194,7 @@ func (d *Device) Disks(ctx *core.Context, ds []meta.DiskAddr, out *DeviceOutput)
 		if d.table.Epoch != 0 {
 			d.rep.SetTable(ctx, d.table, &d.rout)
 		}
+		out.Fetch = out.Fetch || d.table.Epoch < d.dropped
 	} else {
 		d.addrs(ds)
 	}
@@ -226,9 +230,12 @@ func (d *Device) Table(ctx *core.Context, t *chunkstore.Table, out *DeviceOutput
 }
 
 // Delta hands the replica a placement delta; before the replica runs it is dropped, and the
-// replica fetches the whole table when the next delta does not follow its own.
+// replica fetches the whole table when it starts on an older one or the next delta does not
+// follow its own.
 func (d *Device) Delta(ctx *core.Context, dl *chunkstore.Delta, out *DeviceOutput) {
-	if d.rep != nil {
+	if d.rep == nil {
+		d.dropped = max(d.dropped, dl.Epoch)
+	} else {
 		d.rep.ApplyDelta(ctx, dl, &d.rout)
 		d.take(ctx, out)
 	}

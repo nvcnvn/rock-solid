@@ -415,6 +415,42 @@ func TestADeviceReportsToTheVoterItStartsWith(t *testing.T) {
 	}
 }
 
+// A delta that reaches the device before its replica runs is dropped; the replica, starting on no
+// table after the start's fetch got lost, asks the node for the whole table, which nothing else
+// would fetch.
+func TestAReplicaStartedBehindADroppedDeltaFetchesTheTable(t *testing.T) {
+	d := newDevRun(t, sim.NewDisk(devBlocks))
+	d.start(1)
+	d.settle()
+	n := newRun(t, 1)
+	n.out.Reset()
+	n.n.Take(&n.ctx, 7, &DeviceOutput{Opened: d.opened}, &n.out)
+	n.out.Reset()
+	n.n.Start(&n.ctx, &n.out)
+	if len(n.sends(meta.KindTableFetch)) != 1 {
+		t.Fatal("the start sent no table fetch")
+	}
+	dl := chunkstore.Delta{Epoch: 3}
+	n.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeDelta(pool, group, &dl, m) })
+	toDevice(n, d)
+	ds := []meta.DiskAddr{{Disk: 5, Log: d.opened.Log, At: core.NodeID{Node: 4, Loop: 3}}}
+	n.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeDisks(pool, group, ds, m) })
+	o, _ := n.out.Clone()
+	d.out.Reset()
+	d.d.Take(&d.ctx, &o, &d.out)
+	do, _ := d.out.Clone()
+	n.out.Reset()
+	n.n.Take(&n.ctx, 7, &do, &n.out)
+	if len(n.sends(meta.KindTableFetch)) != 1 {
+		t.Fatal("a replica started behind a dropped delta fetched no table")
+	}
+	n.ctx.Now += Interval
+	n.event(core.Event{Kind: core.EvTimer, Timer: HeartbeatTimer})
+	if len(n.sends(meta.KindTableFetch)) != 1 {
+		t.Fatal("the heartbeat after a lost fetch sent no table fetch")
+	}
+}
+
 // A node whose start's table fetch gets lost fetches again on its next heartbeat: the replica,
 // holding no table, refuses a write, and once the retry's answer lands the same write is
 // acknowledged.
