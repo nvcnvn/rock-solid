@@ -369,9 +369,9 @@ func (h *Host) Indexes(dst []disklog.CheckpointIndex, durable uint64) []disklog.
 
 // Rewrite writes again, in a round of its own, the hard state and the removal flag of each shard
 // whose oldest round a restart still needs is the one holding its newest hard state, holds no
-// entry past the compaction, and lies at or before lsn, as a checkpoint does with lsn its last manifest's base, so an idle shard does not
-// hold the replay floor back for good. A shard with a round in flight or waiting for buffers is
-// left to that round.
+// entry past the compaction, and lies at or before lsn, as a checkpoint does with lsn its last
+// manifest's base, so an idle shard does not hold the replay floor back for good. A shard with a
+// round in flight or waiting for buffers is left to that round.
 func (h *Host) Rewrite(ctx *core.Context, lsn uint64, out *disklog.Output) error {
 	for k := range h.shards {
 		hd := &h.shards[k]
