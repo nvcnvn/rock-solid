@@ -239,6 +239,13 @@ func (h *CtlHost) arm(ctx *core.Context, out *CtlHostOutput) {
 
 func (h *CtlHost) recvGroup(ctx *core.Context, ev *core.Event, out *CtlHostOutput) {
 	if in := ev.Msg.Inline(); len(in) <= kindAt || in[kindAt] < KindTxn {
+		if group, id, ok := raftshard.Asked(&ev.Msg); ok && (group != h.group || id != h.id) {
+			var a core.Action
+			if raftshard.Gone(&ev.Msg, ev.Peer, &a) {
+				out.Actions = append(out.Actions, a)
+			}
+			return
+		}
 		h.shard.OnEvent(ctx, ev, &h.sout)
 		return
 	}

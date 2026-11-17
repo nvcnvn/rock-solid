@@ -805,12 +805,13 @@ func (c *group) tellRemoved(i, from int) {
 	})
 }
 
-// TestAReplicaItIsNotIsAnsweredGone hands replica 1 of group 5 asks, raftshard's kind 5, about
-// replicas its node does not hold, another of its group and one of its ID in another group, which
-// raftshard.Gone answers, kind 6, from the replica asked about to the asker; and about itself,
-// live, which nothing answers.
+// TestAReplicaItIsNotIsAnsweredGone hands the control-plane host of replica 1 of group 5 asks,
+// raftshard's kind 5, about replicas its node does not hold, another of its group and one of its
+// ID in another group, which raftshard.Gone answers, kind 6, from the replica asked about to the
+// asker; and about itself, live, which nothing answers.
 func TestAReplicaItIsNotIsAnsweredGone(t *testing.T) {
 	c := newGroup(t, 3, false)
+	h := &CtlHost{shard: c.n[0].s, sv: NewServer(), id: 1, group: 5}
 	for _, k := range []struct {
 		group, about uint64
 		gone         bool
@@ -827,8 +828,9 @@ func TestAReplicaItIsNotIsAnsweredGone(t *testing.T) {
 		var answers [][]byte
 		asker := core.NodeID{Node: 1}
 		c.call(0, func(ctx *core.Context, out *Output) {
-			c.n[0].s.OnEvent(ctx, &core.Event{Kind: core.EvNetRecv, Peer: asker, Msg: msg}, out)
-			for _, a := range out.Raft.Actions {
+			var hout CtlHostOutput
+			h.OnEvent(ctx, &core.Event{Kind: core.EvNetRecv, Peer: asker, Msg: msg}, &hout)
+			for _, a := range append(hout.Actions, out.Raft.Actions...) {
 				if a.Kind == core.ActNetSend && a.Peer == asker {
 					answers = append(answers, slices.Clone(a.Msg.Inline()))
 				}
