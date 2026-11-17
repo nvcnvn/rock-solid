@@ -21,13 +21,15 @@ func TestNodeMessagesCrossTheWireWhole(t *testing.T) {
 		{Node: 1 << 31, Release: 2, Meta: true, MetaOnly: true, Epoch: 9, Sessions: 4,
 			Opened: []OpenedDisk{{Device: 0xdead, Log: 1 << 63, Blocks: 1 << 30, Reserve: 64, Class: "nvme", Loop: 1 << 31}, {Device: 2, Log: 3}},
 			Failed: many,
-			Halts:  []HaltReport{{Group: 1, ID: 2, Index: 3, Age: 4}}},
+			Halts:  []HaltReport{{Group: 1, ID: 2, Index: 3, Age: 4}},
+			Replicas: []ReplicaReport{{Group: 2, ID: 4, ConfIndex: 1 << 40, Joint: true, Voters: []uint64{1, 2, 4}},
+				{Group: 1 << 63, ID: 3, Removed: true}, {Group: 2, ID: 5, Joint: true, Removed: true, Voters: many}}},
 	} {
 		var m core.Msg
 		if err := EncodeNodeReport(pool, 1, &nr, &m); err != nil {
 			t.Fatal(err)
 		}
-		var got NodeReport
+		got := NodeReport{Replicas: []ReplicaReport{{Voters: []uint64{9}}}}
 		if g, k, _, _ := Peek(&m); g != 1 || k != KindNodeReport {
 			t.Fatalf("report framed as group %d kind %#x", g, k)
 		}
@@ -128,7 +130,8 @@ func addWire(f *testing.F, seed func(pool core.BufPool, m *core.Msg)) {
 func FuzzDecodeNodeReport(f *testing.F) {
 	fuzzNodeWire(f, func(pool core.BufPool, m *core.Msg) {
 		nr := NodeReport{Node: 2, Release: 1, Meta: true, Sessions: 3, Opened: []OpenedDisk{{Device: 5, Log: 6, Blocks: 7, Class: "ssd", Loop: 2}},
-			Failed: []uint64{9}, Halts: []HaltReport{{Group: 1, ID: 1, Index: 4, Age: 5}}}
+			Failed: []uint64{9}, Halts: []HaltReport{{Group: 1, ID: 1, Index: 4, Age: 5}},
+			Replicas: []ReplicaReport{{Group: 2, ID: 3, ConfIndex: 7, Joint: true, Removed: true, Voters: []uint64{1, 2, 4}}}}
 		_ = EncodeNodeReport(pool, 1, &nr, m)
 	}, func(pool core.BufPool, m *core.Msg) (core.Msg, bool) {
 		var nr NodeReport
@@ -346,4 +349,41 @@ func FuzzDecodeAsks(f *testing.F) {
 			return EncodeAsks(pool, g, *fs, m)
 		},
 		func(pool core.BufPool, m *core.Msg) ([]chunkstore.PGFields, error) { return DecodeAsks(pool, m, nil) })
+}
+
+func TestDeletesCrossTheWireWhole(t *testing.T) {
+	pool := sim.NewPool(1<<20, 0)
+	var m core.Msg
+	var rs []ReplicaRef
+	for i := range 200 {
+		rs = append(rs, ReplicaRef{Group: uint64(i) << 50, ID: uint64(i) + 1})
+	}
+	for _, sent := range [][]ReplicaRef{nil, rs[:1], rs} {
+		if err := EncodeDelete(pool, 1, sent, &m); err != nil {
+			t.Fatal(err)
+		}
+		got, err := DecodeDelete(pool, &m, rs[:1:1])
+		if err != nil || len(got) != len(sent) || len(sent) > 0 && !slices.Equal(got, sent) {
+			t.Fatalf("decoded %v: %v, sent %v", err, got, sent)
+		}
+		free(&core.Context{Pool: pool}, &m)
+	}
+	if err := encodeBody(pool, 1, KindDelete, 0, []byte{2, 1, 1}, &m); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeDelete(pool, &m, nil); err != ErrMalformed {
+		t.Fatalf("a delete one replica short decodes: %v", err)
+	}
+	free(&core.Context{Pool: pool}, &m)
+	if pool.Live() != 0 {
+		t.Fatalf("%d buffers left", pool.Live())
+	}
+}
+
+func FuzzDecodeDelete(f *testing.F) {
+	fuzzRecode(f, []ReplicaRef{{Group: 3, ID: 4}, {Group: 1 << 40, ID: 9}},
+		func(pool core.BufPool, g uint64, rs *[]ReplicaRef, m *core.Msg) error {
+			return EncodeDelete(pool, g, *rs, m)
+		},
+		func(pool core.BufPool, m *core.Msg) ([]ReplicaRef, error) { return DecodeDelete(pool, m, nil) })
 }

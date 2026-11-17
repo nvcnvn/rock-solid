@@ -267,7 +267,7 @@ func (s *Shard) gone() bool { return s.removed && s.plant.deletesAtOnce }
 func (s *Shard) Removed() (bool, uint64) { return s.removed, s.leave }
 
 // ConfIndex is an index at which the applied configuration holds: that of the last configuration
-// change applied, or the log's base.
+// change applied or snapshot restored, or the log's base.
 func (s *Shard) ConfIndex() uint64 { return s.confAt }
 
 // Propose appends data to the group's log if this replica leads and has not learned its removal, and returns raft.ErrProposalDropped otherwise.
@@ -699,7 +699,7 @@ func (s *Shard) done(ctx *core.Context, rd *raft.Ready, p part, out *Output) {
 			panic(err)
 		}
 		was := s.conf
-		s.conf, s.applied = rd.Snapshot.Metadata.ConfState, rd.Snapshot.Metadata.Index
+		s.conf, s.applied, s.confAt = rd.Snapshot.Metadata.ConfState, rd.Snapshot.Metadata.Index, rd.Snapshot.Metadata.Index
 		if s.cfg.Apply == nil {
 			out.Snapshot = rd.Snapshot
 		}

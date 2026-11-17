@@ -81,6 +81,7 @@ type CtlHost struct {
 	nr      NodeReport
 	asks    []chunkstore.PGFields
 	disks   []chunkstore.Disk
+	dels    []ReplicaRef
 	stepAt  core.Tick
 }
 
@@ -295,7 +296,8 @@ func (h *CtlHost) redirect(ctx *core.Context, to core.NodeID, out *CtlHostOutput
 	}
 }
 
-// report takes a node's report from the loop it names, which pushes then go to.
+// report takes a node's report from the loop it names, which pushes then go to, and answers it
+// with the replicas the node is to delete, if any, and the disk membership.
 func (h *CtlHost) report(ctx *core.Context, ev *core.Event, out *CtlHostOutput) {
 	if DecodeNodeReport(ctx.Pool, &ev.Msg, &h.nr) != nil || h.nr.Node != ev.Peer.Node {
 		return
@@ -318,6 +320,12 @@ func (h *CtlHost) report(ctx *core.Context, ev *core.Event, out *CtlHostOutput) 
 		out.Errs = append(out.Errs, err)
 	}
 	h.handOut(ctx, out)
+	if h.dels = h.ctl.Deletes(h.nr.Node, h.leased(ctx), h.dels[:0]); len(h.dels) > 0 {
+		a := core.Action{Kind: core.ActNetSend, Peer: ev.Peer, Reply: true}
+		if EncodeDelete(ctx.Pool, h.group, h.dels, &a.Msg) == nil {
+			out.Actions = append(out.Actions, a)
+		}
+	}
 	h.sendDisks(ctx, ev.Peer, out)
 }
 

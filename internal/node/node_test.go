@@ -590,6 +590,32 @@ func TestTheDiskMembershipIsHandedOn(t *testing.T) {
 	}
 }
 
+// The heartbeat carries the metadata replicas the loop last reported, and a delete from the voter
+// the node talks to reaches the loop only for a replica that report showed had learned its removal.
+func TestADeleteReachesOnlyAReplicaThatLearnedItsRemoval(t *testing.T) {
+	r := newRun(t, 1)
+	reps := []meta.ReplicaReport{{Group: 5, ID: 3, ConfIndex: 4, Joint: true, Removed: true, Voters: []uint64{1, 2, 4}}, {Group: 5, ID: 7, ConfIndex: 4}, {Group: 6, ID: 3}}
+	r.n.Replicas(reps)
+	reps[0].Voters[0] = 9
+	if nr := r.report(); len(nr.Replicas) != 3 || nr.Replicas[0].Voters[0] != 1 || !nr.Replicas[0].Removed || nr.Replicas[1].ConfIndex != 4 {
+		t.Fatalf("the heartbeat reports %+v", nr.Replicas)
+	}
+	del := func(pool core.BufPool, m *core.Msg) error {
+		return meta.EncodeDelete(pool, group, []meta.ReplicaRef{{Group: 5, ID: 3}, {Group: 5, ID: 7}, {Group: 6, ID: 3}, {Group: 5, ID: 9}}, m)
+	}
+	r.from(core.NodeID{Node: 5}, del)
+	if len(r.out.Deletes) != 0 {
+		t.Fatalf("took a delete from a node that is no voter: %v", r.out.Deletes)
+	}
+	r.from(ctl, del)
+	if !slices.Equal(r.out.Deletes, []meta.ReplicaRef{{Group: 5, ID: 3}}) {
+		t.Fatalf("handed the loop deletes %v, want replica 3 of group 5 alone", r.out.Deletes)
+	}
+	if r.ctx.Pool.(*sim.Pool).Live() != 0 {
+		t.Fatal("a buffer left")
+	}
+}
+
 // A clone of the node's output keeps its membership and placement table once the next messages
 // overwrite the node's buffers, as the node's loop hands it to the device loops.
 func TestACloneOutlivesTheNodesBuffers(t *testing.T) {

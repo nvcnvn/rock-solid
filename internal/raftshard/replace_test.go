@@ -579,6 +579,23 @@ func TestALearnerCatchesUpFromASnapshotBuiltAtTheAppliedIndex(t *testing.T) {
 	}
 }
 
+// A replica that restores a snapshot holds the snapshot's configuration from its index on, and
+// reports that index as its configuration's: a planned voter that caught up from a snapshot taken
+// past the leave has applied the leave.
+func TestARestoredSnapshotMovesTheConfigurationIndex(t *testing.T) {
+	n := newNet(t, 3, 1)
+	n.elect(0)
+	n.propose(0, []byte("a"))
+	n.settleWithout(2)
+	n.snapshot(0)
+	n.propose(0, []byte("b"))
+	n.heartbeat()
+	r := n.r[2]
+	if base := r.st.Base().Index; r.snaps != 1 || base == 0 || r.s.ConfIndex() != base {
+		t.Fatalf("C restored %d snapshots to base %d and reports its configuration at %d", r.snaps, base, r.s.ConfIndex())
+	}
+}
+
 // A snapshot asked for while A applies D's addition is temporarily unavailable, since A's applied
 // index and configuration do not yet hold the change. C, cut off and behind A's compaction, is
 // probed as A applies it, as etcd-raft probes every replica once a configuration changes, and

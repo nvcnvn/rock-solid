@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
@@ -46,10 +47,26 @@ type HaltReport struct {
 	Age              core.Tick
 }
 
+// ReplicaReport is a metadata replica a node holds: its group, its replica ID, the index its
+// applied configuration holds at (raftshard.Shard.ConfIndex), whether that configuration is
+// joint, whether the replica learned its removal, and the configuration's voters, the incoming
+// half's when joint.
+type ReplicaReport struct {
+	Group, ID, ConfIndex uint64
+	Joint, Removed       bool
+	Voters               []uint64
+}
+
+// ReplicaRef names a replica of a group.
+type ReplicaRef struct {
+	Group, ID uint64
+}
+
 // NodeReport is what a node's heartbeat tells the control-plane leader beside its disks' own
 // heartbeats: the format level its release writes, whether it holds metadata and, with role
 // meta, nothing else, the table epoch and session-table version it holds, the disks it opened, the
-// devices it left to the operator (chunkstore.StartFailed) and its halted replicas.
+// devices it left to the operator (chunkstore.StartFailed), its halted replicas and its metadata
+// replicas.
 type NodeReport struct {
 	Node     uint32
 	Release  uint32
@@ -60,6 +77,7 @@ type NodeReport struct {
 	Opened   []OpenedDisk
 	Failed   []uint64
 	Halts    []HaltReport
+	Replicas []ReplicaReport
 }
 
 // FailedDevice is a device a node reports failed, by its stable identity, for the operator.
@@ -80,6 +98,7 @@ type nodeState struct {
 	sessV   uint64
 	halts   []Halt
 	failed  []uint64
+	reps    []ReplicaReport
 }
 
 // DiskEntry is a disk as the record commits it: Up and Gone as the record has them, DownSince unset, its age while down and not gone in whole AgeSteps, and its drain.
@@ -105,7 +124,11 @@ func (c *Control) Heartbeat(now core.Tick, nr *NodeReport, out *ControlOutput) e
 	for _, h := range nr.Halts {
 		n.halts = append(n.halts, Halt{Group: h.Group, ID: h.ID, Index: h.Index, Since: now - min(h.Age, now)})
 	}
-	n.sessV, n.failed = nr.Sessions, append(n.failed[:0], nr.Failed...)
+	n.sessV, n.failed, n.reps = nr.Sessions, append(n.failed[:0], nr.Failed...), n.reps[:0]
+	for _, r := range nr.Replicas {
+		r.Voters = slices.Clone(r.Voters)
+		n.reps = append(n.reps, r)
+	}
 	if nr.Sessions < c.sess.Version {
 		out.SessionTables = append(out.SessionTables, nr.Node)
 	}
@@ -188,6 +211,53 @@ func (c *Control) Asked(node uint32, fs []chunkstore.PGFields) {
 			c.Ask(f)
 		}
 	}
+}
+
+// Deletes appends to dst each replica that node last reported having learned its removal and
+// whose group's plan, its shard-map entry, no longer names it, once that plan is complete. It
+// appends nothing unless leased: the leader holds its lease.
+func (c *Control) Deletes(node uint32, leased bool, dst []ReplicaRef) []ReplicaRef {
+	i, ok := slices.BinarySearchFunc(c.nodes, node, func(n nodeState, id uint32) int { return cmp.Compare(n.id, id) })
+	if !leased || !ok {
+		return dst
+	}
+	for _, r := range c.nodes[i].reps {
+		g, ok := c.group(r.Group)
+		if ok && r.Removed && !slices.ContainsFunc(g.Voters, func(v Replica) bool { return v.ID == r.ID }) && c.complete(g) {
+			dst = append(dst, ReplicaRef{Group: r.Group, ID: r.ID})
+		}
+	}
+	return dst
+}
+
+// complete reports whether every voter of g's plan reported having applied its leave: an index at
+// or past the lowest at which any replica reported a configuration of the plan's voters alone. A
+// report of the joint configuration, whose incoming half is the plan's, does not count, since a
+// voter that applied only that can still lead it and need the voters the plan drops. A plan whose
+// voter is down for good never completes, but the next plan, which replaces that voter, does, and
+// so a plan never waits for the one before it.
+func (c *Control) complete(g *Group) bool {
+	leave := uint64(math.MaxUint64)
+	for _, n := range c.nodes {
+		for _, r := range n.reps {
+			if r.Group == g.ID && !r.Joint && len(r.Voters) == len(g.Voters) && !slices.ContainsFunc(r.Voters, func(id uint64) bool {
+				return !slices.ContainsFunc(g.Voters, func(v Replica) bool { return v.ID == id })
+			}) {
+				leave = min(leave, r.ConfIndex)
+			}
+		}
+	}
+	if leave == math.MaxUint64 {
+		return false
+	}
+	for _, v := range g.Voters {
+		if !slices.ContainsFunc(c.nodes, func(n nodeState) bool {
+			return slices.ContainsFunc(n.reps, func(r ReplicaReport) bool { return r.Group == g.ID && r.ID == v.ID && r.ConfIndex >= leave })
+		}) {
+			return false
+		}
+	}
+	return true
 }
 
 // begin forgets the nodes not heard from within node_down_after of now and, once after a failover

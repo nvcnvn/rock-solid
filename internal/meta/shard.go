@@ -212,6 +212,14 @@ func (s *Shard) Applied() (uint64, raftpb.ConfState) {
 	return s.raft.Applied()
 }
 
+// Report is the replica as its node's heartbeat reports it, its voters dst's.
+func (s *Shard) Report(dst []uint64) ReplicaReport {
+	_, cs := s.raft.Applied()
+	removed, _ := s.raft.Removed()
+	return ReplicaReport{Group: s.group, ID: s.id, ConfIndex: s.raft.ConfIndex(), Joint: len(cs.VotersOutgoing) != 0, Removed: removed,
+		Voters: append(dst[:0], cs.Voters...)}
+}
+
 // Halted is the index of the committed entry the replica could not decode and stopped applying at, or 0.
 func (s *Shard) Halted() uint64 { return s.halted }
 

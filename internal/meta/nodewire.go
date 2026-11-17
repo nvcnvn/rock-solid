@@ -11,7 +11,8 @@ import (
 // control-plane group, every number a uvarint. A NodeReport's body is its node, release, a flags
 // byte (1 Meta, 2 MetaOnly), epoch and session version, then a count and each opened disk's device,
 // log, blocks, reserve, class and loop, a count and each failed device, a count and each halt's group,
-// ID, index and age. A session fetch has no body; its token is the node's. A session table's
+// ID, index and age, and a count and each metadata replica's group, ID, configuration index, a flags
+// byte (1 Joint, 2 Removed), a count and each voter. A session fetch has no body; its token is the node's. A session table's
 // token is the fetch it answers, 0 when pushed unasked, and its body is its version, next ID, a
 // count and each live ID as its gap above the one before. A placement table's body is
 // chunkstore.AppendTable's encoding and a delta's AppendDelta's, both with token 0; a table fetch
@@ -21,7 +22,8 @@ import (
 // and the session's ID as its body. The disk membership, the leader's answer to a report, is a
 // count and, in rising disk ID order, each disk's ID, log, and the node and loop that own it.
 // A replica's asks for new intervals are a count and each ask's epoch, pool, PG index and interval,
-// with no token.
+// with no token. The leader's answer that a node delete metadata replicas is a count and each
+// replica's group and ID, with no token.
 const (
 	KindNodeReport   byte = 0x42
 	KindSessionFetch byte = 0x43
@@ -34,6 +36,7 @@ const (
 	KindStarted      byte = 0x4a
 	KindDisks        byte = 0x4b
 	KindAsks         byte = 0x4c
+	KindDelete       byte = 0x4d
 )
 
 // DiskAddr is a disk of the committed membership record: its ID, its log, and the loop that owns it.
@@ -83,6 +86,21 @@ func appendNodeReport(dst []byte, nr *NodeReport) []byte {
 		dst = binary.AppendUvarint(binary.AppendUvarint(dst, h.Group), h.ID)
 		dst = binary.AppendUvarint(binary.AppendUvarint(dst, h.Index), uint64(h.Age))
 	}
+	dst = binary.AppendUvarint(dst, uint64(len(nr.Replicas)))
+	for _, r := range nr.Replicas {
+		var flags byte
+		if r.Joint {
+			flags |= 1
+		}
+		if r.Removed {
+			flags |= 2
+		}
+		dst = binary.AppendUvarint(binary.AppendUvarint(dst, r.Group), r.ID)
+		dst = binary.AppendUvarint(append(binary.AppendUvarint(dst, r.ConfIndex), flags), uint64(len(r.Voters)))
+		for _, v := range r.Voters {
+			dst = binary.AppendUvarint(dst, v)
+		}
+	}
 	return dst
 }
 
@@ -100,7 +118,7 @@ func DecodeNodeReport(pool core.BufPool, msg *core.Msg, nr *NodeReport) error {
 	node, release := d.uvarint(), d.uvarint()
 	flags := d.byte()
 	*nr = NodeReport{Node: uint32(node), Release: uint32(release), Meta: flags&1 != 0, MetaOnly: flags&2 != 0,
-		Epoch: d.uvarint(), Sessions: d.uvarint(), Opened: nr.Opened[:0], Failed: nr.Failed[:0], Halts: nr.Halts[:0]}
+		Epoch: d.uvarint(), Sessions: d.uvarint(), Opened: nr.Opened[:0], Failed: nr.Failed[:0], Halts: nr.Halts[:0], Replicas: nr.Replicas[:0]}
 	if node > 0xffffffff || release > 0xffffffff || flags > 3 {
 		return ErrMalformed
 	}
@@ -119,6 +137,24 @@ func DecodeNodeReport(pool core.BufPool, msg *core.Msg, nr *NodeReport) error {
 	}
 	for n := d.count(); n > 0; n-- {
 		nr.Halts = append(nr.Halts, HaltReport{Group: d.uvarint(), ID: d.uvarint(), Index: d.uvarint(), Age: core.Tick(d.uvarint())})
+	}
+	for n := d.count(); n > 0; n-- {
+		k := len(nr.Replicas)
+		if k < cap(nr.Replicas) {
+			nr.Replicas = nr.Replicas[:k+1]
+		} else {
+			nr.Replicas = append(nr.Replicas, ReplicaReport{})
+		}
+		r := &nr.Replicas[k]
+		r.Group, r.ID, r.ConfIndex = d.uvarint(), d.uvarint(), d.uvarint()
+		flags := d.byte()
+		if flags > 3 {
+			return ErrMalformed
+		}
+		r.Joint, r.Removed, r.Voters = flags&1 != 0, flags&2 != 0, r.Voters[:0]
+		for v := d.count(); v > 0; v-- {
+			r.Voters = append(r.Voters, d.uvarint())
+		}
 	}
 	if d.bad || len(d.b) != 0 {
 		return ErrMalformed
@@ -309,6 +345,34 @@ func DecodeDisks(pool core.BufPool, msg *core.Msg, dst []DiskAddr) ([]DiskAddr, 
 		}
 		last = id
 		dst = append(dst, DiskAddr{Disk: uint32(id), Log: log, At: core.NodeID{Node: uint32(node), Loop: uint32(loop)}})
+	}
+	if d.bad || len(d.b) != 0 {
+		return dst[:0], ErrMalformed
+	}
+	return dst, nil
+}
+
+// EncodeDelete writes the leader's answer that a node delete each replica of rs into msg, or
+// returns the pool's error.
+func EncodeDelete(pool core.BufPool, group uint64, rs []ReplicaRef, msg *core.Msg) error {
+	body := binary.AppendUvarint(nil, uint64(len(rs)))
+	for _, r := range rs {
+		body = binary.AppendUvarint(binary.AppendUvarint(body, r.Group), r.ID)
+	}
+	return encodeBody(pool, group, KindDelete, 0, body, msg)
+}
+
+// DecodeDelete decodes the replicas a delete names into dst; one that does not decode, or has a
+// token, is ErrMalformed.
+func DecodeDelete(pool core.BufPool, msg *core.Msg, dst []ReplicaRef) ([]ReplicaRef, error) {
+	dst = dst[:0]
+	b, err := untokened(pool, KindDelete, msg)
+	if err != nil {
+		return dst, err
+	}
+	d := decoder{b: b}
+	for n := d.count(); n > 0; n-- {
+		dst = append(dst, ReplicaRef{Group: d.uvarint(), ID: d.uvarint()})
 	}
 	if d.bad || len(d.b) != 0 {
 		return dst[:0], ErrMalformed

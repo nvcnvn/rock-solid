@@ -40,8 +40,9 @@ type Hand struct {
 
 // Output is what a call into the node asks of its loop: actions; session tables to hand
 // replicas; a placement table or delta to hand every replica, with SetTable or ApplyDelta; the
-// committed disk membership to hand every device; and whether the node moved to another
-// control-plane voter, Ctl, which every replica then reports to with SetAuthority.
+// committed disk membership to hand every device; whether the node moved to another
+// control-plane voter, Ctl, which every replica then reports to with SetAuthority; and the
+// metadata replicas to delete, each of which its last report showed had learned its removal.
 type Output struct {
 	Actions []core.Action
 	Hands   []Hand
@@ -50,11 +51,12 @@ type Output struct {
 	Disks   []meta.DiskAddr
 	Moved   bool
 	Ctl     core.NodeID
+	Deletes []meta.ReplicaRef
 }
 
 // Reset empties the output for reuse.
 func (o *Output) Reset() {
-	*o = Output{Actions: o.Actions[:0], Hands: o.Hands[:0]}
+	*o = Output{Actions: o.Actions[:0], Hands: o.Hands[:0], Deletes: o.Deletes[:0]}
 }
 
 // Clone is o without its actions, copied whole, since its table, delta and membership alias the
@@ -121,6 +123,9 @@ type Node struct {
 	delta   chunkstore.Delta
 	epoch   uint64
 	disks   []meta.DiskAddr
+	// metas are the metadata replicas as the loop last reported them, and dels a delete received.
+	metas []meta.ReplicaReport
+	dels  []meta.ReplicaRef
 }
 
 // Ctl is the control-plane voter the node talks to.
@@ -207,6 +212,15 @@ func (n *Node) Remove(device uint64) {
 	n.opened = slices.DeleteFunc(n.opened, func(d meta.OpenedDisk) bool { return d.Device == device })
 }
 
+// Replicas reports the node's metadata replicas, which its heartbeats carry from then on.
+func (n *Node) Replicas(rs []meta.ReplicaReport) {
+	n.metas = n.metas[:0]
+	for _, r := range rs {
+		r.Voters = slices.Clone(r.Voters)
+		n.metas = append(n.metas, r)
+	}
+}
+
 // Start sends the first heartbeat, arms the next and fetches the placement table, which the
 // node's replicas start without.
 func (n *Node) Start(ctx *core.Context, out *Output) {
@@ -243,7 +257,7 @@ func (n *Node) Ask(ctx *core.Context, device, ask uint64, out *Output) {
 	}
 }
 
-// OnEvent takes a session or placement table from a control-plane voter, dropping one from any
+// OnEvent takes a session or placement table or a delete from a control-plane voter, dropping one from any
 // other peer, the leader the voter it talks to names, or a timer. A lost connection to that voter
 // moves the node to the next; a fetch goes again only on a move or FetchTimer, both at most once an
 // Interval, since while the driver backs off each send fails at once with another loss.
@@ -290,6 +304,15 @@ func (n *Node) recv(ctx *core.Context, ev *core.Event, out *Output) {
 	case meta.KindDelta:
 		if n.delta, err = meta.DecodeDelta(ctx.Pool, &ev.Msg); err == nil {
 			out.Delta, n.tableAt, n.wanted, n.epoch = &n.delta, 0, false, max(n.epoch, n.delta.Epoch)
+		}
+		return
+	case meta.KindDelete:
+		if n.dels, err = meta.DecodeDelete(ctx.Pool, &ev.Msg, n.dels); err == nil {
+			for _, d := range n.dels {
+				if slices.ContainsFunc(n.metas, func(r meta.ReplicaReport) bool { return r.Group == d.Group && r.ID == d.ID && r.Removed }) {
+					out.Deletes = append(out.Deletes, d)
+				}
+			}
 		}
 		return
 	case meta.KindDisks:
@@ -371,7 +394,7 @@ func (n *Node) heartbeat(ctx *core.Context, out *Output) {
 	nr := &n.report
 	// With no replica running this reports the version only received, safe while a store's fence
 	// table starts empty in memory: a replica that starts later is handed n.table before any write.
-	*nr = meta.NodeReport{Node: n.cfg.Node, Release: n.cfg.Release, Epoch: n.epoch, Sessions: n.table.Version, Opened: n.opened, Failed: n.failed}
+	*nr = meta.NodeReport{Node: n.cfg.Node, Release: n.cfg.Release, Epoch: n.epoch, Sessions: n.table.Version, Opened: n.opened, Failed: n.failed, Replicas: n.metas}
 	for _, r := range n.reps {
 		if r.runs {
 			nr.Sessions, nr.Epoch = min(nr.Sessions, r.held), min(nr.Epoch, r.epoch)

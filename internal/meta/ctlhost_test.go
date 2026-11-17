@@ -451,6 +451,47 @@ func TestAReportIsAnsweredWithTheCommittedDisks(t *testing.T) {
 	}
 }
 
+// A node reporting a replica its group's plan dropped is answered with the replica's deletion
+// once every voter of the plan reported having applied its leave and the replica learned its
+// removal, and the others with nothing to delete.
+func TestAReportIsAnsweredWithTheReplicasToDelete(t *testing.T) {
+	r := newHostRun(t)
+	r.lead()
+	r.h.Control().smap = deleting(1, 2, 4).smap
+	plan := []uint64{1, 2, 4}
+	deleted := func(node uint32) []ReplicaRef {
+		var got []ReplicaRef
+		for _, a := range r.sent {
+			if _, k, _, _ := Peek(&a.Msg); k == KindDelete && a.Peer.Node == node {
+				rs, err := DecodeDelete(r.pool, &a.Msg, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got = append(got, rs...)
+			}
+			free(&core.Context{Pool: r.pool}, &a.Msg)
+		}
+		r.sent = r.sent[:0]
+		return got
+	}
+	gone := NodeReport{Node: 3, Replicas: []ReplicaReport{{Group: 5, ID: 3, ConfIndex: 3, Joint: true, Removed: true, Voters: plan}}}
+	for _, id := range []uint64{1, 2} {
+		r.report(&NodeReport{Node: uint32(id), Replicas: []ReplicaReport{{Group: 5, ID: id, ConfIndex: 5, Voters: plan}}})
+	}
+	r.report(&gone)
+	if got := deleted(3); len(got) != 0 {
+		t.Fatalf("before D reported the leave applied, node 3 is told to delete %v", got)
+	}
+	r.report(&NodeReport{Node: 4, Replicas: []ReplicaReport{{Group: 5, ID: 4, ConfIndex: 5, Voters: plan}}})
+	if got := deleted(4); len(got) != 0 {
+		t.Fatalf("node 4 is told to delete %v", got)
+	}
+	r.report(&gone)
+	if got := deleted(3); !slices.Equal(got, []ReplicaRef{{Group: 5, ID: 3}}) {
+		t.Fatalf("once the plan is complete, node 3 is told to delete %v, want C", got)
+	}
+}
+
 func TestAReportFromAnotherNodeIsDropped(t *testing.T) {
 	r := newHostRun(t)
 	r.lead()
