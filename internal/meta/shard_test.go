@@ -804,3 +804,49 @@ func (c *group) tellRemoved(i, from int) {
 		}
 	})
 }
+
+// TestAReplicaItIsNotIsAnsweredGone hands replica 1 of group 5 asks, raftshard's kind 5, about
+// replicas its node does not hold, another of its group and one of its ID in another group, which
+// raftshard.Gone answers, kind 6, from the replica asked about to the asker; and about itself,
+// live, which nothing answers.
+func TestAReplicaItIsNotIsAnsweredGone(t *testing.T) {
+	c := newGroup(t, 3, false)
+	for _, k := range []struct {
+		group, about uint64
+		gone         bool
+	}{{5, 9, true}, {7, 1, true}, {5, 1, false}} {
+		body := binary.LittleEndian.AppendUint64([]byte{core.ProtoGroup}, k.group)
+		body = append(body, 5)
+		for _, v := range []uint64{2, k.about, 0, 0, 0} {
+			body = binary.LittleEndian.AppendUint64(body, v)
+		}
+		var msg core.Msg
+		if err := msg.SetInline(body); err != nil {
+			t.Fatal(err)
+		}
+		var answers [][]byte
+		asker := core.NodeID{Node: 1}
+		c.call(0, func(ctx *core.Context, out *Output) {
+			c.n[0].s.OnEvent(ctx, &core.Event{Kind: core.EvNetRecv, Peer: asker, Msg: msg}, out)
+			for _, a := range out.Raft.Actions {
+				if a.Kind == core.ActNetSend && a.Peer == asker {
+					answers = append(answers, slices.Clone(a.Msg.Inline()))
+				}
+			}
+		})
+		c.inbox = c.inbox[:0]
+		want := 0
+		if k.gone {
+			want = 1
+		}
+		if len(answers) != want {
+			t.Fatalf("an ask about replica %d of group %d was answered %d times", k.about, k.group, len(answers))
+		}
+		if want == 1 {
+			a := answers[0]
+			if len(a) != len(body) || binary.LittleEndian.Uint64(a[1:]) != k.group || a[9] != 6 || binary.LittleEndian.Uint64(a[10:]) != k.about || binary.LittleEndian.Uint64(a[18:]) != 2 {
+				t.Fatalf("an ask about replica %d of group %d was answered %v", k.about, k.group, a)
+			}
+		}
+	}
+}

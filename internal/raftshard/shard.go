@@ -518,6 +518,15 @@ func (s *Shard) answerGone(ev *core.Event, out *Output) {
 	}
 }
 
+// Asked reports the group and replica an ask names, and false for any other message.
+func Asked(msg *core.Msg) (group, replica uint64, ok bool) {
+	b := msg.Inline()
+	if msg.Buf != core.NoBuf || len(b) != fortBytes || b[0] != core.ProtoGroup || b[groupBytes] != kindAsk {
+		return 0, 0, false
+	}
+	return le.Uint64(b[1:]), le.Uint64(b[kindBytes+8:]), true
+}
+
 // Gone is a node's answer to an ask about a replica it no longer holds, one that applied its removal or whose state the node deleted, sent back to node from; it reports false for any other message. A node hands Gone only an ask naming a replica it does not hold, never one for another replica of the group.
 func Gone(msg *core.Msg, from core.NodeID, a *core.Action) bool {
 	if b := msg.Inline(); msg.Buf != core.NoBuf || len(b) != fortBytes || b[groupBytes] != kindAsk {

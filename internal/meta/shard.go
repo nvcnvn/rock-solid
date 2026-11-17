@@ -115,9 +115,17 @@ func (s *Shard) Start(ctx *core.Context, out *Output) {
 	s.raft.Start(ctx, &out.Raft)
 }
 
-// OnEvent hands the replica an event, as raftshard.Shard.OnEvent.
+// OnEvent hands the replica an event, as raftshard.Shard.OnEvent. Its host hands it every frame
+// that names no other replica the node holds, so raftshard.Gone answers an ask naming another.
 func (s *Shard) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
 	s.out = out
+	if group, id, ok := raftshard.Asked(&ev.Msg); ev.Kind == core.EvNetRecv && ok && (group != s.group || id != s.id) {
+		var a core.Action
+		if raftshard.Gone(&ev.Msg, ev.Peer, &a) {
+			out.Raft.Actions = append(out.Raft.Actions, a)
+		}
+		return
+	}
 	s.raft.OnEvent(ctx, ev, &out.Raft)
 	s.after()
 }
