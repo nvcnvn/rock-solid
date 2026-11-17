@@ -167,8 +167,8 @@ func (g *gen) crash(n int) {
 	g.line(`k |-> "restart", n |-> %d`, n)
 }
 
-// repliedLater reports whether node n, as PG f's primary, took its own disk's peering reply for an interval after iv and after every interval it decided, and has not decided it: a recovery write of iv that lands now changes no list that decision reads. A reply of an interval a later decision passed over is no longer read.
-func (g *gen) repliedLater(n int, f, iv uint64) bool {
+// repliedLater reports whether node n, PG f's primary of iv, took its own disk's peering reply, or its disk answered a later primary listing chunk c, for an interval after iv and after every interval n decided: a recovery write of c in iv that lands now changes no list that decision reads, as a demoted primary's gated write lands only at the next decision its disk persists. A reply of an interval a later decision of n passed over is no longer read.
+func (g *gen) repliedLater(n int, f, c, iv uint64) bool {
 	own, ok := g.nodeDisk[n]
 	if !ok {
 		own = uint64(n)
@@ -180,11 +180,11 @@ func (g *gen) repliedLater(n int, f, iv uint64) bool {
 		}
 	}
 	for k, got := range g.replies {
-		if k[0] != uint64(n) || k[1] != f || k[2] <= after {
+		if k[1] != f || k[2] <= after {
 			continue
 		}
-		for d := range got {
-			if g.disk(d) == own {
+		for d, x := range got {
+			if g.disk(d) == own && (k[0] == uint64(n) || x.chunks[c][2] != 0) {
 				return true
 			}
 		}
@@ -623,7 +623,7 @@ func (g *gen) run(recs []trace.Record) {
 			g.recovering[n] = slices.DeleteFunc(g.recovering[n], func(x [3]uint64) bool { return x[0] == r.Fields[0] && x[2] == r.Fields[3] })
 			f, s := g.chunkField(r.Fields[0]), g.source(r.Fields[2])
 			at, kind := len(g.lines), "recovered"
-			if n == g.primary[f] && g.repliedLater(n, f, r.Fields[3]) {
+			if n == g.primary[f] && g.repliedLater(n, f, r.Fields[0], r.Fields[3]) {
 				kind = "recoveredlate"
 			} else if r.Fields[3] == g.activated[f] {
 				at = g.recoveredAt(f, r.Fields[0], r.Fields[3], n, s)
