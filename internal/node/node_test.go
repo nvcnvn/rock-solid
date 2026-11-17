@@ -361,6 +361,17 @@ func TestAPlacementTableFromAVoterIsHandedOn(t *testing.T) {
 	}
 }
 
+// A node fetches the placement table at its start: its replicas start with none, and a leader that
+// sent the node the whole table before a restart within node_down_after sends it only deltas.
+func TestAStartFetchesThePlacementTable(t *testing.T) {
+	r := newRun(t, 1)
+	r.out.Reset()
+	r.n.Start(&r.ctx, &r.out)
+	if n := len(r.sends(meta.KindTableFetch)); n != 1 {
+		t.Fatalf("the start sent %d table fetches", n)
+	}
+}
+
 func TestATableFetchGoesOutOnceAnIntervalUntilATableArrives(t *testing.T) {
 	r := newRun(t, 1, 1)
 	fetches := func() int {

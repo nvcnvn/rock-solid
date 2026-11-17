@@ -199,8 +199,12 @@ func (n *Node) Remove(device uint64) {
 	n.opened = slices.DeleteFunc(n.opened, func(d meta.OpenedDisk) bool { return d.Device == device })
 }
 
-// Start sends the first heartbeat and arms the next.
-func (n *Node) Start(ctx *core.Context, out *Output) { n.heartbeat(ctx, out) }
+// Start sends the first heartbeat, arms the next and fetches the placement table, which the
+// node's replicas start without.
+func (n *Node) Start(ctx *core.Context, out *Output) {
+	n.heartbeat(ctx, out)
+	n.FetchTable(ctx, out)
+}
 
 // Held records that the store on device holds session version v, as its replica's SetSessions
 // left it.
