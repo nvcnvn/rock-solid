@@ -487,8 +487,9 @@ EtcdMayChange(i) ==
     /\ \A k \in 1 .. Len(log[i]) : log[i][k].t < term[i] => applied[i] >= k
     /\ OneAtATime => ConfIndex(log[i]) <= applied[i]
 
-\* The code proposes a change only once it applied an entry of its term, too.
-CanChange(i) == EtcdMayChange(i) /\ applied[i] > 0 /\ log[i][applied[i]].t = term[i]
+\* The code proposes a change only once it applied an entry of its term, too, and never once it
+\* learned its removal: such a leader only hands its leadership on (reconcile).
+CanChange(i) == EtcdMayChange(i) /\ ~out[i] /\ applied[i] > 0 /\ log[i][applied[i]].t = term[i]
 
 Propose(i, c, promoted) ==
     /\ log' = [log EXCEPT ![i] = Append(@, [t |-> term[i], cfg |-> c])]
