@@ -1216,8 +1216,8 @@ Die ==
                    leaseVars, clockVars, raftVars>>
 
 \* Whether a held or fenced write must be refused when it is ordered. One on an
-\* unfound chunk is too: its OK would read as missing, and a later peering would
-\* keep it over the version a returning disk could still have healed.
+\* unfound chunk is too: its primary lists the chunk, so the write would wait
+\* for ever for a recovery with no source.
 Fenced(n, x) ==
     LET w == Writes[x.w]
         p == ChunkPG[w.c]
@@ -1244,13 +1244,17 @@ Answer(r) ==
     /\ UNCHANGED <<ctlVars, nodeVars, priVars, rm, vers, sends, dmn, bad, refd, ownw, leaseVars, clockVars, raftVars>>
 
 \* The active primary orders a client write: the chunk's next version, merged
-\* on its image, the newest version it holds that peering did not drop. A write
-\* covering part of a block waits until that image is the version peering kept,
-\* which a primary that dropped only gated versions of its own has at once,
-\* though it lists the chunk and a member may recover from it. Any write waits
-\* while the chunk has fewer than min_live copies, as Copies counts them, until
-\* recovery clears enough members' lists (Degraded): an OK resting on members
-\* that list the chunk leaves it unfound when its one clean copy is lost.
+\* on the newest version it holds that peering did not drop. A write waits while
+\* the primary lists the chunk, until recovery clears its list: the one copy a
+\* write surely lands on is the primary's, so a version logged by members that
+\* list the chunk alone, its clean copies down when the next peering keeps it,
+\* would leave none clean. ListerOrders lets a primary that lists the chunk order
+\* a whole-block write, or a partial one on its image, the kept version, which a
+\* primary that dropped only gated versions of its own has at once, and
+\* MergeBeforeKept beside it a partial one before it holds that. Any write also
+\* waits while the chunk has fewer than min_live copies, as Copies counts them,
+\* until recovery clears enough members' lists (Degraded): an OK resting on
+\* members that list the chunk leaves it unfound when its one clean copy is lost.
 Order(n, x) ==
     LET w == Writes[x.w]
         c == w.c
@@ -1270,7 +1274,8 @@ Order(n, x) ==
        /\ ~pr[n][p].ask \/ Bug("OrderPastFailed")
        /\ own = PrimDisk(p, k)
        /\ ~Fenced(n, x)
-       /\ w.whole \/ miss[own][c] = NoMiss \/ c \in y.img \/ Bug("MergeBeforeKept")
+       /\ \/ miss[own][c] = NoMiss
+          \/ Bug("ListerOrders") /\ (w.whole \/ c \in y.img \/ Bug("MergeBeforeKept"))
        /\ ~Degraded(p, k, c) \/ Bug("NoDegradedHold")
        /\ Cnt(v) <= MaxCounter
        /\ pin' = [pin EXCEPT ![n] = @ \ {x}]
@@ -2240,9 +2245,9 @@ NoStranded ==
 \* a member of its interval can serve them all, or its own image is what peering
 \* kept. A holder that truly dies leaves none, so it is claimed only while no
 \* disk has gone; ci-tears, where every copy can be torn, does not check it. A
-\* write of a primary that lists the chunk would leave none, peering with a
-\* member down unable to tell whether it landed there, but for the Degraded hold:
-\* such a write waits until min_live members that list nothing hold the chunk.
+\* write of a primary that lists the chunk would leave none, landing on members
+\* that list it alone while its clean copies are down, but for the hold: such a
+\* write waits until recovery clears the primary's list.
 PrimarySource ==
     \A p \in PG, n \in Node, c \in Chunk :
        (/\ \A d \in Node : dnode[d] # 0
@@ -2334,7 +2339,7 @@ AckedOnMinLive == [][\A y \in ackd' \ ackd :
 
 \* 22. A write held for its chunk's copies does not wait for ever: recovery
 \* reaches the chunk, so in the end no active primary holds a write it would
-\* order but for Degraded.
+\* order but for Degraded or its own list.
 HeldForCopies(n, x) ==
     LET c == Writes[x.w].c
         p == ChunkPG[c]
@@ -2343,7 +2348,7 @@ HeldForCopies(n, x) ==
        /\ pr[n][p].act
        /\ ~pr[n][p].ask
        /\ ~Fenced(n, x)
-       /\ Degraded(p, IvAt(n, p), c)
+       /\ Degraded(p, IvAt(n, p), c) \/ miss[PrimDisk(p, IvAt(n, p))][c] # NoMiss
 
 HeldWritesOrdered == <>[](\A n \in Node : \A x \in pin[n] : ~HeldForCopies(n, x))
 -----------------------------------------------------------------------------
@@ -2533,6 +2538,9 @@ LoneListerWrites ==
     <<Partial[1], [Partial[2] EXCEPT !.after = 1],
       [c |-> 1, blk |-> 2, whole |-> TRUE, inc |-> 0, re |-> 0, after |-> 1]>>
 ListerOrders == Plan(<<ML(1, 2), Mark(3, "down"), Mark(3, "up")>>, LoneListerWrites, {})
+\* ci-sources-lister-one and neg-lister-orders: the same at min_live 1, where
+\* the source counts as min_live clean copies.
+ListerOrder1Plans == {Plan(<<ML(1, 1), Mark(3, "down"), Mark(3, "up")>>, LoneListerWrites, {})}
 MoveSourcePlans == {MoveRestarted}
 MoveAnswer == {[MoveRestarted EXCEPT !.w = <<Partial2[2]>>]}
 ListerAnswer == {[ListerRestarted EXCEPT !.w = <<Partial[2]>>]}
@@ -2553,10 +2561,13 @@ HeldPlans == {Plan(<<Mark(3, "down"), Mark(3, "up"), Mark(2, "down")>>, Partial,
 \* disk 2 alone, then back listing the chunk, which leaves disk 2 its one clean
 \* copy, so W2, sent once W1 is acknowledged, waits for recovery.
 HeldLivePlans == {Plan(<<Mark(3, "maint"), Mark(3, "up")>>, <<Partial2[1], [Partial2[2] EXCEPT !.after = 1]>>, {})}
-\* neg-write-on-unfound: the same writes, with the source marked down and the
-\* primary moved to the other member that lists the chunk, which carries no
-\* image, so the chunk is unfound.
-UnfoundPlans == {Plan(<<ML(1, 2), Mark(3, "down"), Rot(1)>>, LoneListerWrites, {})}
+\* ci-held-rotated, at min_live 1: the same, then the primary moved to disk 3, so
+\* W2 waits for recovery of the primary's own copy alone.
+HeldLiveRotPlans == {Plan(<<Mark(3, "maint"), Mark(3, "up"), Rot(2)>>, <<Partial2[1], [Partial2[2] EXCEPT !.after = 1]>>, {})}
+\* neg-write-on-unfound, at min_live 1 under fairness: ci-held-live's plan, then
+\* disk 2, W1's one clean copy, marked down, so the chunk is unfound and W2 is
+\* held by its primary, which lists it, unless refused.
+UnfoundPlans == {Plan(<<Mark(3, "maint"), Mark(3, "up"), Mark(2, "down")>>, <<Partial2[1], [Partial2[2] EXCEPT !.after = 1]>>, {})}
 \* neg-keep-past-member and neg-lister-vetoes: the shapes of ci-sources, with the
 \* primary moved to the other member holding Y where the restart was. A restarted
 \* primary keeps Y gated, so it drops Y and is the source of X; the new primary
