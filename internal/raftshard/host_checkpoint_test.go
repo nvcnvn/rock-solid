@@ -151,8 +151,9 @@ func TestACheckpointRewritesAnIdleShardsHardState(t *testing.T) {
 	}
 }
 
-// A shard with a round in flight is left to that round, whose hard state is newer; one whose
-// oldest live round holds entries a compaction has not reached is not rewritten either.
+// A shard whose round lies past the LSN a rewrite is given is not rewritten; one with a round in
+// flight is left to that round, whose hard state is newer; one whose oldest live round holds
+// entries a compaction has not reached is not rewritten either.
 func TestRewriteLeavesAShardWithARoundInFlightOrLiveEntries(t *testing.T) {
 	r := newRig(t)
 	st, other := NewStorage(), NewStorage()
@@ -163,14 +164,19 @@ func TestRewriteLeavesAShardWithARoundInFlightOrLiveEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.commit(other, 6, 1, Round{Entries: entries(1, 1, 1, 100), HardState: raftpb.HardState{Term: 1, Vote: 1, Commit: 1}})
+	rewrite := func(lsn uint64, why string) {
+		t.Helper()
+		n := len(r.host.flights)
+		if err := r.host.Rewrite(&r.ctx, lsn, &r.out); err != nil {
+			t.Fatal(err)
+		}
+		if len(r.host.flights) != n {
+			t.Fatalf("rewrite submitted %d blobs %s, want none", len(r.host.flights)-n, why)
+		}
+	}
+	rewrite(r.host.shard(5).refs[0].LSN-1, "for a round past its LSN")
 	r.write(5, 2, &Round{HardState: raftpb.HardState{Term: 2, Vote: 1, Commit: 1}})
-	n := len(r.host.flights)
-	if err := r.host.Rewrite(&r.ctx, r.host.Log.DurableLSN(), &r.out); err != nil {
-		t.Fatal(err)
-	}
-	if len(r.host.flights) != n {
-		t.Fatalf("rewrite submitted %d blobs, want none", len(r.host.flights)-n)
-	}
+	rewrite(r.host.Log.DurableLSN(), "with a round in flight")
 }
 
 // An owner whose removed shard's blobs can still replay is given to no shard until a manifest's
@@ -285,5 +291,42 @@ func TestTheRoundOfABaseNoRunHoldsStaysLive(t *testing.T) {
 	sts := r.crashCleaned(5)
 	if got := sts[5].Base(); got.Index != 3 || len(got.ConfState.Voters) != 3 {
 		t.Fatalf("the restart lost the boot base: %+v", got)
+	}
+}
+
+// A removed shard's round that turns durable after the removal keeps its owner from a new shard
+// until the loadable manifest's floor passes that round too.
+func TestARemovedShardsRoundInFlightKeepsItsOwnerOnceDurable(t *testing.T) {
+	r := newRig(t)
+	st := NewStorage()
+	r.host.Add(5, st)
+	r.commit(st, 5, 1, Round{Entries: entries(1, 1, 1, 100), HardState: raftpb.HardState{Term: 1, Vote: 1, Commit: 1}})
+	r.write(5, 2, &Round{Entries: entries(2, 1, 1, 100), HardState: raftpb.HardState{Term: 1, Vote: 1, Commit: 2}})
+	r.host.Remove(5)
+	floor := r.checkpoint()
+	r.roll()
+	if r.host.Reusable(5) {
+		t.Fatalf("owner 5 is reusable with its removed shard's round durable after the floor %d", floor)
+	}
+}
+
+// A restart on a base its runs restore past the host's last compaction reports dead the replayed
+// entry rounds that base covers, even when the one round holding a hard state closes no earlier one.
+func TestARestartCollectsTheRoundsItsRestoredBaseCovers(t *testing.T) {
+	r := newRig(t)
+	st := NewStorage()
+	r.host.Add(5, st)
+	r.commit(st, 5, 1, Round{Entries: entries(1, 2, 1, 100)})
+	r.commit(st, 5, 2, Round{Entries: entries(3, 1, 1, 100), HardState: raftpb.HardState{Term: 1, Vote: 1, Commit: 3}})
+	want := r.host.shard(5).rounds[1].blobs
+	r.checkpoint()
+	r.roll()
+	if err := st.Compact(3, raftpb.ConfState{Voters: []uint64{1}}); err != nil {
+		t.Fatal(err)
+	}
+	r.bases = map[uint32]raftpb.SnapshotMetadata{5: st.Base()}
+	r.crash(5)
+	if n := len(r.host.shard(5).refs); n != want {
+		t.Fatalf("after the restart the host holds %d blobs of owner 5, want %d of the round holding its hard state", n, want)
 	}
 }
