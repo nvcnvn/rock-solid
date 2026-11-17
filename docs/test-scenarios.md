@@ -3657,7 +3657,7 @@ under fairness, as `heavy-peering` does, on the restart plan alone, and those fo
 | --- | --- | --- |
 | A member logs one version of a chunk out of order (1.2 before 1.1) | 5 | Peering keeps 1.2, which was merged on 1.1, from a member that lacks 1.1's block |
 | A new primary merges before it holds a kept version | 4 | The new primary's partial write merges on its stale block, and the acknowledged result drops the kept version |
-| A new primary merges on a version it mapped that peering dropped | 8 | PG 1: primary 1's 1.1 reaches node 2 alone; node 1 is marked down; node 2 peers, node 3 lacks 1.1, so the decision drops it, and node 2 merges a partial write on it. The clause it breaks nearly restates the rule, since `Content` is per block and shows no merged bytes: the Go plant `mergeOnDropped`, which breaks "a member listing nothing maps the kept writes applied in version order", is what backs the rule |
+| A new primary merges on a version it mapped that peering dropped | 8 | At `min_live` 1, since at 2 the partial write waits for recovery, its chunk having one clean copy. PG 1: primary 1's 1.1 reaches node 2 alone; node 1 is marked down; node 2 peers, node 3 lacks 1.1, so the decision drops it, and node 2 merges a partial write on it. The clause it breaks nearly restates the rule, since `Content` is per block and shows no merged bytes: the Go plant `mergeOnDropped`, which breaks "a member listing nothing maps the kept writes applied in version order", is what backs the rule |
 | Peering stops only the previous interval | 4 | PG 2: interval 2 replaces the primary, interval 3 puts the other member in `maintenance`; 3 reaches only a member live in 2, and the old primary's write tagged 1, which 3 dropped, completes |
 | Members compare member lists instead of interval numbers | 4 | [1,2,3] → [1,2] → [1,2,3]; members at interval 3 accept the old write tagged 1 that 3's peering dropped |
 | A disk ID kept across a new log ID | 4 | 1.1 acknowledged on all three; node 3's disk is formatted again and keeps its ID; node 1 is marked down; peering finds disk 3, live in 1, lacking 1.1, and drops it |
@@ -3669,7 +3669,7 @@ under fairness, as `heavy-peering` does, on the restart plan alone, and those fo
 | An older version is decided by its own interval's members after a later interval kept it | 4 | Interval 2 keeps a version recovering onto node 1; interval 3 reaches node 1 and a member live in 1 that lacks the version, and 1's rule drops what 2 kept |
 | A primary activates before missing lists are durable | 4 | A member crashes after activation, forgets that it lacks the kept version, and the next peering, reaching it, drops the version |
 | The leader records an activation the primary has only decided | 4 | PG 2: interval 2 replaces member 3 with node 1; primary 2 decides to keep W, still in flight to 3, and the leader records 2 before any member persisted the decision; W completes in interval 1; interval 3 puts 2 in `maintenance`, and node 1, peering from interval 2, finds no member that persisted its decision and drops W |
-| Recovery picks the blocks to leave out when it reads the authoritative member, not when it orders its write | 4 | A member that lists a chunk gets a client write ordered after recovery's read; the recovery write copies the older block over it, and the next peering, reaching that member, drops the acknowledged write |
+| Recovery picks the blocks to leave out when it reads the authoritative member, not when it orders its write | 4 | At `min_live` 1, since at 2 the plans' client write waits for the recovery, its chunk having too few clean copies. A member that lists a chunk gets a client write ordered after recovery's read; the recovery write copies the older block over it, and the next peering, reaching that member, drops the acknowledged write |
 | The leader removes a leaving member before its replacement recovered | 13 | PG 2: W acknowledged on nodes 2 and 3; interval 2 adds node 1 with 3 leaving; interval 3 removes 3 before node 1 holds W, which only node 2 then holds |
 | A recovered report for an earlier interval removes the leaving member | 13 | PG 2: interval 2 adds node 1 with 3 leaving, and primary 2 activates it before any write and reports it recovered; W is acknowledged on nodes 2, 3 and 1; node 1's disk is formatted again, and interval 3 replaces it with the new, empty disk; interval 4 removes 3 on the report for 2 while the new disk lacks W. The maintenance plan alone: interval 3 puts node 2 in `maintenance` and W is acknowledged on 3 and 1; interval 4 brings 2 back; interval 5 removes 3 on the report for 2, leaving W on node 1 alone |
 | Members accept a write only in the table epoch it was sent in | 7 | A fold or a change to the other PG reaches a member while a write is in flight, and the member refuses it though its interval is unchanged |
@@ -4169,10 +4169,10 @@ change model's `ci` runs ran beside other jobs' Go tests, and the rest beside tw
 jobs, but the voter replacement model's two-plans rows, which ran with 1 worker beside one
 4-worker TLC job, where the model's other `ci` configurations took about three times their 4-worker
 time. Constants are in each configuration's first line and in its model's section. The epoch change
-model's `ci` rows are one run on the spec with a restarted member's ask, which grew every restart
-configuration's state space, and a second run of each configuration it put over the 300 s budget,
-cut to fit; each cut configuration keeps its full size in a `deep` twin, as the configuration table
-says. Its `deep` and `heavy` rows ran on the spec before the acknowledgement became a step of its own
+model's `ci` rows are one run on the spec with the hold on a write to a chunk with too few clean
+copies, at a load average of 10 to 17, but `ci-refills-stay` and `ci-refills-stay-node1`, which that
+load put over the 300 s budget, from a second run of the two alone. A configuration cut to fit keeps
+its full size in a `deep` twin, as the configuration table says. Its `deep` and `heavy` rows ran on the spec before the acknowledgement became a step of its own
 (`Answer`) and before the keep rule left out members torn above a version; they are stale until the
 next milestone's run, which is also the twins' first.
 
@@ -4191,47 +4191,49 @@ next milestone's run, which is also the twins' first.
 | Purge | `ci-write` | 1 inode of 7 bytes, 2 nodes, writes at 2 and 6, truncates to 1, 5 or 8, 2 crashes | 38 | 797,082 | 11 s |
 | Purge | `ci-extend` | 1 inode of 3 bytes, 2 nodes, writes at 4 and 6, truncates to 2 or 8, 2 crashes | 39 | 1,145,014 | 13 s |
 | Purge | `ci-orphan` | 1 inode of 3 bytes, 2 nodes, writes at 5, an unlink, a fence, an owner failover, a crash | 30 | 35,516 | 2 s |
-| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 32 | 1,266,834 | 203 s |
-| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 27 | 1,198,408 | 213 s |
-| Epoch change | `ci-restarts-moved` | [Epoch change model](#epoch-change-model) | 29 | 289,344 | 69 s |
-| Epoch change | `ci-edits` | [Epoch change model](#epoch-change-model) | 29 | 918,410 | 174 s |
-| Epoch change | `ci-tears` | [Epoch change model](#epoch-change-model) | 26 | 221,814 | 55 s |
-| Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 84 | 1,414,913 | 141 s |
+| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 32 | 1,142,163 | 202 s |
+| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 27 | 1,196,500 | 242 s |
+| Epoch change | `ci-restarts-moved` | [Epoch change model](#epoch-change-model) | 29 | 268,328 | 73 s |
+| Epoch change | `ci-edits` | [Epoch change model](#epoch-change-model) | 29 | 848,728 | 135 s |
+| Epoch change | `ci-tears` | [Epoch change model](#epoch-change-model) | 26 | 176,462 | 46 s |
+| Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 84 | 1,414,913 | 134 s |
 | Epoch change | `ci-hide` | [Epoch change model](#epoch-change-model) | 76 | 234,832 | 23 s |
-| Epoch change | `ci-hide-clocks` | [Epoch change model](#epoch-change-model) | 83 | 1,741,366 | 176 s |
-| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 32 | 1,347,108 | 274 s |
-| Epoch change | `ci-stays` | [Epoch change model](#epoch-change-model) | 27 | 116,279 | 37 s |
-| Epoch change | `ci-stays-as-primary` | [Epoch change model](#epoch-change-model) | 27 | 365,012 | 143 s |
-| Epoch change | `ci-stays-new` | [Epoch change model](#epoch-change-model) | 27 | 485,798 | 152 s |
-| Epoch change | `ci-stays-stale` | [Epoch change model](#epoch-change-model) | 31 | 410,814 | 62 s |
-| Epoch change | `ci-stays-gone` | [Epoch change model](#epoch-change-model) | 28 | 67,676 | 11 s |
-| Epoch change | `ci-late-ask` | [Epoch change model](#epoch-change-model) | 27 | 591,047 | 140 s |
-| Epoch change | `ci-gates` | [Epoch change model](#epoch-change-model) | 26 | 5,596 | 166 s |
-| Epoch change | `ci-gates-left` | [Epoch change model](#epoch-change-model) | 25 | 46,551 | 163 s |
-| Epoch change | `ci-refills` | [Epoch change model](#epoch-change-model) | 29 | 419,843 | 60 s |
-| Epoch change | `ci-refills-down` | [Epoch change model](#epoch-change-model) | 38 | 1,674,947 | 187 s |
-| Epoch change | `ci-refills-down-restart` | [Epoch change model](#epoch-change-model) | 30 | 446,361 | 56 s |
-| Epoch change | `ci-refills-down-restart-second` | [Epoch change model](#epoch-change-model) | 30 | 446,361 | 56 s |
-| Epoch change | `ci-refills-stay` | [Epoch change model](#epoch-change-model) | 32 | 1,649,733 | 240 s |
-| Epoch change | `ci-refills-stay-node1` | [Epoch change model](#epoch-change-model) | 31 | 1,413,013 | 205 s |
-| Epoch change | `ci-refills-primary` | [Epoch change model](#epoch-change-model) | 31 | 652,011 | 101 s |
-| Epoch change | `ci-refills-back` | [Epoch change model](#epoch-change-model) | 34 | 1,197,621 | 155 s |
-| Epoch change | `ci-refills-two` | [Epoch change model](#epoch-change-model) | 30 | 153,394 | 24 s |
-| Epoch change | `ci-refills-two-second` | [Epoch change model](#epoch-change-model) | 30 | 153,394 | 24 s |
-| Epoch change | `ci-refills-together` | [Epoch change model](#epoch-change-model) | 26 | 58,563 | 11 s |
-| Epoch change | `ci-image` | [Epoch change model](#epoch-change-model) | 35 | 1,639,050 | 183 s |
-| Epoch change | `ci-image-restart` | [Epoch change model](#epoch-change-model) | 31 | 1,203,606 | 142 s |
-| Epoch change | `ci-bounce` | [Epoch change model](#epoch-change-model) | 35 | 1,298,412 | 202 s |
-| Epoch change | `ci-sources` | [Epoch change model](#epoch-change-model) | 26 | 455,009 | 65 s |
-| Epoch change | `ci-sources-move` | [Epoch change model](#epoch-change-model) | 28 | 171,992 | 28 s |
-| Epoch change | `ci-sources-lister` | [Epoch change model](#epoch-change-model) | 34 | 139,009 | 22 s |
-| Epoch change | `ci-faults` | [Epoch change model](#epoch-change-model) | 26 | 924,405 | 150 s |
+| Epoch change | `ci-hide-clocks` | [Epoch change model](#epoch-change-model) | 83 | 1,741,366 | 173 s |
+| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 32 | 1,347,108 | 272 s |
+| Epoch change | `ci-stays` | [Epoch change model](#epoch-change-model) | 27 | 116,279 | 32 s |
+| Epoch change | `ci-stays-as-primary` | [Epoch change model](#epoch-change-model) | 27 | 365,012 | 106 s |
+| Epoch change | `ci-stays-new` | [Epoch change model](#epoch-change-model) | 27 | 485,798 | 125 s |
+| Epoch change | `ci-stays-stale` | [Epoch change model](#epoch-change-model) | 31 | 410,814 | 56 s |
+| Epoch change | `ci-stays-gone` | [Epoch change model](#epoch-change-model) | 28 | 64,660 | 7 s |
+| Epoch change | `ci-late-ask` | [Epoch change model](#epoch-change-model) | 27 | 551,295 | 95 s |
+| Epoch change | `ci-gates` | [Epoch change model](#epoch-change-model) | 26 | 5,380 | 179 s |
+| Epoch change | `ci-gates-left` | [Epoch change model](#epoch-change-model) | 25 | 46,551 | 175 s |
+| Epoch change | `ci-refills` | [Epoch change model](#epoch-change-model) | 29 | 403,123 | 66 s |
+| Epoch change | `ci-refills-down` | [Epoch change model](#epoch-change-model) | 38 | 1,544,287 | 240 s |
+| Epoch change | `ci-refills-down-restart` | [Epoch change model](#epoch-change-model) | 30 | 446,361 | 98 s |
+| Epoch change | `ci-refills-down-restart-second` | [Epoch change model](#epoch-change-model) | 30 | 446,361 | 90 s |
+| Epoch change | `ci-refills-stay` | [Epoch change model](#epoch-change-model) | 32 | 1,649,733 | 257 s |
+| Epoch change | `ci-refills-stay-node1` | [Epoch change model](#epoch-change-model) | 31 | 1,413,013 | 214 s |
+| Epoch change | `ci-refills-primary` | [Epoch change model](#epoch-change-model) | 31 | 652,011 | 132 s |
+| Epoch change | `ci-refills-back` | [Epoch change model](#epoch-change-model) | 34 | 1,116,045 | 232 s |
+| Epoch change | `ci-refills-two` | [Epoch change model](#epoch-change-model) | 30 | 153,394 | 25 s |
+| Epoch change | `ci-refills-two-second` | [Epoch change model](#epoch-change-model) | 30 | 153,394 | 25 s |
+| Epoch change | `ci-refills-together` | [Epoch change model](#epoch-change-model) | 26 | 58,123 | 11 s |
+| Epoch change | `ci-image` | [Epoch change model](#epoch-change-model) | 35 | 1,504,074 | 176 s |
+| Epoch change | `ci-image-restart` | [Epoch change model](#epoch-change-model) | 31 | 1,044,678 | 142 s |
+| Epoch change | `ci-bounce` | [Epoch change model](#epoch-change-model) | 35 | 1,128,876 | 132 s |
+| Epoch change | `ci-sources` | [Epoch change model](#epoch-change-model) | 26 | 425,161 | 67 s |
+| Epoch change | `ci-sources-move` | [Epoch change model](#epoch-change-model) | 28 | 158,296 | 31 s |
+| Epoch change | `ci-sources-lister` | [Epoch change model](#epoch-change-model) | 34 | 123,783 | 24 s |
+| Epoch change | `ci-held` | [Epoch change model](#epoch-change-model) | 26 | 118,424 | 24 s |
+| Epoch change | `ci-held-live` | [Epoch change model](#epoch-change-model) | 20 | 1,990 | 17 s |
+| Epoch change | `ci-faults` | [Epoch change model](#epoch-change-model) | 26 | 859,003 | 130 s |
 | Epoch change | `ci-faults-more` | [Epoch change model](#epoch-change-model) | 26 | 187,119 | 29 s |
-| Epoch change | `ci-asks` | [Epoch change model](#epoch-change-model) | 23 | 63,948 | 240 s |
-| Epoch change | `ci-answers` | [Epoch change model](#epoch-change-model) | 20 | 12,603 | 156 s |
-| Epoch change | `ci-answers-node2` | [Epoch change model](#epoch-change-model) | 20 | 11,588 | 150 s |
-| Epoch change | `ci-answers-node3` | [Epoch change model](#epoch-change-model) | 20 | 10,920 | 147 s |
-| Epoch change | `ci-answers-move` | [Epoch change model](#epoch-change-model) | 22 | 10,267 | 197 s |
+| Epoch change | `ci-asks` | [Epoch change model](#epoch-change-model) | 23 | 55,868 | 169 s |
+| Epoch change | `ci-answers` | [Epoch change model](#epoch-change-model) | 20 | 12,603 | 168 s |
+| Epoch change | `ci-answers-node2` | [Epoch change model](#epoch-change-model) | 20 | 11,588 | 185 s |
+| Epoch change | `ci-answers-node3` | [Epoch change model](#epoch-change-model) | 20 | 10,920 | 158 s |
+| Epoch change | `ci-answers-move` | [Epoch change model](#epoch-change-model) | 22 | 10,267 | 218 s |
 | Sessions and fencing | `deep-lease` | `ci-lease` with a 145-unit lease (about 8 ticks), `dead_wait` 182 | 71 | 803,978,256 | 4,904 s |
 | Sessions and fencing | `deep-terms` | `ci-lease` with 3 terms | 50 | 81,717,036 | 415 s |
 | Sessions and fencing | `deep-down` | `ci-fence` with 2 partitions, 1 write in flight per client, 2-tick lease, `node_down_after` 1 tick | 50 | 151,663,068 | 1,676 s |
@@ -5441,7 +5443,8 @@ heartbeat every 1 s, `rate_window` 10 s, `rate_gap` 100 ms, `max_margin` 50%, 1 
 - `rep1`: W has no member to wait for, so it commits on its own log, and the client hears OK across an interval that ends under it.
 - A version that committed on every member it was sent to, behind a failed version: it keeps its OK at activation, whatever the count.
 - A refused version whose one holder then dies: the chunk reads unfound, X below it included, though X was acknowledged and is whole on the other two disks, and reads again only when the disk returns. Were it lost for good, X would stay unfound with no operator path.
-- The limit of an OK on a member that lists the chunk, with no refusal and recovery held back: W1 lands on disks 1 and 2, disk 2 goes down, disk 3 returns listing the chunk, and W2 is answered OK on disks 1 and 3, where disk 1 is its one clean copy. Disk 1 is lost and disk 2 returns: the chunk reads unfound though disk 3 logged W2. W2 reads once disk 1 returns.
+- A write to a chunk with one clean copy: W1 lands on disks 1 and 2, disk 2 goes down, and disk 3 returns listing the chunk. W2 waits unordered until recovery makes disk 3 clean, and only then is answered OK, so losing disk 1 for good and disk 2 returning leaves W2 readable. Planted away (`noDegradedHold`), W2 is answered OK on disks 1 and 3, disk 1 its one clean copy, and once disk 1 is lost the chunk reads unfound though disk 3 logged W2, until disk 1 returns.
+- The wait, measured in the primary-change run over seeds 0 to 99 (`rep3`, `min_live` 2): 1,852 of the 8,847 client writes ordered, in 83 seeds, were held for too few clean copies. They waited 6.3 ms at the median, 17 ms at p90 and 4.0 s at p99 and at most; those ordered in the interval they arrived in, 1,643, within 22 ms at p99 and 24 ms at most. The 49 slowest, in seeds 18, 24 and 34, waited out the interval change a member's crash brought. 106 more were never ordered by the replica that held them, which crashed or lost the lead first. In the fault run over the same seeds, 700 of 4,494 were held: 8.2 ms at the median, 1.0 s at p90 and 7.5 s at p99, at most 9.0 s; within their interval 7.1 ms at the median and 1.0 s at p99, the retry after a failed recovery read.
 
 **Serving reads**
 
@@ -5713,8 +5716,8 @@ it on its missing list.
 
 | Planted bug | Seeds of 500 failing | First | Invariant |
 | --- | --- | --- | --- |
-| M7: peering drops a subset of a chunk's pending versions, not a suffix (`Settle` drops the first kept one below the newest; `TestSettleMapsTheKeptVersionsAndDropsTheRest` fails at once) | about 9 | 18 | "a member listing nothing maps the kept writes applied in version order" |
-| M8: a partial-block write merges before the primary holds the versions peering kept | about 58 | 16 | The same |
+| M7: peering drops a subset of a chunk's pending versions, not a suffix (`Settle` drops the first kept one below the newest; `TestSettleMapsTheKeptVersionsAndDropsTheRest` fails at once) | 21 | 3 | "a member listing nothing maps the kept writes applied in version order" |
+| M8: a partial-block write merges before the primary holds the versions peering kept | 11 | 16 | The same |
 
 - A restarted primary asks for a new interval of each PG it leads, peers in it, then serves
   (`TestARestartedPrimaryTakesANewIntervalBeforeItServes`); only a store opened at start, not one
@@ -5901,8 +5904,8 @@ own ([Testing strategy](design.md#testing-strategy)).
     (`TestALeftMemberDownAtItsMovesEndKeepsAcknowledgedWrites`, seeds 0-9, 200 in `scripts/seeds.sh` in 18 s) keeps every
     acknowledged write and breaks no invariant, `invLeftGated` included, which judges naming from the cluster's
     table, not the replica's; it logs how many seeds had a restarted
-    disk drop a left PG's gated writes, 4 of seeds 0-9, and fails if none did. `leftNeverSettles` breaks
-    `invLeftGated` at seed 3 (`TestALeftPGNeverSettledBreaksItsInvariant`).
+    disk drop a left PG's gated writes, 3 of seeds 0-9, and fails if none did. `leftNeverSettles` breaks
+    `invLeftGated` at 89 seeds of 500, seed 4 first (`TestALeftPGNeverSettledBreaksItsInvariant`).
   - The stranded-move shapes move the primary instead of restarting it, as the epoch change model's
     negatives do: an operator edit that removes the leaving disk and puts the new member first
     (`TestKeepPastMemberLeavesAMoveUnfound`, `TestNeverUnfoundBreaksTheSourceInvariant`,
@@ -6167,22 +6170,23 @@ commit, it must pass unplanted and break its invariant planted.
 
 | Counterexample | Planted as | Run | Seeds of 500 | First | Invariant |
 | --- | --- | --- | --- | --- | --- |
-| A member logs a version out of order | Writes sent again newest first after a reconnect | Fault | 23 | 0 | "once recovery settles …" |
-| A new primary merges before it holds a kept version | Sub-block spike M8 | Primary-change | about 58 | 16 | "a member listing nothing maps …" |
+| A member logs a version out of order | Writes sent again newest first after a reconnect | Fault | 18 | 13 | "once recovery settles …" |
+| A new primary merges before it holds a kept version | Sub-block spike M8 | Primary-change | 11 | 16 | "a member listing nothing maps …" |
 | Peering stops only the previous interval | | Trace: W acknowledged on disks 2 and 3; interval 2 replaces primary 2 with disk 1, interval 3 puts disk 3 in `maintenance`, both handed to disk 1 alone | | | "no acknowledged version is ever dropped" |
-| Members compare member lists | A member accepts a write tagged with an earlier interval whose disks are its current one's | Primary-change | 307 | 1 | Property 3's: the authority trims a past interval's members once a later activation is recorded, so peering of the next interval already stopped the late write |
-| A disk ID kept across a new log ID | | Primary-change | 209 | 2 | "no disk ID names two log IDs, and no log ID is up under two disk IDs": the node runs its new log under the old disk ID |
-| A restarted primary peers in its old interval | | Primary-change | about 20 | 33 | "no two members hold different data under one version" |
-| A restarted primary never asks for a new interval | | Fault (the primary-change run's end asks itself) | 67 | 7 | Property 12's |
-| An older version decided by its own interval's members | | Fault | 9 | 50 | "the primary maps exactly …" |
-| A primary activates before missing lists are durable | | Fault | 84 | 12 | "the primary maps exactly …" |
+| Members compare member lists | A member accepts a write tagged with an earlier interval whose disks are its current one's | Primary-change | 310 | 1 | Property 3's: the authority trims a past interval's members once a later activation is recorded, so peering of the next interval already stopped the late write |
+| A disk ID kept across a new log ID | | Primary-change | 212 | 2 | "no disk ID names two log IDs, and no log ID is up under two disk IDs": the node runs its new log under the old disk ID |
+| A write to a chunk with too few clean copies is ordered at once | | Primary-change | 392 | 0 | "no write is acknowledged on fewer than min_live disks that list nothing of its chunk, a member in maintenance counting as one" |
+| A restarted primary peers in its old interval | | Primary-change at `min_live` 1: at 2 none of 500: the write that reuses a version number goes to a chunk the old interval's peering left with too few clean copies, and now waits for recovery | 16 | 57 | "no two members hold different data under one version" |
+| A restarted primary never asks for a new interval | | Fault (the primary-change run's end asks itself) | 98 | 0 | Property 12's |
+| An older version decided by its own interval's members | | Fault | 10 | 51 | "the primary maps exactly …" |
+| A primary activates before missing lists are durable | | Fault | 37 | 7 | "the primary maps exactly …" |
 | The leader records an activation only decided | Decide reports it | Primary-change; and a trace: W on its way to disk 3 when interval 2 replaces it with disk 1; disk 2's list to disk 1 lost; interval 3 puts disk 2 in `maintenance`, handed to disk 1 alone | 500 | 0 | "no PG's last activated interval goes down, and every activation a table records happened": the recorded interval is not one a primary activated; on the trace, "no acknowledged version is ever dropped" |
-| Recovery picks its blocks at read | | Fault | 219 | 4 | "no two members hold different data under one version" |
-| A leaving member removed before its replacement recovered | Removed once its PG's interval activates | Primary-change | 109 | 3 | Property 13's |
-| A recovered report for an earlier interval removes the leaving member | | Primary-change | 128 | 3 | Property 13's |
-| Members accept a write only in its send epoch | | Primary-change | 499 | 0 | Property 7's |
-| A later peering clears a missing-list entry | A listed member holding the kept version as its newest left off the list, and a persisted list clearing the PG's earlier listings it leaves out | Fault | about 18 | 7 | "once recovery settles …" |
-| Incarnations checked when a write arrives | At the primary, held replays exempt, with the store's fence off | Read | 26 | 29 | Property 11's: a dead incarnation's partial write held on a chunk the primary lacks is released after its successor's |
+| Recovery picks its blocks at read | | Fault | 47 | 11 | "no two members hold different data under one version" |
+| A leaving member removed before its replacement recovered | Removed once its PG's interval activates | Primary-change | 120 | 3 | Property 13's |
+| A recovered report for an earlier interval removes the leaving member | | Primary-change | 136 | 3 | Property 13's |
+| Members accept a write only in its send epoch | | Primary-change | 441 | 0 | Property 7's |
+| A later peering clears a missing-list entry | A listed member holding the kept version as its newest left off the list, and a persisted list clearing the PG's earlier listings it leaves out | Fault | 56 | 0 | "once recovery settles …" |
+| Incarnations checked when a write arrives | At the primary, held replays exempt, with the store's fence off | Read | 17 | 24 | Property 11's: a dead incarnation's partial write held on a chunk the primary lacks is released after its successor's |
 | A held write ordered again although another primary led | The lead's term kept across another primary's interval | Trace: P, peering cut off from Q, holds W; interval 3 makes Q primary with P in `maintenance`; the successor's W′ and W2 complete at Q; interval 4 makes P primary again | | | Property 11's |
 | A returning primary keeps its pending versions by number | `Settle` keeps every pending version at or below the kept one (`settleByNumber`); no model row, since the model answers no client at peering | Trace: primary 2, cut off from disk 3, orders W as 1.1; interval 2, handed to disks 1 and 3 alone, makes disk 3 primary without disk 2, and W2 is acknowledged as 2.1; interval 3 makes disk 2 primary again, its peering keeping 2.1 (`TestAReturningPrimaryRefusesAPendingVersionOffTheKeptChain` runs it unplanted, the read run's seed 366 found it) | | | "no acknowledged version is ever dropped", checked against the first interval activated after the version's |
 | A kept primary reads below `min_live` | | Trace: interval 2 marks disk 3 down; disk 3 restarts, and interval 3 makes it primary with disk 2 in `maintenance`, handed to disks 1 and 3 alone | | | Property 1's |
@@ -6204,12 +6208,12 @@ new run ID 9 (6), no step check 52 (1), one on grants only 53 (1), no restart wa
 property 10, the step check at `1 + lease_drift / 2` 25 (3) and against a grant that gave no lease 3 (265).
 
 The read run also plants a primary that commits a version once its own log holds it, before its
-members do: a read returns a version the next interval drops at 295 seeds of 500, seed 0 first
+members do: a read returns a version the next interval drops at 360 seeds of 500, seed 0 first
 (`TestPlantedReadBugsBreakTheReadRun`). It is no row of the model's table; it shows the read
 version check firing.
 
 The primary-change run also plants a primary that recovers only its own copies: its members, those
-a drain refilled among them, never reach the copy count, at 450 seeds of 500, seed 0 first.
+a drain refilled among them, never reach the copy count, at 462 seeds of 500, seed 0 first.
 
 The write-limit run's planted bug, a primary ordering a plain write that adds live data past a
 member's limit, fails each of the run's two invariants, checked alone, at all 500 seeds, seed 0
@@ -6311,10 +6315,10 @@ test's alone.
 
   | Planted bug | Run | Seeds failing | First |
   | --- | --- | --- | --- |
-  | A read served from a pending version: the primary commits once its own log holds a version (`commitOnOwnLog`), and the next interval drops it | Read | 78 of 100 | 0 |
-  | An old primary serving reads with no lease check (P1, `noLeaseCheck`): a client that missed the new primary's table reads from the old one after the new one acknowledged a write | Read | 11 of 100 | 12 |
+  | A read served from a pending version: the primary commits once its own log holds a version (`commitOnOwnLog`), and the next interval drops it | Read | 82 of 100 | 0 |
+  | An old primary serving reads with no lease check (P1, `noLeaseCheck`): a client that missed the new primary's table reads from the old one after the new one acknowledged a write | Read | 11 of 100 | 8 |
   | Merging on the committed version (sub-block M2), one client pipelining 4 writes | Sub-block | 100 of 100 | 0 |
-  | Peering dropping a subset of a chunk's pending versions, not a suffix (M7, `settleSubset`) | Primary-change | 21 of 500 | 57 |
+  | Peering dropping a subset of a chunk's pending versions, not a suffix (M7, `settleSubset`) | Primary-change | 21 of 500 | 3 |
 
   The M7 rate is that of the primary-change run's own check of kept bytes, which fails on the same
   seeds. The holder ending its lease on the slower of its clocks (P9's slews) is not planted here:
@@ -7374,8 +7378,8 @@ that completes is ordered, in its chunk, before every write of the second.
 
 | Planted bug | Invariant | Seeds of 500 | First |
 | --- | --- | --- | --- |
-| `neg-check-on-arrival`: a primary checks the session only as a write arrives (`fenceOnArrival`), so a write that waited in its store as the fence came is ordered | No fenced write applied | about 3 | 52 |
-| `neg-replica-no-check`: a member takes a replicated write without checking its session (`memberNoFence`), logging one its primary ordered before the fence reached it | No fenced write applied | 132 | 5 |
+| `neg-check-on-arrival`: a primary checks the session only as a write arrives (`fenceOnArrival`), so a write that waited in its store as the fence came is ordered | No fenced write applied | 5 | 223 |
+| `neg-replica-no-check`: a member takes a replicated write without checking its session (`memberNoFence`), logging one its primary ordered before the fence reached it | No fenced write applied | 130 | 5 |
 
 `neg-up-with-old-table` is planted in the leader, under [Control-plane sessions](#control-plane-sessions).
 `neg-peering-skipped` removes the rule that a new interval activates only once its earlier ones

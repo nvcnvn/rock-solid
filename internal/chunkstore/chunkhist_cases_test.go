@@ -108,7 +108,7 @@ func TestTheChunkModel(t *testing.T) {
 
 // Each planted bug breaks the check of chunk histories, checked alone, at the first seed that fails
 // it: a primary committing a version once its own log holds it, whose reads return a pending version
-// the next interval drops (90 of 100); an old primary serving reads with no lease check (P1, 10 of
+// the next interval drops (82 of 100); an old primary serving reads with no lease check (P1, 11 of
 // 100), which a client that missed the new primary's table reads from after the new one
 // acknowledged a write; merging on the committed version (sub-block spike M2, 100 of 100), which
 // loses bytes a read back sees; and peering dropping a subset of a chunk's pending versions rather
@@ -123,13 +123,13 @@ func TestPlantedBugsBreakChunkHistories(t *testing.T) {
 		{"commit on the primary's own log", 0, func(seed uint64) error {
 			return runReads(t, seed, &readPlant{inv: invLinearizable, set: func(r *readRun) { r.d.replicaPlants.commitOnOwnLog = true }})
 		}},
-		{"no lease check", 12, func(seed uint64) error {
+		{"no lease check", 8, func(seed uint64) error {
 			return runReads(t, seed, &readPlant{inv: invLinearizable, set: func(r *readRun) { r.d.replicaPlants.noLeaseCheck = true }})
 		}},
 		{"M2", 0, func(seed uint64) error {
 			return replicatedSubBlocks{clients: 1, pipeline: 4, writes: 8, maxLen: 300, span: core.BlockSize, mergeCommitted: true}.run(t, seed)
 		}},
-		{"M7", 57, func(seed uint64) error {
+		{"M7", 3, func(seed uint64) error {
 			return runPrimaries(t, seed, &peerPlant{invLinearizable, func(r *primaryRun) { r.c.storePlants.settleSubset = true }})
 		}},
 	} {

@@ -678,10 +678,10 @@ func TestNoFencedSessionsWriteIsApplied(t *testing.T) {
 	})
 }
 
-// Each planted bug breaks its invariant, checked alone, at a seed of the first 500: the epoch change model's neg-fence-on-arrival (21 of 500), a primary that checks a write's incarnation as it arrives rather than as its store orders it, so that a dead incarnation's write held on a chunk the primary lacks is ordered after its successor's; and a primary that commits a version once its own log holds it (368 of 500), so that a read returns a version the next interval drops.
-// With the writers as two sessions, the sessions model's neg-check-on-arrival (6 of 500), the same
+// Each planted bug breaks its invariant, checked alone, at a seed of the first 500: the epoch change model's neg-fence-on-arrival (17 of 500), a primary that checks a write's incarnation as it arrives rather than as its store orders it, so that a dead incarnation's write held on a chunk the primary lacks is ordered after its successor's; and a primary that commits a version once its own log holds it (360 of 500), so that a read returns a version the next interval drops.
+// With the writers as two sessions, the sessions model's neg-check-on-arrival (5 of 500), the same
 // primary, orders a fenced session's write that waited in its store as the fence came; and its
-// neg-replica-no-check (122 of 500), a member that takes a replicated write without checking its
+// neg-replica-no-check (130 of 500), a member that takes a replicated write without checking its
 // session, logs one its primary ordered before the fence reached it.
 func TestPlantedReadBugsBreakTheReadRun(t *testing.T) {
 	for _, p := range []struct {
@@ -690,9 +690,9 @@ func TestPlantedReadBugsBreakTheReadRun(t *testing.T) {
 		fence bool
 		readPlant
 	}{
-		{"incarnation checked on arrival", 29, false, readPlant{inv: invIncarnation, set: func(r *readRun) { r.d.replicaPlants.fenceOnArrival = true }}},
+		{"incarnation checked on arrival", 24, false, readPlant{inv: invIncarnation, set: func(r *readRun) { r.d.replicaPlants.fenceOnArrival = true }}},
 		{"commit on the primary's own log", 0, false, readPlant{inv: invReadVersion, set: func(r *readRun) { r.d.replicaPlants.commitOnOwnLog = true }}},
-		{"session checked on arrival", 58, true, readPlant{inv: invFencedWrite, set: func(r *readRun) { r.d.replicaPlants.fenceOnArrival = true }}},
+		{"session checked on arrival", 223, true, readPlant{inv: invFencedWrite, set: func(r *readRun) { r.d.replicaPlants.fenceOnArrival = true }}},
 		{"member takes a fenced session's write", 5, true, readPlant{inv: invFencedWrite, set: func(r *readRun) { r.d.replicaPlants.memberNoFence = true }}},
 	} {
 		if err := runReadsWith(t, p.seed, p.fence, &p.readPlant); err == nil || !strings.Contains(err.Error(), p.inv) {
