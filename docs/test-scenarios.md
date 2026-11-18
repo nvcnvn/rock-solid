@@ -5953,7 +5953,8 @@ own ([Testing strategy](design.md#testing-strategy)).
   disk 3's entry to its decision, and interval 4's recovery brings the kept version
   (`TestRecoveryCutShortByTheNextIntervalLeavesTheListsInPlace`).
 - Only recovery removes an entry. Disk 2 holds dropped 1.2, which wrote block 1, and lists 1.1;
-  2.1, writing block 2, lands on disk 2 before recovery reaches it. The next peering keeps 2.1,
+  2.1, writing block 2, lands on disk 2 before recovery reaches it, disk 3, which lists nothing,
+  leading interval 2. The next peering keeps 2.1,
   whose newest copy disk 2 holds, and raises its entry to 2.1 rather than clearing it; recovery then
   brings it block 1 of 1.1's history (`TestOnlyRecoveryRemovesAMissingListEntry`).
 - A partial-block write to a chunk the primary lacks waits for its recovery

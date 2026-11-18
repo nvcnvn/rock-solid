@@ -285,7 +285,8 @@ func TestRecoveryCutShortByTheNextIntervalLeavesTheListsInPlace(t *testing.T) {
 }
 
 // Under min_live 1, which disk 3's clean copy meets, disk 2 holds dropped 1.2, which wrote block 1, and lists 1.1; 2.1, writing block 2, lands on it
-// before recovery reaches it. The next peering keeps 2.1, whose newest copy disk 2 holds, and raises
+// before recovery reaches it, disk 3 leading interval 2, as a write to a chunk the primary lists
+// waits for its recovery. The next peering keeps 2.1, whose newest copy disk 2 holds, and raises
 // disk 2's entry to 2.1 rather than clearing it; recovery then brings disk 2 block 1 of 1.1's
 // history.
 func TestOnlyRecoveryRemovesAMissingListEntry(t *testing.T) {
@@ -295,8 +296,12 @@ func TestOnlyRecoveryRemovesAMissingListEntry(t *testing.T) {
 	c.s.Partition(0, 2, false)
 	c.write(pg0, ch, core.BlockSize, bytes.Repeat([]byte{9}, core.BlockSize))
 	c.runFor(100_000)
-	c.reps[0].plant.noRecovery = true
-	c.publish(c.next(func(t *Table) { setInterval(t, pg0, 2) }), false)
+	c.reps[2].plant.noRecovery = true
+	c.publish(c.next(func(t *Table) {
+		setInterval(t, pg0, 2)
+		_, e := t.entry(pg0)
+		e.Members = []Member{{Disk: 3}, {Disk: 1}, {Disk: 2}}
+	}), false)
 	c.s.Heal(0, 2)
 	c.untilActive()
 	c.writeWhole(pg0, ch, 2, 1, 4)
@@ -307,7 +312,8 @@ func TestOnlyRecoveryRemovesAMissingListEntry(t *testing.T) {
 	if x := c.listed(1, ch); x.ListedIn != 3 || x.Listed != MakeVersion(2, 1) {
 		t.Fatalf("disk 2 holds %+v after interval 3's peering", x)
 	}
-	c.reps[0].plant.noRecovery = false
+	c.reps[2].plant.noRecovery = false
+	c.call(2, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.drain(ctx, out) })
 	c.runFor(RetryAfter / 2)
 	c.settle()
 	for d := range 3 {
