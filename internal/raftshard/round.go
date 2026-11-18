@@ -10,18 +10,19 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 )
 
-// Round is what one round makes durable: a restored snapshot, entries and a hard state, any of them empty, and whether the replica learned its removal.
+// Round is what one round makes durable: a restored snapshot, entries and a hard state, any of them empty, whether the replica learned its removal and whether it was deleted.
 type Round struct {
 	HardState raftpb.HardState
 	Entries   []raftpb.Entry
 	Snapshot  raftpb.Snapshot
 	Removed   bool
+	Deleted   bool
 }
 
 // A round's record is a flags byte, then, if flagged, the snapshot (its index, term, configuration
 // and data), the entries (the first index, the count, and each entry's term, type, length and
 // payload) and the hard state (term, vote, commit), little-endian, in that order; flagRemoved
-// marks a replica that learned its removal, which a replay keeps. Replaying a
+// marks a replica that learned its removal and flagDeleted one deleted, which a replay keeps. Replaying a
 // snapshot drops the entries before it, and a hard state's commit index needs its entries. It goes
 // to the log as blobs of at most a record each, every one but the last of kind BlobRaftEntries
 // and the last of kind BlobRaftState, so a round torn at the log's tail is dropped whole. Each
@@ -32,6 +33,7 @@ const (
 	flagEntries
 	flagHardState
 	flagRemoved
+	flagDeleted
 )
 
 // ErrBadRound reports a round record that does not decode.
@@ -51,6 +53,9 @@ func AppendRound(dst []byte, r *Round) []byte {
 	}
 	if r.Removed {
 		flags |= flagRemoved
+	}
+	if r.Deleted {
+		flags |= flagDeleted
 	}
 	dst = append(dst, flags)
 	if flags&flagSnapshot != 0 {
@@ -158,6 +163,7 @@ func (s *Storage) replay(kind disklog.BlobKind, payload []byte) (summary, error)
 		s.hs = r.HardState
 	}
 	s.removed = s.removed || r.Removed
+	s.deleted = s.deleted || r.Deleted
 	return summarize(&r), nil
 }
 
@@ -185,8 +191,8 @@ func DecodeRound(rec []byte, r *Round) error {
 	*r = Round{}
 	d := decoder{b: rec}
 	flags := d.byte()
-	r.Removed = flags&flagRemoved != 0
-	if flags&^(flagSnapshot|flagEntries|flagHardState|flagRemoved) != 0 {
+	r.Removed, r.Deleted = flags&flagRemoved != 0, flags&flagDeleted != 0
+	if flags&^(flagSnapshot|flagEntries|flagHardState|flagRemoved|flagDeleted) != 0 {
 		return ErrBadRound
 	}
 	if flags&flagSnapshot != 0 {

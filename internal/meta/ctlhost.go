@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 
 	"go.etcd.io/raft/v3/raftpb"
@@ -48,7 +49,9 @@ func (o *CtlHostOutput) Reset() {
 // log after the group's replay LSN before the replica starts. A disk or checkpoint that fails stops it.
 // Its replica reports itself every second, to its Control or to the other members of its
 // configuration; a leader drives the group toward the plan its Control hands out for it, and a
-// delete naming the replica, once it learned its removal, stops the host for good.
+// delete naming the replica, once it learned its removal, stops the replica, records the deletion
+// on the log and, once that is durable, stops the host for good, as it stops a restart that
+// replays it.
 type CtlHost struct {
 	shard *Shard
 	// cfg is the replica's settings until the replica starts.
@@ -95,13 +98,18 @@ type CtlHost struct {
 	reportAt core.Tick
 	plan     []raftshard.Peer
 	members  []uint64
+	// deletion is the round recording the replica's deletion, Deleted once it is written.
+	deletion raftshard.Round
 }
+
+// deletionRound is the flush of the deletion's round, which no round of the replica reaches.
+const deletionRound = math.MaxUint64
 
 // reportInterval is how often a voter reports its replica, as a node's heartbeat does.
 const reportInterval = core.Tick(1_000_000)
 
-// ErrDeleted reports a host whose replica the group's leader deleted: the replica learned its
-// removal and the plan that dropped it is complete.
+// ErrDeleted reports a host whose replica the group's leader deleted, now or before a restart: the
+// replica learned its removal and the plan that dropped it is complete.
 var ErrDeleted = errors.New("meta: the control-plane group dropped this voter and its plan is complete")
 
 // ctlOwner is the owner the group's blobs carry on the host's disk log.
@@ -224,7 +232,7 @@ func (h *CtlHost) Control() *Control { return h.ctl }
 // stopped, or replays its log, drops every message.
 func (h *CtlHost) OnEvent(ctx *core.Context, ev *core.Event, out *CtlHostOutput) {
 	switch {
-	case h.err != nil || h.shard == nil && ev.Kind != core.EvDiskDone:
+	case h.err != nil || h.shard == nil && ev.Kind != core.EvDiskDone || h.deletion.Deleted && ev.Kind == core.EvNetRecv:
 		if ev.Kind == core.EvNetRecv {
 			free(ctx, &ev.Msg)
 		}
@@ -246,9 +254,12 @@ func (h *CtlHost) OnEvent(ctx *core.Context, ev *core.Event, out *CtlHostOutput)
 			if h.cp.pieceWait {
 				h.fail(h.nextPiece(ctx), out)
 			}
-			h.reportOwn(ctx, out)
-			h.step(ctx, out)
+			if !h.deletion.Deleted {
+				h.reportOwn(ctx, out)
+				h.step(ctx, out)
+			}
 		}
+	case h.deletion.Deleted:
 	default:
 		h.shard.OnEvent(ctx, ev, &h.sout)
 		if h.ctl != nil {
@@ -286,7 +297,7 @@ func (h *CtlHost) recvGroup(ctx *core.Context, ev *core.Event, out *CtlHostOutpu
 	case kind == KindDelete:
 		var err error
 		if h.dels, err = DecodeDelete(ctx.Pool, &ev.Msg, h.dels[:0]); err == nil {
-			h.deleted(h.dels, out)
+			h.deleted(ctx, h.dels, out)
 		}
 	case kind == KindAsks:
 		var err error
@@ -409,7 +420,7 @@ func (h *CtlHost) voterReport(ctx *core.Context, nr *NodeReport, from core.NodeI
 		return
 	}
 	if self {
-		h.deleted(h.dels, out)
+		h.deleted(ctx, h.dels, out)
 		return
 	}
 	a := core.Action{Kind: core.ActNetSend, Peer: from, Reply: true}
@@ -418,11 +429,15 @@ func (h *CtlHost) voterReport(ctx *core.Context, nr *NodeReport, from core.NodeI
 	}
 }
 
-// deleted stops the host for good when refs name its replica and the replica learned its removal.
-func (h *CtlHost) deleted(refs []ReplicaRef, out *CtlHostOutput) {
-	if removed, _ := h.shard.Raft().Removed(); removed && slices.Contains(refs, ReplicaRef{Group: h.group, ID: h.id}) {
-		h.fail(ErrDeleted, out)
+// deleted, when refs name the replica and it learned its removal, stops the replica and writes
+// the round recording its deletion; the host stops for good once that round is durable.
+func (h *CtlHost) deleted(ctx *core.Context, refs []ReplicaRef, out *CtlHostOutput) {
+	if removed, _ := h.shard.Raft().Removed(); !removed || h.deletion.Deleted || !slices.Contains(refs, ReplicaRef{Group: h.group, ID: h.id}) {
+		return
 	}
+	h.ctl, h.starting, h.admins = nil, h.starting[:0], h.admins[:0]
+	h.deletion = raftshard.Round{HardState: h.shard.log.HardState(), Removed: true, Deleted: true}
+	h.fail(h.disk.Write(ctx, ctlOwner, deletionRound, &h.deletion, &h.lout), out)
 }
 
 // sendDisks answers a node's report with the committed membership: each disk not gone that its
@@ -688,9 +703,13 @@ func (h *CtlHost) logEvents(ctx *core.Context, out *CtlHostOutput) {
 			}
 			h.dones, err = h.disk.Durable(ctx, &ev, &h.lout, h.dones[:0])
 			for _, d := range h.dones {
-				if h.shard == nil {
+				switch {
+				case d.Round == deletionRound:
+					err = ErrDeleted
+				case h.deletion.Deleted:
+				case h.shard == nil:
 					err = h.start(ctx, out)
-				} else {
+				default:
 					h.shard.Durable(ctx, d.Round, &h.sout)
 				}
 			}
@@ -711,7 +730,9 @@ func (h *CtlHost) logEvents(ctx *core.Context, out *CtlHostOutput) {
 				h.disk.Recovered(log)
 				h.rec = nil
 				st := h.cfg.Raft.Storage
-				if !h.replayed {
+				if st.Deleted() {
+					err = ErrDeleted
+				} else if !h.replayed {
 					if err = st.ApplySnapshot(raftpb.Snapshot{Metadata: h.boot}); err == nil {
 						err = h.writeBoot(ctx, h.boot)
 					}

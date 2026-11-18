@@ -191,6 +191,17 @@ func TestTheControlPlaneGroupSwapsInItsPlanAndDeletesTheDroppedVoter(t *testing.
 	t.Fatal("no voter of the plan leads and answers a Txn")
 }
 
+// A deleted voter stays deleted, as the voter model's Delete is final: a restart replays its log,
+// finds the delete recorded and stops with ErrDeleted before its replica starts.
+func TestADeletedControlPlaneVoterStaysDeletedAcrossARestart(t *testing.T) {
+	r, dropped, _ := ctlSwap(t, false)
+	r.restart(dropped)
+	r.run(StepInterval)
+	if !r.deleted(dropped) || r.hs[dropped].Shard() != nil {
+		t.Fatalf("the restarted voter runs a replica %v and stopped with %v", r.hs[dropped].Shard() != nil, r.hs[dropped].Err())
+	}
+}
+
 // A control-plane leader the plan drops hands its leadership to a planned voter, whose own Control
 // then hands its replica the same plan and carries out the swap; the old leader is deleted once
 // the plan is complete.

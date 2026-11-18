@@ -41,8 +41,10 @@ type Storage struct {
 	pending []byte
 	// data is the data of the restored snapshot replay made the base, until the state machine takes it.
 	data []byte
-	// removed is whether a durable round recorded that the replica learned its removal.
+	// removed is whether a durable round recorded that the replica learned its removal, deleted
+	// whether one recorded that it was deleted.
 	removed bool
+	deleted bool
 }
 
 // NewStorage is an empty storage whose base is index 0.
@@ -63,6 +65,10 @@ func (s *Storage) HardState() raftpb.HardState { return s.hs }
 
 // Removed reports whether a durable round recorded that the replica learned its removal.
 func (s *Storage) Removed() bool { return s.removed }
+
+// Deleted reports whether a replayed round recorded that the replica was deleted, which it never
+// undoes: its host runs it no more.
+func (s *Storage) Deleted() bool { return s.deleted }
 
 // Base is the index, term and configuration of the last compaction or restored snapshot.
 func (s *Storage) Base() raftpb.SnapshotMetadata { return s.base }

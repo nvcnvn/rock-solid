@@ -271,6 +271,7 @@ func TestRoundRecordsRoundTrip(t *testing.T) {
 func FuzzDecodeRound(f *testing.F) {
 	f.Add(AppendRound(nil, &Round{HardState: raftpb.HardState{Term: 1, Commit: 2}, Entries: ents(1, 1, 2, 3)}))
 	f.Add(AppendRound(nil, &Round{Snapshot: raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: 3, Term: 1, ConfState: raftpb.ConfState{Voters: []uint64{1}}}}}))
+	f.Add(AppendRound(nil, &Round{HardState: raftpb.HardState{Term: 2, Vote: 1, Commit: 2}, Removed: true, Deleted: true}))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		k := len(b) / 2
 		split := NewStorage()
