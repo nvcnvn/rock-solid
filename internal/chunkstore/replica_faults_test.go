@@ -807,6 +807,12 @@ func runFaultsOn(t *testing.T, seed uint64, clients, writes int, plant *faultPla
 		}
 		return f.settled()
 	})
+	c.inv.Register(invHeldOrdered, func() error {
+		if !f.ended {
+			return nil
+		}
+		return c.heldWrites()
+	})
 	x := c.record()
 	c.inv.Register(invLinearizable, func() error {
 		if !f.ended {

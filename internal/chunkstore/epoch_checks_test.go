@@ -19,7 +19,23 @@ const (
 	invAckCopies     = "no write is acknowledged on fewer than min_live disks that list nothing of its chunk, a member in maintenance counting as one"
 	invHasSource     = "an activated primary has a source of each chunk it kept, or calls it unfound"
 	invLeftGated     = "no running disk keeps a write gated of a PG its table names it in no interval of since the last activated"
+	invHeldOrdered   = "once the run settles, no active primary holds a client write"
 )
+
+// heldWrites is the first active lead on a running node that holds a client write (property 22, checked once the run settles).
+func (c *rcluster) heldWrites() error {
+	for n, r := range c.reps {
+		if r == nil || !c.s.Node(uint32(n)).Up() {
+			continue
+		}
+		for i := range r.leads {
+			if l := &r.leads[i]; l.active && len(l.held) > 0 {
+				return fmt.Errorf("%s: disk %d holds %d client writes of %v", invHeldOrdered, c.ids[n], len(l.held), l.pg)
+			}
+		}
+	}
+	return nil
+}
 
 // leftGated is the first running disk whose store keeps gated a write of a PG the cluster's table names it in no
 // interval of since the last activated, but one whose writes there are still unresolved.

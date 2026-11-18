@@ -656,6 +656,12 @@ func runPrimaryRunAt(t *testing.T, seed uint64, plant *peerPlant, crashLeaving b
 		return c.inactive()
 	})
 	c.inv.Register(invLeftGated, c.leftGated)
+	c.inv.Register(invHeldOrdered, func() error {
+		if !r.ended {
+			return nil
+		}
+		return c.heldWrites()
+	})
 	// Drawn from the seed so other draws keep their order.
 	r.duringPeering = seed%4 == 3
 	if plant != nil {
