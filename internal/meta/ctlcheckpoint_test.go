@@ -231,3 +231,20 @@ func TestAHostWhoseCheckpointHasNoRoomStops(t *testing.T) {
 	}
 	t.Fatalf("the host still runs, its checkpoint running %v and its log stalled %v", r.h.cp.running, r.h.disk.Log.Stalled())
 }
+
+// A log stalled for room with too few records after the last manifest for a checkpoint to be due
+// still checkpoints: the stall makes one due, which compacts the log and frees its segments, so
+// the host's Txns go on past the disk's size.
+func TestAStallForRoomMakesACheckpointDue(t *testing.T) {
+	lc := ctlLogConfig()
+	lc.MaxReplayBytes, lc.NoReserve, lc.Reserve = 1<<40, false, 8
+	geo := disklog.Geometry{SegmentBlocks: 64, SegmentCount: 64}
+	r := newHostGroupOnDisks(t, 1, lc, geo, 0, nil)
+	r.states = []map[uint64][]byte{{}}
+	r.lead()
+	for k := range 3 * geo.DiskBlocks() {
+		if a := r.ask(0, k+1, addOne()); a == nil || a.Err != nil {
+			t.Fatalf("Txn %d not answered (%+v): the log stalled %v, its checkpoint running %v", k+1, a, r.h.disk.Log.Stalled(), r.h.cp.running)
+		}
+	}
+}

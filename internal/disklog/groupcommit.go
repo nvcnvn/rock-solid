@@ -928,9 +928,10 @@ func (l *Log) behind() bool {
 	return n >= 2*l.cfg.MaxReplayBytes
 }
 
-// CheckpointDue reports whether MaxReplayBytes follow the newest manifest and no checkpoint is running.
+// CheckpointDue reports whether no checkpoint is running and MaxReplayBytes follow the newest
+// manifest or items are Stalled: only a manifest lets the dead records it no longer needs go.
 func (l *Log) CheckpointDue() bool {
-	return l.cp == nil && l.err == nil && l.replayBytes >= l.cfg.MaxReplayBytes
+	return l.cp == nil && l.err == nil && (l.replayBytes >= l.cfg.MaxReplayBytes || l.Stalled())
 }
 
 // Submit queues an item for the hot or the cold stream, taking its buffer; a refused item's buffer stays with the caller. A write of a whole chunk to the hot stream goes to a chunk slot while SlotAvailable, its record alone to the hot stream's slot lane, and its Durable event names it as a slot write.
