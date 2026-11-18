@@ -36,7 +36,7 @@ const (
 	KindStarted      byte = 0x4a
 	KindDisks        byte = 0x4b
 	KindAsks         byte = 0x4c
-	KindDelete       byte = 0x4d
+	KindDelete       byte = 0x4f
 )
 
 // DiskAddr is a disk of the committed membership record: its ID, its log, and the loop that owns it.
