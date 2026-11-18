@@ -87,6 +87,7 @@ func (s *Store) beginShards(ctx *core.Context, due bool, durable uint64, idx []d
 	if s.raft == nil {
 		return idx, nil
 	}
+	s.cpShards = len(s.shards)
 	if !due {
 		for i := range s.shards {
 			r := &s.shards[i]
@@ -129,7 +130,7 @@ func (s *Store) beginShards(ctx *core.Context, due bool, durable uint64, idx []d
 // shardsCheckpointed ends each shard tree's flush once the manifest is durable, reports the
 // pieces it made dead and compacts each shard to the index its tree was marked at.
 func (s *Store) shardsCheckpointed(ctx *core.Context, out *Output) {
-	for i := range s.shards {
+	for i := range s.cpShards {
 		r := &s.shards[i]
 		dead, err := r.sh.Tree().CheckpointDone()
 		if err != nil {
@@ -149,7 +150,7 @@ func (s *Store) shardsCheckpointed(ctx *core.Context, out *Output) {
 }
 
 func (s *Store) shardFlushesFailed() {
-	for i := range s.shards {
+	for i := range s.cpShards {
 		s.piecesDead(s.shards[i].sh.Tree().FlushFailed())
 	}
 	s.cpBase = 0

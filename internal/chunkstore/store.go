@@ -364,10 +364,12 @@ type Store struct {
 	pieceTree int
 	idx       []disklog.CheckpointIndex
 
-	// raft hosts the Raft shards on the disk, shards in the order their trees checkpoint;
-	// lastBase is the base of the last manifest a due checkpoint wrote, cpBase that of the one running.
+	// raft hosts the Raft shards on the disk, shards in the order their trees checkpoint, the
+	// first cpShards in the running checkpoint; lastBase is the base of the last manifest a due
+	// checkpoint wrote, cpBase that of the one running.
 	raft             *raftshard.Host
 	shards           []raftShard
+	cpShards         int
 	lastBase, cpBase uint64
 
 	loading map[disklog.BlobRef]*loadingRun
@@ -2435,7 +2437,7 @@ func (s *Store) nextPiece(ctx *core.Context, out *Output) {
 	}
 	tree, owner := s.tree(s.pieceTree)
 	length, root, err := tree.NextPiece(ctx.Pool.Bytes(buf))
-	for err == nil && length == 0 && s.pieceTree < len(s.shards) {
+	for err == nil && length == 0 && s.pieceTree < s.cpShards {
 		s.pieceTree++
 		tree, owner = s.tree(s.pieceTree)
 		length, root, err = tree.NextPiece(ctx.Pool.Bytes(buf))

@@ -327,3 +327,27 @@ func TestRaftShardsOnTheStoreCheckpointCompactAndRecover(t *testing.T) {
 		k.check(t)
 	}
 }
+
+// A shard added while a checkpoint runs joins the next one: the running checkpoint neither
+// writes nor ends a flush of its tree, and a restart after the next restores it.
+func TestAShardAddedDuringACheckpointJoinsTheNext(t *testing.T) {
+	r := newRaftRig(t, raftConfig(), raftGeometry, 7)
+	for !r.s.checkpointing {
+		r.write(r.shards[0], 4, 4000)
+		for !r.s.checkpointing && r.step() {
+		}
+	}
+	k := newKVShard(t, 11, r.maxPiece)
+	r.s.AddRaft(k.owner, k.st, k)
+	r.shards = append(r.shards, k)
+	rnd := core.NewRand(2)
+	for round := range 200 {
+		r.write(r.shards[round%2], 1+int(rnd.Below(8)), 1000+int(rnd.Below(7000)))
+		r.step()
+	}
+	r.settle()
+	r.crash(rnd)
+	if k := r.shards[1]; k.applied == 0 || k.st.Base().Index == 0 {
+		t.Fatalf("the added shard restarted at applied %d on base %d", k.applied, k.st.Base().Index)
+	}
+}
