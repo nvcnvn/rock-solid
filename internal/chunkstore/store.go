@@ -1922,12 +1922,13 @@ func (s *Store) logEvent(ctx *core.Context, ev *disklog.Event, out *Output) {
 			s.recoveryFailed(ctx, err)
 			return
 		}
-		if s.raft != nil {
-			s.raft.Recovered(log)
-		}
 		if err := s.resume(log); err != nil {
 			s.recoveryFailed(ctx, err)
 			return
+		}
+		// After resume's Recount: replay counted again the blobs that died before the manifest.
+		if s.raft != nil {
+			s.raft.Recovered(log)
 		}
 		s.gateHeld()
 		s.freeSlots(true)
