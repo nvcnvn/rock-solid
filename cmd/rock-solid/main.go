@@ -72,7 +72,7 @@ func (h *heapLimit) check(pages int64) error {
 type ctlConfig struct {
 	// Node is this voter's node ID, one of Voters.
 	Node uint32
-	// Voters are the group's voters, by node ID, each at its address.
+	// Voters are the voters, by node ID, each at its address: the group's configuration only at the first start.
 	Voters []voter
 	Group  uint64
 	// Listen is the address this voter takes connections on.
@@ -154,7 +154,7 @@ func parseCtl(args []string) (ctlConfig, error) {
 	var cfg ctlConfig
 	fs := flag.NewFlagSet("ctl", flag.ContinueOnError)
 	node := fs.Uint("node", 0, "this voter's node ID, one of -voters")
-	voters := fs.String("voters", "", "the group's voters as node=host:port, comma-separated, the same voters on every voter and at every start")
+	voters := fs.String("voters", "", "the group's voters as node=host:port, comma-separated: their addresses, and the group's configuration at the voter's first start alone")
 	fs.Uint64Var(&cfg.Group, "group", 1, "the control-plane group's ID")
 	listen := fs.String("listen", "", "the address to take connections on (default: this voter's address in -voters)")
 	fs.StringVar(&cfg.Disk, "disk", "", "the file the group's log lives in")

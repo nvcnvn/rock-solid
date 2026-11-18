@@ -93,6 +93,8 @@ type Control struct {
 	drains          []uint32
 	exits           []diskExit
 	nodes           []nodeState
+	// voters are the control-plane group's voters heard from, by node, each holding only its replicas.
+	voters []nodeState
 	// round counts failovers and error answers; resend is set while every committed shard-map
 	// entry is still to be handed out again.
 	round  uint64

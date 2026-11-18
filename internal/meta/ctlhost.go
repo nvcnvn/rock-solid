@@ -46,12 +46,15 @@ func (o *CtlHostOutput) Reset() {
 // disk is. Once max_replay_bytes of records follow the last manifest it checkpoints the group's
 // tree and compacts the log to what the tree's runs hold; a restart loads the runs and replays the
 // log after the group's replay LSN before the replica starts. A disk or checkpoint that fails stops it.
+// Its replica reports itself every second, to its Control or to the other members of its
+// configuration; a leader drives the group toward the plan its Control hands out for it, and a
+// delete naming the replica, once it learned its removal, stops the host for good.
 type CtlHost struct {
 	shard *Shard
 	// cfg is the replica's settings until the replica starts.
 	cfg Config
-	// boot is the boot state a restart was given: its replay must match its voters, and a log
-	// holding no round gets it as its first round.
+	// boot is the boot state a restart was given, which only a log holding no round takes, as its
+	// first round.
 	boot raftpb.SnapshotMetadata
 	disk *raftshard.Host
 	rec  *disklog.Recovery
@@ -87,13 +90,22 @@ type CtlHost struct {
 	dels    []ReplicaRef
 	stepAt  core.Tick
 	cp      ctlCheckpoint
+	// own is the replica's report, sent at reportAt; plan is the group's plan as its replica takes it.
+	own      NodeReport
+	reportAt core.Tick
+	plan     []raftshard.Peer
+	members  []uint64
 }
+
+// reportInterval is how often a voter reports its replica, as a node's heartbeat does.
+const reportInterval = core.Tick(1_000_000)
+
+// ErrDeleted reports a host whose replica the group's leader deleted: the replica learned its
+// removal and the plan that dropped it is complete.
+var ErrDeleted = errors.New("meta: the control-plane group dropped this voter and its plan is complete")
 
 // ctlOwner is the owner the group's blobs carry on the host's disk log.
 const ctlOwner = 1
-
-// ErrVoters reports a host restarted with voters other than those its disk was formatted with.
-var ErrVoters = errors.New("meta: the voters given are not those the control-plane log was formatted with")
 
 // heardNode is a node heard from: the loop it reported from, when, and the loop of each disk its
 // last report opened.
@@ -150,10 +162,10 @@ func (h *CtlHost) writeBoot(ctx *core.Context, md raftpb.SnapshotMetadata) error
 
 // OpenCtlHost starts recovering a host from its disk of diskBlocks blocks: the log's rounds
 // replay onto an empty storage, from the boot state FormatCtlHost wrote first, and the replica
-// starts once the replay ends. A replay whose voters are not those of cfg's storage stops the host
-// with ErrVoters. A log holding no round, as a crash after format's superblocks and before its
-// boot round leaves it, gets cfg's boot state written as format writes it, and the replica starts
-// once that round is durable.
+// starts once the replay ends, in the configuration its log holds, whatever voters cfg's storage
+// names. A log holding no round, as a crash after format's superblocks and before its boot round
+// leaves it, gets cfg's boot state written as format writes it, and the replica starts once that
+// round is durable.
 func OpenCtlHost(ctx *core.Context, cfg Config, lc disklog.Config, diskBlocks uint64, out *CtlHostOutput) (*CtlHost, error) {
 	boot := cfg.Raft.Storage.Base()
 	cfg.Raft.Storage = raftshard.NewStorage()
@@ -234,6 +246,7 @@ func (h *CtlHost) OnEvent(ctx *core.Context, ev *core.Event, out *CtlHostOutput)
 			if h.cp.pieceWait {
 				h.fail(h.nextPiece(ctx), out)
 			}
+			h.reportOwn(ctx, out)
 			h.step(ctx, out)
 		}
 	default:
@@ -270,6 +283,11 @@ func (h *CtlHost) recvGroup(ctx *core.Context, ev *core.Event, out *CtlHostOutpu
 		return
 	case kind == KindNodeReport:
 		h.report(ctx, ev, out)
+	case kind == KindDelete:
+		var err error
+		if h.dels, err = DecodeDelete(ctx.Pool, &ev.Msg, h.dels[:0]); err == nil {
+			h.deleted(h.dels, out)
+		}
 	case kind == KindAsks:
 		var err error
 		if h.asks, err = DecodeAsks(ctx.Pool, &ev.Msg, h.asks); err == nil && h.ctl != nil {
@@ -309,9 +327,16 @@ func (h *CtlHost) redirect(ctx *core.Context, to core.NodeID, out *CtlHostOutput
 }
 
 // report takes a node's report from the loop it names, which pushes then go to, and answers it
-// with the replicas the node is to delete, if any, and the disk membership.
+// with the replicas the node is to delete, if any, and the disk membership. A report that names a
+// replica of this group is a voter's, taken by voterReport.
 func (h *CtlHost) report(ctx *core.Context, ev *core.Event, out *CtlHostOutput) {
 	if DecodeNodeReport(ctx.Pool, &ev.Msg, &h.nr) != nil || h.nr.Node != ev.Peer.Node {
+		return
+	}
+	if slices.ContainsFunc(h.nr.Replicas, func(r ReplicaReport) bool { return r.Group == h.group }) {
+		if h.ctl != nil {
+			h.voterReport(ctx, &h.nr, ev.Peer, false, out)
+		}
 		return
 	}
 	i, ok := slices.BinarySearchFunc(h.nodes, ev.Peer.Node, func(n heardNode, id uint32) int { return cmp.Compare(n.at.Node, id) })
@@ -339,6 +364,65 @@ func (h *CtlHost) report(ctx *core.Context, ev *core.Event, out *CtlHostOutput) 
 		}
 	}
 	h.sendDisks(ctx, ev.Peer, out)
+}
+
+// reportOwn reports the host's replica every reportInterval: to its Control while it has one, or
+// else to every other member of its applied configuration, since the leader it knows may be stale:
+// a halted replica takes no Raft message, and the next leader of a configuration that dropped the
+// replica sends it none.
+func (h *CtlHost) reportOwn(ctx *core.Context, out *CtlHostOutput) {
+	r := h.shard.Raft()
+	at, ok := r.Node(h.id)
+	if !ok || h.err != nil || ctx.Now < h.reportAt {
+		return
+	}
+	h.reportAt = ctx.Now + reportInterval
+	var voters []uint64
+	if len(h.own.Replicas) > 0 {
+		voters = h.own.Replicas[0].Voters
+	}
+	h.own.Node, h.own.Replicas = at.Node, append(h.own.Replicas[:0], h.shard.Report(voters))
+	if h.ctl != nil {
+		h.voterReport(ctx, &h.own, at, true, out)
+		return
+	}
+	_, cs := h.shard.Applied()
+	h.members = append(append(append(append(h.members[:0], cs.Voters...), cs.VotersOutgoing...), cs.Learners...), cs.LearnersNext...)
+	slices.Sort(h.members)
+	for _, id := range slices.Compact(h.members) {
+		to, known := r.Node(id)
+		if id == h.id || !known {
+			continue
+		}
+		a := core.Action{Kind: core.ActNetSend, Peer: to}
+		if EncodeNodeReport(ctx.Pool, h.group, &h.own, &a.Msg) == nil {
+			out.Actions = append(out.Actions, a)
+		}
+	}
+}
+
+// voterReport hands the Control a voter's report, its own when self, and answers it with the
+// replicas the voter is to delete. A voter is sent no table, session table or disk membership.
+func (h *CtlHost) voterReport(ctx *core.Context, nr *NodeReport, from core.NodeID, self bool, out *CtlHostOutput) {
+	h.ctl.VoterReport(ctx.Now, nr.Node, nr.Replicas)
+	if h.dels = h.ctl.Deletes(nr.Node, h.leased(ctx), h.dels[:0]); len(h.dels) == 0 {
+		return
+	}
+	if self {
+		h.deleted(h.dels, out)
+		return
+	}
+	a := core.Action{Kind: core.ActNetSend, Peer: from, Reply: true}
+	if EncodeDelete(ctx.Pool, h.group, h.dels, &a.Msg) == nil {
+		out.Actions = append(out.Actions, a)
+	}
+}
+
+// deleted stops the host for good when refs name its replica and the replica learned its removal.
+func (h *CtlHost) deleted(refs []ReplicaRef, out *CtlHostOutput) {
+	if removed, _ := h.shard.Raft().Removed(); removed && slices.Contains(refs, ReplicaRef{Group: h.group, ID: h.id}) {
+		h.fail(ErrDeleted, out)
+	}
 }
 
 // sendDisks answers a node's report with the committed membership: each disk not gone that its
@@ -476,10 +560,21 @@ func (h *CtlHost) answer(ctx *core.Context, a *Answer, out *CtlHostOutput) {
 	h.handOut(ctx, out)
 }
 
-// handOut turns the Control's output into the host's: the sessions started; a committed table's
+// handOut turns the Control's output into the host's: its group's plan to its replica, a voter of
+// the group on its node's loop 0; the sessions started; a committed table's
 // delta sent to every node heard from within NodeDownAfter, and the whole table to each node named
 // that is; and the session table pushed to every such node, or to each node named that is.
 func (h *CtlHost) handOut(ctx *core.Context, out *CtlHostOutput) {
+	for _, g := range h.cout.Plans {
+		if g.ID != h.group {
+			continue
+		}
+		h.plan = h.plan[:0]
+		for _, v := range g.Voters {
+			h.plan = append(h.plan, raftshard.Peer{ID: v.ID, Node: core.NodeID{Node: v.Node}})
+		}
+		h.shard.Raft().SetPlan(h.plan)
+	}
 	out.Started = append(out.Started, h.cout.Started...)
 	for _, s := range h.cout.Started {
 		i := slices.IndexFunc(h.starting, func(w starter) bool { return w.at.Node == s.Node && w.request == s.Request })
@@ -620,8 +715,6 @@ func (h *CtlHost) logEvents(ctx *core.Context, out *CtlHostOutput) {
 					if err = st.ApplySnapshot(raftpb.Snapshot{Metadata: h.boot}); err == nil {
 						err = h.writeBoot(ctx, h.boot)
 					}
-				} else if e := st.Base().ConfState.Equivalent(h.boot.ConfState); e != nil {
-					err = fmt.Errorf("%w: %v", ErrVoters, e)
 				} else {
 					err = h.start(ctx, out)
 				}

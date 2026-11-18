@@ -213,15 +213,40 @@ func (c *Control) Asked(node uint32, fs []chunkstore.PGFields) {
 	}
 }
 
-// Deletes appends to dst each replica that node last reported having learned its removal and
-// whose group's plan, its shard-map entry, no longer names it, once that plan is complete. It
-// appends nothing unless leased: the leader holds its lease.
+// VoterReport takes, at now, the report of the control-plane group's voter on node: its replicas,
+// which count as a node's do toward a plan's completion and its deletes, and nothing else, since
+// the voter is not a storage node.
+func (c *Control) VoterReport(now core.Tick, node uint32, reps []ReplicaReport) {
+	c.begin(now)
+	i, ok := slices.BinarySearchFunc(c.voters, node, func(n nodeState, id uint32) int { return cmp.Compare(n.id, id) })
+	if !ok {
+		c.voters = slices.Insert(c.voters, i, nodeState{id: node})
+	}
+	v := &c.voters[i]
+	v.heard, v.reps = now, v.reps[:0]
+	for _, r := range reps {
+		r.Voters = slices.Clone(r.Voters)
+		v.reps = append(v.reps, r)
+	}
+}
+
+// Deletes appends to dst each replica that node, or the control-plane voter on node, last
+// reported having learned its removal and whose group's plan, its shard-map entry, no longer names
+// it, once that plan is complete. It appends nothing unless leased: the leader holds its lease.
 func (c *Control) Deletes(node uint32, leased bool, dst []ReplicaRef) []ReplicaRef {
-	i, ok := slices.BinarySearchFunc(c.nodes, node, func(n nodeState, id uint32) int { return cmp.Compare(n.id, id) })
-	if !leased || !ok {
+	if !leased {
 		return dst
 	}
-	for _, r := range c.nodes[i].reps {
+	for _, ns := range [...][]nodeState{c.nodes, c.voters} {
+		if i, ok := slices.BinarySearchFunc(ns, node, func(n nodeState, id uint32) int { return cmp.Compare(n.id, id) }); ok {
+			dst = c.deletes(ns[i].reps, dst)
+		}
+	}
+	return dst
+}
+
+func (c *Control) deletes(reps []ReplicaReport, dst []ReplicaRef) []ReplicaRef {
+	for _, r := range reps {
 		g, ok := c.group(r.Group)
 		if ok && r.Removed && !slices.ContainsFunc(g.Voters, func(v Replica) bool { return v.ID == r.ID }) && c.complete(g) {
 			dst = append(dst, ReplicaRef{Group: r.Group, ID: r.ID})
@@ -238,33 +263,43 @@ func (c *Control) Deletes(node uint32, leased bool, dst []ReplicaRef) []ReplicaR
 // so a plan never waits for the one before it.
 func (c *Control) complete(g *Group) bool {
 	leave := uint64(math.MaxUint64)
-	for _, n := range c.nodes {
-		for _, r := range n.reps {
-			if r.Group == g.ID && (!r.Joint || c.jointCounts) && len(r.Voters) == len(g.Voters) && !slices.ContainsFunc(r.Voters, func(id uint64) bool {
-				return !slices.ContainsFunc(g.Voters, func(v Replica) bool { return v.ID == id })
-			}) {
-				leave = min(leave, r.ConfIndex)
-			}
+	c.eachReport(func(r *ReplicaReport) {
+		if r.Group == g.ID && (!r.Joint || c.jointCounts) && len(r.Voters) == len(g.Voters) && !slices.ContainsFunc(r.Voters, func(id uint64) bool {
+			return !slices.ContainsFunc(g.Voters, func(v Replica) bool { return v.ID == id })
+		}) {
+			leave = min(leave, r.ConfIndex)
 		}
-	}
+	})
 	if leave == math.MaxUint64 {
 		return false
 	}
 	for _, v := range g.Voters {
-		if !slices.ContainsFunc(c.nodes, func(n nodeState) bool {
-			return slices.ContainsFunc(n.reps, func(r ReplicaReport) bool { return r.Group == g.ID && r.ID == v.ID && r.ConfIndex >= leave })
-		}) {
+		applied := false
+		c.eachReport(func(r *ReplicaReport) { applied = applied || r.Group == g.ID && r.ID == v.ID && r.ConfIndex >= leave })
+		if !applied {
 			return false
 		}
 	}
 	return true
 }
 
-// begin forgets the nodes not heard from within node_down_after of now and, once after a failover
+// eachReport calls f with each replica report the nodes and the control-plane voters last sent.
+func (c *Control) eachReport(f func(r *ReplicaReport)) {
+	for _, ns := range [...][]nodeState{c.nodes, c.voters} {
+		for i := range ns {
+			for j := range ns[i].reps {
+				f(&ns[i].reps[j])
+			}
+		}
+	}
+}
+
+// begin forgets the nodes and control-plane voters not heard from within node_down_after of now and, once after a failover
 // or a reload, starts the failure detector over the committed record at now, the start of this
 // leader's lease: each down disk down since its committed age before now.
 func (c *Control) begin(now core.Tick) {
-	c.nodes = slices.DeleteFunc(c.nodes, func(n nodeState) bool { return now-min(n.heard, now) >= chunkstore.NodeDownAfter })
+	silent := func(n nodeState) bool { return now-min(n.heard, now) >= chunkstore.NodeDownAfter }
+	c.nodes, c.voters = slices.DeleteFunc(c.nodes, silent), slices.DeleteFunc(c.voters, silent)
 	if c.det != nil {
 		return
 	}

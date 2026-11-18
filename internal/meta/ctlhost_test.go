@@ -66,6 +66,21 @@ type hostRun struct {
 	diverged int
 	// plant plants a bug in each host a restart opens.
 	plant func(h *CtlHost)
+	// boot is the group's boot configuration, every host a voter when empty; a fresh host is
+	// formatted with no configuration, as a voter the group has yet to add.
+	boot  raftpb.ConfState
+	fresh []bool
+	// Each host's node-pair lease holder and grantor; leasing has run renew the leases among the
+	// hosts not down every heartbeat. A down host takes no timer and loses every message to or from
+	// it; a paused one takes no timer of its replica. pass, when set, may edit a message between
+	// hosts or refuse it, which loses it.
+	holders  []*lease.Holder
+	grantors []*lease.Grantor
+	leaseID  uint64
+	leasing  bool
+	down     []bool
+	paused   []bool
+	pass     func(w *hostWork) bool
 }
 
 // hostWork is a disk action of host at, or a message from host from to host at.
@@ -82,13 +97,23 @@ func newHostGroup(t *testing.T, voters int) *hostRun {
 
 // newHostGroupOn is newHostGroup, each host's disk log on lc.
 func newHostGroupOn(t *testing.T, voters int, lc disklog.Config) *hostRun {
-	return newHostGroupOnDisks(t, voters, lc, ctlGeometry, 0)
+	return newHostGroupOnDisks(t, voters, lc, ctlGeometry, 0, nil)
 }
 
-// newHostGroupOnDisks is newHostGroupOn, each host's disk of geometry geo and its tree merging in
+// newHostGroupWith is newHostGroupOn, setup changing the run before any host is formatted.
+func newHostGroupWith(t *testing.T, voters int, lc disklog.Config, setup func(r *hostRun)) *hostRun {
+	return newHostGroupOnDisks(t, voters, lc, ctlGeometry, 0, setup)
+}
+
+// newHostGroupOnDisks is newHostGroupWith, each host's disk of geometry geo and its tree merging in
 // steps of stepBytes.
-func newHostGroupOnDisks(t *testing.T, voters int, lc disklog.Config, geo disklog.Geometry, stepBytes int) *hostRun {
-	r := &hostRun{t: t, lc: lc, geo: geo, stepBytes: stepBytes, hs: make([]*CtlHost, voters), pool: sim.NewPool(16<<20, 0), now: 5_000_000}
+func newHostGroupOnDisks(t *testing.T, voters int, lc disklog.Config, geo disklog.Geometry, stepBytes int, setup func(r *hostRun)) *hostRun {
+	r := &hostRun{t: t, lc: lc, geo: geo, stepBytes: stepBytes, hs: make([]*CtlHost, voters), pool: sim.NewPool(16<<20, 0), now: 5_000_000,
+		fresh: make([]bool, voters), down: make([]bool, voters), paused: make([]bool, voters),
+		holders: make([]*lease.Holder, voters), grantors: make([]*lease.Grantor, voters)}
+	if setup != nil {
+		setup(r)
+	}
 	for i := range voters {
 		r.disks = append(r.disks, sim.NewDisk(geo.DiskBlocks()))
 		sb := disklog.Superblock{LogID: uint64(i) + 1, Geometry: geo}
@@ -106,14 +131,21 @@ func newHostGroupOnDisks(t *testing.T, voters int, lc disklog.Config, geo disklo
 }
 
 func (r *hostRun) config(i int) Config {
-	cs := raftpb.ConfState{}
+	cs := r.boot
 	var peers []raftshard.Peer
 	for id := range uint64(len(r.hs)) {
-		cs.Voters = append(cs.Voters, id+1)
+		if len(r.boot.Voters) == 0 {
+			cs.Voters = append(cs.Voters, id+1)
+		}
 		peers = append(peers, raftshard.Peer{ID: id + 1, Node: voterNode(id + 1)})
 	}
-	return Config{Raft: raftshard.Config{Group: hostGroup, ID: uint64(i) + 1, Storage: bootStorage(r.t, cs), Seed: uint64(i), Timer: 1, Peers: peers,
-		Holder: lease.NewHolder(lease.DefaultConfig), Grantor: lease.NewGrantor(lease.DefaultConfig, uint64(i)+1, lease.Time{})},
+	st := bootStorage(r.t, cs)
+	if r.fresh[i] {
+		st = raftshard.NewStorage()
+	}
+	r.holders[i], r.grantors[i] = lease.NewHolder(lease.DefaultConfig), lease.NewGrantor(lease.DefaultConfig, uint64(i)+1, lease.Time{})
+	return Config{Raft: raftshard.Config{Group: hostGroup, ID: uint64(i) + 1, Storage: st, Seed: uint64(i), Timer: 1, Peers: peers,
+		Holder: r.holders[i], Grantor: r.grantors[i]},
 		Tree: lsm.Config{MaxPiece: 32 << 10, StepBytes: r.stepBytes, Check: true, Pages: r.pagesOf(i)}}
 }
 
@@ -206,6 +238,10 @@ func (r *hostRun) drain() {
 	for len(r.work) > 0 {
 		w := r.work[0]
 		r.work = r.work[1:]
+		if r.down[w.at] || r.down[w.from] || w.a.Kind == core.ActNetSend && r.pass != nil && !r.pass(&w) {
+			free(&core.Context{Pool: r.pool}, &w.a.Msg)
+			continue
+		}
 		ev := core.Event{Kind: core.EvNetRecv, Peer: voterNode(uint64(w.from) + 1), Msg: w.a.Msg}
 		if w.a.Kind != core.ActNetSend {
 			ev = r.disks[w.at].Execute(r.pool, &w.a)
@@ -232,8 +268,14 @@ func (r *hostRun) run(d core.Tick) {
 	r.out.Reset()
 	for end := r.now + d; r.now < end; {
 		r.now += raftshard.TickInterval
+		if r.leasing && r.now%(raftshard.HeartbeatTick*raftshard.TickInterval) == 0 {
+			r.renewLeases()
+		}
 		for i, h := range r.hs {
 			for _, timer := range []core.TimerID{1, StepTimer} {
+				if r.down[i] || r.paused[i] && timer == 1 {
+					continue
+				}
 				r.do(i, func(ctx *core.Context, out *CtlHostOutput) {
 					h.OnEvent(ctx, &core.Event{Kind: core.EvTimer, Timer: timer}, out)
 				})
@@ -746,7 +788,8 @@ func TestARestartAfterAFormatCutShortWritesTheBootRound(t *testing.T) {
 	empty := 0
 	for _, keep := range []bool{false, true} {
 		for steps := 0; ; steps++ {
-			r := &hostRun{t: t, lc: ctlLogConfig(), geo: ctlGeometry, hs: make([]*CtlHost, 1), pool: sim.NewPool(16<<20, 0), now: 5_000_000}
+			r := &hostRun{t: t, lc: ctlLogConfig(), geo: ctlGeometry, hs: make([]*CtlHost, 1), pool: sim.NewPool(16<<20, 0), now: 5_000_000,
+				fresh: make([]bool, 1), down: make([]bool, 1), paused: make([]bool, 1), holders: make([]*lease.Holder, 1), grantors: make([]*lease.Grantor, 1)}
 			r.disks = append(r.disks, sim.NewDisk(ctlGeometry.DiskBlocks()))
 			r.do(0, func(ctx *core.Context, out *CtlHostOutput) {
 				h, err := FormatCtlHost(ctx, r.config(0), r.lc, disklog.Superblock{LogID: 1, Geometry: ctlGeometry}, out)
@@ -810,9 +853,10 @@ func TestARestartAfterAFormatCutShortWritesTheBootRound(t *testing.T) {
 	}
 }
 
-// A voter restarted with voters other than those its disk was formatted with stops: alone, it
-// would elect itself and acknowledge commits that no quorum of the group holds.
-func TestAVoterRestartedWithOtherVotersStops(t *testing.T) {
+// A voter restarted with voters other than its log holds, here itself alone, takes its log's
+// configuration, since -voters names the voters only at the first boot: it does not stop, does not
+// elect itself alone, and applies what the group commits.
+func TestAVoterRestartedWithOtherVotersTakesItsLogsConfiguration(t *testing.T) {
 	r := newHostGroup(t, 3)
 	l := r.leader()
 	if a := r.txnAt(l, 9, "x"); a == nil || a.Err != nil {
@@ -821,21 +865,20 @@ func TestAVoterRestartedWithOtherVotersStops(t *testing.T) {
 	alone := r.config(l)
 	alone.Raft.Storage = bootStorage(t, raftpb.ConfState{Voters: []uint64{uint64(l) + 1}})
 	alone.Raft.Peers = alone.Raft.Peers[l : l+1]
-	r.failing = true
 	r.restartWith(l, alone)
-	if !errors.Is(r.hs[l].Err(), ErrVoters) || r.hs[l].Shard() != nil {
-		t.Fatalf("restarted alone, the voter has error %v and replica %v", r.hs[l].Err(), r.hs[l].Shard())
+	if err := r.hs[l].Err(); err != nil || r.hs[l].Shard() == nil {
+		t.Fatalf("restarted alone, the voter has error %v and replica %v", err, r.hs[l].Shard())
 	}
-	r.run(raftshard.TickInterval * 300)
-	if a := r.txnAt(l, 10, "y"); a != nil {
-		t.Fatalf("the stopped voter answered %+v", a)
+	if _, cs := r.hs[l].Shard().Applied(); !slices.Equal(cs.Voters, []uint64{1, 2, 3}) {
+		t.Fatalf("restarted alone, the voter is in %+v", cs)
 	}
 	o := r.leader()
-	if o == l {
-		t.Fatalf("the stopped voter leads")
-	}
 	if a := r.txnAt(o, 11, "z"); a == nil || a.Err != nil {
-		t.Fatalf("the other two voters answered %+v", a)
+		t.Fatalf("voter %d answered %+v", o+1, a)
+	}
+	r.run(raftshard.TickInterval * 50)
+	if got, want := r.hs[l].Shard().State().Applied(), r.hs[o].Shard().State().Applied(); got != want {
+		t.Fatalf("the restarted voter applied through %d, the leader through %d", got, want)
 	}
 }
 

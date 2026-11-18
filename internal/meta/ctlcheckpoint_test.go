@@ -21,7 +21,7 @@ var counterKey = attr(1, 2, 1)
 func compactingRun(t *testing.T, stepBytes int) *hostRun {
 	lc := ctlLogConfig()
 	lc.MaxReplayBytes = 64 << 10
-	r := newHostGroupOnDisks(t, 1, lc, smallDisk, stepBytes)
+	r := newHostGroupOnDisks(t, 1, lc, smallDisk, stepBytes, nil)
 	r.states = []map[uint64][]byte{{}}
 	r.lead()
 	return r
