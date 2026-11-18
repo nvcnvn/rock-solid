@@ -931,14 +931,13 @@ func (s *Shard) reconcile(ctx *core.Context) {
 // from, so its node runs, being sent appends and caught up as a learner must be. etcd-raft drops
 // proposals while a transfer waits for its target to reach the leader's last index, so a down or
 // lagging target would stall them; a caught-up one makes that wait about a round trip. A leader
-// that learned its removal takes no proposals, so it needs no lease: it takes a voter caught up
-// past its leave, which a planned voter whose lease is not valid yet, as in its node's restart
-// wait, still is. Without one, re-proposing the leave would cost it an entry and a round per round
-// trip in a log that compacts no further. It also takes a voter of the leave's configuration, the
-// joint one's incoming half, as planned, since its node may hand it no plan.
+// that learned its removal takes no proposals, so it needs no lease: it takes any replicating voter
+// of the plan or of its applied configuration's incoming half, since its node may hand it no plan,
+// even one whose lease is not valid yet, as in its node's restart wait. Without one, re-proposing
+// its leave would cost it an entry and a round per round trip in a log that compacts no further.
 func (s *Shard) target(t lease.Time) uint64 {
-	return s.next(func(id uint64, pr *tracker.Progress) bool {
-		return s.removed && (s.planned(id) || slices.Contains(s.conf.Voters, id)) && pr.Match >= s.leave ||
+	return s.next(func(id uint64) bool {
+		return s.removed && (s.planned(id) || slices.Contains(s.conf.Voters, id)) ||
 			!s.removed && s.planned(id) && s.cfg.Holder.Valid(s.cfg.Peers[s.peer(id)].Node, t)
 	})
 }
@@ -957,10 +956,10 @@ func (s *Shard) transfer(st raft.BasicStatus, t lease.Time) {
 }
 
 // next is the first replicating voter that ok takes after handedTo in ID order, wrapping round, or 0.
-func (s *Shard) next(ok func(id uint64, pr *tracker.Progress) bool) uint64 {
+func (s *Shard) next(ok func(id uint64) bool) uint64 {
 	var first, next uint64
 	s.rn.WithProgress(func(id uint64, _ raft.ProgressType, pr tracker.Progress) {
-		if !s.replicating(id, &pr) || !ok(id, &pr) {
+		if !s.replicating(id, &pr) || !ok(id) {
 			return
 		}
 		if first == 0 {
@@ -992,7 +991,7 @@ func (s *Shard) handOff(ctx *core.Context) {
 		return
 	}
 	s.handAt = ctx.Now + ElectionTick*TickInterval
-	if next := s.next(func(uint64, *tracker.Progress) bool { return true }); next != 0 {
+	if next := s.next(func(uint64) bool { return true }); next != 0 {
 		s.handedTo = next
 		s.rn.TransferLeader(next)
 	}
