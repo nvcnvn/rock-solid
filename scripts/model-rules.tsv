@@ -15,7 +15,7 @@ epoch/neg-compare-table-epochs	chunkstore.sendEpoch	TestPlantedPeeringBugsBreakT
 epoch/neg-decide-by-own-interval	chunkstore.ownInterval	TestPlantedPeeringBugsBreakTheFaultRun
 epoch/neg-drop-all-leaving	chunkstore.dropAllLeaving	TestDropAllLeavingStrandsAWrite
 epoch/neg-edit-keeps-interval	chunkstore.editKeepsInterval	TestPlantedPeeringBugsBreakTheOracle
-epoch/neg-fence-on-arrival	chunkstore.fenceOnArrival	TestPlantedReadBugsBreakTheReadRun
+epoch/neg-fence-on-arrival	chunkstore.fenceOnArrival,listerOrders	TestPlantedReadBugsBreakTheReadRun
 epoch/neg-fresh-grant-no-table-check	chunkstore.freshGrantNoCheck	TestPlantedBugsBreakTheirTraces
 epoch/neg-gone-while-up	chunkstore.goneWhileUp	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-grantor-faster-clock	lease.fasterClock	TestPlantedLeaseBugsBreakThePair
