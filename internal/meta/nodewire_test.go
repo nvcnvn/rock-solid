@@ -2,7 +2,13 @@ package meta
 
 import (
 	"bytes"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
@@ -386,4 +392,45 @@ func FuzzDecodeDelete(f *testing.F) {
 			return EncodeDelete(pool, g, *rs, m)
 		},
 		func(pool core.BufPool, m *core.Msg) ([]ReplicaRef, error) { return DecodeDelete(pool, m, nil) })
+}
+
+// Every message kind the package declares, a constant named Kind*, has a byte of its own: two
+// kinds on one byte would have a host take one message for the other.
+func TestEveryMessageKindIsDistinct(t *testing.T) {
+	pkgs, err := parser.ParseDir(token.NewFileSet(), ".", func(fi fs.FileInfo) bool { return !strings.HasSuffix(fi.Name(), "_test.go") }, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[uint64]string{}
+	for _, f := range pkgs["meta"].Files {
+		for _, d := range f.Decls {
+			g, ok := d.(*ast.GenDecl)
+			if !ok || g.Tok != token.CONST {
+				continue
+			}
+			for _, sp := range g.Specs {
+				v := sp.(*ast.ValueSpec)
+				for i, name := range v.Names {
+					if !strings.HasPrefix(name.Name, "Kind") || i >= len(v.Values) {
+						continue
+					}
+					lit, ok := v.Values[i].(*ast.BasicLit)
+					if !ok {
+						t.Fatalf("%s is not a literal", name.Name)
+					}
+					b, err := strconv.ParseUint(lit.Value, 0, 8)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if was, ok := seen[b]; ok {
+						t.Fatalf("%s and %s are both %#x", was, name.Name, b)
+					}
+					seen[b] = name.Name
+				}
+			}
+		}
+	}
+	if len(seen) < 16 {
+		t.Fatalf("found %d kinds: %v", len(seen), seen)
+	}
 }

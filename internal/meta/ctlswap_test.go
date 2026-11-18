@@ -202,6 +202,45 @@ func TestADeletedControlPlaneVoterStaysDeletedAcrossARestart(t *testing.T) {
 	}
 }
 
+// A voter's report is kept apart from the nodes': the leader's Control counts it toward no node,
+// so a voter, whose report carries release 0, holds back no format level, and a voter is sent no
+// placement table, session table or disk membership.
+func TestAVoterReportCountsTowardNoNode(t *testing.T) {
+	r := newHostGroupWith(t, 3, ctlLogConfig(), func(r *hostRun) { r.leasing = true })
+	var kinds []byte
+	r.pass = func(w *hostWork) bool {
+		if in := w.a.Msg.Inline(); len(in) > kindAt && slices.Contains([]byte{KindTable, KindDelta, KindDisks, KindSessions}, in[kindAt]) {
+			kinds = append(kinds, in[kindAt])
+		}
+		return true
+	}
+	c := r.hs[r.controlled()].Control()
+	r.run(3 * reportInterval)
+	if len(c.voters) != 3 || len(c.nodes) != 0 || len(kinds) != 0 {
+		t.Fatalf("the Control holds %d voters and %d nodes; the voters were sent kinds %x", len(c.voters), len(c.nodes), kinds)
+	}
+	if err := c.SetFormat(c.Format() + 1); err != nil {
+		t.Fatalf("the voters hold back the format level: %v", err)
+	}
+}
+
+// A delete naming a voter that has not learned its removal, such as a stale or replayed one,
+// leaves its host running.
+func TestADeleteToAVoterThatWasNotRemovedLeavesItRunning(t *testing.T) {
+	r := newHostGroupWith(t, 3, ctlLogConfig(), func(r *hostRun) { r.leasing = true })
+	r.controlled()
+	a := core.Action{Kind: core.ActNetSend, Peer: voterNode(2)}
+	if err := EncodeDelete(r.pool, hostGroup, []ReplicaRef{{Group: hostGroup, ID: 2}}, &a.Msg); err != nil {
+		t.Fatal(err)
+	}
+	r.work = append(r.work, hostWork{from: 0, at: 1, a: a})
+	r.drain()
+	r.run(StepInterval)
+	if err := r.hs[1].Err(); err != nil {
+		t.Fatalf("a voter in the configuration stopped on a delete: %v", err)
+	}
+}
+
 // A control-plane leader the plan drops hands its leadership to a planned voter, whose own Control
 // then hands its replica the same plan and carries out the swap; the old leader is deleted once
 // the plan is complete.

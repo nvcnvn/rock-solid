@@ -653,3 +653,15 @@ func TestAShardMapThatReusesAReplicaIDIsRefused(t *testing.T) {
 		}
 	}
 }
+
+// The Control keeps a copy of a voter's reported voters, not the decode buffer the report came in,
+// which the next report overwrites.
+func TestAVoterReportKeepsItsOwnVoters(t *testing.T) {
+	r := newCtlRun(t)
+	voters := []uint64{1, 2, 3}
+	r.ctl.VoterReport(r.now, 7, []ReplicaReport{{Group: hostGroup, ID: 3, ConfIndex: 5, Voters: voters}})
+	voters[0] = 9
+	if got := r.ctl.voters[0].reps[0].Voters; !slices.Equal(got, []uint64{1, 2, 3}) {
+		t.Fatalf("the voter's report holds voters %v once the buffer changed", got)
+	}
+}
