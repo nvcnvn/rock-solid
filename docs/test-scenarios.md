@@ -5685,8 +5685,8 @@ it on its missing list.
   it has settled the chunk, its index maps a version other than the kept one, lacking it or, after a
   restart, mapping a dropped one, or its own store listed the chunk before the decision. Disk 3, down
   in interval 1, leads interval 2 and lacks 1.1, which peering keeps from disk 2: a partial write to
-  the chunk waits, while a whole-block write to it and a partial write to another chunk go ahead
-  (`TestAPartialWriteWaitsForTheKeptVersion`). Disk 3, down in interval 2, misses 2.1 of block 0 and
+  the chunk waits, as does a whole-block write to it, the primary listing the chunk, while a partial
+  write to another chunk goes ahead (`TestAPartialWriteWaitsForTheKeptVersion`). Disk 3, down in interval 2, misses 2.1 of block 0 and
   lists it in interval 3, where a whole-block write to block 1 brings its copy to 3.1; leading
   interval 4, which keeps 3.1, it still lists the chunk, and a partial write to block 0 waits rather
   than merging on 1.1 (`TestAPartialWriteWaitsWhileThePrimaryListsTheChunk`; found by the
