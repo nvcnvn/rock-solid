@@ -72,8 +72,9 @@ type hostRun struct {
 	fresh []bool
 	// Each host's node-pair lease holder and grantor; leasing has run renew the leases among the
 	// hosts not down every heartbeat. A down host takes no timer and loses every message to or from
-	// it; a paused one takes no timer of its replica. pass, when set, may edit a message between
-	// hosts or refuse it, which loses it.
+	// it; a paused one takes no timer of its replica, though its replica still ticks on each event
+	// it takes, a message included. pass, when set, may edit a message between hosts or refuse it,
+	// which loses it.
 	holders  []*lease.Holder
 	grantors []*lease.Grantor
 	leaseID  uint64
@@ -213,6 +214,9 @@ func (r *hostRun) do(i int, f func(ctx *core.Context, out *CtlHostOutput)) {
 	var o CtlHostOutput
 	f(&ctx, &o)
 	r.checkState(i)
+	if h := r.hs[i]; h != nil && h.err == nil && h.rec == nil && h.disk.Log.Stalled() && !h.cp.running {
+		r.t.Fatalf("host %d's log stalled with no checkpoint to free a segment: its disk is full", i)
+	}
 	for _, err := range o.Errs {
 		if !r.failing {
 			r.t.Fatal(err)
