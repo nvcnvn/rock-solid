@@ -1088,7 +1088,7 @@ RecoverFrom(n, p, c, d, m) ==
                /\ at = Ver(k, 0) \/ Bug("RecoveryCoversAtRead")
                /\ dlog' = [dlog EXCEPT ![d][c] =
                              {v \in dlog[s][c] : v <= K \/ Bug("RecoverFromListed")
-                                                  \/ (s = PrimDisk(p, k) /\ c \in TheDec(n, p, k).img /\ v \in Held(s, c) /\ IvOfV(v) < k)}
+                                                  \/ (K # 0 /\ s = PrimDisk(p, k) /\ c \in TheDec(n, p, k).img /\ v \in Held(s, c) /\ IvOfV(v) < k)}
                              \cup {v \in dlog[d][c] : IvOfV(v) = k /\ (v <= at \/ ~Bug("RecoveryCoversAtRead"))}]
        /\ miss' = [miss EXCEPT ![d][c] = NoMiss]
        /\ drp' = [drp EXCEPT ![d] = {g \in @ : g.c # c}]
@@ -2147,6 +2147,18 @@ MergesOnKept ==
        \A y \in dec : (y.p = ChunkPG[x.c] /\ y.k = IvOfV(x.v) /\ y.n = x.n /\ y.r = x.r)
                         => /\ y.kept[x.c] = 0 \/ y.kept[x.c] \in Chain(x.c, x.on)
                            /\ x.on = y.kept[x.c] \/ IvOfV(x.on) = y.k
+
+\* A primary recovering from its own image, the kept version, finds no version of
+\* an earlier interval above the kept one in its map: so the copy of what its
+\* map holds that RecoverFrom takes from such a source is the kept version's.
+ImageRecoveryKept ==
+    \A n \in Node, p \in PG : Running(n) /\ Leads(n, p) /\ pr[n][p].act =>
+       LET k == IvAt(n, p)
+           s == PrimDisk(p, k)
+       IN \A x \in {y \in dec : y.p = p /\ y.k = k /\ y.n = n /\ y.r = run[n]} :
+             \A c \in x.img, d \in UpIn(p, k) :
+                miss[d][c] \notin {NoMiss, 0} =>
+                   \A v \in Held(s, c) : IvOfV(v) < k => v <= miss[d][c]
 
 \* 9. Table epochs, interval numbers and last activated intervals never go
 \* backwards (the node half is the action property Monotonic), and a table's
