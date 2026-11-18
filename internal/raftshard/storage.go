@@ -158,9 +158,18 @@ func (s *Storage) ApplySnapshot(snap raftpb.Snapshot) error {
 }
 
 // Append adds entries, replacing those from the first one's index on; entries at or below the
-// base are skipped, and a gap after the last entry is a broken invariant of the caller.
+// base are skipped, those the storage holds at the same term are kept, as Raft's log matching
+// makes them the same entries, and a gap after the last entry is a broken invariant of the caller.
 func (s *Storage) Append(ents []raftpb.Entry) {
 	if len(ents) == 0 {
+		return
+	}
+	end := ents[len(ents)-1].Index
+	for len(ents) > 0 && ents[0].Index > s.base.Index && ents[0].Index <= s.last() && s.ents[ents[0].Index-s.base.Index-1].term == ents[0].Term {
+		ents = ents[1:]
+	}
+	if len(ents) == 0 {
+		s.ents = s.ents[:end-s.base.Index]
 		return
 	}
 	// Only a replay on a recorded base meets this, as a live append starts above the commit index:
@@ -230,4 +239,14 @@ func (s *Storage) Compact(i uint64, cs raftpb.ConfState) error {
 	s.chunks = append(s.chunks[:0], s.chunks[drop:]...)
 	s.first += drop
 	return nil
+}
+
+// Bytes is the payload bytes of the chunks holding the retained entries, counting those of entries
+// a later append replaced until a compaction drops their chunk.
+func (s *Storage) Bytes() uint64 {
+	var n uint64
+	for _, c := range s.chunks {
+		n += uint64(len(c))
+	}
+	return n
 }

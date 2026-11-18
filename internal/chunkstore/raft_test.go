@@ -26,6 +26,9 @@ type kvShard struct {
 	applied uint64
 	rounds  map[uint64]raftshard.Round
 	flush   uint64
+	// stuck holds every new round's commit at frozen, as a follower's whose leader is gone.
+	stuck  bool
+	frozen uint64
 }
 
 const kvKeys = 40
@@ -52,6 +55,8 @@ func newKVShard(t *testing.T, owner uint32, maxPiece uint64) *kvShard {
 }
 
 func (k *kvShard) Tree() *lsm.Tree { return k.tree }
+
+func (k *kvShard) Applied() uint64 { return k.applied }
 
 func (k *kvShard) Mark() (uint64, raftpb.ConfState) {
 	b := k.st.Base()
@@ -109,6 +114,9 @@ func (k *kvShard) round(n, size int) raftshard.Round {
 		r.Entries = append(r.Entries, raftpb.Entry{Term: 1, Index: last + 1 + i, Data: kvPayload(last+1+i, size)})
 	}
 	r.HardState = raftpb.HardState{Term: 1, Vote: 1, Commit: last + uint64(n)}
+	if k.stuck {
+		r.HardState.Commit = k.frozen
+	}
 	return r
 }
 
@@ -152,6 +160,9 @@ type raftRig struct {
 	// acked is each shard's commit index the store made durable before the last crash.
 	acked map[uint32]uint64
 	wrote uint64
+	// chunkIDs numbers the chunk writes, and failed is the first one's reply that failed.
+	chunkIDs uint64
+	failed   *Reply
 }
 
 func newRaftRig(t *testing.T, cfg Config, geo disklog.Geometry, owners ...uint32) *raftRig {
@@ -174,6 +185,14 @@ func newRaftRig(t *testing.T, cfg Config, geo disklog.Geometry, owners ...uint32
 
 func (r *raftRig) take() {
 	r.queue = append(r.queue, r.out.Actions...)
+	for _, rp := range r.out.Replies {
+		if rp.Buf != core.NoBuf {
+			r.pool.Free(rp.Buf)
+		}
+		if rp.Err != nil && r.failed == nil {
+			r.failed = &rp
+		}
+	}
 	for _, d := range r.out.Rounds {
 		for _, k := range r.shards {
 			if k.owner == d.Owner {
@@ -262,7 +281,7 @@ func (r *raftRig) crash(rnd *core.Rand) {
 	for i, k := range r.shards {
 		k.tree.Close()
 		n := newKVShard(r.t, k.owner, r.maxPiece)
-		n.flush = k.flush
+		n.flush, n.stuck, n.frozen = k.flush, k.stuck, k.frozen
 		r.s.AddRaft(n.owner, n.st, n)
 		r.shards[i] = n
 	}
@@ -460,5 +479,83 @@ func TestAFailedDueCheckpointKeepsTheShardsReplayLSN(t *testing.T) {
 	}
 	if len(idx) != 1 || idx[0].ReplayLSN != old {
 		t.Fatalf("the step checkpoint after a failed due one names %v, want replay LSN %d", idx, old)
+	}
+}
+
+// chunkWrite writes data at the start of chunk c.
+func (r *raftRig) chunkWrite(c core.ChunkID, data []byte) {
+	buf, err := r.pool.Alloc(len(data))
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	copy(r.pool.Bytes(buf), data)
+	r.chunkIDs++
+	r.s.Write(&r.ctx, Request{ID: r.chunkIDs, Chunk: c, Len: uint32(len(data)), Buf: buf}, &r.out)
+	r.take()
+}
+
+// A follower shard whose leader is gone keeps being sent entries it cannot commit. Past its share
+// of twice max_replay_bytes it takes no more, and the store's checkpoints write the entries it
+// retains again, so it never holds the replay floor back for good: the chunk writes go on over the
+// disk three times, every one answered, and a restart finds every entry it acknowledged. Once its
+// leader is back it commits and applies them all.
+func TestAStuckFollowerShardNeverStallsChunkWrites(t *testing.T) {
+	r := newRaftRig(t, raftConfig(), raftGeometry, 7)
+	k := r.shards[0]
+	for range 20 {
+		r.write(k, 4, 4000)
+		r.step()
+	}
+	r.settle()
+	k.stuck, k.frozen = true, k.st.HardState().Commit
+	bound := 2*r.cfg.Log.MaxReplayBytes + 8*8000
+	rnd := core.NewRand(4)
+	data := make([]byte, 32<<10)
+	size := raftGeometry.DiskBlocks() * core.BlockSize
+	took := 0
+	for i := uint64(0); i*uint64(len(data)) < 3*size; i++ {
+		r.chunkWrite(core.ChunkID{Index: uint32(i % 32)}, data)
+		if !r.s.RaftFull(k.owner) {
+			r.write(k, 1+int(rnd.Below(8)), 1000+int(rnd.Below(7000)))
+			took++
+		}
+		for range rnd.Below(6) {
+			r.step()
+		}
+		if r.failed != nil || !r.s.Serving() {
+			t.Fatalf("chunk write %d of %d: reply %+v, store error %v", i, 3*size/uint64(len(data)), r.failed, r.s.Err())
+		}
+		if b := k.st.Bytes(); b > bound {
+			t.Fatalf("the stuck follower retains %d bytes, past its bound %d", b, bound)
+		}
+		if i%500 == 499 {
+			r.settle()
+			last, _ := k.st.LastIndex()
+			r.crash(rnd)
+			k = r.shards[0]
+			if got, _ := k.st.LastIndex(); got < last {
+				t.Fatalf("the stuck follower restarted with entries to %d, below the %d it acknowledged", got, last)
+			}
+		}
+	}
+	r.settle()
+	if r.failed != nil {
+		t.Fatalf("a chunk write failed: %+v", r.failed)
+	}
+	last, _ := k.st.LastIndex()
+	if took == 0 || last <= k.frozen {
+		t.Fatalf("the stuck follower took %d rounds and holds entries to %d, committed %d", took, last, k.frozen)
+	}
+	k.stuck = false
+	for range 3 {
+		r.write(k, 1, 1000)
+		r.settle()
+	}
+	if k.applied != last+3 {
+		t.Fatalf("the follower applied %d after its leader came back, want %d", k.applied, last+3)
+	}
+	k.check(t)
+	if r.s.RaftFull(k.owner) {
+		t.Fatal("the follower is still full once it applied its entries")
 	}
 }

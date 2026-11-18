@@ -21,11 +21,13 @@ type RaftShard interface {
 	Mark() (uint64, raftpb.ConfState)
 	// Restore makes the base recorded by the runs a restart loaded into Tree the storage's base.
 	Restore() error
+	// Applied is the index the shard's state machine applied.
+	Applied() uint64
 }
 
 // raftShard is a hosted shard, the index and configuration a running checkpoint compacts it to,
-// the replay LSN the last due checkpoint that ended named it with, if one did, and the one a
-// running due checkpoint names it with.
+// the replay LSN the last due checkpoint that ended named it with, if one did, the one a running
+// due checkpoint names it with, and the commit at the last checkpoint begun for it full, if one was.
 type raftShard struct {
 	owner    uint32
 	st       *raftshard.Storage
@@ -36,6 +38,8 @@ type raftShard struct {
 	named    bool
 	cpReplay uint64
 	cpNamed  bool
+	kicked   bool
+	kickedAt uint64
 }
 
 // AddRaft hosts the Raft shard whose blobs carry owner and whose storage is st: after Format or
@@ -177,4 +181,26 @@ func (s *Store) restoreShards(m *disklog.Manifest) error {
 	s.raft.Loaded(m)
 	s.lastBase = m.BaseLSN
 	return nil
+}
+
+// RaftFull reports whether owner's shard retains its share of twice max_replay_bytes in entries,
+// past which it takes no new ones: as a follower it drops the appends sent to it, which Raft takes
+// as lost messages, and as a leader it refuses proposals as overloaded. Its committed entries are
+// never dropped; a checkpoint compacts what it applied.
+func (s *Store) RaftFull(owner uint32) bool {
+	return s.raft.Retained(owner) >= 2*s.cfg.Log.MaxReplayBytes/uint64(len(s.shards))
+}
+
+// fullDue reports whether a full shard applied a commit no checkpoint begun for it saw, and records
+// that commit: one checkpoint compacts what it applied, and another would compact nothing more
+// until its commit moves, as a follower's whose leader is gone does not.
+func (s *Store) fullDue() bool {
+	for i := range s.shards {
+		r := &s.shards[i]
+		if c := r.st.HardState().Commit; (!r.kicked || r.kickedAt != c) && r.sh.Applied() >= c && s.RaftFull(r.owner) {
+			r.kicked, r.kickedAt = true, c
+			return true
+		}
+	}
+	return false
 }

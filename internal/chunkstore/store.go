@@ -1831,8 +1831,10 @@ func (s *Store) housekeep(ctx *core.Context, out *Output) {
 		if s.pieceWait {
 			s.nextPiece(ctx, out)
 		}
-		if due := s.log.CheckpointDue(); !s.checkpointing && !s.retryAfter && (due || s.stepUnnamed()) {
-			s.beginCheckpoint(ctx, due, out)
+		if !s.checkpointing && !s.retryAfter {
+			if due := s.log.CheckpointDue() || s.fullDue(); due || s.stepUnnamed() {
+				s.beginCheckpoint(ctx, due, out)
+			}
 		}
 	case draining:
 		s.drain(ctx, out)
