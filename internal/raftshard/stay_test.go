@@ -204,26 +204,23 @@ func TestARemovedVoterThatHoldsTheOutgoingHalfsNewestEntryLeadsAndHandsOff(t *te
 	}
 }
 
-// C leads the joint configuration and commits its removal, and no node holds a lease from another,
-// so C has no planned voter to hand its leadership to. Its followers acknowledge every entry, and
-// etcd-raft proposes the leave again each time C applies the last one: C takes each commit at
-// most once a heartbeat, so its log grows by about an entry a heartbeat, not one a round trip.
-func TestARemovedLeaderWithNoTargetProposesItsLeaveAtMostOnceAHeartbeat(t *testing.T) {
+// C leads the joint configuration and commits its removal while no node holds a lease from
+// another, as when the planned voters' nodes wait out their restart: C hands its leadership to a
+// planned voter caught up past the leave all the same, which applies the leave.
+func TestARemovedLeaderHandsOffWithoutALease(t *testing.T) {
 	n := jointNet(t, plants{})
 	every := func(envelope) bool { return true }
 	n.campaign(rC)
 	n.settleKeeping(every)
-	if !n.r[rC].removed || n.leaderOf(rC) < 0 {
-		t.Fatalf("C learned its removal %v and leads %v, want both", n.r[rC].removed, n.leaderOf(rC) >= 0)
-	}
-	first, _ := n.r[rC].st.LastIndex()
-	const beats = 20
-	for range beats {
+	for range 3 {
+		if n.leaderOf(rC) < 0 && n.leadsPlan(rA, rB, rD) {
+			break
+		}
 		n.advance(HeartbeatTick * TickInterval)
 		n.settleKeeping(every)
 	}
-	if last, _ := n.r[rC].st.LastIndex(); n.leaderOf(rC) < 0 || last-first > beats {
-		t.Fatalf("over %d heartbeats C, leading %v, wrote %d entries", beats, n.leaderOf(rC) >= 0, last-first)
+	if !n.r[rC].removed || n.leaderOf(rC) >= 0 || !n.leadsPlan(rA, rB, rD) {
+		t.Fatalf("C learned its removal %v and still leads %v; a voter of the plan leads %v", n.r[rC].removed, n.leaderOf(rC) >= 0, n.leadsPlan(rA, rB, rD))
 	}
 }
 

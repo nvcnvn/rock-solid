@@ -120,7 +120,7 @@ type Shard struct {
 	lead    core.NodeID
 	leadID  uint64
 	lapseAt core.Tick
-	// plan is the voters the control plane drives the group toward, confTerm the term of a configuration change this leader proposed and has not applied, mark the commit index at markAt less a heartbeat, applied the index of the last entry handed over to apply, confAt an index at which the applied configuration holds, heard when this replica last heard from its leader, removed whether it learned it left the group, leave the index of the committed change that would take it out of the configuration, which it holds unapplied and before which it hands nothing over, leaveAt when a leader holding it next takes a commit, and saving whether the round in flight records the removal.
+	// plan is the voters the control plane drives the group toward, confTerm the term of a configuration change this leader proposed and has not applied, mark the commit index at markAt less a heartbeat, applied the index of the last entry handed over to apply, confAt an index at which the applied configuration holds, heard when this replica last heard from its leader, removed whether it learned it left the group, leave the index of the committed change that would take it out of the configuration, which it holds unapplied and before which it hands nothing over, and saving whether the round in flight records the removal.
 	plan     []Peer
 	confTerm uint64
 	mark     uint64
@@ -130,7 +130,6 @@ type Shard struct {
 	heard    core.Tick
 	removed  bool
 	leave    uint64
-	leaveAt  core.Tick
 	saving   bool
 	// applying is set while etcd-raft applies a configuration change, snaps are the snapshots sent but not yet reported, and kept a leader the applied configuration dropped that stays in Peers while it leads.
 	applying bool
@@ -638,7 +637,7 @@ func (s *Shard) ready(ctx *core.Context, out *Output) {
 		out.Round = Round{HardState: s.hs, Removed: true}
 		return
 	}
-	for s.round == 0 && !s.gone() && s.rn.HasReady() && !s.pacing(ctx) {
+	for s.round == 0 && !s.gone() && s.rn.HasReady() {
 		rd := s.rn.Ready()
 		if rd.SoftState != nil && rd.SoftState.RaftState == raft.StateLeader {
 			s.fortifyAt = 0
@@ -670,26 +669,6 @@ func (s *Shard) ready(ctx *core.Context, out *Output) {
 		rd.HardState = raftpb.HardState{}
 		s.done(ctx, &rd, all, out)
 	}
-}
-
-// pacing reports whether a leader holding its own leave, with no transfer pending, waits to take
-// a Ready that hands over a commit: etcd-raft proposes the leave again as soon as it applied the
-// last one, so a leader with no planned voter to hand its leadership to would otherwise write an
-// entry and a round per round trip, which its log, compacting no further, holds for good. It takes
-// one at most once a heartbeat.
-func (s *Shard) pacing(ctx *core.Context) bool {
-	if s.leave == 0 {
-		return false
-	}
-	st := s.rn.BasicStatus()
-	if st.RaftState != raft.StateLeader || st.LeadTransferee != 0 || st.Commit <= st.Applied {
-		return false
-	}
-	if ctx.Now < s.leaveAt {
-		return true
-	}
-	s.leaveAt = ctx.Now + HeartbeatTick*TickInterval
-	return false
 }
 
 // passesConf reports whether the committed entries ents hold a configuration change, or stop
@@ -955,14 +934,20 @@ func (s *Shard) reconcile(ctx *core.Context) {
 // target is a planned voter to hand leadership to, or 0: one this leader holds a node-pair lease
 // from, so its node runs, being sent appends and caught up as a learner must be. etcd-raft drops
 // proposals while a transfer waits for its target to reach the leader's last index, so a down or
-// lagging target would stall them; a caught-up one makes that wait about a round trip. A replica
-// holding its own leave also takes a voter of the leave's configuration, the joint one's incoming
-// half, as planned, since its node may hand it no plan.
+// lagging target would stall them; a caught-up one makes that wait about a round trip. A leader
+// that learned its removal takes no proposals, so it needs no lease: it takes a voter caught up
+// past its leave, which a planned voter whose lease is not valid yet, as in its node's restart
+// wait, still is. Without one, re-proposing the leave would cost it an entry and a round per round
+// trip in a log that compacts no further. It also takes a voter of the leave's configuration, the
+// joint one's incoming half, as planned, since its node may hand it no plan.
 func (s *Shard) target(t lease.Time) uint64 {
 	var to uint64
 	s.rn.WithProgress(func(id uint64, _ raft.ProgressType, pr tracker.Progress) {
-		planned := s.planned(id) || s.leave != 0 && slices.Contains(s.conf.Voters, id)
-		if to == 0 && planned && s.replicating(id, &pr) && s.cfg.Holder.Valid(s.cfg.Peers[s.peer(id)].Node, t) {
+		if to != 0 || !s.replicating(id, &pr) {
+			return
+		}
+		if s.removed && (s.planned(id) || slices.Contains(s.conf.Voters, id)) && pr.Match >= s.leave ||
+			!s.removed && s.planned(id) && s.cfg.Holder.Valid(s.cfg.Peers[s.peer(id)].Node, t) {
 			to = id
 		}
 	})
