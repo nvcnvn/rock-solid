@@ -228,7 +228,7 @@ func (x *epochChecks) answers(d int) {
 	}
 }
 
-// copies checks that version v of ch, which node d acknowledged, is on min_live disks: d's, whose store may have stopped since it logged v, those that acknowledged it or whose index holds it, each only while its index lists nothing of the chunk or it persisted the decision of a later interval than the one answering v (v's own, or the one d's lead activated in, as AckIv has it), and those in maintenance in its interval or d's. The min_live is the lower of those two intervals', for a version acknowledged late across a change of it.
+// copies checks that version v of ch, which node d acknowledged, is on min_live disks: d's, whose store may have stopped since it logged v, those that acknowledged it or whose index holds it, each only while its index lists nothing of the chunk or it persisted the decision of a later interval than the one answering v (as AckIv has it: v's own once every up member of it logged v, the one d's lead activated in otherwise), and those in maintenance in its interval or d's. The min_live is the lower of those two intervals', for a version acknowledged late across a change of it.
 func (x *epochChecks) copies(d int, ch core.ChunkID, v uint64) {
 	r := x.c.reps[d]
 	p, ok := r.pgOf(ch)
@@ -249,12 +249,23 @@ func (x *epochChecks) copies(d int, ch core.ChunkID, v uint64) {
 		}
 	}
 	maint(e.Members)
+	own, logged := e.Members, e.Interval == intervalOf(v)
 	if j := slices.IndexFunc(e.Past, func(q PastInterval) bool { return q.Interval == intervalOf(v) }); j >= 0 {
 		need = min(need, int(e.Past[j].MinLive))
 		maint(e.Past[j].Members)
+		own, logged = e.Past[j].Members, true
+	}
+	acked := map[uint32]bool{r.cfg.Disk: true}
+	for n, o := range x.c.reps {
+		if o != nil && x.held[heldAt{ch, v, n}] {
+			acked[o.cfg.Disk] = true
+		}
+	}
+	for _, m := range own {
+		logged = logged && (m.Mark != MarkUp || acked[m.Disk])
 	}
 	answer := intervalOf(v)
-	if l := r.lead(p); l >= 0 && r.leads[l].active {
+	if l := r.lead(p); l >= 0 && r.leads[l].active && !logged {
 		answer = max(answer, r.leads[l].interval)
 	}
 	for n, o := range x.c.reps {
