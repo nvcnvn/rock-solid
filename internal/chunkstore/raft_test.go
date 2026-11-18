@@ -398,3 +398,36 @@ func TestAShardAddedDuringACheckpointJoinsTheNext(t *testing.T) {
 		t.Fatalf("the added shard restarted at applied %d on base %d", k.applied, k.st.Base().Index)
 	}
 }
+
+// The cleaner rewrites the runs of every tree with a live piece in a metadata victim, the shards'
+// as well as the chunk index's, so a segment holding only a shard's pieces is freed once they move.
+func TestTheCleanerFreesASegmentHoldingOnlyShardPieces(t *testing.T) {
+	cfg := raftConfig()
+	cfg.CleanFree = int(raftGeometry.SegmentCount)
+	r := newRaftRig(t, cfg, raftGeometry, 7, 9)
+	var victims []uint32
+	r.s.metaVictim = func(seg uint32) {
+		if p, _ := r.s.ix.Tree().RunsIn(seg, nil); len(p) > 0 {
+			return
+		}
+		for _, k := range r.shards {
+			if p, _ := k.tree.RunsIn(seg, nil); len(p) > 0 && !slices.Contains(victims, seg) {
+				victims = append(victims, seg)
+			}
+		}
+	}
+	rnd := core.NewRand(3)
+	for round := 0; round < 3000; round++ {
+		r.write(r.shards[min(1, round/300+int(rnd.Below(2)))], 1+int(rnd.Below(8)), 1000+int(rnd.Below(7000)))
+		for range rnd.Below(6) {
+			r.step()
+		}
+		for _, seg := range victims {
+			if u, _ := r.s.log.Usage(seg); u.State == disklog.SegmentFree {
+				r.settle()
+				return
+			}
+		}
+	}
+	t.Fatalf("no metadata victim holding only shard pieces was freed (%d were victims)", len(victims))
+}
