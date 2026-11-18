@@ -11,6 +11,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/lsm"
+	"github.com/nvcnvn/rock-solid/internal/sim"
 	"github.com/nvcnvn/rock-solid/internal/sim/clock"
 	"github.com/nvcnvn/rock-solid/internal/trace"
 )
@@ -182,16 +183,24 @@ func TestRecoverySupersedesADroppedVersionOnEveryMemberThatLoggedIt(t *testing.T
 // between the read of disk 2 and the write, it still leaves block 0 out, while the planted variant
 // that chooses them at the read copies 1.1's block 0 over the acknowledged write (the epoch change
 // model's neg-recovery-covers-at-read). The primary's copy is the clean one, as a write to a chunk
-// the primary lists waits for its recovery.
+// the primary lists waits for its recovery. In the remote case 1.1 is on disks 2 and 1, disk 3 alone
+// lacks it, and disk 2's own read fails, so it recovers disk 3 from disk 1, the write ordered between
+// that read and the recovery write.
 func TestRecoveryLeavesOutTheBlocksTheIntervalsWritesCover(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		atRead     bool
 		betweenOps bool
-	}{{"before the read", false, false}, {"between read and write", false, true}, {"planted, chosen at the read", true, true}} {
+		remote     bool
+	}{{"before the read", false, false, false}, {"between read and write", false, true, false}, {"planted, chosen at the read", true, true, false},
+		{"between a remote read and the write", false, true, true}} {
 		tbl := rtable(4, 1)
 		_, e := tbl.entry(pg0)
 		e.Members = []Member{{Disk: 2}, {Disk: 1, Mark: MarkDown}, {Disk: 3, Mark: MarkDown}}
+		target := 0
+		if tc.remote {
+			e.Members[1].Mark, target = MarkUp, 2
+		}
 		c := newRCluster(t, tbl)
 		ch := chunkIn(pg0, 4, 0)
 		c.writeWhole(pg0, ch, 0, 2, 1)
@@ -199,6 +208,7 @@ func TestRecoveryLeavesOutTheBlocksTheIntervalsWritesCover(t *testing.T) {
 		c.reps[1].plant.noRecovery = !tc.betweenOps
 		c.reps[1].plant.coverAtRead = tc.atRead
 		var w core.RequestID
+		failed := false
 		if tc.betweenOps {
 			prev := c.onPass
 			c.onPass = func(d int, acts []core.Action) {
@@ -207,6 +217,14 @@ func TestRecoveryLeavesOutTheBlocksTheIntervalsWritesCover(t *testing.T) {
 					return
 				}
 				switch disk := c.s.Node(1).Disk(0); {
+				case tc.remote && !failed && slices.ContainsFunc(c.reps[1].recs, func(rc recovery) bool { return rc.read != 0 }):
+					failed = true
+					disk.Inject(sim.Fault{Effect: sim.FailIO, When: sim.Once(sim.OnKind(core.ActDiskRead))})
+				case tc.remote && w == 0 && slices.ContainsFunc(acts, func(a core.Action) bool {
+					return a.Kind == core.ActNetSend && a.Msg.Len >= headSize && Kind(a.Msg.Body[1]) == KindRecoverRead
+				}):
+					w = c.write(pg0, ch, 0, bytes.Repeat([]byte{8}, core.BlockSize))
+				case tc.remote:
 				case w == 0 && slices.ContainsFunc(c.reps[1].recs, func(rc recovery) bool { return rc.read != 0 }):
 					disk.Hang(true)
 					w = c.write(pg0, ch, 0, bytes.Repeat([]byte{8}, core.BlockSize))
@@ -230,13 +248,13 @@ func TestRecoveryLeavesOutTheBlocksTheIntervalsWritesCover(t *testing.T) {
 		if rp := c.reply(w); rp.Status != StatusOK {
 			t.Fatalf("%s: the write answered %+v", tc.name, rp)
 		}
-		var toDisk1 *recSend
+		var toTarget *recSend
 		for i := range *sends {
-			if s := &(*sends)[i]; s.to == 0 {
-				toDisk1 = s
+			if s := &(*sends)[i]; s.to == target {
+				toTarget = s
 			}
 		}
-		if toDisk1 == nil || toDisk1.u.Version != c.reply(w).Version {
+		if toTarget == nil || toTarget.u.Version != c.reply(w).Version {
 			t.Fatalf("%s: recovery writes %+v, the write before them %#x", tc.name, *sends, c.reply(w).Version)
 		}
 		if tc.atRead {
@@ -245,8 +263,8 @@ func TestRecoveryLeavesOutTheBlocksTheIntervalsWritesCover(t *testing.T) {
 			}
 			continue
 		}
-		if toDisk1.m.data.has(0) || toDisk1.m.holes.has(0) || len(toDisk1.bytes) != 1 || toDisk1.bytes[1] != 1 {
-			t.Fatalf("%s: disk 1 got blocks %v", tc.name, toDisk1.bytes)
+		if toTarget.m.data.has(0) || toTarget.m.holes.has(0) || len(toTarget.bytes) != 1 || toTarget.bytes[1] != 1 {
+			t.Fatalf("%s: disk %d got blocks %v", tc.name, target+1, toTarget.bytes)
 		}
 		for _, d := range []int{0, 2} {
 			c.blockIs(d, ch, 0, 8)
