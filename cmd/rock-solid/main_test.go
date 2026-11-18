@@ -147,3 +147,14 @@ func TestADeletedVoterExitsWithItsOwnStatus(t *testing.T) {
 		t.Fatalf("a failed voter exits %d, want 1", got)
 	}
 }
+
+// A -max-replay-bytes above a quarter of the disk is refused: the reserve keeps room for a
+// checkpoint of up to twice it, and the records it bounds take up to twice it again.
+func TestTheMaxReplayBytesFitAQuarterOfTheDisk(t *testing.T) {
+	if err := replayFits(256<<20, 1<<30); err != nil {
+		t.Fatal(err)
+	}
+	if err := replayFits(256<<20+1, 1<<30); err == nil {
+		t.Fatal("a max_replay_bytes above a quarter of the disk was taken")
+	}
+}

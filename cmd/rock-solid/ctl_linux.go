@@ -235,6 +235,9 @@ func (m *ctlMachine) OnEvent(ctx *core.Context, ev *core.Event, acts []core.Acti
 // each under its node ID as its Raft ID.
 func (m *ctlMachine) boot(ctx *core.Context) (*meta.CtlHost, error) {
 	cfg := m.p.cfg
+	if err := replayFits(cfg.MaxReplayBytes, m.disk.Blocks()*core.BlockSize); err != nil {
+		return nil, err
+	}
 	cs := raftpb.ConfState{}
 	var peers []raftshard.Peer
 	for _, v := range cfg.Voters {

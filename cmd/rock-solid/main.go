@@ -174,7 +174,7 @@ func parseCtl(args []string) (ctlConfig, error) {
 	fs.BoolVar(&cfg.Format, "format", false, "create the disk file and format it, as at a voter's first start; a file already there is made again only if its superblocks were never written")
 	fs.Int64Var(&cfg.DiskBytes, "disk-bytes", 1<<30, "the size of the disk file -format creates")
 	fs.Int64Var(&cfg.Memory, "memory", 0, "the daemon's memory budget in MiB, which GOMEMLIMIT is held at less the slabs mapped outside the Go heap; 0 leaves GOMEMLIMIT alone")
-	fs.Uint64Var(&cfg.MaxReplayBytes, "max-replay-bytes", disklog.DefaultConfig().MaxReplayBytes, "the bytes of log records after the last checkpoint that begin the next; a restart replays at most twice this")
+	fs.Uint64Var(&cfg.MaxReplayBytes, "max-replay-bytes", disklog.DefaultConfig().MaxReplayBytes, "the bytes of log records after the last checkpoint that begin the next, at most a quarter of the disk; a restart replays at most twice this")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
@@ -205,6 +205,15 @@ func parseCtl(args []string) (ctlConfig, error) {
 		cfg.Listen = ap
 	}
 	return cfg, nil
+}
+
+// replayFits refuses a max_replay_bytes above a quarter of a disk of diskBytes: the log's reserve
+// keeps room for a checkpoint of up to twice it, and the records it bounds take up to twice it again.
+func replayFits(maxReplayBytes, diskBytes uint64) error {
+	if maxReplayBytes > diskBytes/4 {
+		return fmt.Errorf("-max-replay-bytes %d is above a quarter of the disk's %d bytes", maxReplayBytes, diskBytes)
+	}
+	return nil
 }
 
 // daemonNodes bounds every daemon's node ID; the command line draws its own above it, so it never
