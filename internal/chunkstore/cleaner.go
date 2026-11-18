@@ -258,12 +258,18 @@ func (s *Store) pickVictims() (victims []uint32, snapshot bool) {
 		u, stream := s.log.Usage(seg)
 		var cost uint64
 		if stream == disklog.Meta {
-			var held bool
-			s.cl.pieces, held = s.ix.Tree().RunsIn(seg, s.cl.pieces[:0])
+			held, steps, extra := false, 0, uint64(0)
+			s.cl.pieces = s.cl.pieces[:0]
+			for k := range len(s.shards) + 1 {
+				t, _ := s.tree(k)
+				var h bool
+				s.cl.pieces, h = t.RunsIn(seg, s.cl.pieces)
+				n, x := t.RewriteSteps(seg)
+				held, steps, extra = held || h, steps+n, max(extra, x)
+			}
 			if held || len(s.cl.pieces) == 0 && s.log.HoldsPiece(seg) {
 				continue
 			}
-			steps, extra := s.ix.Tree().RewriteSteps(seg)
 			if s.plant.rewriteNoSteps {
 				steps = 0
 			}
@@ -321,7 +327,10 @@ func (s *Store) startVictim(ctx *core.Context, p *cleanPass) bool {
 		if s.metaVictim != nil {
 			s.metaVictim(seg)
 		}
-		s.cl.stats.Rewrites += s.ix.Tree().MarkRewrite(seg)
+		for k := range len(s.shards) + 1 {
+			t, _ := s.tree(k)
+			s.cl.stats.Rewrites += t.MarkRewrite(seg)
+		}
 		if s.log.Free(ctx, seg, &s.lout) == nil {
 			s.cl.stats.Freed++
 			p.freed++
