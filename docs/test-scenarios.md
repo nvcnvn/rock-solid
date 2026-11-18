@@ -6895,17 +6895,27 @@ Recovery from manifest and log is under Shard indexes in the disk owner's checkp
 - **Crash with compaction and cleaning.** [property] The [crash run with rounds in flight](#raft-storage-in-the-disk-log), with each shard compacting once its applied entries are flushed, the cleaner freeing segments whose blobs the hosts reported dead, and each restart replaying from its recorded replay LSN on its recorded base, holds the same invariants. Unlike that run, which never compacts or cleans and replays every blob, dead or live, it fails if a blob reported dead was still needed. It also registers [MetaStore invariants](#metastore-invariants)' "a shard recovered from manifest and log equals its state before the crash".
 - **Shards on a chunk store.** [property] Two single-voter shards on a store's log, whose entry
   `i` puts its index under key `i mod 40`, write 2,000 rounds of 1 to 8 entries of 1 to 8 KB on a
-  disk of 32 segments of 128 blocks with `max_replay_bytes` 64 blocks, crashing every 100 rounds
-  with unflushed writes landing at random. Each restart holds every entry committed before the
-  crash, and its state is the one its applied index leaves; restarts restore compacted bases, and
-  the run writes the disk over twice (`TestRaftShardsOnTheStoreCheckpointCompactAndRecover`). A
-  checkpoint begun for a merge step alone names each shard with the last due checkpoint's replay
-  LSN, the one its carried runs restore: naming it with the host's current one, past a compaction
-  the runs' mark predates, restored a shard at an applied index with none of its entries after
-  the base, and the next compaction panicked. A shard added while a checkpoint runs joins the
-  next one, and a restart after it restores the shard on a compacted base; the running checkpoint
-  once asked its tree for pieces of a flush it never began, which stopped the store
-  (`TestAShardAddedDuringACheckpointJoinsTheNext`).
+  disk of 32 segments of 128 blocks with `max_replay_bytes` 64 blocks, crashing every 50 rounds
+  with unflushed writes landing at random, over seeds (`scripts/seeds.sh`). Each restart holds
+  every entry committed before the crash, and its state is the one its applied index leaves;
+  restarts restore compacted bases, each seed writes the disk over twice, and the crashes land
+  with no checkpoint running, with a piece in flight and with the manifest in flight, each
+  counted (`TestRaftShardsOnTheStoreCheckpointCompactAndRecover`).
+  - Regression (seed 98): a restart's replay adds again every Raft blob past the replay floor,
+    those reported dead before the manifest included, so the host reports them dead only after
+    the log recounts its usage; reported before, the report underflowed a segment's live count
+    and every open of the disk panicked (`TestARestartReportsBlobsDeadAfterTheLogRecounts`).
+  - A checkpoint begun for a merge step alone names each shard with the replay LSN of the last
+    due checkpoint that ended, the one its carried runs restore: naming it with the host's current
+    one, past a compaction the runs' mark predates, restored a shard at an applied index with none
+    of its entries after the base, and the next compaction panicked. A due checkpoint that fails
+    leaves that LSN as it was (`TestAFailedDueCheckpointKeepsTheShardsReplayLSN`).
+  - The cleaner rewrites the runs of every tree with a live piece in a metadata victim, so a
+    segment holding only a shard's pieces is freed once they move; asking the chunk index's tree
+    alone skipped it for good (`TestTheCleanerFreesASegmentHoldingOnlyShardPieces`).
+  - A shard added while a checkpoint runs joins the next one, and a restart after it restores the
+    shard on a compacted base; the running checkpoint once asked its tree for pieces of a flush it
+    never began, which stopped the store (`TestAShardAddedDuringACheckpointJoinsTheNext`).
 - **Lagging follower.** A follower behind the compaction index gets a `MsgSnap` built from a point-in-time view of the shard's LSM tree, which never blocks the writer, and catches up from it. A view held open holds back the cleaner (asserted in the LSM tree tests).
 - **Index rebuild.** One index rebuilds from its manifest and the log while the disk's other indexes serve, without restarting the log.
 
@@ -7466,7 +7476,7 @@ Simulator invariants checked after every step, with the faults that must exercis
 | No two replicas of a shard serve lease reads at overlapping times | Registered by [Leader leases](#leader-leases) (`TestRaftRunsReplayFromTheirSeed`) and [Voter replacement](#voter-replacement): a leader's node cut off past its followers' grants; a leader's node suspended past its lease; a leader transfer while lease reads arrive; a configuration change while a lease is held; slewed clocks; VM pauses |
 | A committed entry is never lost | Registered by [Raft storage in the disk log](#raft-storage-in-the-disk-log) (`TestCommittedEntriesSurviveCrashesOnTheDiskLog`): crashes before and after a round's flush; a torn tail record holding chunk writes and Raft entries |
 | A replica keeps its term and vote across a crash | Registered by [Raft storage in the disk log](#raft-storage-in-the-disk-log): crashes with rounds in flight, landing unflushed writes at random |
-| A shard recovered from manifest and log equals its state before the crash | Registered for the control-plane group by [Control-plane host](#control-plane-host) (`TestAHostCompactsAndRestartsFromItsManifest`, `TestAHostRestartsFromRunsOfManyPieces`, `TestAHostMergesItsTreeInStepsAcrossCrashes`, planted `TestARestoreThatReappliesEntriesBreaksTheStateCheck`): crashes mid-round, with a checkpoint's piece in flight and with its manifest in flight, with merges whole and in steps, compactions, deletes and freed segments. Registered for shards on a disk's chunk store by [Shard indexes in the disk owner's checkpoint](#shard-indexes-in-the-disk-owners-checkpoint) (`TestRaftShardsOnTheStoreCheckpointCompactAndRecover`): crashes landing unflushed writes at random during rounds, flushes, merges, compactions and cleaner passes, each restart's state checked against its applied index and its commit against the last acknowledged. Owed: the same run over `meta.Shard` replicas on a storage node, which hosts none yet |
+| A shard recovered from manifest and log equals its state before the crash | Registered for the control-plane group by [Control-plane host](#control-plane-host) (`TestAHostCompactsAndRestartsFromItsManifest`, `TestAHostRestartsFromRunsOfManyPieces`, `TestAHostMergesItsTreeInStepsAcrossCrashes`, planted `TestARestoreThatReappliesEntriesBreaksTheStateCheck`): crashes mid-round, with a checkpoint's piece in flight and with its manifest in flight, with merges whole and in steps, compactions, deletes and freed segments. Registered for shards on a disk's chunk store by [Shard indexes in the disk owner's checkpoint](#shard-indexes-in-the-disk-owners-checkpoint) (`TestRaftShardsOnTheStoreCheckpointCompactAndRecover`): crashes landing unflushed writes at random, counted with no checkpoint running, with a piece in flight and with the manifest in flight, while the shards compact and the cleaner frees their segments, each restart's state checked against its applied index and its commit against the last acknowledged. Owed: the same run over `meta.Shard` replicas on a storage node, which hosts none yet |
 | At most one lock holder | Registered by [Control-plane sessions](#control-plane-sessions) (`TestNoSessionIsFencedWhileItsClientsLeaseRuns`): clients racing for one inode's lock in shared and exclusive modes, holders evicted, fenced and dead, and control-plane failovers. Owner failover is not in it: the owner's shard does not fail over |
 | No session is fenced while its client's own lease still runs | Registered by [Control-plane sessions](#control-plane-sessions) (`TestNoSessionIsFencedWhileItsClientsLeaseRuns`, `TestAFastNewLeaderFencesNoSessionEarly`, `TestAFastBootClockFencesNoSessionEarly`): control-plane leader failover while sessions renew; a renewal answered by a deposed leader; a leader stalled past `session_lease`; clients paused past their lease; slewed clocks; a client VM stopped with its clocks frozen |
 | Every write of a fenced lock holder that completes is ordered before every write of the next holder; no fenced session's write is applied; a dead client's locks are free within `session_lease` on the leader's clock plus one heartbeat interval while the leader holds its lease and has measured the client, `dead_wait` instead when it has not, or once an unreachable storage node is marked down | Leader side registered by [Control-plane sessions](#control-plane-sessions) (`TestNoSessionIsFencedWhileItsClientsLeaseRuns`): a lock reaches its next holder only once every node with a disk up holds its old holder's fence, and a dead client's locks are free within `dead_wait` (the measured bound is `TestAFenceStretchesByTheMeasuredRate`'s), under acknowledgements that lag, storage nodes cut off for 2 to 27 s, some of them marked down, and failovers. Storage side registered by [Session fencing on storage nodes](#session-fencing-on-storage-nodes) (`TestNoFencedSessionsWriteIsApplied`): a fenced client that writes on for up to 2 s while the fence reaches each node after its own delay, storage nodes cut off, paused and rebooted, and the rejoin gate in the session run |
@@ -8235,6 +8245,7 @@ The rows without a test named are unit tests in `internal/meta/ctlhost_test.go`.
 | That process killed with `SIGKILL` and started again on its file without `-format` | It loads its manifest's runs, replays the log after them and answers the node's fetches again, and its counter past every count it answered before; a voter that formats at every start fails this |
 | `-format` over a file not there, one of zeros, a short one of zeros, one with a byte in block 0 and one with a byte in the superblock copy | The first three made at full size; the last two refused and left as they were (`TestFormatMakesAFileNeverWrittenAndRefusesAnyOther`) |
 | The voter stops with `ErrDeleted`, and with any other error | It exits with status 3, which a service manager should not restart; 1 (`TestADeletedVoterExitsWithItsOwnStatus`) |
+| A `-max-replay-bytes` of a quarter of a 1 GiB disk, and one byte more | The first taken, the second refused at start: the reserve keeps room for a checkpoint of up to twice it and the records it bounds take up to twice it again, so a larger one stops the voter at about half its disk (`TestTheMaxReplayBytesFitAQuarterOfTheDisk`) |
 
 The node's side, in `internal/node/node_test.go`:
 
