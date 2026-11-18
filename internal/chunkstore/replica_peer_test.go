@@ -78,8 +78,9 @@ func TestAnActivationIsReportedUntilATableRecordsIt(t *testing.T) {
 
 // Under min_live 1, disk 3, down in interval 1, becomes PG 0's primary in interval 2 and lacks 1.1, which peering
 // keeps from disk 2: disk 3 lists it, and while recovery has not brought it 1.1 a partial-block
-// write to the chunk waits, while a whole-block write to it, for which disk 2's clean copy is
-// enough, and a partial write to another chunk go ahead. Recovery then lets the held write go, merged on 1.1's byte.
+// write to the chunk waits, as does a whole-block write to it, since the primary lists the chunk,
+// while a partial write to another chunk goes ahead. Recovery then lets the held writes go, the
+// partial one merged on 1.1's byte.
 func TestAPartialWriteWaitsForTheKeptVersion(t *testing.T) {
 	tbl := rtable(4, 1)
 	_, e := tbl.entry(pg0)
@@ -100,18 +101,20 @@ func TestAPartialWriteWaitsForTheKeptVersion(t *testing.T) {
 	whole := c.write(pg0, ch, core.BlockSize, make([]byte, core.BlockSize))
 	elsewhere := c.write(pg0, other, 10, []byte{3})
 	c.settle()
-	if _, ok := c.cl.replies[wait]; ok {
-		t.Fatal("the partial write went ahead")
-	}
-	for _, w := range []core.RequestID{whole, elsewhere} {
-		if rp := c.reply(w); rp.Status != StatusOK {
-			t.Fatalf("answered %+v", rp)
+	for _, w := range []core.RequestID{wait, whole} {
+		if _, ok := c.cl.replies[w]; ok {
+			t.Fatalf("request %d went ahead", w)
 		}
 	}
+	if rp := c.reply(elsewhere); rp.Status != StatusOK {
+		t.Fatalf("answered %+v", rp)
+	}
 	c.reps[2].plant.noRecovery = false
-	c.until(wait)
-	if rp := c.reply(wait); rp.Status != StatusOK {
-		t.Fatalf("the held write answered %+v", rp)
+	for _, w := range []core.RequestID{wait, whole} {
+		c.until(w)
+		if rp := c.reply(w); rp.Status != StatusOK {
+			t.Fatalf("held request %d answered %+v", w, rp)
+		}
 	}
 	if got := c.readNow(pg0, ch, 0, 11); got[0] != 1 || got[10] != 2 {
 		t.Fatalf("block 0 reads %v", got)
