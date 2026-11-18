@@ -776,7 +776,7 @@ func runFaultsOn(t *testing.T, seed uint64, clients, writes int, plant *faultPla
 		}
 	}
 	c.detect(f.a)
-	watchEpochs(c, &f.a.rec)
+	watchEpochs(c, &f.a.rec).tears = true
 	c.onPass = f.pass
 	c.cl.lost = func(peer core.NodeID) {
 		for id, to := range f.to {

@@ -2230,12 +2230,13 @@ RemovalKeepsCopies ==
 \* is a read that succeeds: a refused version peering keeps can sit above the
 \* acknowledged ones, and with its one holder dead the chunk stays unfound
 \* though a member holds them all.
-CanServe(d, c) ==
+HoldsAcked(d, c) ==
     LET want == Content(c, UNION {Chain(c, v) : v \in AckedV(c)})
         got == Content(c, dlog[d][c])
     IN /\ dnode[d] # 0
-       /\ miss[d][c] = NoMiss
        /\ \A b \in 1..Blocks[c] : got[b] >= want[b]
+
+CanServe(d, c) == HoldsAcked(d, c) /\ miss[d][c] = NoMiss
 
 NoStranded ==
     \A c \in Chunk :
@@ -2255,7 +2256,11 @@ NoStranded ==
 \* disk has gone; ci-tears, where every copy can be torn, does not check it. A
 \* write of a primary that lists the chunk would leave none, landing on members
 \* that list it alone while its clean copies are down, but for the hold: such a
-\* write waits until recovery clears the primary's list.
+\* write waits until recovery clears the primary's list. Nor is a source claimed
+\* for a version no client heard OK for: one whose record fails on its primary's
+\* own log after it reached members that list the chunk alone is kept while the
+\* primary is down, since those replies cannot show it unacknowledged, and the
+\* primary, back, lists the chunk for it though it holds every acknowledged write.
 PrimarySource ==
     \A p \in PG, n \in Node, c \in Chunk :
        (/\ \A d \in Node : dnode[d] # 0
@@ -2264,7 +2269,7 @@ PrimarySource ==
         /\ pr[n][p].act
         /\ AckedV(c) # {}
         /\ Decided(n, p, IvAt(n, p)))
-       => \/ \E d \in Mem(p, IvAt(n, p)) : CanServe(d, c)
+       => \/ \E d \in Mem(p, IvAt(n, p)) : HoldsAcked(d, c) /\ (miss[d][c] = NoMiss \/ miss[d][c] > Newest(AckedV(c)))
           \/ c \in TheDec(n, p, IvAt(n, p)).img
 
 \* The versions of c a later activated decision does not rest on.

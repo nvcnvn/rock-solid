@@ -115,6 +115,16 @@ type epochChecks struct {
 	writes  map[core.RequestID]core.ChunkID
 	updates map[updateAt]core.ChunkID
 	held    map[heldAt]bool
+	// acked is the newest version of each chunk acknowledged to a client; clean the newest each disk held listing nothing of the chunk as it was acknowledged.
+	acked map[core.ChunkID]uint64
+	clean map[diskChunk]uint64
+	// tears is set for a run whose crashes leave versions in part, where, as in ci-tears, every copy can be torn and property 19 is not claimed.
+	tears bool
+}
+
+type diskChunk struct {
+	disk  uint32
+	chunk core.ChunkID
 }
 
 type nodePG struct {
@@ -149,7 +159,7 @@ func watchEpochs(c *rcluster, rec *DiskRecord) *epochChecks {
 	x := &epochChecks{c: c, rec: rec, seen: make([]memberSeen, len(c.reps)), epochs: make([]uint64, len(c.reps)),
 		intervals: map[nodePG]uint32{}, activated: map[core.PGID]uint32{}, logs: map[uint32]uint64{},
 		decisions: map[core.PGID]map[uint32][]keptChunk{}, errs: map[string]error{},
-		writes: map[core.RequestID]core.ChunkID{}, updates: map[updateAt]core.ChunkID{}, held: map[heldAt]bool{}}
+		writes: map[core.RequestID]core.ChunkID{}, updates: map[updateAt]core.ChunkID{}, held: map[heldAt]bool{}, acked: map[core.ChunkID]uint64{}, clean: map[diskChunk]uint64{}}
 	for _, inv := range epochInvariants {
 		c.inv.Register(inv, func() error { return x.errs[inv] })
 	}
@@ -239,6 +249,7 @@ func (x *epochChecks) answers(d int) {
 			x.held[heldAt{ch, rp.Version, d}] = true
 		}
 		if ch, ok := x.writes[rp.ID]; ok && k == KindReply {
+			x.acked[ch] = max(x.acked[ch], rp.Version)
 			x.copies(d, ch, rp.Version)
 		}
 	}
@@ -292,6 +303,9 @@ func (x *epochChecks) copies(d int, ch core.ChunkID, v uint64) {
 		if o.Store().Serving() {
 			c, _ := o.Store().Index().Chunk(r.st.cfg.Pool, ch)
 			holds = (holds || c.Whole >= v) && (c.ListedIn == 0 || o.Store().Index().Decided(p.Pool, p.Index, uint32(len(pool.PGs))) > answer)
+			if k := (diskChunk{o.cfg.Disk, ch}); holds && c.ListedIn == 0 {
+				x.clean[k] = max(x.clean[k], v)
+			}
 		}
 		if holds {
 			disks[o.cfg.Disk] = true
@@ -395,8 +409,9 @@ func (x *epochChecks) activations() error {
 	return nil
 }
 
-// sources checks each activated lead of its table's interval: a chunk it kept that it lacks, and does not call unfound, has an up member listing nothing, or one not running to say.
+// sources checks each activated lead of its table's interval: a chunk it kept that it lacks, and does not call unfound, has an up member listing nothing, or one not running to say; while the disk record has lost no disk, an unfound one with an acknowledged write has a member of any mark that held the newest clean when it was acknowledged and lists nothing or only a version above it, or one not running to say (property 19).
 func (x *epochChecks) sources() error {
+	claimed := !x.tears && x.rec != nil && !slices.ContainsFunc(x.rec.Disks(), func(d RecordedDisk) bool { return d.Gone })
 	for _, r := range x.c.reps {
 		if r == nil {
 			continue
@@ -408,8 +423,11 @@ func (x *epochChecks) sources() error {
 				continue
 			}
 			for _, k := range l.kept {
-				if k.kept != 0 && k.lacking && !k.unfound && !slices.ContainsFunc(e.Members, func(m Member) bool { return x.canSource(m, k.chunk) }) {
+				if k.kept != 0 && k.lacking && !k.unfound && !slices.ContainsFunc(e.Members, func(m Member) bool { return x.canSource(m, k.chunk, 0) }) {
 					return fmt.Errorf("%s: disk %d keeps %#x of %v, every up member lists it", invHasSource, r.cfg.Disk, k.kept, k.chunk)
+				}
+				if a := x.acked[k.chunk]; k.unfound && claimed && a != 0 && !slices.ContainsFunc(e.Members, func(m Member) bool { return x.canSource(m, k.chunk, a) }) {
+					return fmt.Errorf("%s: disk %d calls %v unfound with every disk kept, no member holding its acknowledged %#x", invHasSource, r.cfg.Disk, k.chunk, a)
 				}
 			}
 		}
@@ -417,8 +435,9 @@ func (x *epochChecks) sources() error {
 	return nil
 }
 
-func (x *epochChecks) canSource(m Member, ch core.ChunkID) bool {
-	if m.Mark != MarkUp {
+// canSource reports whether member m lists nothing of chunk ch, or runs no store to say: an up member if acked is 0; otherwise one of any mark that held version acked clean when it was acknowledged and lists nothing or only a version above it.
+func (x *epochChecks) canSource(m Member, ch core.ChunkID, acked uint64) bool {
+	if m.Mark != MarkUp && acked == 0 {
 		return false
 	}
 	n := x.c.node(m.Disk)
@@ -427,7 +446,10 @@ func (x *epochChecks) canSource(m Member, ch core.ChunkID) bool {
 	}
 	o := x.c.reps[n]
 	c, _ := o.Store().Index().Chunk(o.st.cfg.Pool, ch)
-	return c.ListedIn == 0
+	if acked == 0 {
+		return c.ListedIn == 0
+	}
+	return x.clean[diskChunk{m.Disk, ch}] >= acked && (c.ListedIn == 0 || c.Listed > acked)
 }
 
 // identities checks the disk record and the disks the nodes run: each disk ID keeps the log ID it was first given, and no log ID is up under two disk IDs.
