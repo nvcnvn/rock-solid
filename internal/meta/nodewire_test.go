@@ -5,7 +5,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/fs"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -397,12 +397,19 @@ func FuzzDecodeDelete(f *testing.F) {
 // Every message kind the package declares, a constant named Kind*, has a byte of its own: two
 // kinds on one byte would have a host take one message for the other.
 func TestEveryMessageKindIsDistinct(t *testing.T) {
-	pkgs, err := parser.ParseDir(token.NewFileSet(), ".", func(fi fs.FileInfo) bool { return !strings.HasSuffix(fi.Name(), "_test.go") }, 0)
+	names, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
 	seen := map[uint64]string{}
-	for _, f := range pkgs["meta"].Files {
+	for _, name := range names {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
 		for _, d := range f.Decls {
 			g, ok := d.(*ast.GenDecl)
 			if !ok || g.Tok != token.CONST {
