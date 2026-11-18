@@ -81,8 +81,8 @@ func (s *Store) stepUnnamed() bool {
 
 // beginShards begins each shard tree's part of a checkpoint whose base is durable and appends
 // its index. A due one first writes again the hard state of each idle shard the last manifest's
-// base passed, then marks each tree with its storage's base and flushes its memtable, which the
-// shard compacts to once durable unless the flush writes instead a memtable a failed one froze.
+// base passed, then marks each tree with its storage's base and flushes its memtable, and the
+// shard compacts to its mark once the manifest is durable.
 // A step one writes only merge steps, so it names each shard with the replay LSN of the runs it
 // carries, that of the last due checkpoint that ended, and leaves out a shard none named: its rounds
 // all follow that checkpoint's base, where the replay floor stays.
@@ -112,12 +112,8 @@ func (s *Store) beginShards(ctx *core.Context, due bool, durable uint64, idx []d
 		r := &s.shards[i]
 		r.compact, r.conf = r.sh.Mark()
 		r.cpNamed = false
-		froze, err := r.sh.Tree().BeginFlush()
-		if err != nil {
+		if _, err := r.sh.Tree().BeginFlush(); err != nil {
 			panic("chunkstore: a shard's flush begun while one runs: " + err.Error())
-		}
-		if !froze && r.sh.Tree().Frozen() {
-			r.compact = 0
 		}
 	}
 	n := len(idx)

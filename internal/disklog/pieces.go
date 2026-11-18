@@ -211,11 +211,6 @@ func (l *Log) HoldsPiece(segment uint32) bool {
 	return l.pieces.in[segment] > 0 || l.pinnedLSN != 0 && l.streams[segment] == Meta
 }
 
-// HoldsRaftBlob reports whether segment holds a Raft blob its shard has not reported dead.
-func (l *Log) HoldsRaftBlob(segment uint32) bool {
-	return segment < uint32(len(l.raft.in)) && l.raft.in[segment] > 0
-}
-
 // registerBlobs adds the run and manifest pieces of a durable round to the live pieces: a run
 // piece until its owner reports it dead, a manifest piece of the running checkpoint until a
 // segment header names a manifest that no longer lists it, and drops at once a manifest piece of
