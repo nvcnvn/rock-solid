@@ -343,6 +343,7 @@ func leaveBehindOnHosts(t *testing.T, bound core.Tick) (led, cLed bool) {
 	cutA, bToC, mute := true, false, false
 	r.pass = func(w *hostWork) bool {
 		m, isRaft := r.raftOf(w)
+		cLed = cLed || !cutA && isRaft && w.from == 2 && (m.Type == raftpb.MsgApp || m.Type == raftpb.MsgHeartbeat)
 		switch {
 		case cutA && (w.from == 0 || w.at == 0):
 			return false
@@ -381,7 +382,6 @@ func leaveBehindOnHosts(t *testing.T, bound core.Tick) (led, cLed bool) {
 	r.paused[0], r.paused[2], r.paused[3] = false, false, false
 	for end := r.now + bound; r.now < end; {
 		r.run(raftshard.TickInterval)
-		cLed = cLed || r.hs[2].Shard().Raft().Leader() == 3
 		if r.leadsPlan([]uint64{1, 2, 4}, 0, 3) {
 			return true, cLed
 		}

@@ -250,6 +250,22 @@ func TestALeaderThatCommittedItsOwnRemovalHandsItsLeadershipOn(t *testing.T) {
 	}
 }
 
+// A removed leader whose first planned voter by ID never gets its MsgTimeoutNow, as when that
+// voter halted or is cut off one way, hands its leadership to the next caught-up planned voter
+// once the transfer times out, rather than retrying the first for good.
+func TestARemovedLeaderTriesTheNextPlannedVoterWhenATransferFails(t *testing.T) {
+	keep := func(n *testNet, e envelope) bool { return e.to != rA || lostTimeoutNow(n, e) }
+	n := outgoingNet(t, plants{}, keep)
+	bound := 3 * ElectionTick * TickInterval
+	for start := n.now; n.leaderOf(rC) >= 0 || !n.leadsPlan(rB, rD); {
+		if n.now-start > bound {
+			t.Fatalf("within %v C still leads %v; B or D leads the plan %v", bound.Duration(), n.leaderOf(rC) >= 0, n.leadsPlan(rB, rD))
+		}
+		n.advance(HeartbeatTick * TickInterval)
+		n.settleKeeping(func(e envelope) bool { return keep(n, e) })
+	}
+}
+
 // lostTimeoutNow keeps every message but C's MsgTimeoutNow, so C cannot hand its leadership on.
 func lostTimeoutNow(n *testNet, e envelope) bool {
 	m, raft := n.message(e)

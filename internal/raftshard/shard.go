@@ -135,7 +135,7 @@ type Shard struct {
 	applying bool
 	snaps    []sentSnap
 	kept     uint64
-	// halted is whether the state machine halted; a halted leader next hands its leadership on at handAt, to the voter after handedTo.
+	// halted is whether the state machine halted, handAt when a halted leader next hands its leadership on, and handedTo the voter a leader last handed it to, after which the next try goes.
 	halted   bool
 	handAt   core.Tick
 	handedTo uint64
@@ -908,18 +908,14 @@ func (s *Shard) reconcile(ctx *core.Context) {
 		return
 	}
 	if s.removed {
-		if id := s.target(lease.Now(ctx)); id != 0 {
-			s.rn.TransferLeader(id)
-		}
+		s.transfer(st, lease.Now(ctx))
 		return
 	}
 	if s.confTerm == st.Term || len(s.conf.VotersOutgoing) != 0 {
 		return
 	}
 	if !s.planned(s.cfg.ID) && slices.ContainsFunc(s.conf.Voters, s.planned) {
-		if id := s.target(lease.Now(ctx)); id != 0 {
-			s.rn.TransferLeader(id)
-		}
+		s.transfer(st, lease.Now(ctx))
 		return
 	}
 	caughtUp := s.mark
@@ -941,17 +937,43 @@ func (s *Shard) reconcile(ctx *core.Context) {
 // trip in a log that compacts no further. It also takes a voter of the leave's configuration, the
 // joint one's incoming half, as planned, since its node may hand it no plan.
 func (s *Shard) target(t lease.Time) uint64 {
-	var to uint64
+	return s.next(func(id uint64, pr *tracker.Progress) bool {
+		return s.removed && (s.planned(id) || slices.Contains(s.conf.Voters, id)) && pr.Match >= s.leave ||
+			!s.removed && s.planned(id) && s.cfg.Holder.Valid(s.cfg.Peers[s.peer(id)].Node, t)
+	})
+}
+
+// transfer has a leader with no transfer pending hand its leadership to its target after
+// handedTo: one that cannot win, as a voter halted or cut off one way, fails its transfer after
+// an election timeout, and the next try goes to another.
+func (s *Shard) transfer(st raft.BasicStatus, t lease.Time) {
+	if st.LeadTransferee != 0 {
+		return
+	}
+	if id := s.target(t); id != 0 {
+		s.handedTo = id
+		s.rn.TransferLeader(id)
+	}
+}
+
+// next is the first replicating voter that ok takes after handedTo in ID order, wrapping round, or 0.
+func (s *Shard) next(ok func(id uint64, pr *tracker.Progress) bool) uint64 {
+	var first, next uint64
 	s.rn.WithProgress(func(id uint64, _ raft.ProgressType, pr tracker.Progress) {
-		if to != 0 || !s.replicating(id, &pr) {
+		if !s.replicating(id, &pr) || !ok(id, &pr) {
 			return
 		}
-		if s.removed && (s.planned(id) || slices.Contains(s.conf.Voters, id)) && pr.Match >= s.leave ||
-			!s.removed && s.planned(id) && s.cfg.Holder.Valid(s.cfg.Peers[s.peer(id)].Node, t) {
-			to = id
+		if first == 0 {
+			first = id
+		}
+		if next == 0 && id > s.handedTo {
+			next = id
 		}
 	})
-	return to
+	if next == 0 {
+		next = first
+	}
+	return next
 }
 
 // replicating reports whether peer id is a voter this leader sends appends to, holding every entry committed by mark.
@@ -970,22 +992,7 @@ func (s *Shard) handOff(ctx *core.Context) {
 		return
 	}
 	s.handAt = ctx.Now + ElectionTick*TickInterval
-	var first, next uint64
-	s.rn.WithProgress(func(id uint64, _ raft.ProgressType, pr tracker.Progress) {
-		if !s.replicating(id, &pr) {
-			return
-		}
-		if first == 0 {
-			first = id
-		}
-		if next == 0 && id > s.handedTo {
-			next = id
-		}
-	})
-	if next == 0 {
-		next = first
-	}
-	if next != 0 {
+	if next := s.next(func(uint64, *tracker.Progress) bool { return true }); next != 0 {
 		s.handedTo = next
 		s.rn.TransferLeader(next)
 	}
