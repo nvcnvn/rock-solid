@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"encoding/binary"
 	"fmt"
+	"slices"
 	"testing"
 
 	"go.etcd.io/raft/v3/raftpb"
@@ -12,6 +13,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/raftshard"
 	"github.com/nvcnvn/rock-solid/internal/sim"
+	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
 
 // kvShard is a single-voter shard whose committed entry i puts its payload under key i mod
@@ -287,22 +289,21 @@ func raftConfig() Config {
 // raftGeometry is a disk of 32 segments of 512 KiB, which the shards' rounds fill many times over.
 var raftGeometry = disklog.Geometry{SegmentBlocks: 128, SegmentCount: 32}
 
-// [property] Raft shards on a disk owner's log checkpoint their trees with the chunk index,
-// compact their logs, and recover from the manifest's runs and the log after their replay LSNs
-// across crashes that land unflushed writes at random: each recovered shard holds every entry
-// committed before the crash, its state that of its applied index, while the shards write the
-// disk over many times, so the cleaner frees the segments of their dead blobs.
-func TestRaftShardsOnTheStoreCheckpointCompactAndRecover(t *testing.T) {
+// raftCrashRun writes rounds of random sizes to two kv shards on seed's draws, 2000 of them,
+// crashing the store every 50 with unflushed writes landing at random, and counts the restarts
+// that restored a compacted base, the rounds after which a shard had compacted and the crashes in
+// each window of the store's checkpoint.
+func raftCrashRun(t *testing.T, seed uint64, rounds int) (restored, compacted int, windows storeCrashWindows, wrote uint64) {
 	r := newRaftRig(t, raftConfig(), raftGeometry, 7, 9)
-	rnd := core.NewRand(1)
-	restored, compacted := 0, 0
-	for round := 0; round < 2000; round++ {
+	rnd := core.NewRand(seed)
+	for round := range rounds {
 		k := r.shards[rnd.Below(2)]
 		r.write(k, 1+int(rnd.Below(8)), 1000+int(rnd.Below(7000)))
 		for range rnd.Below(6) {
 			r.step()
 		}
-		if round%100 == 99 {
+		if round%50 == 49 {
+			windows.add(r.s)
 			r.crash(rnd)
 			for _, k := range r.shards {
 				if k.st.Base().Index > 0 {
@@ -317,15 +318,61 @@ func TestRaftShardsOnTheStoreCheckpointCompactAndRecover(t *testing.T) {
 		}
 	}
 	r.settle()
-	if restored == 0 || compacted == 0 {
-		t.Fatalf("no restart restored a compacted base (%d), or no shard compacted (%d)", restored, compacted)
-	}
-	if size := r.disk.Blocks() * core.BlockSize; r.wrote < 2*size {
-		t.Fatalf("the run wrote %d bytes, not twice the disk's %d", r.wrote, size)
-	}
 	for _, k := range r.shards {
 		k.check(t)
 	}
+	return restored, compacted, windows, r.wrote
+}
+
+// storeCrashWindows counts a store's crashes by where its checkpoint stands: none running, a
+// piece in flight or waiting for a buffer, or every piece durable and the manifest in flight.
+type storeCrashWindows [3]int
+
+func (w *storeCrashWindows) add(s *Store) {
+	switch {
+	case !s.checkpointing:
+		w[0]++
+	case s.inPiece || s.pieceWait:
+		w[1]++
+	default:
+		w[2]++
+	}
+}
+
+// [property] Raft shards on a disk owner's log checkpoint their trees with the chunk index,
+// compact their logs, and recover from the manifest's runs and the log after their replay LSNs
+// across crashes that land unflushed writes at random: each recovered shard holds every entry
+// committed before the crash, its state that of its applied index, while the shards write the
+// disk over many times, so the cleaner frees the segments of their dead blobs. The crashes land in
+// every window of the checkpoint.
+func TestRaftShardsOnTheStoreCheckpointCompactAndRecover(t *testing.T) {
+	size := raftGeometry.DiskBlocks() * core.BlockSize
+	var windows storeCrashWindows
+	restored, compacted := 0, 0
+	seeds.Run(t, 0, 4, func(seed uint64) {
+		res, comp, w, wrote := raftCrashRun(t, seed, 2000)
+		if wrote < 2*size {
+			t.Fatalf("the run wrote %d bytes, not twice the disk's %d", wrote, size)
+		}
+		restored, compacted = restored+res, compacted+comp
+		for i := range w {
+			windows[i] += w[i]
+		}
+	})
+	t.Logf("crashes with no checkpoint running %d, with a piece in flight %d, with the manifest in flight %d", windows[0], windows[1], windows[2])
+	if restored == 0 || compacted == 0 {
+		t.Fatalf("no restart restored a compacted base (%d), or no shard compacted (%d)", restored, compacted)
+	}
+	if seeds.Default() && slices.Contains(windows[:], 0) {
+		t.Fatal("a window of the checkpoint had no crash")
+	}
+}
+
+// Regression (seed 98 of the crash run): a restart's replay adds again every Raft blob past the
+// replay floor, those that died before the manifest included, so the log must recount its usage
+// before the host reports them dead again, or the dead report underflows a segment's live count.
+func TestARestartReportsBlobsDeadAfterTheLogRecounts(t *testing.T) {
+	raftCrashRun(t, 98, 1000)
 }
 
 // A shard added while a checkpoint runs joins the next one: the running checkpoint neither
