@@ -431,3 +431,34 @@ func TestTheCleanerFreesASegmentHoldingOnlyShardPieces(t *testing.T) {
 	}
 	t.Fatalf("no metadata victim holding only shard pieces was freed (%d were victims)", len(victims))
 }
+
+// A due checkpoint that fails leaves each shard named with the replay LSN of the last that ended,
+// so a step checkpoint after it pairs the runs it carries with the replay LSN they were marked at.
+func TestAFailedDueCheckpointKeepsTheShardsReplayLSN(t *testing.T) {
+	r := newRaftRig(t, raftConfig(), raftGeometry, 7)
+	k := r.shards[0]
+	for r.s.shards[0].replay == 0 || k.st.Base().Index == 0 {
+		r.write(k, 4, 4000)
+		r.settle()
+	}
+	old := r.s.shards[0].replay
+	for range 5 {
+		r.write(k, 4, 4000)
+	}
+	r.settle()
+	durable := r.s.log.DurableLSN()
+	idx, err := r.s.beginShards(&r.ctx, true, durable, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idx[0].ReplayLSN == old {
+		t.Fatalf("the failed due checkpoint names the shard with %d, its last's replay LSN", old)
+	}
+	r.s.shardFlushesFailed()
+	if idx, err = r.s.beginShards(&r.ctx, false, durable, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(idx) != 1 || idx[0].ReplayLSN != old {
+		t.Fatalf("the step checkpoint after a failed due one names %v, want replay LSN %d", idx, old)
+	}
+}
