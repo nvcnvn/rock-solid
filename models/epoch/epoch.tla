@@ -1378,6 +1378,30 @@ GoneRefuses(m) ==
     /\ Refused(m)
     /\ UNCHANGED faults
 
+\* It refuses a recovery write for the old disk too. As a failed version does,
+\* the refusal ends the interval at the primary, which refuses the chunk's
+\* versions ordered after the recovery write, and the next interval recovers
+\* the chunk.
+GoneRefusesRecovery(n, c, d) ==
+    LET p == ChunkPG[c]
+        k == IvAt(n, p)
+    IN /\ Running(n)
+       /\ Leads(n, p)
+       /\ pr[n][p].act
+       /\ d \in UpIn(p, k)
+       /\ miss[d][c] # NoMiss
+       /\ dnode[d] = 0
+       /\ dhost[d] # 0
+       /\ Running(dhost[d])
+       /\ IvAt(dhost[d], p) = k
+       /\ \E at \in {Ver(k, 0)} \cup {v \in Ver(k, 1)..pv[n][c] : IvOfV(v) = k} :
+            LET out == {x \in pend : x.n = n /\ x.r = run[n] /\ x.c = c /\ x.v > at}
+            IN /\ pend' = pend \ out
+               /\ refd' = refd \cup out
+       /\ pr' = [pr EXCEPT ![n][p].ask = TRUE]
+       /\ UNCHANGED <<ctlVars, nodeVars, pv, pin, known, dec, act, rm, vers, ackd, wst, sends, dmn, bad, ownw,
+                      leaseVars, clockVars, raftVars>>
+
 \* A version's record on the primary's own log fails before it is durable, by a
 \* disk error or a crash, after it went out to members, while the primary is
 \* still in its interval or has not decided its next one: peering answers only
@@ -2045,6 +2069,7 @@ Choices ==
     \/ Die
     \/ \E n \in Node : Isolate(n)
     \/ \E m \in rm : MemberFail(m) \/ GoneRefuses(m)
+    \/ \E n \in Node, c \in Chunk, d \in Disk : GoneRefusesRecovery(n, c, d)
     \/ \E n \in Node, r \in pend : OwnFail(n, r)
     \/ \E g, h \in Node : OpenGrant(g, h) \/ OpenLapse(g, h)
     \/ \E n \in Node : Target(n) /\

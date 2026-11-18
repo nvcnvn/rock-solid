@@ -167,6 +167,8 @@ Line(l) ==
     \/ /\ l.k = "gone"
        /\ \E m \in {x \in rm : dhost[x.to] = l.n /\ x.c = l.c /\ x.v = l.v} :
             IF [c |-> l.c, v |-> l.v] \in failed[m.to] THEN UNCHANGED vars ELSE GoneRefuses(m)
+    \/ /\ l.k = "gonerecover"
+       /\ \E n \in Node, d \in Disk : dhost[d] = l.n /\ GoneRefusesRecovery(n, l.c, d)
     \/ /\ l.k = "mayfail"
        /\ \/ UNCHANGED vars
           \/ /\ LostAbove(l)

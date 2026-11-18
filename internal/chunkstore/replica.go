@@ -1233,11 +1233,14 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 	}
 	if refuse {
 		if e != nil && u.PG.Interval == e.Interval {
-			var reason uint64
+			var reason, rec uint64
 			if gone {
 				reason = 1
 			}
-			out.note(trace.OutMemberFail, u.Chunk.Hash(), u.Version, reason, 0, 0)
+			if recover {
+				rec = 1
+			}
+			out.note(trace.OutMemberFail, u.Chunk.Hash(), u.Version, reason, rec, 0)
 			r.noteFailed(failedVer{pg: u.PG.PG, chunk: u.Chunk, version: u.Version})
 		}
 		freeBuf(ctx, ev.Msg.Buf)
@@ -1691,7 +1694,11 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 		if resp.Status != StatusOK {
 			ref := r.refusal(q.pg)
 			resp.Version, resp.Epoch, resp.Interval = 0, ref.Epoch, ref.Interval
-			out.note(trace.OutMemberFail, q.chunk.Hash(), q.version, 0, 0, 0)
+			var rec uint64
+			if q.recover {
+				rec = 1
+			}
+			out.note(trace.OutMemberFail, q.chunk.Hash(), q.version, 0, rec, 0)
 			r.noteFailed(failedVer{pg: q.pg, chunk: q.chunk, version: q.version})
 		} else if q.recover {
 			out.note(trace.OutRecovered, q.chunk.Hash(), rp.Version, uint64(q.source), uint64(q.interval), 0)

@@ -168,7 +168,7 @@ func (g *gen) crash(n int) {
 	g.line(`k |-> "restart", n |-> %d`, n)
 }
 
-// repliedLater reports whether node n, PG f's primary of iv, took its own disk's peering reply, or its disk answered a later primary listing chunk c, for an interval after iv and after every interval n decided: a recovery write of c in iv that lands now changes no list that decision reads, as a demoted primary's gated write lands only at the next decision its disk persists. A reply of an interval a later decision of n passed over is no longer read.
+// repliedLater reports whether node n, PG f's primary of iv, took its own disk's peering reply, or its disk answered a later primary, listing chunk c, for an interval after iv and after every interval n decided: a recovery write of c in iv that lands now changes no list that decision reads, as a demoted primary's gated write lands only at the next decision its disk persists. A reply of an interval a later decision of n passed over is no longer read.
 func (g *gen) repliedLater(n int, f, c, iv uint64) bool {
 	own, ok := g.nodeDisk[n]
 	if !ok {
@@ -185,7 +185,7 @@ func (g *gen) repliedLater(n int, f, c, iv uint64) bool {
 			continue
 		}
 		for d, x := range got {
-			if g.disk(d) == own && (k[0] == uint64(n) || x.chunks[c][2] != 0) {
+			if g.disk(d) == own && x.chunks[c][2] != 0 {
 				return true
 			}
 		}
@@ -598,6 +598,9 @@ func (g *gen) run(recs []trace.Record) {
 			kind := "mfail"
 			if r.Fields[2] != 0 {
 				kind = "gone"
+			}
+			if r.Fields[3] != 0 {
+				kind += "recover"
 			}
 			g.refused[r.Fields[0]] = append(g.refused[r.Fields[0]], refusal{fmt.Sprintf(`k |-> "%s", n |-> %d, c |-> %d, v |-> %s`, kind, n, g.chunk(r.Fields[0]), ver(r.Fields[1])), n})
 		case trace.OutFail:
