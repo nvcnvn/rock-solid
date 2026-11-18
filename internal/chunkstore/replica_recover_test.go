@@ -175,12 +175,14 @@ func TestRecoverySupersedesADroppedVersionOnEveryMemberThatLoggedIt(t *testing.T
 	}
 }
 
-// Kept 1.1 is on disk 2 only; disk 3, the new primary, takes a whole-block write to block 0, then
-// recovers the chunk from disk 2: the recovery write leaves block 0 out, carrying block 1 alone, so
-// both lacking members end with the new write in block 0. The blocks are chosen when the recovery
-// write is ordered: with the whole-block write ordered between the read of disk 2 and the write, it
-// still leaves block 0 out, while the planted variant that chooses them at the read copies 1.1's
-// block 0 over the acknowledged write (the epoch change model's neg-recovery-covers-at-read).
+// Kept 1.1 is on disk 2 only, the primary, which disks 1 and 3 rejoin in interval 2; disk 2 takes a
+// whole-block write to block 0, then recovers the chunk from its own copy: the recovery write leaves
+// block 0 out, carrying block 1 alone, so both lacking members end with the new write in block 0.
+// The blocks are chosen when the recovery write is ordered: with the whole-block write ordered
+// between the read of disk 2 and the write, it still leaves block 0 out, while the planted variant
+// that chooses them at the read copies 1.1's block 0 over the acknowledged write (the epoch change
+// model's neg-recovery-covers-at-read). The primary's copy is the clean one, as a write to a chunk
+// the primary lists waits for its recovery.
 func TestRecoveryLeavesOutTheBlocksTheIntervalsWritesCover(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -194,29 +196,34 @@ func TestRecoveryLeavesOutTheBlocksTheIntervalsWritesCover(t *testing.T) {
 		ch := chunkIn(pg0, 4, 0)
 		c.writeWhole(pg0, ch, 0, 2, 1)
 		sends := c.watchRecoveries()
-		c.reps[2].plant.noRecovery = !tc.betweenOps
-		c.reps[2].plant.coverAtRead = tc.atRead
+		c.reps[1].plant.noRecovery = !tc.betweenOps
+		c.reps[1].plant.coverAtRead = tc.atRead
 		var w core.RequestID
 		if tc.betweenOps {
 			prev := c.onPass
 			c.onPass = func(d int, acts []core.Action) {
 				prev(d, acts)
-				for i := range acts {
-					if a := &acts[i]; d == 2 && w == 0 && a.Kind == core.ActNetSend && a.Msg.Len >= headSize && Kind(a.Msg.Body[1]) == KindRecoverRead {
-						w = c.write(pg0, ch, 0, bytes.Repeat([]byte{8}, core.BlockSize))
-					}
+				if d != 1 {
+					return
+				}
+				switch disk := c.s.Node(1).Disk(0); {
+				case w == 0 && slices.ContainsFunc(c.reps[1].recs, func(rc recovery) bool { return rc.read != 0 }):
+					disk.Hang(true)
+					w = c.write(pg0, ch, 0, bytes.Repeat([]byte{8}, core.BlockSize))
+				case w != 0 && slices.ContainsFunc(c.reps[1].vers, func(v version) bool { return v.u.Chunk == ch && !v.recover && v.ordered }):
+					disk.Hang(false)
 				}
 			}
 		}
 		c.publish(c.next(func(t *Table) {
 			setInterval(t, pg0, 2)
 			_, e := t.entry(pg0)
-			e.Members = []Member{{Disk: 3}, {Disk: 1}, {Disk: 2}}
+			e.Members = []Member{{Disk: 2}, {Disk: 1}, {Disk: 3}}
 		}), true)
 		if !tc.betweenOps {
 			w = c.write(pg0, ch, 0, bytes.Repeat([]byte{8}, core.BlockSize))
 			c.until(w)
-			c.reps[2].plant.noRecovery = false
+			c.reps[1].plant.noRecovery = false
 		}
 		c.runFor(RetryAfter / 2)
 		c.settle()

@@ -5939,11 +5939,11 @@ own ([Testing strategy](design.md#testing-strategy)).
   and a length other than its written blocks (`TestBlockMapErrors`, fuzzed by
   `FuzzDecodeBlockMap`).
 - Recovery leaves out a block that a whole-block write ordered before it covers. Kept 1.1 is on
-  disk 2 only; the new primary takes a whole-block write to block 0, then orders the recovery of the
-  chunk from disk 2: the recovery write carries block 1 alone, and the byte-range oracle shows the
-  new write in block 0. The blocks are chosen when the recovery write is ordered: with the
-  whole-block write ordered between recovery's read and its write, the recovery write still leaves
-  block 0 out. A planted variant that chooses them at the read (the epoch change model's
+  disk 2 only, the primary, which disks 1 and 3 rejoin; it takes a whole-block write to block 0,
+  then orders the recovery of the chunk from its own copy: the recovery write carries block 1 alone,
+  and the byte-range oracle shows the new write in block 0. The blocks are chosen when the recovery
+  write is ordered: with the whole-block write ordered between recovery's read and its write, the
+  recovery write still leaves block 0 out. A planted variant that chooses them at the read (the epoch change model's
   `neg-recovery-covers-at-read`) copies 1.1's block 0 over the acknowledged write
   (`TestRecoveryLeavesOutTheBlocksTheIntervalsWritesCover`).
 - A primary that lacks a chunk's kept version orders a punch of it although its own store holds
