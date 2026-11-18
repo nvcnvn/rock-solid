@@ -24,15 +24,18 @@ type RaftShard interface {
 }
 
 // raftShard is a hosted shard, the index and configuration a running checkpoint compacts it to,
-// and the replay LSN the last due checkpoint named it with, if one did.
+// the replay LSN the last due checkpoint that ended named it with, if one did, and the one a
+// running due checkpoint names it with.
 type raftShard struct {
-	owner   uint32
-	st      *raftshard.Storage
-	sh      RaftShard
-	compact uint64
-	conf    raftpb.ConfState
-	replay  uint64
-	named   bool
+	owner    uint32
+	st       *raftshard.Storage
+	sh       RaftShard
+	compact  uint64
+	conf     raftpb.ConfState
+	replay   uint64
+	named    bool
+	cpReplay uint64
+	cpNamed  bool
 }
 
 // AddRaft hosts the Raft shard whose blobs carry owner and whose storage is st: after Format or
@@ -81,7 +84,7 @@ func (s *Store) stepUnnamed() bool {
 // base passed, then marks each tree with its storage's base and flushes its memtable, which the
 // shard compacts to once durable unless the flush writes instead a memtable a failed one froze.
 // A step one writes only merge steps, so it names each shard with the replay LSN of the runs it
-// carries, the last due checkpoint's, and leaves out a shard no due checkpoint named: its rounds
+// carries, that of the last due checkpoint that ended, and leaves out a shard none named: its rounds
 // all follow that checkpoint's base, where the replay floor stays.
 func (s *Store) beginShards(ctx *core.Context, due bool, durable uint64, idx []disklog.CheckpointIndex) ([]disklog.CheckpointIndex, error) {
 	if s.raft == nil {
@@ -108,6 +111,7 @@ func (s *Store) beginShards(ctx *core.Context, due bool, durable uint64, idx []d
 	for i := range s.shards {
 		r := &s.shards[i]
 		r.compact, r.conf = r.sh.Mark()
+		r.cpNamed = false
 		froze, err := r.sh.Tree().BeginFlush()
 		if err != nil {
 			panic("chunkstore: a shard's flush begun while one runs: " + err.Error())
@@ -122,7 +126,7 @@ func (s *Store) beginShards(ctx *core.Context, due bool, durable uint64, idx []d
 		r := &s.shards[s.shardOf(idx[k].Owner)]
 		t := r.sh.Tree()
 		idx[k].Runs, idx[k].Bounds = t.CarriedRuns(), t.Bounds()
-		r.replay, r.named = idx[k].ReplayLSN, true
+		r.cpReplay, r.cpNamed = idx[k].ReplayLSN, true
 	}
 	return idx, nil
 }
@@ -137,6 +141,9 @@ func (s *Store) shardsCheckpointed(ctx *core.Context, out *Output) {
 			panic("chunkstore: a shard's checkpoint done with no flush running: " + err.Error())
 		}
 		s.piecesDead(dead)
+		if r.cpNamed {
+			r.replay, r.named, r.cpNamed = r.cpReplay, true, false
+		}
 		if r.compact > r.st.Base().Index {
 			if err := s.raft.Compact(r.owner, r.compact, r.conf); err != nil {
 				s.stop(ctx, err, out)
@@ -152,6 +159,7 @@ func (s *Store) shardsCheckpointed(ctx *core.Context, out *Output) {
 func (s *Store) shardFlushesFailed() {
 	for i := range s.cpShards {
 		s.piecesDead(s.shards[i].sh.Tree().FlushFailed())
+		s.shards[i].cpNamed = false
 	}
 	s.cpBase = 0
 }
