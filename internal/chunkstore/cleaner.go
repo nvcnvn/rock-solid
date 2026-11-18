@@ -240,9 +240,9 @@ func (s *Store) isVictim(seg uint32) bool {
 // index entries its moves write included, charging live run pieces at the records of the whole
 // runs a rewrite writes again and what each of its steps writes beside them; a chunk segment's
 // copies must also fit the room the cleaner's lane can reach, and it must hold no header of a
-// live slot write, which no copy moves. A segment holding a piece of a manifest recovery may
-// load waits for the next snapshot, which snapshot reports is wanted, and one holding only
-// pieces about to die waits for them.
+// live slot write and no live Raft blob, which no copy moves. A segment holding a piece of a
+// manifest recovery may load waits for the next snapshot, which snapshot reports is wanted, and
+// one holding only pieces about to die waits for them.
 func (s *Store) pickVictims() (victims []uint32, snapshot bool) {
 	geo := s.sb.Geometry
 	room := s.log.CleanerRoom()
@@ -268,6 +268,8 @@ func (s *Store) pickVictims() (victims []uint32, snapshot bool) {
 				steps = 0
 			}
 			cost = s.log.RewriteCost(s.cl.pieces, steps, extra)
+		} else if s.log.HoldsRaftBlob(seg) {
+			continue
 		} else if cost = s.log.CopyCost(uint64(u.Live)); cost > room || s.ix.SlotHeld(seg) > 0 {
 			continue
 		} else {

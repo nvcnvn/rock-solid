@@ -10,6 +10,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lsm"
+	"github.com/nvcnvn/rock-solid/internal/raftshard"
 )
 
 var (
@@ -124,13 +125,14 @@ type Output struct {
 	Ordered []Reply
 	Logged  []Reply
 	Bases   []BaseFetch
+	Rounds  []raftshard.Done
 	Rebuilt bool
 }
 
 // Reset empties the output for reuse.
 func (o *Output) Reset() {
 	clear(o.Replies)
-	o.Actions, o.Replies, o.Ordered, o.Logged, o.Bases, o.Rebuilt = o.Actions[:0], o.Replies[:0], o.Ordered[:0], o.Logged[:0], o.Bases[:0], false
+	o.Actions, o.Replies, o.Ordered, o.Logged, o.Bases, o.Rounds, o.Rebuilt = o.Actions[:0], o.Replies[:0], o.Ordered[:0], o.Logged[:0], o.Bases[:0], o.Rounds[:0], false
 }
 
 type phase uint8
@@ -249,6 +251,7 @@ type flushWait struct {
 }
 
 type loadingRun struct {
+	tree *lsm.Tree
 	// bound is the merge bound the manifest holds on the run, whose pieces up to bound.Dead are dead and never read.
 	bound *disklog.MergeBound
 	refs  []disklog.BlobRef
@@ -357,6 +360,15 @@ type Store struct {
 	retryAfter    bool
 	// pieceWait is a flush whose next piece waits for a pool buffer, tried again on every call.
 	pieceWait bool
+	// pieceTree is the tree whose pieces the checkpoint writes, as tree numbers it.
+	pieceTree int
+	idx       []disklog.CheckpointIndex
+
+	// raft hosts the Raft shards on the disk, shards in the order their trees checkpoint;
+	// lastBase is the base of the last manifest a due checkpoint wrote, cpBase that of the one running.
+	raft             *raftshard.Host
+	shards           []raftShard
+	lastBase, cpBase uint64
 
 	loading map[disklog.BlobRef]*loadingRun
 	pieceOf map[disklog.BlobRef]disklog.BlobRef
@@ -487,6 +499,9 @@ func (s *Store) newIndex(maxPiece uint64, geo disklog.Geometry) error {
 		return err
 	}
 	sched.Add(tree)
+	for _, r := range s.shards {
+		sched.Add(r.sh.Tree())
+	}
 	s.ix, s.sched = NewIndex(tree, geo.SegmentBlocks, geo.SegmentCount), sched
 	return nil
 }
@@ -1800,12 +1815,21 @@ func (s *Store) housekeep(ctx *core.Context, out *Output) {
 		s.admitHeld(ctx, out)
 		if s.log.Stalled() && (!victim || s.log.CopiesStalled() || s.plant.noSpaceWithVictim) {
 			s.log.FailStalled(ctx, &s.lout)
+			if len(s.shards) > 0 {
+				s.stop(ctx, disklog.ErrNoSpace, out)
+			}
 			return
+		}
+		if s.raft != nil {
+			if err := s.raft.Retry(ctx, &s.lout); err != nil {
+				s.stop(ctx, err, out)
+				return
+			}
 		}
 		if s.pieceWait {
 			s.nextPiece(ctx, out)
 		}
-		if due := s.log.CheckpointDue(); !s.checkpointing && !s.retryAfter && (due || s.ix.Tree().StepUnnamed()) {
+		if due := s.log.CheckpointDue(); !s.checkpointing && !s.retryAfter && (due || s.stepUnnamed()) {
 			s.beginCheckpoint(ctx, due, out)
 		}
 	case draining:
@@ -1852,14 +1876,22 @@ func (s *Store) logEvent(ctx *core.Context, ev *disklog.Event, out *Output) {
 		}
 		s.piecesDead(dead)
 		s.checkpointing, s.rebuilt = false, false
+		s.shardsCheckpointed(ctx, out)
 	case disklog.CheckpointFailed:
 		s.piecesDead(s.ix.Tree().FlushFailed())
+		s.shardFlushesFailed()
 		s.checkpointing, s.inPiece, s.piecesOut, s.retryAfter, s.pieceWait = false, false, 0, true, false
 	case disklog.ManifestLoaded:
 		s.manifestLoaded(ctx)
 	case disklog.BlobRead:
 		s.blobRead(ctx, ev)
 	case disklog.Replayed:
+		if s.raft != nil {
+			if err := s.raft.Replayed(ev); err != nil {
+				s.recoveryFailed(ctx, err)
+				return
+			}
+		}
 		if s.plant.replayCopyAsWrite {
 			for i := range ev.Entries {
 				if e := &ev.Entries[i]; e.Kind == disklog.EntryCopy {
@@ -1887,6 +1919,9 @@ func (s *Store) logEvent(ctx *core.Context, ev *disklog.Event, out *Output) {
 		if err != nil {
 			s.recoveryFailed(ctx, err)
 			return
+		}
+		if s.raft != nil {
+			s.raft.Recovered(log)
 		}
 		if err := s.resume(log); err != nil {
 			s.recoveryFailed(ctx, err)
@@ -2059,7 +2094,8 @@ func (s *Store) durable(ctx *core.Context, ev *disklog.Event, out *Output) {
 		if s.inPiece && t == s.piece {
 			s.inPiece, s.piecesOut = false, 0
 			ref := disklog.BlobRef{Segment: ev.Segment, Block: ev.Block, LSN: ev.LSN, Entry: uint16(i)}
-			if err := s.ix.Tree().PieceDurable(ref); err != nil {
+			tree, _ := s.tree(s.pieceTree)
+			if err := tree.PieceDurable(ref); err != nil {
 				panic("chunkstore: piece durable out of turn: " + err.Error())
 			}
 			s.nextPiece(ctx, out)
@@ -2083,6 +2119,12 @@ func (s *Store) durable(ctx *core.Context, ev *disklog.Event, out *Output) {
 		}
 		if s.itemDone(si.op, out) {
 			s.mapResolved(ctx, s.ops[si.op].chunk, out)
+		}
+	}
+	if s.raft != nil {
+		var err error
+		if out.Rounds, err = s.raft.Durable(ctx, ev, &s.lout, out.Rounds); err != nil {
+			s.stop(ctx, err, out)
 		}
 	}
 }
@@ -2360,16 +2402,24 @@ func (s *Store) beginCheckpoint(ctx *core.Context, due bool, out *Output) {
 	if froze || due && !tree.Frozen() {
 		s.replayLSN = s.replayPoint()
 	}
-	idx := [1]disklog.CheckpointIndex{{Owner: indexOwnerID, ReplayLSN: s.replayLSN, Runs: tree.CarriedRuns(), Bounds: tree.Bounds()}}
+	s.idx = append(s.idx[:0], disklog.CheckpointIndex{Owner: indexOwnerID, ReplayLSN: s.replayLSN, Runs: tree.CarriedRuns(), Bounds: tree.Bounds()})
+	s.idx, err = s.beginShards(ctx, due, s.log.DurableLSN(), s.idx)
+	if err != nil {
+		s.piecesDead(tree.FlushFailed())
+		s.shardFlushesFailed()
+		s.stop(ctx, err, out)
+		return
+	}
 	begin := s.log.BeginCheckpoint
 	if !due {
 		begin = s.log.BeginStepCheckpoint
 	}
-	if err := begin(idx[:]); err != nil {
+	if err := begin(s.idx); err != nil {
 		s.piecesDead(tree.FlushFailed())
+		s.shardFlushesFailed()
 		return
 	}
-	s.checkpointing = true
+	s.checkpointing, s.pieceTree = true, 0
 	s.nextPiece(ctx, out)
 }
 
@@ -2383,8 +2433,13 @@ func (s *Store) nextPiece(ctx *core.Context, out *Output) {
 	if err != nil {
 		return
 	}
-	tree := s.ix.Tree()
+	tree, owner := s.tree(s.pieceTree)
 	length, root, err := tree.NextPiece(ctx.Pool.Bytes(buf))
+	for err == nil && length == 0 && s.pieceTree < len(s.shards) {
+		s.pieceTree++
+		tree, owner = s.tree(s.pieceTree)
+		length, root, err = tree.NextPiece(ctx.Pool.Bytes(buf))
+	}
 	if err == nil && (s.plant.failCheck || s.plant.failChecks) {
 		s.plant.failCheck, err = false, lsm.ErrCheck
 	}
@@ -2401,9 +2456,9 @@ func (s *Store) nextPiece(ctx *core.Context, out *Output) {
 		return
 	}
 	if w := tree.PieceWorker(); w > 0 {
-		s.piece, err = s.log.MergePiece(ctx, w, indexOwnerID, buf, uint64(length), root, &s.lout)
+		s.piece, err = s.log.MergePiece(ctx, w, owner, buf, uint64(length), root, &s.lout)
 	} else {
-		s.piece, err = s.log.CheckpointPiece(ctx, indexOwnerID, buf, uint64(length), root, &s.lout)
+		s.piece, err = s.log.CheckpointPiece(ctx, owner, buf, uint64(length), root, &s.lout)
 	}
 	if err != nil {
 		ctx.Pool.Free(buf)
@@ -2448,7 +2503,7 @@ func (s *Store) InstallMerge(ctx *core.Context, c *lsm.Compaction, out *Output) 
 // lets the log's rounds in flight finish and recovers its log again as an open does. A check that
 // fails again before a checkpoint completes after the rebuild stops the store with err.
 func (s *Store) indexBroken(ctx *core.Context, err error, out *Output) {
-	if s.rebuilt {
+	if s.rebuilt || len(s.shards) > 0 {
 		s.stop(ctx, err, out)
 		return
 	}
@@ -2547,12 +2602,16 @@ func (s *Store) manifestLoaded(ctx *core.Context) {
 	}
 	if m, ok := s.rec.Manifest(); ok && s.mode == disklog.ModeOpen {
 		for _, mi := range m.Indexes {
-			if mi.Owner != indexOwnerID {
+			tree := s.ix.Tree()
+			if k := s.shardOf(mi.Owner); k >= 0 {
+				tree = s.shards[k].sh.Tree()
+			} else if mi.Owner != indexOwnerID {
 				continue
+			} else {
+				s.replayLSN = mi.ReplayLSN
 			}
-			s.replayLSN = mi.ReplayLSN
 			for _, root := range mi.Runs {
-				l := &loadingRun{got: map[disklog.BlobRef][]byte{}}
+				l := &loadingRun{tree: tree, got: map[disklog.BlobRef][]byte{}}
 				if k := slices.IndexFunc(mi.Bounds, func(b disklog.MergeBound) bool { return b.Run == root }); k >= 0 {
 					l.bound = &mi.Bounds[k]
 				}
@@ -2601,9 +2660,9 @@ func (s *Store) blobRead(ctx *core.Context, ev *disklog.Event) {
 		pieces = append(pieces, l.root)
 		var err error
 		if l.bound != nil {
-			err = s.ix.Tree().LoadBoundedRun(*l.bound, pieces)
+			err = l.tree.LoadBoundedRun(*l.bound, pieces)
 		} else {
-			err = s.ix.Tree().LoadRun(root, pieces)
+			err = l.tree.LoadRun(root, pieces)
 		}
 		if err != nil {
 			s.recoveryFailed(ctx, err)
@@ -2621,6 +2680,12 @@ func (s *Store) replayIfLoaded(ctx *core.Context) {
 	if err := s.ix.CheckChunks(); err != nil {
 		s.recoveryFailed(ctx, err)
 		return
+	}
+	if m, ok := s.rec.Manifest(); ok && s.mode == disklog.ModeOpen {
+		if err := s.restoreShards(&m); err != nil {
+			s.recoveryFailed(ctx, err)
+			return
+		}
 	}
 	if err := s.rec.Replay(ctx, &s.lout); err != nil {
 		s.recoveryFailed(ctx, err)
