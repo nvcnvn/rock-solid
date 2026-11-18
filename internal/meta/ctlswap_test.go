@@ -279,3 +279,74 @@ func TestTheControlPlaneGroupsRemovedVoterKeepsTheOutgoingHalfsVote(t *testing.T
 		}
 	}
 }
+
+// leaveBehindOnHosts is the voter model's ci-leave-die-live wedge on the control-plane group: A,
+// B, C and D boot in ctlJoint and A is cut off; C leads and commits the leave on B and D, which do
+// not learn it committed; B wins the next term, appends its entry to C alone and dies. Then A
+// returns, every node left holding a lease from every other. It reports whether one of A and D led
+// having applied the plan within bound, and whether C led meanwhile.
+func leaveBehindOnHosts(t *testing.T, bound core.Tick) (led, cLed bool) {
+	r := newHostGroupWith(t, 4, ctlLogConfig(), func(r *hostRun) {
+		r.boot, r.failing = ctlJoint, true
+		r.paused[0], r.paused[1], r.paused[3] = true, true, true
+	})
+	cutA, bToC, mute := true, false, false
+	r.pass = func(w *hostWork) bool {
+		m, isRaft := r.raftOf(w)
+		switch {
+		case cutA && (w.from == 0 || w.at == 0):
+			return false
+		case mute && isRaft && w.from == 2 && w.at == 1 && (m.Type == raftpb.MsgApp || m.Type == raftpb.MsgHeartbeat):
+			return false
+		case cutA && isRaft && w.at == 2 && (w.from == 1 || w.from == 3) && m.Type == raftpb.MsgAppResp && m.Index > ctlLeave:
+			return false
+		case w.from == 2 && (w.at == 1 || w.at == 3):
+			r.lowerCommit(w, ctlLeave-1)
+		case w.from == 1 && isRaft && m.Type == raftpb.MsgApp:
+			bToC = bToC || w.at == 2 && len(m.Entries) > 0
+			return w.at == 2
+		}
+		return true
+	}
+	for range 500 {
+		if removed, _ := r.hs[2].Shard().Raft().Removed(); removed {
+			break
+		}
+		r.run(raftshard.TickInterval)
+	}
+	if removed, _ := r.hs[2].Shard().Raft().Removed(); !removed || r.applies(1, 1, 2, 4) || r.applies(3, 1, 2, 4) {
+		t.Fatalf("C learned its removal %v; B applied %+v, D %+v", removed, r.hs[1].Shard().Report(nil), r.hs[3].Shard().Report(nil))
+	}
+	r.paused[1], r.paused[2], mute = false, true, true
+	for range 500 {
+		if bToC {
+			break
+		}
+		r.run(raftshard.TickInterval)
+	}
+	if !bToC || r.hs[1].Shard().Raft().Leader() != 2 {
+		t.Fatalf("B leads %v, appended to C %v; terms %d %d %d %d leaders %d %d %d %d", r.hs[1].Shard().Raft().Leader() == 2, bToC, r.hs[0].Shard().Raft().Term(), r.hs[1].Shard().Raft().Term(), r.hs[2].Shard().Raft().Term(), r.hs[3].Shard().Raft().Term(), r.hs[0].Shard().Raft().Leader(), r.hs[1].Shard().Raft().Leader(), r.hs[2].Shard().Raft().Leader(), r.hs[3].Shard().Raft().Leader())
+	}
+	r.down[1], cutA, r.leasing, mute = true, false, true, false
+	r.paused[0], r.paused[2], r.paused[3] = false, false, false
+	for end := r.now + bound; r.now < end; {
+		r.run(raftshard.TickInterval)
+		cLed = cLed || r.hs[2].Shard().Raft().Leader() == 3
+		if r.leadsPlan([]uint64{1, 2, 4}, 0, 3) {
+			return true, cLed
+		}
+	}
+	return false, cLed
+}
+
+// The same wedge as TestARemovedVoterThatHoldsTheOutgoingHalfsNewestEntryLeadsAndHandsOff, on the
+// control-plane group: C, holding the newest entry of the outgoing half, wins, commits the leave on
+// A and D and hands its leadership to one of them, and is kept, since B, a voter of the plan, is
+// down for good.
+func TestTheControlPlaneGroupsRemovedVoterHoldingTheNewestEntryLeadsAndHandsOff(t *testing.T) {
+	bound := 4 * raftshard.ElectionTick * raftshard.TickInterval
+	led, cLed := leaveBehindOnHosts(t, bound)
+	if !led || !cLed {
+		t.Fatalf("within %v C led %v, and a voter of the plan %v", bound.Duration(), cLed, led)
+	}
+}
