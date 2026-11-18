@@ -656,17 +656,18 @@ func (h *CtlHost) after(ctx *core.Context, out *CtlHostOutput) {
 			h.disk.Log.FailStalled(ctx, &h.lout)
 		}
 		h.logEvents(ctx, out)
-		// A checkpoint begins after a round is written, or with none on a log stalled for room,
-		// which only a manifest frees.
-		begin := false
+		// The host runs no cleaner and frees segments only when a checkpoint ends, so a log
+		// stalled for room begins one however few records follow the last manifest.
+		due := false
 		if r := h.sout.Raft.Flush; r != 0 && h.err == nil {
 			h.sout.Raft.Flush = 0
 			h.fail(h.disk.Write(ctx, ctlOwner, r, &h.sout.Raft.Round, &h.lout), out)
-			begin = true
-		} else if h.disk != nil && h.disk.Log != nil {
-			begin = h.disk.Log.Stalled()
+			due = h.err == nil && h.disk.Log.CheckpointDue()
 		}
-		if begin && h.shard != nil && h.err == nil && !h.cp.running && h.disk.Log.CheckpointDue() {
+		if h.disk != nil && h.disk.Log != nil {
+			due = due || h.disk.Log.Stalled()
+		}
+		if due && h.shard != nil && h.err == nil && !h.cp.running {
 			h.fail(h.checkpoint(ctx), out)
 		}
 		if h.shard == nil || h.err != nil {

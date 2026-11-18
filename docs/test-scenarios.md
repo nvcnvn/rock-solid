@@ -1826,11 +1826,14 @@ manifest, written or in flight, segment headers and the checkpoint's own records
   `CheckpointStalled`, and the no-victim report fails the piece, the checkpoint and the held write. A write submitted next is
   `Stalled` at once, until a new checkpoint begins.
 - Merge pieces (`MergePiece`) stay out of the hold and are never held, as checkpoint items.
-- An ordinary item waiting for room with only the reserve free makes a checkpoint due, however few
-  records follow the newest manifest: the control-plane host, which runs no cleaner, on a disk of
-  64 segments of 64 blocks with an 8-segment reserve and `max_replay_bytes` past the disk, answers
-  three disks' worth of counter `Txn`s, each stall checkpointing, compacting and freeing segments;
-  before the rule its 462nd `Txn` waited for good (`TestAStallForRoomMakesACheckpointDue`).
+- The control-plane host, which runs no cleaner, begins a checkpoint once an ordinary item waits
+  for room with only the reserve free, however few records follow the newest manifest: on a disk of
+  64 segments of 64 blocks with an 8-segment reserve and `max_replay_bytes` past the disk, it
+  answers three disks' worth of counter `Txn`s, each stall checkpointing, compacting and freeing
+  segments; before the rule its 462nd `Txn` waited for good (`TestAStallForRoomMakesACheckpointDue`).
+  A chunk store leaves a stall to its cleaner: making the log's `CheckpointDue` true on a stall took
+  the cleaner's room and failed writes with NoSpace while it had a victim
+  (`TestAFullDiskWithNoFreeSegmentEndsInNoSpace`, `TestAStalledSlotWriteFailsTheHotWritesAfterIt`).
 - The chunk store stand-in of the recovery tests begins a new checkpoint after a failure once a
   record has become durable since, so held items are released and the random-crash property keeps
   "every accepted ticket ends ...".
@@ -6899,7 +6902,10 @@ Recovery from manifest and log is under Shard indexes in the disk owner's checkp
   checkpoint begun for a merge step alone names each shard with the last due checkpoint's replay
   LSN, the one its carried runs restore: naming it with the host's current one, past a compaction
   the runs' mark predates, restored a shard at an applied index with none of its entries after
-  the base, and the next compaction panicked.
+  the base, and the next compaction panicked. A shard added while a checkpoint runs joins the
+  next one, and a restart after it restores the shard on a compacted base; the running checkpoint
+  once asked its tree for pieces of a flush it never began, which stopped the store
+  (`TestAShardAddedDuringACheckpointJoinsTheNext`).
 - **Lagging follower.** A follower behind the compaction index gets a `MsgSnap` built from a point-in-time view of the shard's LSM tree, which never blocks the writer, and catches up from it. A view held open holds back the cleaner (asserted in the LSM tree tests).
 - **Index rebuild.** One index rebuilds from its manifest and the log while the disk's other indexes serve, without restarting the log.
 
