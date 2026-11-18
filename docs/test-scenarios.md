@@ -8213,6 +8213,7 @@ The rows without a test named are unit tests in `internal/meta/ctlhost_test.go`.
 | A single voter of group 257 formatting its disk file, its `-max-replay-bytes` 256 KiB, and a node sending its report, a session fetch and a `Txn` adding 1 to a counter every 100 ms, then 2000 `Txn`s one after another | A fetch answered under its token: the voter elected itself, leased and committed its session table; the `Txn`s answered with their counts. Their rounds pass twice `max_replay_bytes` many times over, which the voter could not answer without checkpointing, compacting and reusing the segments it frees (`TestASingleVoterControlPlaneAnswersOverTCPAndSurvivesAKill`) |
 | That process killed with `SIGKILL` and started again on its file without `-format` | It loads its manifest's runs, replays the log after them and answers the node's fetches again, and its counter past every count it answered before; a voter that formats at every start fails this |
 | `-format` over a file not there, one of zeros, a short one of zeros, one with a byte in block 0 and one with a byte in the superblock copy | The first three made at full size; the last two refused and left as they were (`TestFormatMakesAFileNeverWrittenAndRefusesAnyOther`) |
+| The voter stops with `ErrDeleted`, and with any other error | It exits with status 3, which a service manager should not restart; 1 (`TestADeletedVoterExitsWithItsOwnStatus`) |
 
 The node's side, in `internal/node/node_test.go`:
 

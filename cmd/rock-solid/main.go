@@ -20,6 +20,7 @@ import (
 	"syscall"
 
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/meta"
 )
 
 // minHeap is the least GOMEMLIMIT a budget sets: at 0 the collector would run back to back.
@@ -146,8 +147,20 @@ func main() {
 		p.Stop()
 	}()
 	if err := p.Run(); err != nil {
-		log.Fatal(err)
+		log.Print(err)
+		os.Exit(exitStatus(err))
 	}
+}
+
+// exitDeleted is the exit status of a control-plane voter whose group deleted it: it exits so at
+// every start, so a service manager should not restart it (systemd's RestartPreventExitStatus).
+const exitDeleted = 3
+
+func exitStatus(err error) int {
+	if errors.Is(err, meta.ErrDeleted) {
+		return exitDeleted
+	}
+	return 1
 }
 
 func parseCtl(args []string) (ctlConfig, error) {

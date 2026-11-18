@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"log"
 	"reflect"
 	"strings"
@@ -132,5 +134,16 @@ func TestTheHeapLimitIsTheBudgetLessTheMappedSlabs(t *testing.T) {
 	}
 	if _, err := parseNode(strings.Fields("-node 2 -ctl 1=127.0.0.1:7000 -listen 127.0.0.1:7100 -device /dev/a -memory -1")); err == nil {
 		t.Fatal("a negative -memory was taken")
+	}
+}
+
+// A deleted control-plane voter exits with its own status, so a service manager can leave it down;
+// every other failure exits 1.
+func TestADeletedVoterExitsWithItsOwnStatus(t *testing.T) {
+	if got := exitStatus(fmt.Errorf("ctl: %w", meta.ErrDeleted)); got != exitDeleted || exitDeleted == 1 || exitDeleted == 2 {
+		t.Fatalf("a deleted voter exits %d, exitDeleted %d: want a status of its own", got, exitDeleted)
+	}
+	if got := exitStatus(errors.New("disk failed")); got != 1 {
+		t.Fatalf("a failed voter exits %d, want 1", got)
 	}
 }
