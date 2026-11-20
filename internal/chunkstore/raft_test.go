@@ -388,11 +388,11 @@ func TestRaftShardsOnTheStoreCheckpointCompactAndRecover(t *testing.T) {
 	}
 }
 
-// Regression (seed 98 of the crash run): a restart's replay adds again every Raft blob past the
+// Regression (seed 8 of the crash run): a restart's replay adds again every Raft blob past the
 // replay floor, those that died before the manifest included, so the log must recount its usage
 // before the host reports them dead again, or the dead report underflows a segment's live count.
 func TestARestartReportsBlobsDeadAfterTheLogRecounts(t *testing.T) {
-	raftCrashRun(t, 98, 1000)
+	raftCrashRun(t, 8, 2000)
 }
 
 // A shard added while a checkpoint runs joins the next one: the running checkpoint neither

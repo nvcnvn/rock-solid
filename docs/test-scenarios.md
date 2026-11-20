@@ -6901,7 +6901,7 @@ Recovery from manifest and log is under Shard indexes in the disk owner's checkp
   restarts restore compacted bases, each seed writes the disk over twice, and the crashes land
   with no checkpoint running, with a piece in flight and with the manifest in flight, each
   counted (`TestRaftShardsOnTheStoreCheckpointCompactAndRecover`).
-  - Regression (seed 98): a restart's replay adds again every Raft blob past the replay floor,
+  - Regression (seed 8): a restart's replay adds again every Raft blob past the replay floor,
     those reported dead before the manifest included, so the host reports them dead only after
     the log recounts its usage; reported before, the report underflowed a segment's live count
     and every open of the disk panicked (`TestARestartReportsBlobsDeadAfterTheLogRecounts`).
