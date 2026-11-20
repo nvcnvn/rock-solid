@@ -599,3 +599,9 @@ func TestAReplicaDeletedOnItsPlanBreaksTheInvariant(t *testing.T) {
 func TestANoticeFromAPeerBehindBreaksTheInvariant(t *testing.T) {
 	plantBreaks(t, 0, invOnlyRemoved, plants{noticeAnyIndex: true}, replaceCluster)
 }
+
+// The voter model's neg-notice-non-member: a replica asks and takes a removal notice while its own
+// applied configuration lacks it, as the fourth replica does before its addition reaches it.
+func TestANoticeToANonMemberBreaksTheInvariant(t *testing.T) {
+	plantBreaks(t, 0, invOnlyRemoved, plants{noticeNonMember: true}, replaceCluster)
+}
