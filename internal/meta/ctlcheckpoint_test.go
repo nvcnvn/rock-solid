@@ -1,6 +1,7 @@
 package meta
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"slices"
@@ -60,7 +61,11 @@ func (r *hostRun) crashRound(n, crash int, token *uint64, next func() *Txn, answ
 		if crash%3 == 0 || r.h.cp.running {
 			break
 		}
-		r.drain()
+		for !r.h.cp.running && r.step() {
+		}
+		if r.h.cp.running {
+			break
+		}
 	}
 	steps := crash % 9
 	if crash%5 == 4 {
@@ -245,6 +250,63 @@ func TestAStallForRoomMakesACheckpointDue(t *testing.T) {
 	for k := range 3 * geo.DiskBlocks() {
 		if a := r.ask(0, k+1, addOne()); a == nil || a.Err != nil {
 			t.Fatalf("Txn %d not answered (%+v): the log stalled %v, its checkpoint running %v", k+1, a, r.h.disk.Log.Stalled(), r.h.cp.running)
+		}
+	}
+}
+
+// A leader cut off from its followers keeps appending Txns it cannot commit: its oldest round
+// holds an entry past its commit, so a checkpoint writes every entry past its compaction again in
+// a full rewrite, after which the replay floor passes that round. A crash then recovers every
+// entry the leader held, at the same index and term, from the rewrite.
+func TestACutOffLeaderRewritesItsEntriesAndKeepsThemAcrossACrash(t *testing.T) {
+	lc := ctlLogConfig()
+	lc.MaxReplayBytes = 64 << 10
+	r := newHostGroupOnDisks(t, 3, lc, smallDisk, 0, nil)
+	l := r.leader()
+	for k := range uint64(10) {
+		if a := r.txnAt(l, k+1, "v"); a == nil || a.Err != nil {
+			t.Fatalf("Txn %d before the cut: %+v", k+1, a)
+		}
+	}
+	for i := range r.down {
+		r.down[i] = i != l
+	}
+	h := r.hs[l]
+	val := make([]byte, 1000)
+	r.ask(l, 100, &Txn{Ops: []Op{Put(attr(1, 2, 100), val)}})
+	cut := h.disk.Log.DurableLSN()
+	for k := uint64(101); h.disk.Log.ReplayFloor() <= cut; k++ {
+		if k == 2000 {
+			t.Fatalf("the replay floor stayed at %d, behind the round at %d holding the first entry past the commit", h.disk.Log.ReplayFloor(), cut)
+		}
+		r.ask(l, k, &Txn{Ops: []Op{Put(attr(1, 2, k), val)}})
+	}
+	st := h.Shard().log
+	first, _ := st.FirstIndex()
+	last, _ := st.LastIndex()
+	if commit := st.HardState().Commit; commit >= last {
+		t.Fatalf("the leader committed through %d of %d entries", commit, last)
+	}
+	want, err := st.Entries(first, last+1, 1<<62)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = slices.Clone(want)
+	for i := range want {
+		want[i].Data = slices.Clone(want[i].Data)
+	}
+	r.restart(l)
+	st = r.hs[l].Shard().log
+	got, err := st.Entries(first, last+1, 1<<62)
+	if err != nil {
+		t.Fatalf("after the crash entries %d to %d: %v", first, last, err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("after the crash %d entries from %d, before it %d", len(got), first, len(want))
+	}
+	for i := range want {
+		if got[i].Index != want[i].Index || got[i].Term != want[i].Term || !bytes.Equal(got[i].Data, want[i].Data) {
+			t.Fatalf("after the crash entry %d is at term %d, before it at term %d", want[i].Index, got[i].Term, want[i].Term)
 		}
 	}
 }

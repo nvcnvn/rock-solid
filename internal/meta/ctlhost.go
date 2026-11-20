@@ -656,19 +656,20 @@ func (h *CtlHost) after(ctx *core.Context, out *CtlHostOutput) {
 			h.disk.Log.FailStalled(ctx, &h.lout)
 		}
 		h.logEvents(ctx, out)
-		// The host runs no cleaner and frees segments only when a checkpoint ends, so a log
-		// stalled for room begins one however few records follow the last manifest.
-		due := false
+		// A due checkpoint begins only while no round of the replica is in flight, before its next
+		// one is written, so the checkpoint's Rewrite may write its entries again. The host runs no
+		// cleaner and frees segments only when a checkpoint ends, so a log stalled for room begins
+		// one however few records follow the last manifest, the round just written included.
+		landed := h.shard != nil && (h.sout.Raft.Flush != 0 || !h.shard.Raft().Flushing())
+		if h.mayCheckpoint() && (landed && h.disk.Log.CheckpointDue() || h.disk.Log.Stalled()) {
+			h.fail(h.checkpoint(ctx), out)
+		}
 		if r := h.sout.Raft.Flush; r != 0 && h.err == nil {
 			h.sout.Raft.Flush = 0
 			h.fail(h.disk.Write(ctx, ctlOwner, r, &h.sout.Raft.Round, &h.lout), out)
-			due = h.err == nil && h.disk.Log.CheckpointDue()
-		}
-		if h.disk != nil && h.disk.Log != nil {
-			due = due || h.disk.Log.Stalled()
-		}
-		if due && h.shard != nil && h.err == nil && !h.cp.running {
-			h.fail(h.checkpoint(ctx), out)
+			if h.mayCheckpoint() && h.disk.Log.Stalled() {
+				h.fail(h.checkpoint(ctx), out)
+			}
 		}
 		if h.shard == nil || h.err != nil {
 			break
@@ -695,6 +696,11 @@ func (h *CtlHost) after(ctx *core.Context, out *CtlHostOutput) {
 	h.sout.Reset()
 	h.lout.Reset()
 	h.seen = 0
+}
+
+// mayCheckpoint reports whether the host may begin a checkpoint: it runs, on its log, with none running.
+func (h *CtlHost) mayCheckpoint() bool {
+	return h.disk != nil && h.disk.Log != nil && h.shard != nil && h.err == nil && !h.cp.running
 }
 
 // logEvents takes the log's events: a durable round goes to the replica, a restart's replay to
