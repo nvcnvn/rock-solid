@@ -45,6 +45,8 @@ type Storage struct {
 	// whether one recorded that it was deleted.
 	removed bool
 	deleted bool
+	// took is the shard's newest round its host reported durable that the storage holds.
+	took uint64
 }
 
 // NewStorage is an empty storage whose base is index 0.
@@ -143,6 +145,10 @@ func (s *Storage) TakeBaseData() []byte {
 	s.data = nil
 	return d
 }
+
+// Took records that the storage holds the shard's round, the newest its host reported durable, as
+// the shard does once told: the host rewrites the storage's entries only while it holds them all.
+func (s *Storage) Took(round uint64) { s.took = round }
 
 // SetHardState replaces the hard state.
 func (s *Storage) SetHardState(hs raftpb.HardState) { s.hs = hs }

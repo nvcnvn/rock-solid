@@ -290,6 +290,7 @@ func (s *Shard) Durable(ctx *core.Context, round uint64, out *Output) {
 	}
 	rd := s.rd
 	s.round, s.rd = 0, raft.Ready{}
+	s.cfg.Storage.Took(round)
 	if s.saving {
 		s.cfg.Storage.removed, s.saving = true, false
 	}

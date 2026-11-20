@@ -126,6 +126,7 @@ func (k *kvShard) durable(flush uint64) {
 	delete(k.rounds, flush)
 	k.st.Append(r.Entries)
 	k.st.SetHardState(r.HardState)
+	k.st.Took(flush)
 	k.apply()
 }
 
@@ -557,5 +558,42 @@ func TestAStuckFollowerShardNeverStallsChunkWrites(t *testing.T) {
 	k.check(t)
 	if r.s.RaftFull(k.owner) {
 		t.Fatal("the follower is still full once it applied its entries")
+	}
+}
+
+// Regression: a follower that keeps taking entries it cannot commit, under its bound, while chunk
+// writes drive due checkpoints, has a round durable in the handler that begins one; the full
+// rewrite waits for the shard to take it, and every restart finds every entry it acknowledged.
+func TestAStuckFollowerTakingRoundsKeepsThemAcrossRestarts(t *testing.T) {
+	r := newRaftRig(t, raftConfig(), raftGeometry, 7)
+	k := r.shards[0]
+	for range 20 {
+		r.write(k, 4, 4000)
+		r.step()
+	}
+	r.settle()
+	k.stuck, k.frozen = true, k.st.HardState().Commit
+	rnd := core.NewRand(4)
+	data := make([]byte, 32<<10)
+	for i := range 3000 {
+		r.chunkWrite(core.ChunkID{Index: uint32(i % 32)}, data)
+		if !r.s.RaftFull(k.owner) {
+			r.write(k, 1, 64)
+		}
+		for range rnd.Below(6) {
+			r.step()
+		}
+		if r.failed != nil || !r.s.Serving() {
+			t.Fatalf("chunk write %d: reply %+v, store error %v", i, r.failed, r.s.Err())
+		}
+		if i%100 == 99 {
+			r.settle()
+			last, _ := k.st.LastIndex()
+			r.crash(rnd)
+			k = r.shards[0]
+			if got, _ := k.st.LastIndex(); got < last {
+				t.Fatalf("restart after chunk write %d: entries to %d, below the %d acknowledged", i, got, last)
+			}
+		}
 	}
 }

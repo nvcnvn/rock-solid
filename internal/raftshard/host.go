@@ -44,8 +44,9 @@ type retiredOwner struct {
 // buffers (0 for none) and its contents, the durable rounds a restart may still need, oldest
 // first, newest the last of them holding a hard state (-1 for none), and refs, their blobs in
 // order and then those of a round not yet whole, from closed on; from is the LSN at or before
-// which a restart's replay skips its blobs, inflight counts its blobs not yet durable, and flying
-// the entry payload bytes of its rounds written and not yet durable.
+// which a restart's replay skips its blobs, inflight counts its blobs not yet durable, flying
+// the entry payload bytes of its rounds written and not yet durable, and done is its newest round
+// reported durable.
 type hosted struct {
 	owner     uint32
 	st        *Storage
@@ -59,6 +60,7 @@ type hosted struct {
 	from      uint64
 	inflight  int
 	flying    uint64
+	done      uint64
 }
 
 type liveRound struct {
@@ -173,6 +175,7 @@ func (h *Host) Durable(ctx *core.Context, ev *disklog.Event, out *disklog.Output
 		if f.sum.done {
 			h.close(hd, f.sum)
 			if f.round != 0 {
+				hd.done = f.round
 				dst = append(dst, Done{Owner: f.owner, Round: f.round})
 			}
 		}
@@ -402,8 +405,9 @@ func (h *Host) Indexes(dst []disklog.CheckpointIndex, durable uint64) []disklog.
 // shard, whose oldest round is the one holding its newest hard state and holds no entry past the
 // compaction; and every entry past the base, with the newest hard state, of a shard whose oldest
 // round holds an entry past its commit, as a follower's whose leader is gone does, which makes
-// every round before it dead once durable. A shard with a round in flight or waiting for buffers
-// is left to that round, and one with entries committed but not yet compacted to its compaction.
+// every round before it dead once durable, once its storage took every round reported durable. A
+// shard with a round in flight or waiting for buffers is left to that round, and one with entries
+// committed but not yet compacted to its compaction.
 func (h *Host) Rewrite(ctx *core.Context, lsn uint64, out *disklog.Output) error {
 	for k := range h.shards {
 		hd := &h.shards[k]
@@ -414,6 +418,8 @@ func (h *Host) Rewrite(ctx *core.Context, lsn uint64, out *disklog.Output) error
 		r := Round{HardState: newest.state, Removed: newest.removed}
 		full := hd.rounds[0].last > newest.state.Commit
 		switch {
+		case full && hd.st.took != hd.done:
+			continue
 		case full:
 			last, _ := hd.st.LastIndex()
 			ents, err := hd.st.Entries(hd.st.base.Index+1, last+1, math.MaxUint64)

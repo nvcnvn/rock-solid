@@ -18,6 +18,7 @@ func (r *rig) commit(st *Storage, owner uint32, flush uint64, rd Round) uint64 {
 		st.SetHardState(rd.HardState)
 	}
 	st.removed = st.removed || rd.Removed
+	st.Took(flush)
 	if d := r.takeDone(); len(d) != 1 || d[0].Round != flush {
 		r.t.Fatalf("owner %d round %d: done %v", owner, flush, d)
 	}
@@ -328,5 +329,31 @@ func TestARestartCollectsTheRoundsItsRestoredBaseCovers(t *testing.T) {
 	r.crash(5)
 	if n := len(r.host.shard(5).refs); n != want {
 		t.Fatalf("after the restart the host holds %d blobs of owner 5, want %d of the round holding its hard state", n, want)
+	}
+}
+
+// Regression: a full rewrite writes the storage's entries, so one taken after a round is durable
+// and before the shard took that round into its storage, as a chunk store's due checkpoint in the
+// same handler is, would make the round dead without its entries.
+func TestAFullRewriteWaitsForTheShardToTakeEveryDurableRound(t *testing.T) {
+	r := newRig(t)
+	st := NewStorage()
+	r.host.Add(6, st)
+	hs := raftpb.HardState{Term: 1, Vote: 2}
+	r.commit(st, 6, 1, Round{Entries: entries(1, 2, 1, 100), HardState: hs})
+	second := Round{Entries: entries(3, 2, 1, 100), HardState: hs}
+	r.write(6, 2, &second)
+	r.run()
+	r.checkpoint()
+	if err := r.host.Rewrite(&r.ctx, r.host.Log.DurableLSN(), &r.out); err != nil {
+		t.Fatal(err)
+	}
+	r.absorb()
+	r.run()
+	st.Append(second.Entries)
+	r.takeDone()
+	sts := r.crashCleaned(6)
+	if last, _ := sts[6].LastIndex(); last != 4 {
+		t.Fatalf("the restart recovered entries to %d, want the 4 the shard was told durable", last)
 	}
 }
