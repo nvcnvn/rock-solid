@@ -70,8 +70,11 @@ type replacement struct {
 	// With regress, the first old voter that runs, follows and applied the joint configuration
 	// while holding the leave beyond its commit index crashes, regressed, at regressAt; until
 	// 10 s on it reaches only the cut-off replica, which reaches only it, and the leader hands its
-	// leadership to the fourth replica once it applied the leave.
+	// leadership to the fourth replica once it applied the leave. With split as well, the old voter
+	// is not crashed but taken, and cut off the same way, once the leader applied the plan's
+	// configuration while that voter applied neither it nor the joint one.
 	regress   bool
+	split     bool
 	regressed int
 	regressAt core.Tick
 }
@@ -223,10 +226,14 @@ func (c *simCluster) regress() {
 	switch l := c.leader(); {
 	case p.regressed < 0 && p.plan != nil && l >= 0:
 		for id, r := range c.reps[:simNodes] {
-			if id == p.dead || r.leads || !c.s.Node(uint32(id)).Up() || len(r.s.conf.VotersOutgoing) == 0 || !holdsConf(c.storage[id], r.s.rn.BasicStatus().Commit) {
+			split := p.split && p.holds(c.reps[l]) && !p.holds(r) && len(r.s.conf.VotersOutgoing) == 0
+			crash := !p.split && len(r.s.conf.VotersOutgoing) != 0 && holdsConf(c.storage[id], r.s.rn.BasicStatus().Commit)
+			if id == p.dead || r.leads || !c.s.Node(uint32(id)).Up() || !split && !crash {
 				continue
 			}
-			c.s.CrashRandom(uint32(id))
+			if crash {
+				c.s.CrashRandom(uint32(id))
+			}
 			p.regressed, p.regressAt = id, now
 			for x := range uint32(len(c.reps)) {
 				if x != uint32(p.dead) && x != uint32(id) {
@@ -527,6 +534,13 @@ func regressCluster(seed uint64, p plants) *simCluster {
 	return c
 }
 
+// splitCluster is regressCluster with the split fault.
+func splitCluster(seed uint64, p plants) *simCluster {
+	c := regressCluster(seed, p)
+	c.rep.split = true
+	return c
+}
+
 // Under the regress fault a voter that restarts once the joint configuration committed, holding
 // the leave, restarts in that configuration and wins no term on its vote and the cut-off replica's.
 func TestAVoterRestartedMidSwapKeepsTheConfigurationItKnewCommitted(t *testing.T) {
@@ -612,4 +626,11 @@ func TestANoticeToANonMemberBreaksTheInvariant(t *testing.T) {
 // the replaced replica's vote.
 func TestACampaignWithAConfigurationChangeUnappliedElectsTwoLeaders(t *testing.T) {
 	plantBreaks(t, 0, invOneLeader, plants{campaignUnapplied: true}, regressCluster)
+}
+
+// The voter model's neg-joint-one-half: a replica that applies the swap's changes one by one counts
+// the incoming half alone; under the split fault the old voter, which knows no change committed,
+// wins on the replaced replica's vote the term the fourth replica won on the leader's.
+func TestAJointConfigurationCountingOneHalfElectsTwoLeaders(t *testing.T) {
+	plantBreaks(t, 0, invOneLeader, plants{jointOneHalf: true}, splitCluster)
 }

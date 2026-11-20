@@ -146,13 +146,13 @@ type fortified struct {
 	term, run, support uint64
 }
 
-// plants are bugs a test plants: a removed replica that stops at once, as if its node deleted it, one that does so as soon as its plan drops it, one that takes a removal notice from a peer that applied less than it, one that asks and takes one while its own configuration lacks it, and one that applies its removal to its Raft configuration and so campaigns no more; election timeouts from crypto/rand, every message of a Ready sent before its flush, followers that vote and campaign while they support a leader, a learner promoted before it caught up, a replacement added as a voter, a learner held to the current commit index, lease reads before an entry of the leader's term commits, snapshots kept from the last compaction instead of built at the applied index, a leader counting a fortification under whatever support epoch its lease from the peer now runs, as if grantors renewed a lapsed grant under its old epoch, a leader serving lease reads after MsgTimeoutNow left, a vote granted to every candidate, a follower serving lease reads while it supports its leader, a follower that never asks its leader's node about the leader, a halted replica that no longer leads answering an ask about it with silence, a leader serving lease reads after it applied its own removal, rounds that write only their own Ready's hard state and none for a Ready that commits a configuration change and moves only the commit index, a configuration change applied, and its commit sent, before that commit index is durable, and a restart that tells etcd-raft every entry it knows committed is applied, so it campaigns with a committed configuration change unapplied.
+// plants are bugs a test plants: a removed replica that stops at once, as if its node deleted it, one that does so as soon as its plan drops it, one that takes a removal notice from a peer that applied less than it, one that asks and takes one while its own configuration lacks it, and one that applies its removal to its Raft configuration and so campaigns no more; election timeouts from crypto/rand, every message of a Ready sent before its flush, followers that vote and campaign while they support a leader, a learner promoted before it caught up, a replacement added as a voter, a learner held to the current commit index, lease reads before an entry of the leader's term commits, snapshots kept from the last compaction instead of built at the applied index, a leader counting a fortification under whatever support epoch its lease from the peer now runs, as if grantors renewed a lapsed grant under its old epoch, a leader serving lease reads after MsgTimeoutNow left, a vote granted to every candidate, a follower serving lease reads while it supports its leader, a follower that never asks its leader's node about the leader, a halted replica that no longer leads answering an ask about it with silence, a leader serving lease reads after it applied its own removal, rounds that write only their own Ready's hard state and none for a Ready that commits a configuration change and moves only the commit index, a configuration change applied, and its commit sent, before that commit index is durable, a restart that tells etcd-raft every entry it knows committed is applied, so it campaigns with a committed configuration change unapplied, and a swap applied one change at a time, so the replica counts its incoming half alone.
 type plants struct {
 	unseeded, early, disloyal, eager, voterFirst, current, uncommitted, staleSnapshot bool
 	noEpochBump, transferKeepsLease, voteEveryone, followerReads                      bool
 	noSupportAsk, removedKeepsLease, oldHardState, noConfRound                        bool
 	deletesAtOnce, appliesRemoval, haltedSilent, deletesOnPlan, noticeAnyIndex        bool
-	noticeNonMember, campaignUnapplied                                                bool
+	noticeNonMember, campaignUnapplied, jointOneHalf                                  bool
 }
 
 // New starts a replica from its storage.
@@ -839,7 +839,13 @@ func (s *Shard) applyConf(e *raftpb.Entry, out *Output) bool {
 	}
 	was := s.conf
 	s.applying = true
-	s.conf = *s.rn.ApplyConfChange(cc)
+	if _, enters := cc.EnterJoint(); enters && s.plant.jointOneHalf {
+		for _, c := range cc.Changes {
+			s.conf = *s.rn.ApplyConfChange(raftpb.ConfChangeV2{Changes: []raftpb.ConfChangeSingle{c}})
+		}
+	} else {
+		s.conf = *s.rn.ApplyConfChange(cc)
+	}
 	s.applying = false
 	s.confTerm, s.confAt = 0, e.Index
 	if node, ok := decodeNode(cc.Context); ok {

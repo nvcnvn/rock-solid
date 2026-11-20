@@ -135,7 +135,7 @@ epoch/neg-replay-forgets-drops	chunkstore.replayForgetsDrops	TestReplayRollbackP
 voters/neg-campaign-unapplied	raftshard.campaignUnapplied	TestACampaignWithAConfigurationChangeUnappliedElectsTwoLeaders
 voters/neg-voter-first	raftshard.voterFirst	TestAddingTheReplacementAsAVoterStallsProposals
 voters/neg-eager	raftshard.eager	TestPromotingALearnerBeforeItCaughtUpBreaksTheInvariant
-voters/neg-joint-one-half	open	Plants for the voter replacement model
+voters/neg-joint-one-half	raftshard.jointOneHalf	TestAJointConfigurationCountingOneHalfElectsTwoLeaders
 voters/neg-one-at-a-time	open	Plants for the voter replacement model
 voters/neg-delete-on-plan	raftshard.deletesOnPlan	TestAReplicaDeletedOnItsPlanBreaksTheInvariant
 voters/neg-notice-any-index	raftshard.noticeAnyIndex	TestANoticeFromAPeerBehindBreaksTheInvariant
