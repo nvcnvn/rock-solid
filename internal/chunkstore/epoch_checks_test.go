@@ -445,21 +445,22 @@ func (x *epochChecks) sources() error {
 	return nil
 }
 
-// canSource reports whether member m lists nothing of chunk ch of PG pg, or runs no store to say: an up member if acked is 0; otherwise one of any mark that held version acked clean when it was acknowledged and lists nothing, or lists only a version above it that it lacks though it was that version's primary.
+// canSource reports whether member m can serve chunk ch of PG pg: if acked is 0, an up member that lists nothing of it or runs no store to say; otherwise one of any mark that held version acked clean when it was acknowledged and lists nothing, lists only a version above it that it lacks though it was that version's primary, or runs no store to say.
 func (x *epochChecks) canSource(m Member, pg core.PGID, ch core.ChunkID, acked uint64) bool {
 	if m.Mark != MarkUp && acked == 0 {
 		return false
 	}
+	held := x.clean[diskChunk{m.Disk, ch}] >= acked
 	n := x.c.node(m.Disk)
 	if n < 0 || x.c.reps[n] == nil || !x.c.reps[n].Store().Serving() {
-		return true
+		return held
 	}
 	o := x.c.reps[n]
 	c, _ := o.Store().Index().Chunk(o.st.cfg.Pool, ch)
 	if acked == 0 {
 		return c.ListedIn == 0
 	}
-	return x.clean[diskChunk{m.Disk, ch}] >= acked && (c.ListedIn == 0 || c.Listed > acked && c.Version < c.Listed && x.prims[pgInterval{pg, intervalOf(c.Listed)}] == m.Disk)
+	return held && (c.ListedIn == 0 || c.Listed > acked && c.Version < c.Listed && x.prims[pgInterval{pg, intervalOf(c.Listed)}] == m.Disk)
 }
 
 // identities checks the disk record and the disks the nodes run: each disk ID keeps the log ID it was first given, and no log ID is up under two disk IDs.
