@@ -3,7 +3,6 @@ package raftshard
 import (
 	"errors"
 	"fmt"
-	"math"
 
 	"go.etcd.io/raft/v3/raftpb"
 
@@ -45,8 +44,9 @@ type retiredOwner struct {
 // first, newest the last of them holding a hard state (-1 for none), and refs, their blobs in
 // order and then those of a round not yet whole, from closed on; from is the LSN at or before
 // which a restart's replay skips its blobs, inflight counts its blobs not yet durable, flying
-// the entry payload bytes of its rounds written and not yet durable, and done is its newest round
-// reported durable.
+// the entry payload bytes of its rounds written and not yet durable, done its newest round
+// reported durable, rw its full rewrite going out, if one is, and cut the compaction, with its
+// configuration, waiting for that rewrite to read the entries it drops (0 for none).
 type hosted struct {
 	owner     uint32
 	st        *Storage
@@ -61,6 +61,70 @@ type hosted struct {
 	inflight  int
 	flying    uint64
 	done      uint64
+	rw        *rewriting
+	cut       uint64
+	cutConf   raftpb.ConfState
+}
+
+// rewriting is a full rewrite's round going out a blob at a time, the storage left as it was when
+// it began: its record is head, the encodings of entries next to end, off bytes of next's already
+// out, then tail; left counts the record's bytes not yet out, and sum is the round's summary.
+type rewriting struct {
+	head, tail []byte
+	next, end  uint64
+	off        int
+	left       uint64
+	begun      bool
+	sum        summary
+}
+
+// rewriteBlobs is how many blobs of a full rewrite may be in flight, so that it takes a few
+// records' worth of the pool, never the whole of a shard's share at once.
+const rewriteBlobs = 4
+
+func newRewriting(st *Storage, newest *liveRound) *rewriting {
+	r := Round{HardState: newest.state, Removed: newest.removed}
+	rec := AppendRound(nil, &r)
+	rw := &rewriting{head: rec[:1:1], tail: rec[1:], next: st.base.Index + 1, end: st.last(), sum: summarize(&r)}
+	if rw.end >= rw.next {
+		rw.head[0] |= flagEntries
+		rw.head = le.AppendUint32(le.AppendUint64(rw.head, rw.next), uint32(rw.end-rw.next+1))
+		rw.sum.last = rw.end
+	}
+	rw.sum.full = true
+	rw.left = uint64(len(rw.head) + len(rw.tail))
+	for i := range st.ents {
+		rw.left += entryHeadBytes + uint64(st.ents[i].n)
+	}
+	return rw
+}
+
+// fill copies the record's next len(b) bytes into b.
+func (rw *rewriting) fill(st *Storage, b []byte) {
+	for len(b) > 0 {
+		switch {
+		case len(rw.head) > 0:
+			n := copy(b, rw.head)
+			rw.head, b = rw.head[n:], b[n:]
+		case rw.next > rw.end:
+			n := copy(b, rw.tail)
+			rw.tail, b = rw.tail[n:], b[n:]
+		default:
+			e := st.entry(rw.next)
+			var head [entryHeadBytes]byte
+			enc := appendEntryHead(head[:0], &e)
+			var n int
+			if rw.off < len(enc) {
+				n = copy(b, enc[rw.off:])
+			} else {
+				n = copy(b, e.Data[rw.off-len(enc):])
+			}
+			b, rw.off = b[n:], rw.off+n
+			if rw.off == len(enc)+len(e.Data) {
+				rw.next, rw.off = rw.next+1, 0
+			}
+		}
+	}
 }
 
 type liveRound struct {
@@ -108,11 +172,15 @@ func (h *Host) shard(owner uint32) *hosted {
 }
 
 // Write submits round flush of owner's shard, whose contents r stay valid until the shard is told
-// it is durable, as a Ready's do.
+// it is durable, as a Ready's do; it waits behind the shard's full rewrite, if one is going out.
 func (h *Host) Write(ctx *core.Context, owner uint32, flush uint64, r *Round, out *disklog.Output) error {
 	hd := h.shard(owner)
 	hd.flying += payloadBytes(r)
-	ok, err := h.submit(ctx, hd, flush, r, out)
+	var ok bool
+	var err error
+	if hd.rw == nil {
+		ok, err = h.submit(ctx, hd, flush, r, out)
+	}
 	if err == nil && !ok {
 		hd.wait, hd.pending = flush, *r
 		h.waiting = append(h.waiting, owner)
@@ -202,28 +270,81 @@ func (h *Host) Retained(owner uint32) uint64 {
 	return hd.st.Bytes() + hd.flying
 }
 
-// Retry submits the rounds waiting for pool buffers that now fit; the driver calls it on its timer.
+// Retry sends the next blobs of the full rewrites going out, then submits the rounds waiting for
+// pool buffers that now fit, in order, but for those waiting behind their shard's rewrite; the
+// driver calls it on its timer.
 func (h *Host) Retry(ctx *core.Context, out *disklog.Output) error {
-	n := 0
+	for k := range h.shards {
+		if err := h.step(ctx, &h.shards[k], out); err != nil {
+			return err
+		}
+	}
+	keep, full := 0, false
 	for _, owner := range h.waiting {
 		k, ok := h.at[owner]
 		if !ok || h.shards[k].wait == 0 {
-			n++
 			continue
 		}
 		hd := &h.shards[k]
-		sent, err := h.submit(ctx, hd, hd.wait, &hd.pending, out)
+		if !full && hd.rw == nil {
+			sent, err := h.submit(ctx, hd, hd.wait, &hd.pending, out)
+			if err != nil {
+				return err
+			}
+			if sent {
+				hd.wait, hd.pending = 0, Round{}
+				continue
+			}
+			full = true
+		}
+		h.waiting[keep] = owner
+		keep++
+	}
+	h.waiting = h.waiting[:keep]
+	return nil
+}
+
+// step sends the next blobs of hd's full rewrite while the pool has buffers for them, at most
+// rewriteBlobs in flight, and once its last is out, the compaction that waited for it.
+func (h *Host) step(ctx *core.Context, hd *hosted, out *disklog.Output) error {
+	for rw := hd.rw; rw != nil && hd.inflight < rewriteBlobs; rw = hd.rw {
+		k := min(rw.left, h.Log.MaxBlobBytes()-1)
+		buf, err := ctx.Pool.Alloc(int(k + 1))
+		if errors.Is(err, core.ErrPoolExhausted) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
-		if !sent {
-			break
+		b := ctx.Pool.Bytes(buf)[:k+1]
+		b[0] = 0
+		if !rw.begun {
+			b[0] = 1
 		}
-		hd.wait, hd.pending = 0, Round{}
-		n++
+		rw.fill(hd.st, b[1:])
+		rw.begun, rw.left = true, rw.left-k
+		kind := disklog.BlobRaftEntries
+		if rw.left == 0 {
+			kind = disklog.BlobRaftState
+		}
+		t, err := h.Log.Submit(ctx, disklog.Hot, disklog.Item{Entry: disklog.BlobEntry(kind, hd.owner, k+1), Buf: buf}, out)
+		if err != nil {
+			ctx.Pool.Free(buf)
+			return err
+		}
+		f := flight{ticket: t, owner: hd.owner, after: h.Log.DurableLSN()}
+		if rw.left == 0 {
+			f.sum, hd.rw = rw.sum, nil
+		}
+		hd.inflight++
+		h.flights = append(h.flights, f)
 	}
-	h.waiting = append(h.waiting[:0], h.waiting[n:]...)
-	return nil
+	if hd.rw != nil || hd.cut == 0 {
+		return nil
+	}
+	i := hd.cut
+	hd.cut = 0
+	return h.Compact(hd.owner, i, hd.cutConf)
 }
 
 // close makes the blobs since the last whole round one round. A hard state in it frees the round
@@ -281,9 +402,14 @@ func (h *Host) bury() {
 }
 
 // Compact compacts owner's storage to index i, whose configuration is cs, as its state machine
-// does once the memtable that applied i is durable, and reports dead the rounds that frees.
+// does once the memtable that applied i is durable, and reports dead the rounds that frees; while
+// the shard's full rewrite goes out, it waits for that rewrite to read the entries it drops.
 func (h *Host) Compact(owner uint32, i uint64, cs raftpb.ConfState) error {
 	hd := h.shard(owner)
+	if hd.rw != nil {
+		hd.cut, hd.cutConf = i, cs
+		return nil
+	}
 	if err := hd.st.Compact(i, cs); err != nil {
 		return err
 	}
@@ -404,37 +530,31 @@ func (h *Host) Indexes(dst []disklog.CheckpointIndex, durable uint64) []disklog.
 // so no shard holds the replay floor back for good: the hard state and removal flag of an idle
 // shard, whose oldest round is the one holding its newest hard state and holds no entry past the
 // compaction; and every entry past the base, with the newest hard state, of a shard whose oldest
-// round holds an entry past its commit, as a follower's whose leader is gone does, which makes
-// every round before it dead once durable, once its storage took every round reported durable. A
-// shard with a round in flight or waiting for buffers is left to that round, and one with entries
-// committed but not yet compacted to its compaction.
+// round holds an entry past its commit, as a follower's whose leader is gone does, once its storage
+// took every round reported durable. That full rewrite goes out a few blobs at a time, as Retry
+// finds buffers for them, the shard's own rounds waiting behind it, and once durable makes every
+// round before it dead. A shard with a round in flight or waiting for buffers is left to that
+// round, and one with entries committed but not yet compacted to its compaction.
 func (h *Host) Rewrite(ctx *core.Context, lsn uint64, out *disklog.Output) error {
 	for k := range h.shards {
 		hd := &h.shards[k]
-		if hd.newest < 0 || hd.refs[0].LSN > lsn || hd.inflight > 0 || hd.wait != 0 {
+		if hd.newest < 0 || hd.rw != nil || hd.refs[0].LSN > lsn || hd.inflight > 0 || hd.wait != 0 {
 			continue
 		}
 		newest := &hd.rounds[hd.newest]
-		r := Round{HardState: newest.state, Removed: newest.removed}
-		full := hd.rounds[0].last > newest.state.Commit
 		switch {
-		case full && hd.st.took != hd.done:
-			continue
-		case full:
-			last, _ := hd.st.LastIndex()
-			ents, err := hd.st.Entries(hd.st.base.Index+1, last+1, math.MaxUint64)
-			if err != nil {
+		case hd.rounds[0].last > newest.state.Commit:
+			if hd.st.took == hd.done {
+				hd.rw = newRewriting(hd.st, newest)
+				if err := h.step(ctx, hd, out); err != nil {
+					return err
+				}
+			}
+		case hd.newest == 0 && hd.rounds[0].last <= hd.compacted:
+			r := Round{HardState: newest.state, Removed: newest.removed}
+			if _, err := h.submit(ctx, hd, 0, &r, out); err != nil {
 				return err
 			}
-			r.Entries = ents
-		case hd.newest != 0 || hd.rounds[0].last > hd.compacted:
-			continue
-		}
-		if ok, err := h.submit(ctx, hd, 0, &r, out); err != nil || !ok {
-			return err
-		}
-		if full {
-			h.flights[len(h.flights)-1].sum.full = true
 		}
 	}
 	return nil

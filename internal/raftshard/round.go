@@ -77,9 +77,7 @@ func AppendRound(dst []byte, r *Round) []byte {
 	if flags&flagEntries != 0 {
 		dst = le.AppendUint32(le.AppendUint64(dst, r.Entries[0].Index), uint32(len(r.Entries)))
 		for i := range r.Entries {
-			e := &r.Entries[i]
-			dst = append(le.AppendUint64(dst, e.Term), byte(e.Type))
-			dst = append(le.AppendUint32(dst, uint32(len(e.Data))), e.Data...)
+			dst = append(appendEntryHead(dst, &r.Entries[i]), r.Entries[i].Data...)
 		}
 	}
 	if flags&flagHardState != 0 {
@@ -87,6 +85,13 @@ func AppendRound(dst []byte, r *Round) []byte {
 		dst = le.AppendUint64(le.AppendUint64(le.AppendUint64(dst, hs.Term), hs.Vote), hs.Commit)
 	}
 	return dst
+}
+
+// entryHeadBytes is the length of an entry's encoding before its payload.
+const entryHeadBytes = 13
+
+func appendEntryHead(dst []byte, e *raftpb.Entry) []byte {
+	return le.AppendUint32(append(le.AppendUint64(dst, e.Term), byte(e.Type)), uint32(len(e.Data)))
 }
 
 // RoundItems cuts a round's record into blob items for owner of at most maxBlob bytes each, at

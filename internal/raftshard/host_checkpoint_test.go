@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"go.etcd.io/raft/v3/raftpb"
+
+	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
 // commit writes owner's round and, once it is durable, takes it into st as the shard does; it
@@ -355,5 +357,58 @@ func TestAFullRewriteWaitsForTheShardToTakeEveryDurableRound(t *testing.T) {
 	sts := r.crashCleaned(6)
 	if last, _ := sts[6].LastIndex(); last != 4 {
 		t.Fatalf("the restart recovered entries to %d, want the 4 the shard was told durable", last)
+	}
+}
+
+// A full rewrite holding more than the pool has free goes out a few blobs at a time as buffers
+// free, a compaction waiting until it read the entries, and a shard after it in the host still
+// gets its own rewrite: both floors move on, and a restart recovers every entry and hard state.
+func TestAFullRewriteLargerThanThePoolGoesOutAsBuffersFree(t *testing.T) {
+	r := newRig(t)
+	stuck, idle := NewStorage(), NewStorage()
+	r.host.Add(6, stuck)
+	r.host.Add(5, idle)
+	hs := raftpb.HardState{Term: 1, Vote: 2, Commit: 2}
+	for i := uint64(1); i <= 12; i++ {
+		r.commit(stuck, 6, i, Round{Entries: entries(4*i-3, 4, 1, 2000), HardState: hs})
+	}
+	idleHS := raftpb.HardState{Term: 2, Vote: 3, Commit: 1}
+	r.commit(idle, 5, 1, Round{Entries: entries(1, 1, 2, 100), HardState: idleHS})
+	if err := r.host.Compact(5, 1, raftpb.ConfState{Voters: []uint64{3}}); err != nil {
+		t.Fatal(err)
+	}
+	r.checkpoint()
+	pool := r.ctx.Pool.(*sim.Pool)
+	hog, err := pool.Alloc(pool.Available() - 32<<10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := r.host.Log.DurableLSN()
+	if err := r.host.Rewrite(&r.ctx, before, &r.out); err != nil {
+		t.Fatal(err)
+	}
+	r.absorb()
+	if err := r.host.Compact(6, 2, raftpb.ConfState{Voters: []uint64{2}}); err != nil {
+		t.Fatal(err)
+	}
+	if b := stuck.Base().Index; b != 0 {
+		t.Fatalf("the storage compacted to %d while its rewrite was going out", b)
+	}
+	r.run()
+	pool.Free(hog)
+	if b := stuck.Base().Index; b != 2 {
+		t.Fatalf("the storage is at base %d once its rewrite went out, want 2", b)
+	}
+	if floor := r.checkpoint(); floor < before {
+		t.Fatalf("after the rewrites the floor is %d, before the rounds durable at %d", floor, before)
+	}
+	r.roll()
+	r.bases = map[uint32]raftpb.SnapshotMetadata{5: idle.Base(), 6: stuck.Base()}
+	sts := r.crashCleaned(5, 6)
+	if last, _ := sts[6].LastIndex(); last != 48 || sts[6].HardState() != hs {
+		t.Fatalf("the stuck shard recovered entries to %d and hard state %+v, want 48 and %+v", last, sts[6].HardState(), hs)
+	}
+	if got := sts[5].HardState(); got != idleHS {
+		t.Fatalf("the idle shard recovered hard state %+v, want %+v", got, idleHS)
 	}
 }
