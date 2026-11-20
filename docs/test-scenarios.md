@@ -6740,6 +6740,7 @@ properties, and the same seed finishes unplanted:
 | Plant | Model | Breaks | Found by |
 | --- | --- | --- | --- |
 | A replica its plan drops reports itself removed and stops at once, before any change commits | `neg-delete-on-plan` | "only a replica the group's configuration removed deletes its state" | `TestAReplicaDeletedOnItsPlanBreaksTheInvariant`, seed 0 |
+| A replica takes a removal notice from a peer that applied less than it: an old voter's ask a second into the run takes the fourth replica's answer, sent before that replica applied anything | `neg-notice-any-index` | Same | `TestANoticeFromAPeerBehindBreaksTheInvariant`, seed 0 |
 | Followers never ask the node of the leader they support about it: once the removed leader's node deletes it, they support it for good | `neg-no-support-ask` | "a replica leads having applied the plan's configuration" | `TestFollowersThatNeverAskKeepARemovedLeader`, runs that always draw `outgoing` |
 | A removed replica stops at once, as if its node deleted it: the wedge leaves the outgoing half one voter | `neg-removed-deletes-at-once` | Same | `TestARemovedVoterDeletedAtOnceLeavesNoLeader`, runs that always draw `wedge` and `die`; seed 1 |
 | A removed replica applies its removal and campaigns no more: holding the outgoing half's newest entry, it refuses every voter of the plan its vote | `neg-removed-applies-removal` | Same | `TestARemovedVoterThatAppliesItsRemovalLeavesNoLeader`, the same runs; seed 30 |

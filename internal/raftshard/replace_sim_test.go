@@ -592,3 +592,10 @@ func replaceCluster(seed uint64, p plants) *simCluster {
 func TestAReplicaDeletedOnItsPlanBreaksTheInvariant(t *testing.T) {
 	plantBreaks(t, 0, invOnlyRemoved, plants{deletesOnPlan: true}, replaceCluster)
 }
+
+// The voter model's neg-notice-any-index: a replica takes the removal notice of a peer that
+// applied less than it, as the fourth replica, which applied nothing yet, answers an old voter's
+// ask a second into the run.
+func TestANoticeFromAPeerBehindBreaksTheInvariant(t *testing.T) {
+	plantBreaks(t, 0, invOnlyRemoved, plants{noticeAnyIndex: true}, replaceCluster)
+}
