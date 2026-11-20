@@ -605,3 +605,11 @@ func TestANoticeFromAPeerBehindBreaksTheInvariant(t *testing.T) {
 func TestANoticeToANonMemberBreaksTheInvariant(t *testing.T) {
 	plantBreaks(t, 0, invOnlyRemoved, plants{noticeNonMember: true}, replaceCluster)
 }
+
+// The voter model's neg-campaign-unapplied: a voter the regress fault restarts tells etcd-raft
+// that every entry it knows committed is applied, so it campaigns in its base's configuration
+// with the joint one it knows committed unapplied, and wins the term the fourth replica won on
+// the replaced replica's vote.
+func TestACampaignWithAConfigurationChangeUnappliedElectsTwoLeaders(t *testing.T) {
+	plantBreaks(t, 0, invOneLeader, plants{campaignUnapplied: true}, regressCluster)
+}
