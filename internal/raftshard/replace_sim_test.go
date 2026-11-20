@@ -655,3 +655,11 @@ func haltCluster(seed uint64, p plants) *simCluster {
 func TestAHaltedLeaderThatKeepsLeadingLeavesNoLeader(t *testing.T) {
 	plantBreaks(t, 1, invNewLeader, plants{haltedKeepsLeading: true}, haltCluster)
 }
+
+// The voter model's neg-restart-commit-at-base: a restart that starts etcd-raft at its base's
+// commit index knows none of the swap's entries committed, so the regress fault's voter, back in
+// the configuration before the swap, wins on the replaced replica's vote the term the fourth
+// replica won.
+func TestARestartAtItsBasesCommitElectsTwoLeaders(t *testing.T) {
+	plantBreaks(t, 0, invOneLeader, plants{restartCommitAtBase: true}, regressCluster)
+}
