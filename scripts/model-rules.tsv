@@ -136,7 +136,7 @@ voters/neg-campaign-unapplied	raftshard.campaignUnapplied	TestACampaignWithAConf
 voters/neg-voter-first	raftshard.voterFirst	TestAddingTheReplacementAsAVoterStallsProposals
 voters/neg-eager	raftshard.eager	TestPromotingALearnerBeforeItCaughtUpBreaksTheInvariant
 voters/neg-joint-one-half	raftshard.jointOneHalf	TestAJointConfigurationCountingOneHalfElectsTwoLeaders
-voters/neg-one-at-a-time	open	Plants for the voter replacement model
+voters/neg-one-at-a-time	raftshard.oneAtATime	TestAChangeProposedBeforeThePreviousAppliedElectsTwoLeaders
 voters/neg-delete-on-plan	raftshard.deletesOnPlan	TestAReplicaDeletedOnItsPlanBreaksTheInvariant
 voters/neg-notice-any-index	raftshard.noticeAnyIndex	TestANoticeFromAPeerBehindBreaksTheInvariant
 voters/neg-notice-non-member	raftshard.noticeNonMember	TestANoticeToANonMemberBreaksTheInvariant

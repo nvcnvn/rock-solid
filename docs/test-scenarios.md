@@ -6744,6 +6744,7 @@ properties, and the same seed finishes unplanted:
 | A replica asks its peers and takes a removal notice while its own applied configuration lacks it: the fourth replica does so a second into the run, before its addition | `neg-notice-non-member` | Same | `TestANoticeToANonMemberBreaksTheInvariant`, seed 0 |
 | A restart tells etcd-raft that every entry it knows committed is applied, so the replica campaigns with a committed configuration change unapplied: the regress fault's voter restarts in its base's configuration and, on the replaced replica's vote, wins the term the fourth replica won | `neg-campaign-unapplied` | "at most one leader per shard per term" | `TestACampaignWithAConfigurationChangeUnappliedElectsTwoLeaders`, the regress fault's runs (below); seed 0 |
 | A replica applies the swap one change at a time, so it counts the incoming half alone: under the split fault (below) the old voter, which knows no change committed, wins on the replaced replica's vote the term the fourth replica won on the leader's | `neg-joint-one-half` | Same | `TestAJointConfigurationCountingOneHalfElectsTwoLeaders`, seed 0 |
+| A leader proposes the swap and the leave behind the learner's addition, before it applied any, past etcd-raft's one-pending-change check: all three commit on a quorum of the old configuration, and under the split fault the old voter, which applied none, wins on the replaced replica's vote the term the fourth replica won on the leader's | `neg-one-at-a-time` | Same | `TestAChangeProposedBeforeThePreviousAppliedElectsTwoLeaders`, seed 0 |
 | Followers never ask the node of the leader they support about it: once the removed leader's node deletes it, they support it for good | `neg-no-support-ask` | "a replica leads having applied the plan's configuration" | `TestFollowersThatNeverAskKeepARemovedLeader`, runs that always draw `outgoing` |
 | A removed replica stops at once, as if its node deleted it: the wedge leaves the outgoing half one voter | `neg-removed-deletes-at-once` | Same | `TestARemovedVoterDeletedAtOnceLeavesNoLeader`, runs that always draw `wedge` and `die`; seed 1 |
 | A removed replica applies its removal and campaigns no more: holding the outgoing half's newest entry, it refuses every voter of the plan its vote | `neg-removed-applies-removal` | Same | `TestARemovedVoterThatAppliesItsRemovalLeavesNoLeader`, the same runs; seed 30 |
@@ -6769,8 +6770,9 @@ within 5 seeds (`TestRoundsThatLeaveTheCommitOfASwapBehindElectTwoLeaders`; 39 o
 The split fault is the regress one with no crash: the old voter is cut off the same way once the
 leader applied the plan's configuration while that voter applied neither it nor the joint one.
 Unplanted it never fires, as the voter acknowledged the leave and so applied the joint
-configuration first; a replica that applies the swap one change at a time (`neg-joint-one-half`)
-opens that window.
+configuration first; a replica that applies the swap one change at a time (`neg-joint-one-half`),
+or a leader that commits every change on the old configuration (`neg-one-at-a-time`), opens that
+window.
 
 `TestVoterReplacementRegressionSeeds` keeps three seeds that found bugs: 6389, which found a
 lease-reading leader behind a follower that applied first (the run has since changed and no longer

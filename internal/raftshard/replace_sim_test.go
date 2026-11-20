@@ -634,3 +634,11 @@ func TestACampaignWithAConfigurationChangeUnappliedElectsTwoLeaders(t *testing.T
 func TestAJointConfigurationCountingOneHalfElectsTwoLeaders(t *testing.T) {
 	plantBreaks(t, 0, invOneLeader, plants{jointOneHalf: true}, splitCluster)
 }
+
+// The voter model's neg-one-at-a-time: a leader that proposes the swap and the leave behind the
+// learner's addition commits all three on a quorum of the old configuration; under the split
+// fault the old voter, which applied none, wins on the replaced replica's vote the term the
+// fourth replica won on the leader's.
+func TestAChangeProposedBeforeThePreviousAppliedElectsTwoLeaders(t *testing.T) {
+	plantBreaks(t, 0, invOneLeader, plants{oneAtATime: true}, splitCluster)
+}
