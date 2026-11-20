@@ -170,8 +170,12 @@ Line(l) ==
     \/ /\ l.k = "gonerecover"
        /\ LET p == ChunkPG[l.c]
           IN IF \E n \in Node : Running(n) /\ Leads(n, p) /\ pr[n][p].act /\ IvAt(n, p) = IvAt(l.n, p)
-             THEN \E n \in Node, d \in Disk : dhost[d] = l.n /\ GoneRefusesRecovery(n, l.c, d)
-             ELSE UNCHANGED vars
+             THEN \E n \in Node, d \in Disk :
+                    /\ dhost[d] = l.n
+                    /\ GoneRefusesRecovery(n, l.c, d)
+                    /\ pend' = pend \ {x \in pend : x.n = n /\ x.r = run[n] /\ x.c = l.c /\ x.v > l.v}
+             ELSE /\ ~\E r \in pend : r.c = l.c /\ r.v > l.v
+                  /\ UNCHANGED vars
     \/ /\ l.k = "mayfail"
        /\ \/ UNCHANGED vars
           \/ /\ LostAbove(l)
