@@ -168,7 +168,10 @@ Line(l) ==
        /\ \E m \in {x \in rm : dhost[x.to] = l.n /\ x.c = l.c /\ x.v = l.v} :
             IF [c |-> l.c, v |-> l.v] \in failed[m.to] THEN UNCHANGED vars ELSE GoneRefuses(m)
     \/ /\ l.k = "gonerecover"
-       /\ \E n \in Node, d \in Disk : dhost[d] = l.n /\ GoneRefusesRecovery(n, l.c, d)
+       /\ LET p == ChunkPG[l.c]
+          IN IF \E n \in Node : Running(n) /\ Leads(n, p) /\ pr[n][p].act /\ IvAt(n, p) = IvAt(l.n, p)
+             THEN \E n \in Node, d \in Disk : dhost[d] = l.n /\ GoneRefusesRecovery(n, l.c, d)
+             ELSE UNCHANGED vars
     \/ /\ l.k = "mayfail"
        /\ \/ UNCHANGED vars
           \/ /\ LostAbove(l)
