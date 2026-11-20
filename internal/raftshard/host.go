@@ -44,8 +44,9 @@ type retiredOwner struct {
 // first, newest the last of them holding a hard state (-1 for none), and refs, their blobs in
 // order and then those of a round not yet whole, from closed on; from is the LSN at or before
 // which a restart's replay skips its blobs, inflight counts its blobs not yet durable, flying
-// the entry payload bytes of its rounds written and not yet durable, done its newest round
-// reported durable, rw its full rewrite going out, if one is, and cut the compaction, with its
+// the entry payload bytes of its rounds written and not yet taken into its storage, landed its
+// rounds durable and not yet taken, with their payload bytes, done its newest round reported
+// durable, rw its full rewrite going out, if one is, and cut the compaction, with its
 // configuration, waiting for that rewrite to read the entries it drops (0 for none).
 type hosted struct {
 	owner     uint32
@@ -60,11 +61,14 @@ type hosted struct {
 	from      uint64
 	inflight  int
 	flying    uint64
+	landed    []landedRound
 	done      uint64
 	rw        *rewriting
 	cut       uint64
 	cutConf   raftpb.ConfState
 }
+
+type landedRound struct{ round, bytes uint64 }
 
 // rewriting is a full rewrite's round going out a blob at a time, the storage left as it was when
 // it began: its record is head, the encodings of entries next to end, off bytes of next's already
@@ -83,7 +87,7 @@ type rewriting struct {
 const rewriteBlobs = 4
 
 func newRewriting(st *Storage, newest *liveRound) *rewriting {
-	r := Round{HardState: newest.state, Removed: newest.removed}
+	r := Round{HardState: newest.state, Removed: newest.removed, Deleted: newest.deleted}
 	rec := AppendRound(nil, &r)
 	rw := &rewriting{head: rec[:1:1], tail: rec[1:], next: st.base.Index + 1, end: st.last(), sum: summarize(&r)}
 	if rw.end >= rw.next {
@@ -239,7 +243,9 @@ func (h *Host) Durable(ctx *core.Context, ev *disklog.Event, out *disklog.Output
 		hd := &h.shards[k]
 		hd.refs = append(hd.refs, ref)
 		hd.inflight--
-		hd.flying -= f.bytes
+		if f.bytes > 0 {
+			hd.landed = append(hd.taken(), landedRound{f.round, f.bytes})
+		}
 		if f.sum.done {
 			h.close(hd, f.sum)
 			if f.round != 0 {
@@ -264,10 +270,25 @@ func payloadBytes(r *Round) uint64 {
 }
 
 // Retained is the entry payload bytes owner's shard holds in its storage, as Storage.Bytes counts
-// them, and in its rounds written and not yet durable.
+// them, and in its rounds written and not yet taken into it, durable or not.
 func (h *Host) Retained(owner uint32) uint64 {
 	hd := h.shard(owner)
+	hd.landed = hd.taken()
 	return hd.st.Bytes() + hd.flying
+}
+
+// taken drops the landed rounds the storage took from flying and returns those left.
+func (hd *hosted) taken() []landedRound {
+	k := 0
+	for _, r := range hd.landed {
+		if r.round <= hd.st.took {
+			hd.flying -= r.bytes
+			continue
+		}
+		hd.landed[k] = r
+		k++
+	}
+	return hd.landed[:k]
 }
 
 // Retry sends the next blobs of the full rewrites going out, then submits the rounds waiting for
@@ -551,7 +572,7 @@ func (h *Host) Rewrite(ctx *core.Context, lsn uint64, out *disklog.Output) error
 				}
 			}
 		case hd.newest == 0 && hd.rounds[0].last <= hd.compacted:
-			r := Round{HardState: newest.state, Removed: newest.removed}
+			r := Round{HardState: newest.state, Removed: newest.removed, Deleted: newest.deleted}
 			if _, err := h.submit(ctx, hd, 0, &r, out); err != nil {
 				return err
 			}

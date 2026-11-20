@@ -118,15 +118,15 @@ func TestACheckpointKeepsTheFloorAtTheOldestLiveRound(t *testing.T) {
 }
 
 // An idle shard's newest hard state would hold the floor back for good: a checkpoint writes it
-// again, with the replica's removal, and the next checkpoint's floor passes the old round, from
-// which a restart recovers the same hard state and removal.
+// again, with the replica's removal and deletion, and the next checkpoint's floor passes the old
+// round, from which a restart recovers the same hard state, removal and deletion.
 func TestACheckpointRewritesAnIdleShardsHardState(t *testing.T) {
 	r := newRig(t)
 	busy, idle := NewStorage(), NewStorage()
 	r.host.Add(5, busy)
 	r.host.Add(6, idle)
 	hs := raftpb.HardState{Term: 2, Vote: 3, Commit: 2}
-	held := r.commit(idle, 6, 1, Round{Entries: entries(1, 2, 2, 100), HardState: hs, Removed: true})
+	held := r.commit(idle, 6, 1, Round{Entries: entries(1, 2, 2, 100), HardState: hs, Removed: true, Deleted: true})
 	if err := r.host.Compact(6, 2, raftpb.ConfState{Voters: []uint64{3}}); err != nil {
 		t.Fatal(err)
 	}
@@ -149,8 +149,8 @@ func TestACheckpointRewritesAnIdleShardsHardState(t *testing.T) {
 	r.roll()
 	r.bases = map[uint32]raftpb.SnapshotMetadata{6: idle.Base()}
 	sts := r.crashCleaned(5, 6)
-	if got := sts[6]; got.HardState() != hs || !got.Removed() {
-		t.Fatalf("the idle shard recovered hard state %+v, removed %v; want %+v, removed", got.HardState(), got.Removed(), hs)
+	if got := sts[6]; got.HardState() != hs || !got.Removed() || !got.Deleted() {
+		t.Fatalf("the idle shard recovered hard state %+v, removed %v, deleted %v; want %+v, removed and deleted", got.HardState(), got.Removed(), got.Deleted(), hs)
 	}
 }
 

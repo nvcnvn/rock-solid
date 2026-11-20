@@ -174,18 +174,18 @@ func (s *Storage) replay(kind disklog.BlobKind, payload []byte) (summary, error)
 
 // summary is what decides when a round's blobs die: the highest index it holds, an entry's or its
 // snapshot's, and whether it holds a hard state; done marks a whole round. The removal needs no
-// count of its own: its round holds the hard state, and every later round carries the flag. state
-// and removed are the round's hard state and flag, which a rewrite repeats; full marks a rewrite
-// holding every entry past the base, which every round before it needs no more.
+// count of its own: its round holds the hard state, and every later round carries the flag. state,
+// removed and deleted are the round's hard state and flags, which a rewrite repeats; full marks a
+// rewrite holding every entry past the base, which every round before it needs no more.
 type summary struct {
-	last                    uint64
-	hs, done, removed, full bool
-	state                   raftpb.HardState
+	last                             uint64
+	hs, done, removed, deleted, full bool
+	state                            raftpb.HardState
 }
 
 func summarize(r *Round) summary {
 	sum := summary{last: r.Snapshot.Metadata.Index, hs: !raft.IsEmptyHardState(r.HardState), done: true}
-	sum.removed, sum.state = r.Removed, r.HardState
+	sum.removed, sum.deleted, sum.state = r.Removed, r.Deleted, r.HardState
 	if n := len(r.Entries); n > 0 {
 		sum.last = r.Entries[n-1].Index
 	}
