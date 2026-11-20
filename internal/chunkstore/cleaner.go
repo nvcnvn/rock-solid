@@ -235,14 +235,13 @@ func (s *Store) isVictim(seg uint32) bool {
 
 // pickVictims picks up to VictimsPerPass segments, those with nothing live first, then by
 // cost-benefit, (1 − u) × age ÷ (1 + u) with u the live share and age capped at a disk's worth of
-// writes, among those whose copy
-// costs less than a segment less the header of the segment it lands in, header blocks and the
-// index entries its moves write included, charging live run pieces at the records of the whole
-// runs a rewrite writes again and what each of its steps writes beside them; a chunk segment's
-// copies must also fit the room the cleaner's lane can reach, and it must hold no header of a
-// live slot write. A segment holding a piece of a
-// manifest recovery may load waits for the next snapshot, which snapshot reports is wanted, and
-// one holding only pieces about to die waits for them.
+// writes, among those whose copy costs less than a segment less the header of the segment it lands
+// in, header blocks and the index entries its moves write included, charging live run pieces at
+// the records of the whole runs a rewrite writes again and what each of its steps writes beside
+// them; a chunk segment's copies must also fit the room the cleaner's lane can reach, and it must
+// hold no header of a live slot write. A segment holding a piece of a manifest recovery may load
+// waits for the next snapshot, which snapshot reports is wanted, and one holding only pieces about
+// to die waits for them.
 func (s *Store) pickVictims() (victims []uint32, snapshot bool) {
 	geo := s.sb.Geometry
 	room := s.log.CleanerRoom()
