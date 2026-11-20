@@ -1435,7 +1435,8 @@ func (s *Store) peerGated(dst []ChunkPeer, from int, cs *chunkState) []ChunkPeer
 		}
 		whole = whole && o.err == nil && !o.torn
 		if whole {
-			c.Whole = o.version
+			// A primary's own recovery copy of a kept version below what its map holds lowers nothing until it maps.
+			c.Whole = max(c.Whole, o.version)
 		}
 		if o.holdsVersion() {
 			c.Logged = max(c.Logged, o.version)

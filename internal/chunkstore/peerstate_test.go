@@ -330,3 +330,20 @@ func TestAPrimaryReportsItsGatedWrites(t *testing.T) {
 		t.Fatalf("reports %+v after 4.2 failed", got)
 	}
 }
+
+// A primary's own recovery copy of kept version 4.1, gated and not mapped, leaves 4.2, which its
+// map holds above it, its newest whole version (conformance seed 0).
+func TestAPrimarysGatedRecoveryCopyLowersNoWholeVersion(t *testing.T) {
+	h := newRecoveryHarness(t)
+	for i := range uint32(2) {
+		h.s.Write(&h.ctx, Request{ID: h.id(), Chunk: chunkC, Len: core.BlockSize, Buf: h.writeBuf(0, fill(core.BlockSize, byte(i+1))), Version: MakeVersion(4, i+1)}, &h.out)
+		h.take()
+		h.settle()
+	}
+	h.s.Cover(chunkC, 6)
+	h.recoverWrite(Request{Chunk: chunkC, Interval: 6, Gated: true, Ver: MakeVersion(4, 1), Buf: recoveryBuf(h, map[uint16]byte{0: 1})})
+	h.settle()
+	if got, _ := h.peerState(0, 1); len(got) != 1 || got[0].Whole != MakeVersion(4, 2) || got[0].Logged != MakeVersion(4, 2) {
+		t.Fatalf("reports %+v with the recovery copy of 4.1 gated", got)
+	}
+}
