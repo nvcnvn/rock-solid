@@ -2285,7 +2285,9 @@ NoStranded ==
 \* for a version no client heard OK for: one whose record fails on its primary's
 \* own log after it reached members that list the chunk alone is kept while the
 \* primary is down, since those replies cannot show it unacknowledged, and the
-\* primary, back, lists the chunk for it though it holds every acknowledged write.
+\* primary, back, lists the chunk for it though it holds every acknowledged write:
+\* it counts as the source. A primary that lists the chunk and logs the version
+\* does not: its write is what the hold stops.
 PrimarySource ==
     \A p \in PG, n \in Node, c \in Chunk :
        (/\ \A d \in Node : dnode[d] # 0
@@ -2294,7 +2296,12 @@ PrimarySource ==
         /\ pr[n][p].act
         /\ AckedV(c) # {}
         /\ Decided(n, p, IvAt(n, p)))
-       => \/ \E d \in Mem(p, IvAt(n, p)) : HoldsAcked(d, c) /\ (miss[d][c] = NoMiss \/ miss[d][c] > Newest(AckedV(c)))
+       => \/ \E d \in Mem(p, IvAt(n, p)) :
+                /\ HoldsAcked(d, c)
+                /\ \/ miss[d][c] = NoMiss
+                   \/ /\ miss[d][c] > Newest(AckedV(c))
+                      /\ d = PrimDisk(p, IvOfV(miss[d][c]))
+                      /\ miss[d][c] \notin dlog[d][c]
           \/ c \in TheDec(n, p, IvAt(n, p)).img
 
 \* The versions of c a later activated decision does not rest on.
