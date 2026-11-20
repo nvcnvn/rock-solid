@@ -164,6 +164,18 @@ type raftRig struct {
 	// chunkIDs numbers the chunk writes, and failed is the first one's reply that failed.
 	chunkIDs uint64
 	failed   *Reply
+	// hold, when set, holds back each durable round from its shard for up to hold pumps, drawn
+	// from delay, as a shard on another loop learns of it late; held is those rounds, in order.
+	hold  uint64
+	delay *core.Rand
+	pumps uint64
+	held  []heldRound
+}
+
+type heldRound struct {
+	owner uint32
+	round uint64
+	at    uint64
 }
 
 func newRaftRig(t *testing.T, cfg Config, geo disklog.Geometry, owners ...uint32) *raftRig {
@@ -195,17 +207,43 @@ func (r *raftRig) take() {
 		}
 	}
 	for _, d := range r.out.Rounds {
+		at := r.pumps
+		if r.hold > 0 {
+			at += r.delay.Below(r.hold + 1)
+		}
+		for _, h := range r.held {
+			if h.owner == d.Owner {
+				at = max(at, h.at)
+			}
+		}
+		r.held = append(r.held, heldRound{d.Owner, d.Round, at})
+	}
+	r.out.Reset()
+	r.deliver(r.pumps)
+}
+
+// deliver tells each shard of the durable rounds held back until pump at or before now.
+func (r *raftRig) deliver(now uint64) {
+	keep := 0
+	for _, h := range r.held {
+		if h.at > now {
+			r.held[keep] = h
+			keep++
+			continue
+		}
 		for _, k := range r.shards {
-			if k.owner == d.Owner {
-				k.durable(d.Round)
+			if k.owner == h.owner {
+				k.durable(h.round)
 			}
 		}
 	}
-	r.out.Reset()
+	r.held = r.held[:keep]
 }
 
 // step runs the oldest queued action, or fires the TRIM timer when nothing is queued.
 func (r *raftRig) step() bool {
+	r.pumps++
+	r.deliver(r.pumps)
 	if len(r.queue) == 0 {
 		if r.timerAt == 0 {
 			return false
@@ -241,7 +279,7 @@ func (r *raftRig) step() bool {
 
 func (r *raftRig) settle() {
 	r.t.Helper()
-	for n := 0; r.step(); n++ {
+	for n := 0; r.step() || len(r.held) > 0; n++ {
 		if n == settleSteps {
 			r.t.Fatal("the store did not settle")
 		}
@@ -270,7 +308,7 @@ func (r *raftRig) crash(rnd *core.Rand) {
 	for _, k := range r.shards {
 		r.acked[k.owner] = k.applied
 	}
-	r.queue, r.timerAt, r.out = nil, 0, Output{}
+	r.queue, r.timerAt, r.out, r.held = nil, 0, Output{}, nil
 	r.s.Close()
 	r.disk.CrashRandom(rnd)
 	r.pool = sim.NewPool(32<<20, 0)
@@ -596,4 +634,82 @@ func TestAStuckFollowerTakingRoundsKeepsThemAcrossRestarts(t *testing.T) {
 			}
 		}
 	}
+}
+
+// held is the entry payload bytes of the rounds k wrote that its storage has not taken: in
+// flight, waiting for buffers, or durable and held back from it.
+func (k *kvShard) held() uint64 {
+	var n uint64
+	for _, r := range k.rounds {
+		for _, e := range r.Entries {
+			n += uint64(len(e.Data))
+		}
+	}
+	return n
+}
+
+// raftBoundRun hosts three kv shards beside chunk writes that go over the disk twice, the last a
+// follower whose leader is gone. On seed's draws each shard is sent bursts of rounds, each taken
+// only while the store does not report the shard full, durable rounds reach their shard up to 12
+// pumps late, and the store crashes every 256 chunk writes. It fails unless each shard retains at
+// most its share of twice max_replay_bytes and a round, and every chunk write is answered.
+func raftBoundRun(t *testing.T, seed uint64) {
+	r := newRaftRig(t, raftConfig(), raftGeometry, 7, 9, 11)
+	rnd := core.NewRand(seed)
+	r.hold, r.delay = 12, rnd
+	for range 20 {
+		r.write(r.shards[2], 4, 4000)
+		r.step()
+	}
+	r.settle()
+	stuck := r.shards[2]
+	stuck.stuck, stuck.frozen = true, stuck.st.HardState().Commit
+	const round = 8 * 8000
+	share := 2 * r.cfg.Log.MaxReplayBytes / uint64(len(r.shards))
+	data := make([]byte, 32<<10)
+	size := raftGeometry.DiskBlocks() * core.BlockSize
+	for i := uint64(0); i*uint64(len(data)) < 2*size; i++ {
+		r.chunkWrite(core.ChunkID{Index: uint32(i % 32)}, data)
+		if rnd.Below(3) == 0 {
+			k := r.shards[rnd.Below(3)]
+			for range 1 + rnd.Below(6) {
+				if r.s.RaftFull(k.owner) {
+					break
+				}
+				r.write(k, 1+int(rnd.Below(8)), 1000+int(rnd.Below(7000)))
+			}
+		}
+		for range rnd.Below(6) {
+			r.step()
+		}
+		if r.failed != nil || !r.s.Serving() {
+			t.Fatalf("chunk write %d: reply %+v, store error %v", i, r.failed, r.s.Err())
+		}
+		for _, k := range r.shards {
+			if b := k.st.Bytes() + k.held(); b > share+round {
+				t.Fatalf("chunk write %d: shard %d retains %d bytes, past its share %d and a round", i, k.owner, b, share)
+			}
+		}
+		if i%256 == 255 {
+			r.crash(rnd)
+		}
+	}
+	r.settle()
+	if r.failed != nil {
+		t.Fatalf("a chunk write failed: %+v", r.failed)
+	}
+}
+
+// [property] Shards on a chunk store retain at most their share of twice max_replay_bytes and a
+// round, under bursts of proposals, durable rounds reaching their shards late, crashes and a
+// stuck follower among them, and never stall the chunk writes beside them.
+func TestRaftShardsRetainAtMostTheirShare(t *testing.T) {
+	seeds.Run(t, 0, 4, func(seed uint64) { raftBoundRun(t, seed) })
+}
+
+// Regression (seed 0 of the bound run): a shard told of its durable rounds late retained past its
+// share, since the store counted such a round neither in flight nor in the shard's storage and
+// let the shard take more.
+func TestAShardToldLateOfItsRoundsKeepsWithinItsShare(t *testing.T) {
+	raftBoundRun(t, 0)
 }

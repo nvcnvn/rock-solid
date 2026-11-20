@@ -335,8 +335,9 @@ func TestARestartCollectsTheRoundsItsRestoredBaseCovers(t *testing.T) {
 }
 
 // A shard retains the payload its storage holds and that of its rounds written and not yet
-// durable; a round durable but not yet taken by the shard is counted by neither.
-func TestRetainedCountsTheStorageAndTheRoundsInFlight(t *testing.T) {
+// taken into it, durable or not, so a shard told late of its durable rounds is never under its
+// bound only for the time being.
+func TestRetainedCountsTheStorageAndTheRoundsNotTaken(t *testing.T) {
 	r := newRig(t)
 	st := NewStorage()
 	r.host.Add(6, st)
@@ -350,10 +351,11 @@ func TestRetainedCountsTheStorageAndTheRoundsInFlight(t *testing.T) {
 		t.Fatalf("retained %d with a round of 300 bytes in flight, want 500", got)
 	}
 	r.run()
-	if got := r.host.Retained(6); got != 200 {
-		t.Fatalf("retained %d with the round durable and not taken, want 200", got)
+	if got := r.host.Retained(6); got != 500 {
+		t.Fatalf("retained %d with the round durable and not taken, want 500", got)
 	}
 	st.Append(next.Entries)
+	st.Took(2)
 	if got := r.host.Retained(6); got != 500 {
 		t.Fatalf("retained %d once the shard took the round, want 500", got)
 	}
