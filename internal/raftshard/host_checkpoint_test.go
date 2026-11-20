@@ -334,6 +334,31 @@ func TestARestartCollectsTheRoundsItsRestoredBaseCovers(t *testing.T) {
 	}
 }
 
+// A shard retains the payload its storage holds and that of its rounds written and not yet
+// durable; a round durable but not yet taken by the shard is counted by neither.
+func TestRetainedCountsTheStorageAndTheRoundsInFlight(t *testing.T) {
+	r := newRig(t)
+	st := NewStorage()
+	r.host.Add(6, st)
+	r.commit(st, 6, 1, Round{Entries: entries(1, 2, 1, 100), HardState: raftpb.HardState{Term: 1, Vote: 1}})
+	if got := r.host.Retained(6); got != 200 {
+		t.Fatalf("retained %d after a round of 200 bytes", got)
+	}
+	next := Round{Entries: entries(3, 1, 1, 300)}
+	r.write(6, 2, &next)
+	if got := r.host.Retained(6); got != 500 {
+		t.Fatalf("retained %d with a round of 300 bytes in flight, want 500", got)
+	}
+	r.run()
+	if got := r.host.Retained(6); got != 200 {
+		t.Fatalf("retained %d with the round durable and not taken, want 200", got)
+	}
+	st.Append(next.Entries)
+	if got := r.host.Retained(6); got != 500 {
+		t.Fatalf("retained %d once the shard took the round, want 500", got)
+	}
+}
+
 // Regression: a full rewrite writes the storage's entries, so one taken after a round is durable
 // and before the shard took that round into its storage, as a chunk store's due checkpoint in the
 // same handler is, would make the round dead without its entries.

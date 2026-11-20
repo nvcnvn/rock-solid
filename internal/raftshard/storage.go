@@ -32,9 +32,11 @@ type Storage struct {
 	hs   raftpb.HardState
 	base raftpb.SnapshotMetadata
 	ents []slot
-	// chunks[i] is chunk number first+i; the last one takes new payloads.
+	// chunks[i] is chunk number first+i; the last one takes new payloads. bytes is the payload
+	// bytes they hold.
 	chunks [][]byte
 	first  uint32
+	bytes  uint64
 	// build is the shard's snapshot at its applied index, nil before a shard runs on the storage.
 	build func() (raftpb.Snapshot, error)
 	// pending holds the blob payloads of a round replay has not yet seen whole.
@@ -159,7 +161,7 @@ func (s *Storage) ApplySnapshot(snap raftpb.Snapshot) error {
 		return raft.ErrSnapOutOfDate
 	}
 	s.base, s.data = snap.Metadata, nil
-	s.ents, s.chunks, s.first = s.ents[:0], nil, 0
+	s.ents, s.chunks, s.first, s.bytes = s.ents[:0], nil, 0, 0
 	return nil
 }
 
@@ -213,6 +215,7 @@ func (s *Storage) copyIn(e *raftpb.Entry) slot {
 	c := &s.chunks[n-1]
 	sl.chunk, sl.off = s.first+uint32(n-1), uint32(len(*c))
 	*c = append(*c, e.Data...)
+	s.bytes += uint64(len(e.Data))
 	return sl
 }
 
@@ -241,6 +244,9 @@ func (s *Storage) Compact(i uint64, cs raftpb.ConfState) error {
 			break
 		}
 	}
+	for _, c := range s.chunks[:drop] {
+		s.bytes -= uint64(len(c))
+	}
 	clear(s.chunks[:drop])
 	s.chunks = append(s.chunks[:0], s.chunks[drop:]...)
 	s.first += drop
@@ -249,10 +255,4 @@ func (s *Storage) Compact(i uint64, cs raftpb.ConfState) error {
 
 // Bytes is the payload bytes of the chunks holding the retained entries, counting those of entries
 // a later append replaced until a compaction drops their chunk.
-func (s *Storage) Bytes() uint64 {
-	var n uint64
-	for _, c := range s.chunks {
-		n += uint64(len(c))
-	}
-	return n
-}
+func (s *Storage) Bytes() uint64 { return s.bytes }

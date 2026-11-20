@@ -98,6 +98,26 @@ func TestAppendReplacesTheConflictingTail(t *testing.T) {
 	}
 }
 
+// An append keeps the entries the storage holds at the same index and term, as Raft's log matching
+// makes them the same, and replaces from the first that conflicts, at a higher term too; one whose
+// every entry matches ends the storage at its last, as a rewrite replayed after its rounds does.
+func TestAppendKeepsMatchingEntriesAndReplacesFromAConflict(t *testing.T) {
+	st := storageWith(ents(1, 1, 6, 10))
+	before := st.Bytes()
+	st.Append(append(ents(1, 2, 2, 10), ents(2, 4, 1, 30)...))
+	got, _ := st.Entries(1, 5, 1<<20)
+	if last, _ := st.LastIndex(); last != 4 || got[2].Term != 1 || got[3].Term != 2 || len(got[3].Data) != 30 {
+		t.Fatalf("last %d, entries %+v", last, got)
+	}
+	if st.Bytes() != before+30 {
+		t.Fatalf("the storage holds %d payload bytes, want the kept entries' not copied again: %d", st.Bytes(), before+30)
+	}
+	st.Append(ents(1, 1, 2, 10))
+	if last, _ := st.LastIndex(); last != 2 {
+		t.Fatalf("an append matching every entry it holds left the last at %d, want 2", last)
+	}
+}
+
 // Chunks double from the payload's size up to 64 KiB, and compaction drops those only compacted
 // entries used, every one once no payload is left, and keeps those the rest still read.
 func TestCompactionFreesChunks(t *testing.T) {
@@ -112,8 +132,12 @@ func TestCompactionFreesChunks(t *testing.T) {
 	if err := st.Compact(40, raftpb.ConfState{}); err != nil {
 		t.Fatal(err)
 	}
-	if len(st.chunks) != 3 {
-		t.Fatalf("%d chunks after compacting to 40, want 3", len(st.chunks))
+	var held uint64
+	for _, c := range st.chunks {
+		held += uint64(len(c))
+	}
+	if len(st.chunks) != 3 || st.Bytes() != held {
+		t.Fatalf("%d chunks of %d bytes after compacting to 40, counted %d; want 3", len(st.chunks), held, st.Bytes())
 	}
 	got, _ := st.Entries(41, 65, 1<<30)
 	for _, e := range got {
@@ -121,8 +145,8 @@ func TestCompactionFreesChunks(t *testing.T) {
 			t.Fatalf("entry %d corrupt after compaction", e.Index)
 		}
 	}
-	if err := st.Compact(64, raftpb.ConfState{}); err != nil || len(st.chunks) != 0 {
-		t.Fatalf("compacting everything: %v, %d chunks", err, len(st.chunks))
+	if err := st.Compact(64, raftpb.ConfState{}); err != nil || len(st.chunks) != 0 || st.Bytes() != 0 {
+		t.Fatalf("compacting everything: %v, %d chunks of %d bytes", err, len(st.chunks), st.Bytes())
 	}
 	if err := st.Compact(64, raftpb.ConfState{}); !errors.Is(err, raft.ErrCompacted) {
 		t.Fatalf("compacting to the base again = %v", err)
