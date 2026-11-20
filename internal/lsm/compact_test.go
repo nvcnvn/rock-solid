@@ -229,6 +229,24 @@ func TestSchedulerWorkers(t *testing.T) {
 	}
 }
 
+// A tree removed from the scheduler gives up the worker its merge held, and its merges run no more.
+func TestARemovedTreesMergeFreesItsWorker(t *testing.T) {
+	a, b := treeWithRuns(t, 8, 10), treeWithRuns(t, 13, 14)
+	s, err := NewScheduler(SchedulerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Add(a)
+	s.Add(b)
+	if c := s.Next(); c == nil || c.tree != a {
+		t.Fatalf("started %+v first, want index A's merge", c)
+	}
+	s.Remove(a)
+	if c := s.Next(); c == nil || c.tree != b || c.Worker() != 1 || s.Running() != 1 {
+		t.Fatalf("after removing index A, started %+v with %d running, want index B's on worker 1", c, s.Running())
+	}
+}
+
 // holds with forward cursors agrees with a fresh search of every older run for each key, the
 // keys given in increasing order with repeats, as a flush retries the entry that ends a block.
 func TestHoldsForwardCursors(t *testing.T) {

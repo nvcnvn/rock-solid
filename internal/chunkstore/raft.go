@@ -67,6 +67,31 @@ func (s *Store) WriteRound(ctx *core.Context, owner uint32, flush uint64, r *raf
 	return err
 }
 
+// RemoveRaft stops hosting owner's shard, as the driver does once the shard is deleted. Once no
+// checkpoint runs, every Raft blob of it and every piece of its tree are reported dead, and it
+// leaves the checkpoints and the merges. A restart that does not add it again skips its runs and
+// takes its blobs for dead, and its owner goes to no new shard while they can replay.
+func (s *Store) RemoveRaft(ctx *core.Context, owner uint32, out *Output) error {
+	if s.phase != serving {
+		return ErrUnavailable
+	}
+	s.removing = append(s.removing, owner)
+	s.pump(ctx, out)
+	return nil
+}
+
+func (s *Store) removeShards() {
+	for _, owner := range s.removing {
+		s.raft.Remove(owner)
+		k := s.shardOf(owner)
+		t := s.shards[k].sh.Tree()
+		s.piecesDead(t.Pieces(nil))
+		s.sched.Remove(t)
+		s.shards = slices.Delete(s.shards, k, k+1)
+	}
+	s.removing = s.removing[:0]
+}
+
 // tree is the tree whose pieces a checkpoint writes k-th: the index's, then each shard's.
 func (s *Store) tree(k int) (*lsm.Tree, uint32) {
 	if k == 0 {

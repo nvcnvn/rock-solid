@@ -782,6 +782,12 @@ func NewScheduler(cfg SchedulerConfig) (*Scheduler, error) {
 // Add makes the scheduler run t's merges.
 func (s *Scheduler) Add(t *Tree) { s.trees = append(s.trees, t) }
 
+// Remove stops running t's merges, freeing the worker one holds.
+func (s *Scheduler) Remove(t *Tree) {
+	s.trees = slices.DeleteFunc(s.trees, func(o *Tree) bool { return o == t })
+	s.running = slices.DeleteFunc(s.running, func(c *Compaction) bool { return c.tree == t })
+}
+
 // Running is the number of merges holding a worker.
 func (s *Scheduler) Running() int {
 	s.running = slices.DeleteFunc(s.running, (*Compaction).Finished)

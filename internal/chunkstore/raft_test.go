@@ -652,7 +652,9 @@ func (k *kvShard) held() uint64 {
 // follower whose leader is gone. On seed's draws each shard is sent bursts of rounds, each taken
 // only while the store does not report the shard full, durable rounds reach their shard up to 12
 // pumps late, and the store crashes every 256 chunk writes. It fails unless each shard retains at
-// most its share of twice max_replay_bytes and a round, and every chunk write is answered.
+// most its share of twice max_replay_bytes and a round, and every chunk write is answered. A
+// restart restores a shard on the base before its last compaction, so until it compacts again it
+// may hold what it held at that checkpoint and what it took after, each within the bound.
 func raftBoundRun(t *testing.T, seed uint64) {
 	r := newRaftRig(t, raftConfig(), raftGeometry, 7, 9, 11)
 	rnd := core.NewRand(seed)
@@ -668,6 +670,9 @@ func raftBoundRun(t *testing.T, seed uint64) {
 	share := 2 * r.cfg.Log.MaxReplayBytes / uint64(len(r.shards))
 	data := make([]byte, 32<<10)
 	size := raftGeometry.DiskBlocks() * core.BlockSize
+	// restored is each shard's bytes and base at the last restart, while it has not compacted since.
+	type restart struct{ bytes, base uint64 }
+	restored := map[uint32]restart{}
 	for i := uint64(0); i*uint64(len(data)) < 2*size; i++ {
 		r.chunkWrite(core.ChunkID{Index: uint32(i % 32)}, data)
 		if rnd.Below(3) == 0 {
@@ -686,12 +691,22 @@ func raftBoundRun(t *testing.T, seed uint64) {
 			t.Fatalf("chunk write %d: reply %+v, store error %v", i, r.failed, r.s.Err())
 		}
 		for _, k := range r.shards {
-			if b := k.st.Bytes() + k.held(); b > share+round {
+			bound := share + round
+			if at, ok := restored[k.owner]; ok && k.st.Base().Index == at.base {
+				bound = max(bound, at.bytes)
+			}
+			if b := k.st.Bytes() + k.held(); b > bound {
 				t.Fatalf("chunk write %d: shard %d retains %d bytes, past its share %d and a round", i, k.owner, b, share)
 			}
 		}
 		if i%256 == 255 {
 			r.crash(rnd)
+			for _, k := range r.shards {
+				if b := k.st.Bytes(); b > 2*(share+round) {
+					t.Fatalf("chunk write %d: shard %d restarted with %d bytes, past twice its share %d and a round", i, k.owner, b, share)
+				}
+				restored[k.owner] = restart{k.st.Bytes(), k.st.Base().Index}
+			}
 		}
 	}
 	r.settle()
@@ -712,4 +727,80 @@ func TestRaftShardsRetainAtMostTheirShare(t *testing.T) {
 // let the shard take more.
 func TestAShardToldLateOfItsRoundsKeepsWithinItsShare(t *testing.T) {
 	raftBoundRun(t, 0)
+}
+
+// A removed shard stays removed: a crash before the checkpoint after its removal, whose manifest
+// still names it, and one after it restart without it and with every other shard whole; its owner
+// goes to no new shard until the replay floor passes its blobs, the segments of its tree's pieces
+// are freed, and a new shard given its owner then
+// restarts with its own entries alone, none of the removed shard's runs or rounds.
+func TestARemovedShardStaysRemovedAcrossACrash(t *testing.T) {
+	for _, after := range []bool{false, true} {
+		r := newRaftRig(t, raftConfig(), raftGeometry, 7, 9)
+		rnd := core.NewRand(5)
+		for range 300 {
+			r.write(r.shards[rnd.Below(2)], 1+int(rnd.Below(8)), 1000+int(rnd.Below(7000)))
+			for range rnd.Below(6) {
+				r.step()
+			}
+		}
+		r.settle()
+		names9 := func() bool {
+			return slices.ContainsFunc(r.s.idx, func(ix disklog.CheckpointIndex) bool { return ix.Owner == 9 })
+		}
+		if !names9() {
+			t.Fatal("the last manifest before the removal does not name the shard")
+		}
+		pieces := map[uint32]bool{}
+		for _, p := range r.shards[1].tree.Pieces(nil) {
+			pieces[p.Segment] = true
+		}
+		if err := r.s.RemoveRaft(&r.ctx, 9, &r.out); err != nil {
+			t.Fatal(err)
+		}
+		r.take()
+		r.shards = r.shards[:1]
+		if r.s.shardOf(9) >= 0 || r.s.raft.Reusable(9) {
+			t.Fatalf("after the removal: hosted %v, owner reusable %v", r.s.shardOf(9) >= 0, r.s.raft.Reusable(9))
+		}
+		if after {
+			for names9() || r.s.checkpointing {
+				r.write(r.shards[0], 4, 4000)
+				r.settle()
+			}
+			for i := 0; len(pieces) > 0; i++ {
+				if i == 3000 {
+					t.Fatalf("segments %v holding the removed shard's pieces were never freed", pieces)
+				}
+				r.write(r.shards[0], 1+int(rnd.Below(8)), 1000+int(rnd.Below(7000)))
+				r.step()
+				for seg := range pieces {
+					if u, _ := r.s.log.Usage(seg); u.State == disklog.SegmentFree {
+						delete(pieces, seg)
+					}
+				}
+			}
+		}
+		r.crash(rnd)
+		for i := 0; !r.s.raft.Reusable(9); i++ {
+			if i == 2000 {
+				t.Fatalf("after %v: the removed shard's owner never became reusable", after)
+			}
+			r.write(r.shards[0], 4, 4000)
+			r.step()
+		}
+		r.settle()
+		k := newKVShard(t, 9, r.maxPiece)
+		r.s.AddRaft(9, k.st, k)
+		r.shards = append(r.shards, k)
+		for range 3 {
+			r.write(k, 1, 1000)
+		}
+		r.settle()
+		r.crash(rnd)
+		k = r.shards[1]
+		if last, _ := k.st.LastIndex(); k.applied != 3 || last != 3 {
+			t.Fatalf("after %v: the new shard under the removed one's owner restarted at applied %d with entries to %d, want 3", after, k.applied, last)
+		}
+	}
 }

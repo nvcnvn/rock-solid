@@ -365,11 +365,13 @@ type Store struct {
 	idx       []disklog.CheckpointIndex
 
 	// raft hosts the Raft shards on the disk, shards in the order their trees checkpoint, the
-	// first cpShards in the running checkpoint; lastBase is the base of the last manifest a due
-	// checkpoint wrote, cpBase that of the one running.
+	// first cpShards in the running checkpoint, removing the owners of those RemoveRaft removes
+	// once it ends; lastBase is the base of the last manifest a due checkpoint wrote, cpBase that
+	// of the one running.
 	raft             *raftshard.Host
 	shards           []raftShard
 	cpShards         int
+	removing         []uint32
 	lastBase, cpBase uint64
 
 	loading map[disklog.BlobRef]*loadingRun
@@ -1831,6 +1833,9 @@ func (s *Store) housekeep(ctx *core.Context, out *Output) {
 		}
 		if s.pieceWait {
 			s.nextPiece(ctx, out)
+		}
+		if !s.checkpointing {
+			s.removeShards()
 		}
 		if !s.checkpointing && !s.retryAfter {
 			if due := s.log.CheckpointDue() || s.fullDue(); due || s.stepUnnamed() {
