@@ -482,7 +482,7 @@ func (h *Host) Recovered(log *disklog.Log) {
 		hd := &h.shards[k]
 		h.dead = append(h.dead, hd.refs[hd.closed:]...)
 		hd.refs = hd.refs[:hd.closed]
-		hd.st.pending = hd.st.pending[:0]
+		hd.st.pending = nil
 		h.collect(hd)
 	}
 	h.bury()

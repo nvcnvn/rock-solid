@@ -437,3 +437,61 @@ func TestAFullRewriteLargerThanThePoolGoesOutAsBuffersFree(t *testing.T) {
 		t.Fatalf("the idle shard recovered hard state %+v, want %+v", got, idleHS)
 	}
 }
+
+// A round written while a full rewrite goes out waits behind it, so a crash at any point of the two, the
+// cleaner run or not, keeps every entry the shard was told durable and never a part of the rewrite.
+func TestARoundHeldBehindAFullRewriteSurvivesACrashAtEveryPoint(t *testing.T) {
+	for _, cleaned := range []bool{false, true} {
+		for k := 0; ; k++ {
+			r := newRig(t)
+			stuck := NewStorage()
+			r.host.Add(6, stuck)
+			hs := raftpb.HardState{Term: 1, Vote: 2, Commit: 2}
+			for i := uint64(1); i <= 12; i++ {
+				r.commit(stuck, 6, i, Round{Entries: entries(4*i-3, 4, 1, 2000), HardState: hs})
+			}
+			r.checkpoint()
+			pool := r.ctx.Pool.(*sim.Pool)
+			if _, err := pool.Alloc(pool.Available() - 32<<10); err != nil {
+				t.Fatal(err)
+			}
+			if err := r.host.Rewrite(&r.ctx, r.host.Log.DurableLSN(), &r.out); err != nil {
+				t.Fatal(err)
+			}
+			r.absorb()
+			if r.host.shard(6).rw == nil {
+				t.Fatal("rewrite went out whole")
+			}
+			hs2 := raftpb.HardState{Term: 1, Vote: 2, Commit: 3}
+			held := Round{Entries: entries(49, 4, 1, 2000), HardState: hs2}
+			r.write(6, 13, &held)
+			if r.host.shard(6).wait != 13 {
+				t.Fatal("round 13 not held")
+			}
+			for n := 0; n < k && len(r.queue) > 0; n++ {
+				r.step()
+			}
+			finished := len(r.queue) == 0
+			want, wantHS := uint64(48), hs
+			for _, d := range r.takeDone() {
+				if d.Round == 13 {
+					want, wantHS = 52, hs2
+				}
+			}
+			var sts map[uint32]*Storage
+			if cleaned {
+				sts = r.crashCleaned(6)
+			} else {
+				sts = r.crash(6)
+			}
+			last, _ := sts[6].LastIndex()
+			got := sts[6].HardState()
+			if last < want || last > 52 || (want == 52 && got != wantHS) || (got != hs && got != hs2) {
+				t.Fatalf("cleaned %v, crash after %d steps: last %d hs %+v, want >= %d hs %+v", cleaned, k, last, got, want, wantHS)
+			}
+			if finished {
+				break
+			}
+		}
+	}
+}
