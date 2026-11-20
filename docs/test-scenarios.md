@@ -6724,7 +6724,8 @@ and:
   storage holds every entry the leader had committed a heartbeat earlier. Promoting at once breaks
   it within 20 seeds (`TestPromotingALearnerBeforeItCaughtUpBreaksTheInvariant`).
 - "only a replica the group's configuration removed deletes its state": no replica but the
-  replaced one reports `Removed`.
+  replaced one reports `Removed`, and it only once it holds the committed change that removes it
+  or some replica applied a configuration without it.
 - [property] "a replica leads having applied the plan's configuration within 15 election timeouts
   of the faults stopping", the model's `NewLeader`. A run done before then runs on quietly until
   a replica leads so, or the bound passes. Fifteen is past the longest wait a run allows
@@ -6733,18 +6734,19 @@ and:
   `raft_lapse_campaign` later, and two split votes cost up to 2 s each, 14.3 s in all; the longest
   over 2,000 seeds was 7.8 s.
 
-Planted, each of the voter model's rules about a removed or halted leader breaks one of them:
+Planted, each of the voter model's rules that no scripted test alone covers breaks one of these
+properties, and the same seed finishes unplanted:
 
-| Plant | Model | Found by |
-| --- | --- | --- |
-| Followers never ask the node of the leader they support about it: once the removed leader's node deletes it, they support it for good | `neg-no-support-ask` | `TestFollowersThatNeverAskKeepARemovedLeader`, runs that always draw `outgoing` |
-| A removed replica stops at once, as if its node deleted it: the wedge leaves the outgoing half one voter | `neg-removed-deletes-at-once` | `TestARemovedVoterDeletedAtOnceLeavesNoLeader`, runs that always draw `wedge` and `die`; seed 1 |
-| A removed replica applies its removal and campaigns no more: holding the outgoing half's newest entry, it refuses every voter of the plan its vote | `neg-removed-applies-removal` | `TestARemovedVoterThatAppliesItsRemovalLeavesNoLeader`, the same runs; seed 30 |
-| A halted replica that no longer leads leaves an ask about it unanswered: a halted leader whose hand-off fails steps down on the target's later term and never campaigns, and a follower still supporting it refuses every candidate | `neg-halted-silent` | `TestAHaltedLeaderThatStepsDownAndKeepsSilentLeavesNoLeader`, seeds 770 and 1388 of the run, which found the bug |
+| Plant | Model | Breaks | Found by |
+| --- | --- | --- | --- |
+| A replica its plan drops reports itself removed and stops at once, before any change commits | `neg-delete-on-plan` | "only a replica the group's configuration removed deletes its state" | `TestAReplicaDeletedOnItsPlanBreaksTheInvariant`, seed 0 |
+| Followers never ask the node of the leader they support about it: once the removed leader's node deletes it, they support it for good | `neg-no-support-ask` | "a replica leads having applied the plan's configuration" | `TestFollowersThatNeverAskKeepARemovedLeader`, runs that always draw `outgoing` |
+| A removed replica stops at once, as if its node deleted it: the wedge leaves the outgoing half one voter | `neg-removed-deletes-at-once` | Same | `TestARemovedVoterDeletedAtOnceLeavesNoLeader`, runs that always draw `wedge` and `die`; seed 1 |
+| A removed replica applies its removal and campaigns no more: holding the outgoing half's newest entry, it refuses every voter of the plan its vote | `neg-removed-applies-removal` | Same | `TestARemovedVoterThatAppliesItsRemovalLeavesNoLeader`, the same runs; seed 30 |
+| A halted replica that no longer leads leaves an ask about it unanswered: a halted leader whose hand-off fails steps down on the target's later term and never campaigns, and a follower still supporting it refuses every candidate | `neg-halted-silent` | Same | `TestAHaltedLeaderThatStepsDownAndKeepsSilentLeavesNoLeader`, seeds 770 and 1388 of the run, which found the bug |
 
-Each breaks "a replica leads having applied the plan's configuration", and the same seed finishes
-unplanted. A halted wedge leader's heartbeats tell the others the leave committed once the faults
-stop, so only a dead one wedges the planted runs.
+A halted wedge leader's heartbeats tell the others the leave committed once the faults stop, so
+only a dead one wedges the `neg-removed-*` runs.
 
 A halted leader that still leads serves no lease read, and its replica answers no ask about it
 as gone, so its followers keep their support until it steps down

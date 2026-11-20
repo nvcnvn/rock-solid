@@ -137,7 +137,7 @@ voters/neg-voter-first	raftshard.voterFirst	TestAddingTheReplacementAsAVoterStal
 voters/neg-eager	raftshard.eager	TestPromotingALearnerBeforeItCaughtUpBreaksTheInvariant
 voters/neg-joint-one-half	open	Plants for the voter replacement model
 voters/neg-one-at-a-time	open	Plants for the voter replacement model
-voters/neg-delete-on-plan	open	Plants for the voter replacement model
+voters/neg-delete-on-plan	raftshard.deletesOnPlan	TestAReplicaDeletedOnItsPlanBreaksTheInvariant
 voters/neg-notice-any-index	open	Plants for the voter replacement model
 voters/neg-notice-non-member	open	Plants for the voter replacement model
 voters/neg-no-support-ask	raftshard.noSupportAsk	TestFollowersThatNeverAskKeepARemovedLeader

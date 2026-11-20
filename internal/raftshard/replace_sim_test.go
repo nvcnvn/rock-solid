@@ -50,9 +50,11 @@ type replacement struct {
 	stopped    bool
 	// planLed is whether a replica led having applied the plan's configuration once the faults stopped.
 	planLed bool
-	// removed is whether the cut-off replica reported itself removed, sinceSwap the first value
-	// proposed after the swap, and caughtUp whether the fourth replica applied one from then on.
+	// removed is whether the cut-off replica reported itself removed, dropped whether a replica
+	// applied a configuration without it, sinceSwap the first value proposed after the swap, and
+	// caughtUp whether the fourth replica applied one from then on.
 	removed   bool
+	dropped   bool
 	sinceSwap uint64
 	caughtUp  bool
 	// top is the highest index a running old voter applied since the plan, last when, and gap the longest wait between two such indexes before the swap.
@@ -304,10 +306,18 @@ func (c *simCluster) replaced(r *simReplica, st *raft.BasicStatus) {
 			}
 		}
 	}
-	if r.out.Removed {
-		if r.id != p.dead && c.removed == nil {
+	if p.dead >= 0 && len(r.s.conf.Voters) != 0 && !member(&r.s.conf, uint64(p.dead)+1) {
+		p.dropped = true
+	}
+	if r.out.Removed && c.removed == nil {
+		switch {
+		case r.id != p.dead:
 			c.removed = fmt.Errorf("replica %d, never removed, reported itself removed", r.id)
+		case r.s.leave == 0 && !p.dropped:
+			c.removed = fmt.Errorf("replica %d reported itself removed before a committed configuration lacked it", r.id)
 		}
+	}
+	if r.out.Removed {
 		p.removed = p.removed || r.id == p.dead
 		p.leadRemoved = p.leadRemoved || r.id == p.dead && st.RaftState == raft.StateLeader
 	}
@@ -559,4 +569,26 @@ func TestAConfigurationChangeAppliedBeforeItsCommitIsDurableIsForgotten(t *testi
 		}
 	}
 	t.Fatal("5 seeds whose replicas apply configuration changes before their commit is durable broke no durable-commit invariant")
+}
+
+// plantBreaks fails t unless seed's run of cluster breaks inv with p planted and finishes with it off.
+func plantBreaks(t *testing.T, seed uint64, inv string, p plants, cluster func(uint64, plants) *simCluster) {
+	t.Helper()
+	if !cluster(seed, p).breaks(t, seed, inv) {
+		t.Fatalf("seed %d: the planted run kept %q", seed, inv)
+	}
+	if !cluster(seed, plants{}).run(t, seed).done {
+		t.Fatalf("seed %d: the run does not finish with the plant off", seed)
+	}
+}
+
+// replaceCluster is seed's replacement run under faults, its first leader crashed.
+func replaceCluster(seed uint64, p plants) *simCluster {
+	return newReplaceCluster(seed, p, faults(), true, false)
+}
+
+// The voter model's neg-delete-on-plan: a replica that deletes its state as soon as the shard
+// map's plan drops it does so before any change of the group commits.
+func TestAReplicaDeletedOnItsPlanBreaksTheInvariant(t *testing.T) {
+	plantBreaks(t, 0, invOnlyRemoved, plants{deletesOnPlan: true}, replaceCluster)
 }

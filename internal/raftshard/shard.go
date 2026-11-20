@@ -146,12 +146,12 @@ type fortified struct {
 	term, run, support uint64
 }
 
-// plants are bugs a test plants: a removed replica that stops at once, as if its node deleted it, and one that applies its removal to its Raft configuration and so campaigns no more; election timeouts from crypto/rand, every message of a Ready sent before its flush, followers that vote and campaign while they support a leader, a learner promoted before it caught up, a replacement added as a voter, a learner held to the current commit index, lease reads before an entry of the leader's term commits, snapshots kept from the last compaction instead of built at the applied index, a leader counting a fortification under whatever support epoch its lease from the peer now runs, as if grantors renewed a lapsed grant under its old epoch, a leader serving lease reads after MsgTimeoutNow left, a vote granted to every candidate, a follower serving lease reads while it supports its leader, a follower that never asks its leader's node about the leader, a halted replica that no longer leads answering an ask about it with silence, a leader serving lease reads after it applied its own removal, rounds that write only their own Ready's hard state and none for a Ready that commits a configuration change and moves only the commit index, and a configuration change applied, and its commit sent, before that commit index is durable.
+// plants are bugs a test plants: a removed replica that stops at once, as if its node deleted it, one that does so as soon as its plan drops it, and one that applies its removal to its Raft configuration and so campaigns no more; election timeouts from crypto/rand, every message of a Ready sent before its flush, followers that vote and campaign while they support a leader, a learner promoted before it caught up, a replacement added as a voter, a learner held to the current commit index, lease reads before an entry of the leader's term commits, snapshots kept from the last compaction instead of built at the applied index, a leader counting a fortification under whatever support epoch its lease from the peer now runs, as if grantors renewed a lapsed grant under its old epoch, a leader serving lease reads after MsgTimeoutNow left, a vote granted to every candidate, a follower serving lease reads while it supports its leader, a follower that never asks its leader's node about the leader, a halted replica that no longer leads answering an ask about it with silence, a leader serving lease reads after it applied its own removal, rounds that write only their own Ready's hard state and none for a Ready that commits a configuration change and moves only the commit index, and a configuration change applied, and its commit sent, before that commit index is durable.
 type plants struct {
 	unseeded, early, disloyal, eager, voterFirst, current, uncommitted, staleSnapshot bool
 	noEpochBump, transferKeepsLease, voteEveryone, followerReads                      bool
 	noSupportAsk, removedKeepsLease, oldHardState, noConfRound                        bool
-	deletesAtOnce, appliesRemoval, haltedSilent                                       bool
+	deletesAtOnce, appliesRemoval, haltedSilent, deletesOnPlan                        bool
 }
 
 // New starts a replica from its storage.
@@ -259,8 +259,8 @@ func (s *Shard) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
 }
 
 // gone reports whether the replica stopped for good on learning its removal, as only the
-// deletesAtOnce plant has it: a removed replica runs on as a voter until its node deletes it.
-func (s *Shard) gone() bool { return s.removed && s.plant.deletesAtOnce }
+// deletesAtOnce and deletesOnPlan plants have it: a removed replica runs on as a voter until its node deletes it.
+func (s *Shard) gone() bool { return s.removed && (s.plant.deletesAtOnce || s.plant.deletesOnPlan) }
 
 // Removed reports whether the replica learned its removal, and the index of the change that removed
 // it, which it holds unapplied, or 0 for one that learned it from a peer's notice.
@@ -631,6 +631,9 @@ func (s *Shard) ready(ctx *core.Context, out *Output) {
 	if s.round == 0 {
 		s.reconcile(ctx)
 		s.handOff(ctx)
+	}
+	if s.plant.deletesOnPlan && !s.removed && len(s.plan) != 0 && !s.planned(s.cfg.ID) {
+		s.removed, out.Removed = true, true
 	}
 	if s.round == 0 && s.removed && !s.cfg.Storage.Removed() && !s.gone() {
 		s.rounds++
