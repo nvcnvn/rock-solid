@@ -642,3 +642,16 @@ func TestAJointConfigurationCountingOneHalfElectsTwoLeaders(t *testing.T) {
 func TestAChangeProposedBeforeThePreviousAppliedElectsTwoLeaders(t *testing.T) {
 	plantBreaks(t, 0, invOneLeader, plants{oneAtATime: true}, splitCluster)
 }
+
+// haltCluster is wedgeCluster with the wedge fault's leader halting instead of standing still.
+func haltCluster(seed uint64, p plants) *simCluster {
+	c := wedgeCluster(seed, p)
+	c.rep.die = false
+	return c
+}
+
+// The voter model's neg-halted-keeps-leading: a halted leader that never hands its leadership on
+// keeps leading, its followers supporting it, so no replica that has not halted leads again.
+func TestAHaltedLeaderThatKeepsLeadingLeavesNoLeader(t *testing.T) {
+	plantBreaks(t, 1, invNewLeader, plants{haltedKeepsLeading: true}, haltCluster)
+}

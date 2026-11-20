@@ -6749,6 +6749,7 @@ properties, and the same seed finishes unplanted:
 | A removed replica stops at once, as if its node deleted it: the wedge leaves the outgoing half one voter | `neg-removed-deletes-at-once` | Same | `TestARemovedVoterDeletedAtOnceLeavesNoLeader`, runs that always draw `wedge` and `die`; seed 1 |
 | A removed replica applies its removal and campaigns no more: holding the outgoing half's newest entry, it refuses every voter of the plan its vote | `neg-removed-applies-removal` | Same | `TestARemovedVoterThatAppliesItsRemovalLeavesNoLeader`, the same runs; seed 30 |
 | A halted replica that no longer leads leaves an ask about it unanswered: a halted leader whose hand-off fails steps down on the target's later term and never campaigns, and a follower still supporting it refuses every candidate | `neg-halted-silent` | Same | `TestAHaltedLeaderThatStepsDownAndKeepsSilentLeavesNoLeader`, seeds 770 and 1388 of the run, which found the bug |
+| A halted leader never hands its leadership on: when the wedge fault's leader halts instead of standing still, it keeps leading, its followers supporting it, and no replica that has not halted leads | `neg-halted-keeps-leading` | Same | `TestAHaltedLeaderThatKeepsLeadingLeavesNoLeader`, seed 1 |
 
 A halted wedge leader's heartbeats tell the others the leave committed once the faults stop, so
 only a dead one wedges the `neg-removed-*` runs.

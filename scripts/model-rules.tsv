@@ -143,7 +143,7 @@ voters/neg-notice-non-member	raftshard.noticeNonMember	TestANoticeToANonMemberBr
 voters/neg-no-support-ask	raftshard.noSupportAsk	TestFollowersThatNeverAskKeepARemovedLeader
 voters/neg-removed-keeps-lease	raftshard.removedKeepsLease	TestARemovedLeaderThatKeepsReadingBreaksTheLeaseInvariant
 voters/neg-restart-commit-at-base	open	Plants for the voter replacement model
-voters/neg-halted-keeps-leading	open	Plants for the voter replacement model
+voters/neg-halted-keeps-leading	raftshard.haltedKeepsLeading	TestAHaltedLeaderThatKeepsLeadingLeavesNoLeader
 voters/neg-removed-deletes-at-once	raftshard.deletesAtOnce	TestARemovedVoterDeletedAtOnceLeavesNoLeader
 voters/neg-removed-applies-removal	raftshard.appliesRemoval	TestARemovedVoterThatAppliesItsRemovalLeavesNoLeader
 voters/neg-halted-silent	raftshard.haltedSilent	TestAHaltedLeaderThatStepsDownAndKeepsSilentLeavesNoLeader

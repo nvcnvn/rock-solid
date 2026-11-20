@@ -146,13 +146,13 @@ type fortified struct {
 	term, run, support uint64
 }
 
-// plants are bugs a test plants: a removed replica that stops at once, as if its node deleted it, one that does so as soon as its plan drops it, one that takes a removal notice from a peer that applied less than it, one that asks and takes one while its own configuration lacks it, and one that applies its removal to its Raft configuration and so campaigns no more; election timeouts from crypto/rand, every message of a Ready sent before its flush, followers that vote and campaign while they support a leader, a learner promoted before it caught up, a replacement added as a voter, a learner held to the current commit index, lease reads before an entry of the leader's term commits, snapshots kept from the last compaction instead of built at the applied index, a leader counting a fortification under whatever support epoch its lease from the peer now runs, as if grantors renewed a lapsed grant under its old epoch, a leader serving lease reads after MsgTimeoutNow left, a vote granted to every candidate, a follower serving lease reads while it supports its leader, a follower that never asks its leader's node about the leader, a halted replica that no longer leads answering an ask about it with silence, a leader serving lease reads after it applied its own removal, rounds that write only their own Ready's hard state and none for a Ready that commits a configuration change and moves only the commit index, a configuration change applied, and its commit sent, before that commit index is durable, a restart that tells etcd-raft every entry it knows committed is applied, so it campaigns with a committed configuration change unapplied, a swap applied one change at a time, so the replica counts its incoming half alone, and a leader that proposes the swap and the leave behind a learner's addition before it applied any.
+// plants are bugs a test plants: a removed replica that stops at once, as if its node deleted it, one that does so as soon as its plan drops it, one that takes a removal notice from a peer that applied less than it, one that asks and takes one while its own configuration lacks it, and one that applies its removal to its Raft configuration and so campaigns no more; election timeouts from crypto/rand, every message of a Ready sent before its flush, followers that vote and campaign while they support a leader, a learner promoted before it caught up, a replacement added as a voter, a learner held to the current commit index, lease reads before an entry of the leader's term commits, snapshots kept from the last compaction instead of built at the applied index, a leader counting a fortification under whatever support epoch its lease from the peer now runs, as if grantors renewed a lapsed grant under its old epoch, a leader serving lease reads after MsgTimeoutNow left, a vote granted to every candidate, a follower serving lease reads while it supports its leader, a follower that never asks its leader's node about the leader, a halted replica that no longer leads answering an ask about it with silence, a leader serving lease reads after it applied its own removal, rounds that write only their own Ready's hard state and none for a Ready that commits a configuration change and moves only the commit index, a configuration change applied, and its commit sent, before that commit index is durable, a restart that tells etcd-raft every entry it knows committed is applied, so it campaigns with a committed configuration change unapplied, a swap applied one change at a time, so the replica counts its incoming half alone, and a leader that proposes the swap and the leave behind a learner's addition before it applied any, and a halted leader that keeps leading.
 type plants struct {
 	unseeded, early, disloyal, eager, voterFirst, current, uncommitted, staleSnapshot bool
 	noEpochBump, transferKeepsLease, voteEveryone, followerReads                      bool
 	noSupportAsk, removedKeepsLease, oldHardState, noConfRound                        bool
 	deletesAtOnce, appliesRemoval, haltedSilent, deletesOnPlan, noticeAnyIndex        bool
-	noticeNonMember, campaignUnapplied, jointOneHalf, oneAtATime                      bool
+	noticeNonMember, campaignUnapplied, jointOneHalf, oneAtATime, haltedKeepsLeading  bool
 }
 
 // New starts a replica from its storage.
@@ -1013,7 +1013,7 @@ func (s *Shard) replicating(id uint64, pr *tracker.Progress) bool {
 // voter in ID order, at most once an election timeout: when every replica halts, each would
 // otherwise hand it on as soon as it wins, a term and a durable hard state per round trip.
 func (s *Shard) handOff(ctx *core.Context) {
-	if !s.halted || s.gone() || ctx.Now < s.handAt {
+	if !s.halted || s.gone() || ctx.Now < s.handAt || s.plant.haltedKeepsLeading {
 		return
 	}
 	if st := s.rn.BasicStatus(); st.RaftState != raft.StateLeader || st.LeadTransferee != 0 {
