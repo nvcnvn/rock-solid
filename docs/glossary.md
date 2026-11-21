@@ -172,6 +172,8 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Declared lost.** An operator's statement that a down disk will never return, as a dead node's disks cannot report a new log. The control plane treats it as if its log had been replaced: its members refill at once, a leaving member on it goes with no report, and the disk can never rejoin under its old ID. What only it held stays unfound. It does not free a PG whose peering waits for it. See [A disk is its log](design.md#epoch-changes-and-failure-detection).
 
+**Give-up.** An operator's command that ends what no disk left can supply: a PG's unfound chunks, which every member then drops so they work again as empty chunks, or a stopped PG's lost intervals, which its peering then skips. It is refused while a down disk that may hold the data can still return. It is the one step that lets an acknowledged write be lost, as Ceph's `mark_unfound_lost delete` is. See [An operator's give-up](design.md#epoch-changes-and-failure-detection).
+
 **Flap damping, `flap_count`, `flap_window`.** Keeping a node or disk that keeps going down and coming back marked down until it has stayed healthy for a while, so its PGs do not start new intervals over and over. rock-solid holds one marked down `flap_count` times (5) within `flap_window` (10 minutes) down until it has been normal for a whole `flap_window`, unless a PG it belongs to cannot serve without it and placement would not refill it; Ceph stops an OSD at the same count. See [Failure detection](design.md#epoch-changes-and-failure-detection).
 
 **Split brain.** Two nodes both believing they are in charge, for example after a network partition, and both accepting writes. Most of the coordination machinery below exists to prevent it.

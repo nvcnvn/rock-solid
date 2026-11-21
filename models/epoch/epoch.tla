@@ -77,7 +77,9 @@ Infinity == MaxTime + 1
 
 VARIABLES
     \* Control plane and tables
-    tbl,      \* Seq([PG -> [iv, la]]): every committed table
+    tbl,      \* Seq([PG -> [iv, la, gu]]): every committed table; gu: the PG's give-ups,
+              \* each [k, cs, drop]: the interval it covers the PG's intervals up to, the
+              \* chunks it may lose, and whether members drop them
     ivs,      \* [PG -> Seq([mem: Seq(Disk), st: [Disk -> mark], lv: SUBSET Disk, ml: Nat])]:
               \* each interval's members, leaving members and min_live
     reqIv,    \* [PG -> Nat]: the interval whose primary asked for a new one
@@ -166,7 +168,10 @@ PrimDisk(p, i) ==
 PrimNode(p, i) == IF PrimDisk(p, i) = 0 THEN 0 ELSE dnode[PrimDisk(p, i)]
 IvAt(n, p) == tbl[ep[n]][p].iv
 LaAt(n, p) == tbl[ep[n]][p].la
+GuMax(G) == IF G = {} THEN 0 ELSE Max({g.k : g \in G})
+GuAt(n, p) == GuMax(tbl[ep[n]][p].gu)
 Cur(p) == tbl[Len(tbl)][p].iv
+GU(p) == GuMax(tbl[Len(tbl)][p].gu)
 MinLiveOf(p, i) == ivs[p][i].ml
 ChunksOf(p) == {c \in Chunk : ChunkPG[c] = p}
 Running(n) == frz[n] = "run"
@@ -250,7 +255,13 @@ RaftReads(n) ==
                      fby[n][v] >= 0 /\ LeaseOK(n, v) /\ hl[n][v].ep = fby[n][v]}) >= Quorum
 
 ActDecs == {x \in dec : [p |-> x.p, k |-> x.k, r |-> x.r] \in act}
-AckedV(c) == {y.v : y \in {z \in ackd : z.c = c}}
+\* A give-up loses what the intervals it covers held of the chunks it records,
+\* so the properties hold such a chunk's acknowledged version, and one an
+\* activated interval kept, only above them; AllAckedV and EverCommitAt count
+\* the rest too, as what a read may return.
+GivenUp(c, i) == \E g \in tbl[Len(tbl)][ChunkPG[c]].gu : c \in g.cs /\ g.k >= i
+AllAckedV(c) == {y.v : y \in {z \in ackd : z.c = c}}
+AckedV(c) == {v \in AllAckedV(c) : ~GivenUp(c, IvOfV(v))}
 
 RECURSIVE Chain(_, _)
 \* The versions a version's bytes rest on, following each merge to its base.
@@ -266,9 +277,10 @@ Content(c, S) == [b \in 1..Blocks[c] |-> Newest({v \in S : BlkOf(c, v) = b})]
 
 \* Versions committed: acknowledged in their interval, or kept by an activated
 \* interval's peering.
-CommitAt(c) ==
-    {[v |-> u, at |-> IvOfV(u)] : u \in AckedV(c)}
+EverCommitAt(c) ==
+    {[v |-> u, at |-> IvOfV(u)] : u \in AllAckedV(c)}
     \cup {[v |-> x.kept[c], at |-> x.k] : x \in {y \in ActDecs : y.p = ChunkPG[c] /\ y.kept[c] # 0}}
+CommitAt(c) == {u \in EverCommitAt(c) : ~GivenUp(c, u.at)}
 
 -----------------------------------------------------------------------------
 \* Initial state
@@ -288,7 +300,7 @@ InitIv(p) ==[mem |-> InitMem[p], st |-> [d \in Disk |-> IF d \in Node THEN "up" 
              ml |-> MinLive[p]]
 
 Init ==
-    /\ tbl = <<[p \in PG |-> [iv |-> 1, la |-> 1]]>>
+    /\ tbl = <<[p \in PG |-> [iv |-> 1, la |-> 1, gu |-> {}]]>>
     /\ ivs = [p \in PG |-> <<InitIv(p)>>]
     /\ reqIv = [p \in PG |-> 0]
     /\ plan \in Plans
@@ -373,7 +385,7 @@ Commit(t) == /\ Len(tbl) < IF plan.free THEN plan.n ELSE MaxTable
 
 \* A new interval of each PG in ps, with members from f[p].
 NewIntervals(ps, f) ==
-    /\ Commit([p \in PG |-> IF p \in ps THEN [iv |-> Cur(p) + 1, la |-> tbl[Len(tbl)][p].la]
+    /\ Commit([p \in PG |-> IF p \in ps THEN [tbl[Len(tbl)][p] EXCEPT !.iv = Cur(p) + 1]
                             ELSE tbl[Len(tbl)][p]])
     /\ ivs' = [p \in PG |-> IF p \in ps THEN Append(ivs[p], f[p]) ELSE ivs[p]]
 
@@ -547,7 +559,8 @@ Edit(p, mem, marks) ==
 \* A planned change: [k |-> "mark", d, to], [k |-> "replace", p, old, new],
 \* [k |-> "rotate", p], [k |-> "add", p, old, new], [k |-> "remove", p],
 \* [k |-> "drop", p], [k |-> "stay", p, l, out], [k |-> "refill", p, mem, marks, lv],
-\* [k |-> "minlive", p, to], [k |-> "edit", p, mem, marks] or [k |-> "lost", d] (LostPlanned).
+\* [k |-> "minlive", p, to], [k |-> "edit", p, mem, marks], [k |-> "lost", d] (LostPlanned) or
+\* [k |-> "giveup", p] (GiveUpPlanned).
 Planned(m) ==
     \/ m.k = "mark" /\ MarkDisk(m.d, m.to)
     \/ m.k = "replace" /\ Replace(m.p, m.old, m.new)
@@ -619,7 +632,10 @@ LeftGated(G, e, d) ==
 \* PG's versions it ordered; one that skips such tables and returns as primary
 \* still holds them for peering to settle. A member forgets the versions it
 \* failed in an interval once that interval is over. Its store drops the gated
-\* versions of each PG the table names its disk in no interval of (LeftGated).
+\* versions of each PG the table names its disk in no interval of (LeftGated),
+\* and every chunk a give-up the table records and its last did not drops: a
+\* node that skips the table that gave up still drops them, before it answers
+\* peering of any later interval.
 
 AdoptPr(n, p, e) ==
     LET old == pr[n][p]
@@ -649,10 +665,16 @@ Adopt(n, e) ==
     /\ LET d == ddisk[n]
            G == gat[d] \cup {[c |-> r.c, v |-> r.v] : r \in {x \in (pend \ pend') \cup (refd \ refd') :
                                                               ~Bug("MapOnDemote")}}
-       IN /\ gat' = [gat EXCEPT ![d] = G \ LeftGated(G, e, d)]
-          /\ ldrp' = [ldrp EXCEPT ![d] = @ \cup LeftGated(G, e, d)]
+           W == UNION {g.cs : g \in {h \in UNION {tbl[e][p].gu \ tbl[ep[n]][p].gu : p \in PG} : h.drop}}
+       IN /\ gat' = [gat EXCEPT ![d] = {g \in G \ LeftGated(G, e, d) : g.c \notin W}]
+          /\ ldrp' = [ldrp EXCEPT ![d] = {g \in @ \cup LeftGated(G, e, d) : g.c \notin W}]
+          /\ dlog' = [dlog EXCEPT ![d] = [c \in Chunk |-> IF c \in W THEN {} ELSE @[c]]]
+          /\ miss' = [miss EXCEPT ![d] = [c \in Chunk |-> IF c \in W THEN NoMiss ELSE @[c]]]
+          /\ drp' = [drp EXCEPT ![d] = {g \in @ : g.c \notin W}]
+          /\ rdrp' = [rdrp EXCEPT ![d] = {g \in @ : g.c \notin W}]
+          /\ imf' = [imf EXCEPT ![d] = @ \ W]
     /\ failed' = [failed EXCEPT ![ddisk[n]] = {f \in @ : tbl[e][ChunkPG[f.c]].iv = IvOfV(f.v)}]
-    /\ UNCHANGED <<ctlVars, dnode, ddisk, dhost, fmts, stale, run, rsIv, dlog, miss, persIv, drp, rdrp, imf, mrecv,
+    /\ UNCHANGED <<ctlVars, dnode, ddisk, dhost, fmts, stale, run, rsIv, persIv, mrecv,
                    pv, dec, act, rm, vers, ackd, wst, sends, dmn, bad, ownw, leaseVars, clockVars, raftVars>>
 
 -----------------------------------------------------------------------------
@@ -660,12 +682,14 @@ Adopt(n, e) ==
 
 \* The intervals a new primary of k must stop, from the last activated one L:
 \* those that could accept writes, with the min_live they ran under live and
-\* one member up, the primary.
-NeedIv(p, k, L) ==
+\* one member up, the primary. It skips those up to G, which an operator gave
+\* up; with SkipPastGiveUp, every one once the PG was given up.
+NeedIv(p, k, L, G) ==
     LET from == IF Bug("StopPreviousOnly") THEN k - 1 ELSE L
         ivl == IF Bug("ReachLastActivatedOnly") THEN {L} ELSE from..k - 1
         floor(i) == MinLiveOf(p, IF Bug("CurrentMinLive") THEN k ELSE i)
-    IN {i \in ivl : i >= 1 /\ LiveCnt(p, i) >= floor(i) /\ UpIn(p, i) # {}}
+    IN {i \in ivl : /\ i >= 1 /\ LiveCnt(p, i) >= floor(i) /\ UpIn(p, i) # {}
+                    /\ IF Bug("SkipPastGiveUp") THEN G = 0 ELSE i > G}
 
 \* A format moves a node to a new disk ID but not to a new address, so a message
 \* for the old ID still reaches the node, which ignores it. With
@@ -967,7 +991,7 @@ PeerOn(n, p, J, P, U) ==
         unf == {c \in ChunksOf(p) :
                   K[c] # 0 /\ c \notin img /\ \A d \in UpIn(p, k) : lists[d][c] # NoMiss}
     IN /\ UpIn(p, k) \subseteq J
-       /\ \A i \in NeedIv(p, k, L) : J \cap UpIn(p, i) # {}
+       /\ \A i \in NeedIv(p, k, L, GuAt(n, p)) : J \cap UpIn(p, i) # {}
        /\ LapseFor(J, p, k)
        /\ dec' = dec \cup {[p |-> p, k |-> k, n |-> n, r |-> run[n], kept |-> K,
                             gone |-> gone, img |-> img, torn |-> T, unf |-> unf]}
@@ -1034,6 +1058,53 @@ Persist(d) ==
        /\ mrecv' = [mrecv EXCEPT ![d] = mrecv[d] \ {x}]
        /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, dlog, failed, priVars,
                       dataVars, leaseVars, clockVars, raftVars>>
+
+\* The disks to try bringing back: the members down or in maintenance whose
+\* disks are not gone.
+Candidates(p) == {d \in Mem(p, Cur(p)) : St(p, Cur(p), d) # "up" /\ dnode[d] # 0}
+
+\* A PG is stopped when its current interval has not activated and an interval
+\* its peering needs has no member left.
+Stopped(p) ==
+    /\ ~\E a \in act : a.p = p /\ a.k = Cur(p)
+    /\ \E i \in NeedIv(p, Cur(p), tbl[Len(tbl)][p].la, GU(p)) : \A d \in UpIn(p, i) : dnode[d] = 0
+
+\* The chunks the activated peering of the current interval left unfound.
+Unfound(p) == UNION {x.unf : x \in {y \in ActDecs : y.p = p /\ y.k = Cur(p)}}
+
+\* An operator gives up what a PG's intervals up to its current one k held, as
+\* Ceph's mark_unfound_lost delete does. The leader commits it in the PG's
+\* entry, in a new interval of the same members whose peering skips those up
+\* to k, and records with k the chunks it may lose: every chunk of the PG if k
+\* has not activated, since peering cannot tell which chunks the skipped
+\* intervals wrote, else the chunks k's peering left unfound, which every node
+\* drops on adopting the first table that holds the record (Adopt), so that
+\* peering keeps nothing of them. It is refused while the PG has a candidate,
+\* and unless the PG is stopped or k left chunks unfound. With GiveUpFound it
+\* takes any activated interval and drops every chunk; with
+\* GiveUpWithCandidate it ignores candidates; with GiveUpNotStopped it takes an
+\* interval that has not activated though its peering can still reach every
+\* interval it needs.
+GiveUpDrops(p) == IF Bug("GiveUpFound") THEN ChunksOf(p) ELSE Unfound(p)
+
+GiveUp(p, k) ==
+    LET open == ~\E a \in act : a.p = p /\ a.k = k
+    IN /\ k = Cur(p)
+       /\ Candidates(p) = {} \/ Bug("GiveUpWithCandidate")
+       /\ \/ Stopped(p)
+          \/ Unfound(p) # {}
+          \/ Bug("GiveUpFound") /\ ~open
+          \/ Bug("GiveUpNotStopped") /\ open
+       /\ Commit([tbl[Len(tbl)] EXCEPT ![p].iv = k + 1,
+                    ![p].gu = @ \cup {[k |-> k, cs |-> IF open THEN ChunksOf(p) ELSE GiveUpDrops(p), drop |-> ~open]}])
+       /\ ivs' = [ivs EXCEPT ![p] = Append(@, @[k])]
+       /\ UNCHANGED <<reqIv, reports, recd, plan, nodeVars, priVars, dataVars, leaseVars, clockVars, raftVars>>
+
+GiveUpPlanned ==
+    /\ step <= Len(plan.m)
+    /\ plan.m[step].k = "giveup"
+    /\ GiveUp(plan.m[step].p, Cur(plan.m[step].p))
+    /\ step' = step + 1
 
 
 \* Recovery is a write the primary orders: it reads the kept version's blocks
@@ -2066,6 +2137,7 @@ Protocol ==
 Choices ==
     \/ Membership
     \/ LostPlanned
+    \/ GiveUpPlanned
     \/ Die
     \/ \E n \in Node : Isolate(n)
     \/ \E m \in rm : MemberFail(m) \/ GoneRefuses(m)
@@ -2136,8 +2208,8 @@ OneLeaseholder ==
 NoLateCompletion == "late" \notin bad
 
 \* 4. No acknowledged version, and no version an activated interval kept, is
-\* ever dropped: every later decision and acknowledged version rests on it.
-\* That includes a write tagged with an interval that completes after a later
+\* ever dropped, unless a give-up covers its interval: every later decision and
+\* acknowledged version rests on it. That includes a write tagged with an interval that completes after a later
 \* one activated, which peering must have kept.
 NothingCommittedDropped ==
     \A c \in Chunk : \A u \in CommitAt(c) :
@@ -2231,7 +2303,7 @@ Settled(p) ==
        \/ LiveCnt(p, k) < MinLiveOf(p, k)
        \/ n = 0
        \/ \E d \in UpIn(p, k) : dnode[d] = 0
-       \/ \E i \in NeedIv(p, k, tbl[Len(tbl)][p].la) : \A d \in UpIn(p, i) : dnode[d] = 0
+       \/ Stopped(p)
        \/ reqIv[p] = k
 PeeringSettles == <>[](\A p \in PG : Settled(p))
 
@@ -2246,11 +2318,13 @@ RemovalKeepsCopies ==
             => \A c \in ChunksOf(p) : \A v \in AckedV(c) : \A d \in Range(x.mem) \ x.lv :
                  v \in dlog[d][c] /\ miss[d][c] = NoMiss]_vars
 
-\* 18. An acknowledged write is not stranded: if a disk that is not gone can
-\* serve all of a chunk's acknowledged writes, holding them and listing nothing
-\* of it, so can a member of its PG's current interval, up or down, or an
-\* image of a version that covers them, carried by a node while its disk is
-\* such a member and runs on it. That
+\* 18. An acknowledged write is not stranded: if a disk that is not gone, nor
+\* Removed, can serve all of a chunk's acknowledged writes, holding them and
+\* listing nothing of it, so can a member of its PG's current interval, up or
+\* down, or an image of a version that covers them, carried by a node while its
+\* disk is such a member and runs on it. Remove waits for the recovered report
+\* and an acknowledged write needs every live member, so losing every member
+\* that took a removed disk's place is a real loss of every copy. That
 \* such a disk exists is not claimed: a holder that truly dies leaves none. Nor
 \* is a read that succeeds: a refused version peering keeps can sit above the
 \* acknowledged ones, and with its one holder dead the chunk stays unfound
@@ -2263,11 +2337,22 @@ HoldsAcked(d, c) ==
 
 CanServe(d, c) == HoldsAcked(d, c) /\ miss[d][c] = NoMiss
 
+\* d was removed from p, the last interval naming it listing it leaving, and
+\* every member of the interval after it is gone. Property 13 has those
+\* members hold every version d held at the removal, so a config checking 18
+\* or 23 with removals and losses checks 13 too.
+Removed(p, d) ==
+    LET I == {i \in 1..Len(ivs[p]) : d \in Mem(p, i)}
+    IN /\ I # {}
+       /\ d \in ivs[p][Max(I)].lv
+       /\ Max(I) < Len(ivs[p])
+       /\ \A e \in Mem(p, Max(I) + 1) : dnode[e] = 0
+
 NoStranded ==
     \A c \in Chunk :
        LET p == ChunkPG[c]
            want == Content(c, UNION {Chain(c, v) : v \in AckedV(c)})
-       IN (AckedV(c) # {} /\ \E d \in Disk : CanServe(d, c))
+       IN (AckedV(c) # {} /\ \E d \in Disk : ~Removed(p, d) /\ CanServe(d, c))
           => \/ \E d \in Mem(p, Cur(p)) : CanServe(d, c)
              \/ \E n \in Node : /\ ddisk[n] \in Mem(p, Cur(p))
                                /\ dnode[ddisk[n]] = n
@@ -2335,7 +2420,7 @@ ReadsMapped ==
        LET own == PrimDisk(p, IvAt(n, p))
        IN \A c \in ChunksOf(p) : miss[own][c] = NoMiss =>
             LET got == Content(c, Served(n, own, c))
-                mapped == AckedV(c) \cup UNION {Chain(c, u.v) : u \in CommitAt(c)}
+                mapped == AllAckedV(c) \cup UNION {Chain(c, u.v) : u \in EverCommitAt(c)}
             IN \A b \in 1..Blocks[c] : got[b] = 0 \/ got[b] \in mapped
 
 \* 15. A primary whose interval a failed version ended always asks for the next
@@ -2396,6 +2481,15 @@ HeldForCopies(n, x) ==
        /\ Degraded(p, IvAt(n, p), c) \/ miss[PrimDisk(p, IvAt(n, p))][c] # NoMiss
 
 HeldWritesOrdered == <>[](\A n \in Node : \A x \in pin[n] : ~HeldForCopies(n, x))
+
+\* 23. A give-up loses only what no disk left holds: when one commits, no disk
+\* that is not gone nor Removed, but an up member of the PG's current
+\* interval, holds any acknowledged version of a chunk of the PG, and no such
+\* disk can serve a chunk the give-up drops. Removed is excepted for 18's reason.
+GiveUpOnlyLost == [][\A p \in PG : (GU(p))' > GU(p) =>
+    \A c \in ChunksOf(p), d \in Disk : ~Removed(p, d) =>
+       /\ dnode[d] # 0 /\ AckedV(c) \cap dlog[d][c] # {} => d \in UpIn(p, Cur(p))
+       /\ AckedV(c) # {} /\ CanServe(d, c) => c \notin GiveUpDrops(p)]_vars
 -----------------------------------------------------------------------------
 \* Configurations: the .cfg files substitute these for the constants. PG 1 is
 \* in a rep3 pool with min_live 2; PG 2 in a rep2 pool with min_live 2 that
@@ -2572,6 +2666,41 @@ RefillLostPlans == {RefillLostSecond}
 \* neg-drop-all-leaving: both members leaving, one lost, and the other holds what
 \* no member can serve.
 DropAllPlans == {Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), AddM(2, 2, 4), LostM(3), DropM(2)>>, Partial2, {})}
+
+GiveUpM(p) == [k |-> "giveup", p |-> p]
+\* ci-giveup-stopped: both members down together, refilled by nodes 1 and 4 in one
+\* table and declared lost. If peering reached neither first, the PG is stopped:
+\* with no spare table no activation is folded, so peering needs interval 1,
+\* whose members are gone. Else the chunk is unfound, held only by the lost
+\* disks. A give-up ends either.
+TwoLost == <<Tab(2, <<1, 4, 2, 3>>, <<"up", "up", "down", "down">>, {2, 3}), LostM(2), LostM(3), GiveUpM(2)>>
+GiveUpStoppedPlans == {Plan(TwoLost, Partial2, {})}
+\* neg-give-up-found gives up the chunk W1 is acknowledged on; neg-give-up-candidate
+\* gives it up while disks 2 and 3, down, still hold it; neg-skip-past-give-up
+\* has W2 acknowledged on node 1 alone after the give-up, while node 4 is in
+\* maintenance, and then moves the primary to node 4 with node 1 in maintenance.
+GiveUpFoundPlans == {Plan(<<GiveUpM(2)>>, <<Partial2[1]>>, {})}
+GiveUpCandidatePlans == {Plan(<<TwoLost[1], GiveUpM(2)>>, <<Partial2[1]>>, {})}
+\* neg-give-up-not-stopped replaces up disk 3 by node 1 and gives up the new
+\* interval before it activates, while disks 2 and 3 hold W1.
+GiveUpNotStoppedPlans == {Plan(<<Repl(2, 3, 1), GiveUpM(2)>>, <<Partial2[1]>>, {})}
+\* ci-giveup-two-chunks: TwoLost with W1 on chunk 2 and a write to chunk 1, both
+\* chunks in PG 2, so an unfound give-up of one must keep the other.
+ChunksInPG2 == [c \in Chunks2 |-> 2]
+GiveUpTwoChunksPlans == {Plan(TwoLost, <<Partial2[1], [Partial[1] EXCEPT !.c = 1]>>, {})}
+\* heavy-giveup-second: node 1 joins, so peering lists the chunk on it for W1,
+\* and may take W2 before recovery; then node 4 joins as disks 2 and 3 go
+\* down, and they are lost. A give-up of the stopped PG keeps what node 1
+\* holds, W2 without W1's block, which the next peering finds listed and held
+\* by no other member: unfound, given up again.
+GiveUpSecondPlans == {Plan(<<AddM(2, 3, 1), Tab(2, <<1, 4, 2, 3>>, <<"up", "up", "down", "down">>, {2, 3}),
+                             LostM(2), LostM(3), GiveUpM(2), GiveUpM(2)>>, Partial2, {})}
+\* ci-giveup-removed: disk 4 joins in disk 3's place and disk 3 is removed on
+\* the recovered report; then both members are lost and the stopped PG given
+\* up while disk 3, removed, still holds W1.
+GiveUpRemovedPlans == {Plan(<<AddM(2, 3, 4), RemoveM(2), Mark(2, "down"), Mark(4, "down"), LostM(2), LostM(4),
+                              GiveUpM(2)>>, <<Partial2[1]>>, {})}
+SkipPastPlans == {Plan(TwoLost \o <<Mark(4, "maint"), Tab(2, <<4, 1>>, <<"up", "maint">>, {})>>, <<Partial2[2]>>, {})}
 
 \* ci-sources, each with a primary restart: a move whose removed member lacks Y;
 \* a recovering member of rep3 that lacks Y, which both go to every member listing
