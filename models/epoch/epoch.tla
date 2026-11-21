@@ -2806,7 +2806,7 @@ RaftTransfer == [Plan(<<>>, <<>>, {"raft", "transfer", "fast"}) EXCEPT !.t = 300
 \* with partitions that heal.
 RaftPartition == [Plan(<<>>, <<>>, {"raft", "cut", "heal", "fast"}) EXCEPT !.t = 500, !.k = 2]
 
-\* ci-leases checks LeasePlans. deep-leases adds the plans that pair a
+\* ci-leases checks LeasePlans. heavy-leases adds the plans that pair a
 \* partition with a pause, a suspend or a reboot, at 1.6 to 7.6 million states
 \* each on 3 nodes, and those that stop the holder in place while its grantor
 \* pauses or restarts; the negative variants that need one run it alone. The

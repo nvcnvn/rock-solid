@@ -682,7 +682,7 @@ Unfortified == \A r \in Replicas : fort[r] = {}
 KeptFollowerCrashes == \A r \in Replicas : ~up[r] => r \in (BaseVoters \cap Plan) \ {Kept}
 
 \* No more than four entries commit (a state constraint), as many as the swap from the empty
-\* log needs: ci-swap stops there, and deep-swap goes on.
+\* log needs: ci-swap stops there, and heavy-swap goes on.
 FourChosen == Len(chosen) <= 4
 
 \* From LeaveInit, only the dropped voter and the voter that took the leave with it go down

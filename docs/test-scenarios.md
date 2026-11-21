@@ -3410,7 +3410,7 @@ nodes without finishing.
 | `heavy-peering` | 4 | `ci-peering`'s, `ci-restarts`' and `ci-restarts-moved`'s plans and the free plan, and the unbounded liveness property |
 | `ci-hide` | 3 | `ci-leases`'s constants with one plan: PG 2's handover with exact clocks, the holder suspended 1 s with `CLOCK_BOOTTIME` gaining nothing and no `Resumed`, standing for a suspend just under 1 s; apart from `ci-leases` so that a lease variant that also drops the margin for such a suspend fails on its own rule |
 | `ci-hide-clocks` | 3 | `ci-hide`'s plan with `ci-leases`'s rates and slews in place of exact clocks, on which the holder's slower and the grantor's faster clock break property 1 with the margin kept |
-| `deep-leases` | 4 | `ci-leases`'s and `ci-hide`'s plans and the six `ci-leases` leaves out: four pair a partition with a pause, a suspend or a reboot, and two stop the holder in place while its grantor pauses or restarts |
+| `heavy-leases` | 4 | `ci-leases`'s and `ci-hide`'s plans and the six `ci-leases` leaves out: four pair a partition with a pause, a suspend or a reboot, and two stop the holder in place while its grantor pauses or restarts |
 | `deep-slow` | 3 | The delayed-message plan alone, with `ci-leases`'s constants and time to 5 s |
 
 `heavy-peering` runs apart from the lease plans because whether nodes have clocks is a constant of
@@ -3418,7 +3418,7 @@ the spec; at 8,923 s it is past `deep`'s budget. The delayed-message plan, over 
 3 nodes, passed 108 million at 4 nodes with the other lease plans without finishing in 4 hours, so `deep-slow` runs it alone at 3. The plans that pair a
 partition with a pause, a suspend or a reboot are 1.6 to 7.6 million states each at 3 nodes, and the
 two that stop the holder in place while its grantor pauses or restarts 5.4 and 1.2 million, so they
-run in `deep-leases`; the variants that need one run on it alone.
+run in `heavy-leases`; the variants that need one run on it alone.
 
 | Constant | Value |
 | --- | --- |
@@ -3606,7 +3606,7 @@ part, which peering treats as not held; and a record failing below a later one o
 own log, which the store reports as held whole up to the failure, so that only the newest version
 on that log fails.
 
-**Properties.** `ci-leases`, `deep-leases` and `deep-slow` check every property but 12, 15, 16, 20 and 21.
+**Properties.** `ci-leases`, `heavy-leases` and `deep-slow` check every property but 12, 15, 16, 20 and 21.
 `ci-peering`, `ci-restarts`, `ci-restarts-moved`, `ci-edits`, `ci-tears`, `ci-faults`, `ci-faults-more`, `deep-faults-more` and `heavy-peering` check every property but 2 and 10, since
 the Raft group and lease time need clocks, 13, since their plans make no move, 15 and 16, which
 only `ci-asks` checks, 20, which only `ci-gates` and `ci-gates-left` check, and 21, which only `ci-gates-left` checks; `heavy-peering` adds the unbounded liveness property 12. `ci-asks` checks only the unbounded liveness properties 15
@@ -4133,7 +4133,7 @@ A TLA+ specification of a metadata group's voter replacement ([Replica placement
 
 **Configurations** (runs as in [TLA+ and TLC](#tla-and-tlc); results in the [Model-to-simulator map](#model-to-simulator-map)). Voters a, b and c, the plan swapping d in for c:
 
-- `ci-swap`: up to term 2 and four committed entries, as many as the swap needs (the constraint `FourChosen`), no crash, safety, with a and b symmetric, and no leader fortified (the constraint `Unfortified`): support only narrows the votes a candidate wins, so every election and commit stays reachable, and the lease invariants are left to `ci-live-moved`, `ci-lease` and `deep-swap`.
+- `ci-swap`: up to term 2 and four committed entries, as many as the swap needs (the constraint `FourChosen`), no crash, safety, with a and b symmetric, and no leader fortified (the constraint `Unfortified`): support only narrows the votes a candidate wins, so every election and commit stays reachable, and the lease invariants are left to `ci-live-moved`, `ci-lease` and `heavy-swap`.
 - `ci-live`: c down for good, up to term 2, `SwapCommits` under weak fairness.
 - `ci-lease`: from `JointInit`, a leading term 1 with every replica having applied the joint configuration, a state the spec reaches from its start with no crash; up to term 2, no crash, under any interleaving, grant lapses included, safety only: c wins term 2 while a leads, and lease reads across that election. The next leader after a removed one needs a third term, so `ci-live-moved` checks its reads against the removed leader's.
 - `ci-live-moved`: from `OutgoingInit`, `JointInit` after c won term 2 on every replica, one step of the spec; every replica up, no crash, up to term 3: c leaves the joint configuration, commits its own removal and hands its leadership on, and `NewLeader` holds under weak fairness, with the safety invariants. That fairness lets nobody campaign while a replica leads, an assumption about the steps after the start, not about how the group reached it. `neg-no-support-ask` is this configuration with one rule off, and `neg-removed-keeps-lease` its start and constants under any interleaving with one rule off.
@@ -4147,12 +4147,12 @@ A TLA+ specification of a metadata group's voter replacement ([Replica placement
 - `ci-two-plans-live`: `ci-two-plans` under weak fairness, no leader fortified, up to term 4: c hands its leadership to a or d, which swaps e in for b, and `NewLeader` holds for the second plan, the one that completes the first.
 - `deep-two-plans`: `ci-two-plans` with b up, no leader fortified: b, which the second plan drops, lives on as well and can lead the second plan's joint configuration while c can lead the first's.
 - `heavy-two-plans-fortified`: `deep-two-plans` with leaders fortified: b and c, each dropped by one plan, fortify leaders of different joint configurations, which the `ci` and `deep` two-plans configurations, b stopped or no leader fortified, never reach. A simulation of it, depth 60, seed 7, 150 s at one worker, checked about 720,000 states and found nothing; it has not run to the end.
-- `ci-restart`: from `JointInit`, up to term 2, no leader fortified, as in `ci-swap`: b, which both configurations keep, crashes once and restarts from any base at or below what it applied, so its configuration can rewind past both changes; the other replicas' restarts are `deep-restart`'s, and lease reads across a restart `deep-lease`'s. `neg-restart-commit-at-base` and `neg-conf-commit-not-durable` are this configuration with one rule off, and `neg-hard-state-old` with two.
+- `ci-restart`: from `JointInit`, up to term 2, no leader fortified, as in `ci-swap`: b, which both configurations keep, crashes once and restarts from any base at or below what it applied, so its configuration can rewind past both changes; the other replicas' restarts are `deep-restart`'s, and lease reads across a restart `heavy-lease`'s. `neg-restart-commit-at-base` and `neg-conf-commit-not-durable` are this configuration with one rule off, and `neg-hard-state-old` with two.
 - `deep-restart`: `ci-restart` with a crash of any replica.
-- `deep-swap`: `ci-swap` with one crash and restart of any replica, and no bound on the committed entries. Every `deep` and `heavy` restart is from a base.
+- `heavy-swap`: `ci-swap` with one crash and restart of any replica, and no bound on the committed entries. Every `deep` and `heavy` restart is from a base.
 - `deep-live`: `ci-live` with one crash and restart of a leader, up to term 3.
 - `deep-live-moved`: from `JointInit`, one crash and restart, up to term 3, so c wins after a crashes and its commit of the leave can reach no follower.
-- `deep-lease`: `ci-lease` with one crash and restart, up to term 3.
+- `heavy-lease`: `ci-lease` with one crash and restart, up to term 3.
 - `heavy-live-moved`: `deep-live-moved` from the empty log, up to term 4, so the leader that is crashed while joint can be one that took over by transfer.
 - `heavy-crash-die-live`: `ci-leave-die-live` from `LeaveInit` with one crash and restart of a leader, up to term 6, only c and b going down (`LeaveHoldersDown`), the voters that hold the leave and the outgoing half's newest entries; a crash and a death can each cost two elections when c leads between them, and `NewLeader` must hold. It has not run to the end.
 
@@ -4262,7 +4262,7 @@ next milestone's run, which is also the twins' first.
 | Voter replacement | `ci-two-plans-live` | [Voter replacement model](#voter-replacement-model) | 24 | 3,022 | 13 s, 1 worker |
 | Voter replacement | `deep-two-plans` | [Voter replacement model](#voter-replacement-model) | 27 | 850,637 | 1,802 s, 1 worker |
 | Epoch change | `heavy-peering` | [Epoch change model](#epoch-change-model) | 31 | 13,717,707 | 8,923 s |
-| Epoch change | `deep-leases` | [Epoch change model](#epoch-change-model) | 132 | 48,516,248 | 5,577 s |
+| Epoch change | `heavy-leases` | [Epoch change model](#epoch-change-model) | | over 73,673,319 | cut off at 19,800 s on the CI runner, not yet run to the end |
 | Epoch change | `deep-slow` | [Epoch change model](#epoch-change-model) | 72 | 20,909,636 | 2,265 s |
 | Epoch change | `deep-refills-down` | [Epoch change model](#epoch-change-model) | 34 | 3,823,511 | 362 s |
 | Epoch change | `deep-refills-stay` | [Epoch change model](#epoch-change-model) | 30 | 2,377,613 | 283 s |
