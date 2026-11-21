@@ -847,3 +847,36 @@ func TestARestartKeepsTheListingOfAWriteAfterAGiveUp(t *testing.T) {
 		t.Fatalf("Z, acknowledged after the give-up and held by no disk left, reads OK, not unfound")
 	}
 }
+
+// A give-up staged with an edit that replaces every member is left out of that table, so its peering reaches the interval
+// that holds Y, a chunk the give-up does not record, and Y reads as written. The record is forced, standing for one
+// CheckGiveUp passed the step before.
+func TestAGiveUpWithAnEditKeepsTheChunksItDoesNotRecord(t *testing.T) {
+	r, x, _ := refillRun(t, 2, 2, 5, nil, "")
+	r.tick(2_000_000)
+	y := chunkIn(pg0, 1, 1)
+	if rp, ok := r.answered(r.c.write(pg0, y, 0, bytes.Repeat([]byte{0x22}, core.BlockSize)), 5_000_000); !ok || rp.Status != StatusOK {
+		t.Fatalf("Y answered %+v, %v", rp, ok)
+	}
+	r.tick(2_000_000)
+	ms := r.members()
+	var spare []uint32
+	for d := uint32(1); d <= 5 && len(spare) < 2; d++ {
+		if d != ms[0].Disk && d != ms[1].Disk {
+			spare = append(spare, d)
+		}
+	}
+	clear(r.acked)
+	r.a.edits = []Edit{{PG: pg0, Disks: spare}}
+	k := r.c.table.Entry(pg0).Interval
+	r.a.giveUps = []PGGiveUp{{PG: pg0, GiveUp: GiveUp{Interval: k, Drop: true, Chunks: []core.ChunkID{x}}}}
+	r.recovery(false)
+	r.publish()
+	if e := r.c.table.Entry(pg0); len(e.GiveUps) != 0 {
+		t.Fatalf("the edit's table records %+v", e.GiveUps)
+	}
+	r.tick(5_000_000)
+	if rp, got := r.read(y); rp.Status == StatusOK && got[0] != 0x22 {
+		t.Fatalf("Y reads %#x", got[0])
+	}
+}

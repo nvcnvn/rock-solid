@@ -498,3 +498,65 @@ func TestIntervalsRaisedByTableChanges(t *testing.T) {
 		}
 	})
 }
+
+// A give-up commits only in a PG whose members, marks and activation the table leaves as they were, interval k+1 a copy of
+// k; in a PG an edit, a mark change, a refill or a balance move changes it is left out, for the leader to check again.
+func TestAGiveUpCommitsOnlyWithItsMembersUnchanged(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		prep func(l *layout, in *Inputs)
+	}{
+		{"alone", func(*layout, *Inputs) {}},
+		{"with an edit", func(l *layout, in *Inputs) {
+			e := &l.pools().PGs[0]
+			in.Edits = []Edit{{PG: pg(0), Disks: []uint32{l.onNode(l.freeNode(e))[0], e.Members[1].Disk}}}
+		}},
+		{"with a mark change", func(l *layout, _ *Inputs) { l.mark(MarkDown, l.pools().PGs[0].Members[0].Disk) }},
+		{"with a refill", func(l *layout, _ *Inputs) {
+			l.mark(MarkDown, l.pools().PGs[0].Members[0].Disk)
+			l.step(t, l.inputs(0))
+			l.now += RefillAfter
+		}},
+		{"with a move", func(l *layout, in *Inputs) {
+			l.grow(0, 2, 0)
+			l.step(t, l.inputs(0))
+			in.Moves = allMoves
+		}},
+		{"with an activation", func(l *layout, in *Inputs) {
+			ask := l.inputs(0)
+			for i, e := range l.pools().PGs {
+				ask.Asks = append(ask.Asks, PGInterval{pg(i), e.Interval})
+			}
+			l.step(t, ask)
+			for i, e := range l.pools().PGs {
+				in.Activations = append(in.Activations, PGInterval{pg(i), e.Interval})
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := placed(t, nodesOf(rep(2, 8), 4, 1, 2))
+			in := l.inputs(0)
+			tc.prep(l, in)
+			in.Now, in.Pools = l.now, l.inputs(0).Pools
+			prev := l.table
+			for i, e := range prev.Pools[0].PGs {
+				in.GiveUps = append(in.GiveUps, PGGiveUp{PG: pg(i), GiveUp: GiveUp{Interval: e.Interval, All: true}})
+			}
+			l.step(t, in)
+			var left int
+			for i, e := range l.pools().PGs {
+				b := &prev.Pools[0].PGs[i]
+				copied := slices.Equal(e.Members, b.Members) && e.Activated == b.Activated
+				if gave := e.givenUp() == b.Interval; gave != copied || gave && e.Interval != b.Interval+1 {
+					t.Fatalf("PG %d from %+v to %+v", i, b, e)
+				}
+				if !copied {
+					left++
+				}
+			}
+			if (left == 0) != (tc.name == "alone") {
+				t.Fatalf("%d give-ups left out", left)
+			}
+		})
+	}
+}

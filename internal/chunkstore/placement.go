@@ -138,7 +138,7 @@ type placementPlants struct {
 	giveUpNotStopped    bool
 }
 
-// Next computes the table after prev: live marks, settings, splits, asks and activations, leaving members removed on a recovered report for their PG's current interval while its other members stay up, reports ignored in a pool it splits since they name the parent's PG numbers, every missing member refilled, then up to in.Moves balance moves. It reports the moves it made.
+// Next computes the table after prev: live marks, settings, splits, asks and activations, leaving members removed on a recovered report for their PG's current interval while its other members stay up, reports ignored in a pool it splits since they name the parent's PG numbers, every missing member refilled, then up to in.Moves balance moves, and each give-up of a PG's current interval whose members, marks and activation the rest leaves as they were. It reports the moves it made.
 func Next(prev *Table, in *Inputs) (Table, int) {
 	pools := slices.Clone(in.Pools)
 	slices.SortFunc(pools, func(a, b PoolInputs) int { return cmp.Compare(a.ID, b.ID) })
@@ -205,7 +205,7 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 	gaveUp := make([]*GiveUp, n)
 	for i, g := range all.GiveUps {
 		if !split && g.PG.Pool == in.ID && int(g.PG.Index) < n && g.Interval == base[g.PG.Index].Interval {
-			gaveUp[g.PG.Index], asked[g.PG.Index] = &all.GiveUps[i].GiveUp, true
+			gaveUp[g.PG.Index] = &all.GiveUps[i].GiveUp
 		}
 	}
 	edits := make([]*Edit, n)
@@ -266,7 +266,11 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 	moves := pl.balance(max(0, all.Moves-moved))
 	for i := range pl.entries {
 		e, b := &pl.entries[i], &base[i]
-		if b.Interval > 0 && (slices.Equal(e.Members, b.Members) || all.plant.editKeepsInterval && sameDisks(e.Members, b.Members)) && !settings && !split && !asked[i] {
+		// A give-up commits interval k+1 as a copy of k, else peering of k+1 skips k without reaching k's members.
+		if gaveUp[i] != nil && (settings || e.Activated != b.Activated || !slices.Equal(e.Members, b.Members)) {
+			e.GiveUps, gaveUp[i] = b.GiveUps, nil
+		}
+		if b.Interval > 0 && (slices.Equal(e.Members, b.Members) || all.plant.editKeepsInterval && sameDisks(e.Members, b.Members)) && !settings && !split && !asked[i] && gaveUp[i] == nil {
 			continue
 		}
 		if b.Interval > 0 {
