@@ -929,7 +929,7 @@ func TestPlantedRecoveryBugBreaksTheFaultRun(t *testing.T) {
 // leaves a member mapping other bytes once recovery settles (56 of 500); and a primary that holds a
 // write to a chunk it called unfound rather than answering it (neg-write-on-unfound) still holds it
 // once the run settles (53 of 500); and a primary whose interval a failed version ended that never
-// asks for the next (neg-never-ask) still leads it once the run settles (7 of 500).
+// asks for the next (neg-never-ask) still leads it once the run settles (250 of 500).
 func TestPlantedPeeringBugsBreakTheFaultRun(t *testing.T) {
 	for _, p := range []struct {
 		name string
@@ -943,7 +943,7 @@ func TestPlantedPeeringBugsBreakTheFaultRun(t *testing.T) {
 		{"activated before lists are durable", 7, faultPlant{invMappedAnswers, func(c *rcluster) { c.replicaPlants.activateEarly = true }}},
 		{"missing entry cleared", 7, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.relistNever, c.storePlants.clearListed = true, true }}},
 		{"a write held on an unfound chunk", 3, faultPlant{invHeldOrdered, func(c *rcluster) { c.replicaPlants.writeOnUnfound = true }}},
-		{"no ask after a failed version", 16, faultPlant{invAsks, func(c *rcluster) { c.replicaPlants.neverAskOnFail = true }}},
+		{"no ask after a failed version", 0, faultPlant{invAsks, func(c *rcluster) { c.replicaPlants.neverAskOnFail = true }}},
 	} {
 		if err := runFaults(t, p.seed, 2, 24, &p.faultPlant); err == nil || !strings.Contains(err.Error(), p.inv) {
 			t.Errorf("%s at seed %d: %v", p.name, p.seed, err)

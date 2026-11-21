@@ -1604,7 +1604,6 @@ func (r *Replica) fail(ctx *core.Context, i int, ref Response, out *ReplicaOutpu
 	out.note(trace.OutFail, c.Hash(), from, 0, 0, 0)
 	if l := r.lead(pg); l >= 0 && r.leads[l].interval == v.interval {
 		r.leads[l].asking = true
-		r.leads[l].asked = r.leads[l].asked || r.plant.neverAskOnFail
 	}
 	if own := r.refusal(pg); ref.Epoch <= own.Epoch {
 		ref = own
@@ -1783,7 +1782,7 @@ func (r *Replica) counterSpent(ctx *core.Context, i int, buf core.IOBuf, out *Re
 func (r *Replica) ask(out *ReplicaOutput) {
 	for i := range r.leads {
 		l := &r.leads[i]
-		if !l.asking || l.asked || r.plant.neverAsk && r.cfg.Restarted || slices.ContainsFunc(r.vers, func(v version) bool { return v.u.PG.PG == l.pg && !v.done && !v.commit }) {
+		if !l.asking || l.asked || r.plant.neverAsk && r.cfg.Restarted || r.plant.neverAskOnFail || slices.ContainsFunc(r.vers, func(v version) bool { return v.u.PG.PG == l.pg && !v.done && !v.commit }) {
 			continue
 		}
 		l.asked = true
