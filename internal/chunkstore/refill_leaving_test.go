@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 	"github.com/nvcnvn/rock-solid/internal/trace"
 )
 
@@ -292,25 +293,40 @@ func (r *soleRun) giveUp() error {
 	return nil
 }
 
-// onlyLost reports, as g commits on e, a disk not declared lost that holds an acknowledged version of a chunk not given up
-// already and is no up member of e, or can serve a chunk g drops. Unlike the model's property 23 it excepts no removed disk.
+// onlyLost reports, as g commits on e, a disk neither declared lost nor removed that holds an acknowledged version of a
+// chunk of the PG, one no earlier give-up covers, and is no up member of e, or can serve such a chunk g drops, as the
+// model's property 23. A disk holds a version its index has, current or whole, and any as new as the newest acknowledged.
 func (r *soleRun) onlyLost(e *PGEntry, g PGGiveUp) error {
+	acked := map[core.ChunkID][]uint64{}
 	for ch, v := range r.acked {
-		if slices.ContainsFunc(e.GiveUps, func(x GiveUp) bool { return x.Interval >= intervalOf(v) && (x.All || slices.Contains(x.Chunks, ch)) }) {
+		acked[ch] = append(acked[ch], v)
+	}
+	for id, rp := range r.c.cl.replies {
+		if ch, ok := r.c.updated[id]; ok && rp.Status == StatusOK && rp.Version != 0 {
+			acked[ch] = append(acked[ch], rp.Version)
+		}
+	}
+	for ch, vs := range acked {
+		vs = slices.DeleteFunc(vs, func(v uint64) bool {
+			return slices.ContainsFunc(e.GiveUps, func(x GiveUp) bool { return x.Interval >= intervalOf(v) && (x.All || slices.Contains(x.Chunks, ch)) })
+		})
+		if len(vs) == 0 {
 			continue
 		}
+		newest := slices.Max(vs)
 		drops := g.Drop && (g.All || slices.Contains(g.Chunks, ch))
 		for n := range r.c.reps {
 			d, idx := r.c.ids[n], r.c.reps[n].Store().Index()
-			if r.c.declared[d] || idx == nil {
+			if r.c.declared[d] || idx == nil || r.removed(d) {
 				continue
 			}
 			x, _ := idx.Chunk(testPool, ch)
-			if x.Version >= v && !slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == d && m.Mark == MarkUp }) {
-				return fmt.Errorf("giving up %d: %#x of %v is on disk %d, no up member of %v", g.Interval, v, ch, d, e.Members)
+			holds := x.Version >= newest || slices.Contains(vs, x.Version) || slices.Contains(vs, x.Whole)
+			if holds && !slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == d && m.Mark == MarkUp }) {
+				return fmt.Errorf("giving up %d: %#x of %v is on disk %d, no up member of %v", g.Interval, x.Version, ch, d, e.Members)
 			}
-			if drops && x.ListedIn == 0 && x.Whole >= v {
-				return fmt.Errorf("giving up %d drops %v, which disk %d can serve at %#x", g.Interval, ch, d, v)
+			if drops && x.ListedIn == 0 && (x.Whole >= newest || slices.Contains(vs, x.Whole)) {
+				return fmt.Errorf("giving up %d drops %v, which disk %d can serve at %#x", g.Interval, ch, d, x.Whole)
 			}
 		}
 	}
@@ -879,4 +895,115 @@ func TestAGiveUpWithAnEditKeepsTheChunksItDoesNotRecord(t *testing.T) {
 	if rp, got := r.read(y); rp.Status == StatusOK && got[0] != 0x22 {
 		t.Fatalf("Y reads %#x", got[0])
 	}
+}
+
+// A rep2 pool of 5 disks takes writes to three chunks while disks, its members more often, are cut off and come back,
+// are declared lost, and restart, and recovery stops and starts, and an operator gives up PG 0 at random through the leader's check, which commits only for a stopped or an
+// unfound interval: no give-up loses what a disk left holds, and a chunk written since every give-up covering its
+// newest acknowledged version never reads as zeros. The run fails if its seeds, more than one, never give up.
+func TestGiveUpsUnderFaultsLoseOnlyWhatIsLost(t *testing.T) {
+	var runs, gave int
+	seeds.Run(t, 0, 20, func(seed uint64) {
+		runs++
+		n, err := giveUpRun(t, seed)
+		if err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+		gave += n
+	})
+	t.Logf("%d seeds, %d give-ups committed", runs, gave)
+	if runs > 1 && gave == 0 {
+		t.Fatalf("none of %d seeds gave up", runs)
+	}
+}
+
+func giveUpRun(t *testing.T, seed uint64) (int, error) {
+	rng := core.NewRand(seed)
+	r, _, _ := refillRun(t, 2, 2, 5, nil, "")
+	r.watch()
+	r.c.planted = true
+	chunks := []core.ChunkID{chunkIn(pg0, 1, 0), chunkIn(pg0, 1, 1), chunkIn(pg0, 1, 2)}
+	pick := func(ok func(d uint32) bool) uint32 {
+		var ds []uint32
+		for d := uint32(1); d <= 5; d++ {
+			if ok(d) {
+				ds = append(ds, d)
+			}
+		}
+		if len(ds) == 0 {
+			return 0
+		}
+		return ds[rng.Below(uint64(len(ds)))]
+	}
+	gave := 0
+	for range 60 {
+		switch [...]int{0, 0, 2, 2, 3, 4, 4, 5, 6, 6, 7}[rng.Below(11)] {
+		case 0:
+			ch := chunks[rng.Below(uint64(len(chunks)))]
+			r.answered(r.c.write(pg0, ch, 0, bytes.Repeat([]byte{byte(rng.Range(1, 255))}, core.BlockSize)), 5_000_000)
+		case 2:
+			member := func(d uint32) bool {
+				return slices.ContainsFunc(r.members(), func(m Member) bool { return m.Disk == d })
+			}
+			if len(r.isolated) < 2 {
+				if d := pick(func(d uint32) bool { return !r.isolated[d] && (member(d) || rng.Chance(1, 3)) }); d != 0 {
+					r.lose(d)
+				}
+			}
+		case 3:
+			if d := pick(func(d uint32) bool { return r.isolated[d] && !r.c.declared[d] }); d != 0 {
+				r.back(d)
+			}
+		case 4:
+			if d := pick(func(d uint32) bool { return r.isolated[d] && !r.c.declared[d] }); d != 0 && len(r.c.declared) < 2 && r.a.rec.Lost(d) == nil {
+				if r.c.declared == nil {
+					r.c.declared = map[uint32]bool{}
+				}
+				r.c.declared[d] = true
+			}
+		case 5:
+			if d := pick(func(d uint32) bool { return !r.isolated[d] }); d != 0 {
+				n := uint32(r.c.node(d))
+				r.c.s.CrashRandom(n)
+				r.c.s.Restart(n)
+			}
+		case 6:
+			had := len(r.c.table.Entry(pg0).GiveUps)
+			if r.giveUp() == nil && len(r.c.table.Entry(pg0).GiveUps) > had {
+				gave++
+			}
+		case 7:
+			r.recovery(rng.Chance(1, 2))
+		}
+		r.tick(core.Tick(rng.Range(1, 70)) * 1_000_000)
+	}
+	for d := range r.isolated {
+		if !r.c.declared[d] {
+			r.back(d)
+		}
+	}
+	r.recovery(true)
+	r.tick(2 * DegradedRefillAfter)
+	if r.c.found != nil {
+		return gave, r.c.found
+	}
+	if err := r.c.inv.Check(); err != nil {
+		return gave, err
+	}
+	e := r.c.table.Entry(pg0)
+	newest := map[core.ChunkID]uint64{}
+	for id, rp := range r.c.cl.replies {
+		if ch, ok := r.c.updated[id]; ok && rp.Status == StatusOK {
+			newest[ch] = max(newest[ch], rp.Version)
+		}
+	}
+	for ch, v := range newest {
+		if slices.ContainsFunc(e.GiveUps, func(g GiveUp) bool { return g.Interval >= intervalOf(v) && (g.All || slices.Contains(g.Chunks, ch)) }) {
+			continue
+		}
+		if rp, got := r.read(ch); rp.Status == StatusOK && got[0] == 0 {
+			return gave, fmt.Errorf("%v, acknowledged at %#x past every give-up of it, reads as zeros", ch, v)
+		}
+	}
+	return gave, nil
 }

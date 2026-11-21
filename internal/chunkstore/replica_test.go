@@ -77,6 +77,8 @@ type rcluster struct {
 	reporting bool
 	// hist, once set, records every client write, punch and read.
 	hist *chunkHist
+	// updated is the chunk of each write and punch the client sent.
+	updated map[core.RequestID]core.ChunkID
 }
 
 type sendKey struct {
@@ -457,6 +459,10 @@ func (c *rcluster) node(disk uint32) int {
 func (c *rcluster) update(pgf PGFields, ch core.ChunkID, off uint32, data []byte, n uint32, edit func(*Update)) core.RequestID {
 	c.nextID++
 	id := c.nextID
+	if c.updated == nil {
+		c.updated = map[core.RequestID]core.ChunkID{}
+	}
+	c.updated[id] = ch
 	_, e := c.table.entry(pgf.PG)
 	lead, _ := e.primary()
 	u := Update{Kind: KindPunch, ID: id, PG: pgf, Session: 1, Incarnation: 1, Chunk: ch, Off: off, Len: n}

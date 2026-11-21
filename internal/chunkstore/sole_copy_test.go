@@ -21,6 +21,8 @@ type soleRun struct {
 	cond Conditions
 	// lostErr is what the first give-up that broke invOnlyLost found.
 	lostErr error
+	// ivs is the members of each interval of PG 0 a table named.
+	ivs map[uint32][]Member
 }
 
 // watch starts an authority on a node of its own that every replica heartbeats from each start and that hears their reports in w.
@@ -59,6 +61,7 @@ func newSoleRun(t *testing.T, replicas, minLive, disks int) *soleRun {
 	tbl, _ := Next(&empty, &Inputs{Pools: a.pools()})
 	c := newSoleCluster(t, tbl, disks)
 	r := &soleRun{c: c, a: a, isolated: map[uint32]bool{}, acked: map[core.ChunkID]uint64{}}
+	r.noteIntervals()
 	c.inv.Register(invStranded, func() error {
 		_, e := c.table.entry(pg0)
 		for ch, v := range r.acked {
@@ -142,11 +145,35 @@ func (r *soleRun) publish() {
 	}
 	c.noteTable(&next)
 	c.table = next
+	r.noteIntervals()
 	for n := range c.reps {
 		if !r.isolated[uint32(n)+1] {
 			c.call(n, func(ctx *core.Context, rep *Replica, out *ReplicaOutput) { rep.SetTable(ctx, next, out) })
 		}
 	}
+}
+
+func (r *soleRun) noteIntervals() {
+	if r.ivs == nil {
+		r.ivs = map[uint32][]Member{}
+	}
+	if e := r.c.table.Entry(pg0); r.ivs[e.Interval] == nil {
+		r.ivs[e.Interval] = slices.Clone(e.Members)
+	}
+}
+
+// removed reports whether disk d left PG 0 as the model's Removed has it: leaving in the last interval naming it, which
+// is not the current one, and every member of the interval after it declared lost.
+func (r *soleRun) removed(d uint32) bool {
+	var last uint32
+	for iv, ms := range r.ivs {
+		if iv > last && slices.ContainsFunc(ms, func(m Member) bool { return m.Disk == d }) {
+			last = iv
+		}
+	}
+	next, ok := r.ivs[last+1]
+	return last != 0 && ok && slices.ContainsFunc(r.ivs[last], func(m Member) bool { return m.Disk == d && m.Leaving }) &&
+		!slices.ContainsFunc(next, func(m Member) bool { return !r.c.declared[m.Disk] })
 }
 
 // lose cuts disk off from every node, the client's and a watch's authority's included, as a power cut would, and marks it down; its disk stays as it was.
