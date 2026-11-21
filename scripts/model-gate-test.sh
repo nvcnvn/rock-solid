@@ -82,7 +82,7 @@ sed -i.bak "s/$keep/lease.noStepCheck	TestNoSuchTest/" scripts/model-rules.tsv
 expect 1 "a test that does not exist" "no test TestNoSuchTest"
 sed -i.bak "s/$keep/lease.noStepCheck	TestPlantedBugsBreakTheirTraces/" scripts/model-rules.tsv
 expect 1 "a test whose file does not name the plant" "does not name noStepCheck"
-sed -i.bak 's/^- \[ \] \*\*MetaStore invariants\*\*/- [x] **MetaStore invariants**/' docs/build-checklist.md
+sed -i.bak "s/$keep/open	MetaStore invariants/" scripts/model-rules.tsv
 expect 1 "an open row whose item is ticked" "is no unticked checklist item"
 sed -i.bak '/^epoch\/neg-no-step-check/d' scripts/model-rules.tsv
 expect 1 "a removed row" "epoch/neg-no-step-check needs exactly one row"

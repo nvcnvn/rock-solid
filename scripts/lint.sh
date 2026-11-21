@@ -4,6 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 scripts/model-gate.sh
+scripts/model-gate-test.sh
 
 GOTOOLCHAIN=$(sed -n 's/^toolchain //p' go.mod)
 export GOTOOLCHAIN
