@@ -674,6 +674,17 @@ func raftBoundRun(t *testing.T, seed uint64) {
 	// restored is each shard's bytes and base at the last restart, while it has not compacted since.
 	type restart struct{ bytes, base uint64 }
 	restored := map[uint32]restart{}
+	bounded := func(i uint64) {
+		for _, k := range r.shards {
+			bound := share + round
+			if at, ok := restored[k.owner]; ok && k.st.Base().Index == at.base {
+				bound = max(bound, at.bytes)
+			}
+			if b := k.st.Bytes() + k.held(); b > bound {
+				t.Fatalf("chunk write %d: shard %d retains %d bytes, past its share %d and a round", i, k.owner, b, share)
+			}
+		}
+	}
 	for i := uint64(0); i*uint64(len(data)) < 2*size; i++ {
 		r.chunkWrite(core.ChunkID{Index: uint32(i % 32)}, data)
 		if rnd.Below(3) == 0 {
@@ -684,6 +695,7 @@ func raftBoundRun(t *testing.T, seed uint64) {
 				}
 				r.write(k, 1+int(rnd.Below(8)), 1000+int(rnd.Below(7000)))
 			}
+			bounded(i)
 		}
 		for range rnd.Below(6) {
 			r.step()
@@ -691,15 +703,7 @@ func raftBoundRun(t *testing.T, seed uint64) {
 		if r.failed != nil || !r.s.Serving() {
 			t.Fatalf("chunk write %d: reply %+v, store error %v", i, r.failed, r.s.Err())
 		}
-		for _, k := range r.shards {
-			bound := share + round
-			if at, ok := restored[k.owner]; ok && k.st.Base().Index == at.base {
-				bound = max(bound, at.bytes)
-			}
-			if b := k.st.Bytes() + k.held(); b > bound {
-				t.Fatalf("chunk write %d: shard %d retains %d bytes, past its share %d and a round", i, k.owner, b, share)
-			}
-		}
+		bounded(i)
 		if i%256 == 255 {
 			r.crash(rnd)
 			for _, k := range r.shards {
