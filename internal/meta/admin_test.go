@@ -1,6 +1,7 @@
 package meta
 
 import (
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -141,6 +142,50 @@ func TestALostDiskIsAnsweredOnceGone(t *testing.T) {
 	r.admin(3, Admin{Op: AdminLost, Disk: 2})
 	if got := r.answers(); len(got[3]) != 1 || got[3][0].Refused != "" {
 		t.Fatalf("a repeated declaration answered %+v", got)
+	}
+}
+
+// A give-up is refused for a PG the table lacks and for one with nothing lost; once its primary reports chunks unfound,
+// it is answered when it commits, with the interval it gave up and the chunks it dropped.
+func TestAGiveUpIsAnsweredWithWhatItDropped(t *testing.T) {
+	r := newHostRun(t)
+	r.lead()
+	r.report(&NodeReport{Node: 2, Opened: []OpenedDisk{{Device: 1, Log: 0x77, Blocks: 1 << 20}}})
+	r.run(StepInterval * 3)
+	r.admin(1, Admin{Op: AdminPool, Pool: 1, Spec: chunkstore.PoolSpec{Replicas: new(1), MinLive: new(1), PGCount: new(uint32(8))}})
+	r.run(StepInterval * 5)
+	r.answers()
+	pg := core.PGID{Pool: 1, Index: 3}
+	k := r.h.Control().Table().Entry(pg).Interval
+	for i, c := range []struct {
+		a    Admin
+		want error
+	}{
+		{Admin{Op: AdminGiveUp, Pool: 1, PG: 8}, ErrUnknownPG},
+		{Admin{Op: AdminGiveUp, Pool: 1, PG: 3}, chunkstore.ErrNothingLost},
+	} {
+		r.admin(uint64(i+2), c.a)
+		if got := r.answers(); len(got[uint64(i+2)]) != 1 || !strings.Contains(got[uint64(i+2)][0].Refused, c.want.Error()) {
+			t.Fatalf("%+v answered %+v, want a refusal naming %q", c.a, got, c.want)
+		}
+	}
+	lost := []core.ChunkID{{Volume: 1, Index: 4}, {Volume: 1, Index: 12}}
+	var m core.Msg
+	if err := chunkstore.Attach(nil, &m, chunkstore.AppendReport(nil, &chunkstore.Report{ID: 1, Leads: []chunkstore.LeadState{{PG: pg, Interval: k, Active: true, Unfound: 2, Chunks: lost}}}), core.NoBuf); err != nil {
+		t.Fatal(err)
+	}
+	r.recv(core.NodeID{Node: 2, Loop: 1}, m)
+	r.admin(4, Admin{Op: AdminGiveUp, Pool: 1, PG: 3})
+	if got := r.answers(); len(got) != 0 {
+		t.Fatalf("answered before the give-up committed: %+v", got)
+	}
+	r.run(StepInterval * 5)
+	want := chunkstore.GiveUp{Interval: k, Drop: true, Chunks: lost}
+	if got := r.answers(); len(got[4]) != 1 || got[4][0].Refused != "" || !reflect.DeepEqual(got[4][0].GiveUp, want) {
+		t.Fatalf("answered %+v, want %+v", got, want)
+	}
+	if e := r.h.Control().Table().Entry(pg); e.Interval != k+1 {
+		t.Fatalf("after the give-up: %+v", e)
 	}
 }
 
@@ -325,7 +370,7 @@ func TestAdminCrossesTheWireWhole(t *testing.T) {
 }
 
 func FuzzDecodeAdmin(f *testing.F) {
-	for _, a := range []Admin{{Op: AdminLost, Disk: 2}, {Op: AdminRemove, Disk: 3}, {Op: AdminFailed}} {
+	for _, a := range []Admin{{Op: AdminLost, Disk: 2}, {Op: AdminRemove, Disk: 3}, {Op: AdminFailed}, {Op: AdminGiveUp, Pool: 1, PG: 7}} {
 		addWire(f, func(pool core.BufPool, m *core.Msg) { _ = EncodeAdmin(pool, 1, 4, &a, m) })
 	}
 	fuzzNodeWire(f, func(pool core.BufPool, m *core.Msg) {
@@ -345,7 +390,8 @@ func FuzzDecodeAdmin(f *testing.F) {
 }
 
 func FuzzDecodeAdminAnswer(f *testing.F) {
-	for _, a := range []AdminAnswer{{}, {Refused: "disk 2: chunkstore: disk not down"}, {Failed: []FailedDevice{{Node: 2, Device: 9}, {Node: 3, Device: 1 << 40}}}} {
+	for _, a := range []AdminAnswer{{}, {Refused: "disk 2: chunkstore: disk not down"}, {Failed: []FailedDevice{{Node: 2, Device: 9}, {Node: 3, Device: 1 << 40}}},
+		{GiveUp: chunkstore.GiveUp{Interval: 3, All: true}}, {GiveUp: chunkstore.GiveUp{Interval: 9, Drop: true, Chunks: []core.ChunkID{{Volume: 1, Inode: 2, Index: 3}}}}} {
 		addWire(f, func(pool core.BufPool, m *core.Msg) { _ = EncodeAdminAnswer(pool, 1, 4, &a, m) })
 	}
 	fuzzNodeWire(f, func(pool core.BufPool, m *core.Msg) {

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
+	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/meta"
 )
 
@@ -65,9 +66,11 @@ func TestParseAdminTakesEachCommand(t *testing.T) {
 		"pool 2 -ctl 1=127.0.0.1:7000 -preset rep2 -pg-count 64": {Op: meta.AdminPool, Pool: 2, Spec: chunkstore.PoolSpec{Replicas: new(2), PGCount: new(uint32(64))}},
 		"pool 3 -ctl 1=127.0.0.1:7000 -overcommit=false -failure-domain disk": {Op: meta.AdminPool, Pool: 3,
 			Spec: chunkstore.PoolSpec{Overcommit: new(false), FailureDomain: "disk"}},
+		"pg give-up 2 0 -ctl 1=127.0.0.1:7000": {Op: meta.AdminGiveUp, Pool: 2},
+		"pg give-up 2 7 -ctl 1=127.0.0.1:7000": {Op: meta.AdminGiveUp, Pool: 2, PG: 7},
 	} {
 		a, cfg, err := parseAdmin(strings.Fields(args))
-		if err != nil || a.Op != want.Op || a.Disk != want.Disk || a.Pool != want.Pool || !reflect.DeepEqual(a.Spec, want.Spec) || cfg.Group != 1 || len(cfg.Ctls) == 0 {
+		if err != nil || a.Op != want.Op || a.Disk != want.Disk || a.Pool != want.Pool || a.PG != want.PG || !reflect.DeepEqual(a.Spec, want.Spec) || cfg.Group != 1 || len(cfg.Ctls) == 0 {
 			t.Errorf("%q parsed as %+v, %+v, %v", args, a, cfg, err)
 		}
 	}
@@ -82,9 +85,29 @@ func TestParseAdminTakesEachCommand(t *testing.T) {
 		"pool 1 -ctl 1=127.0.0.1:7000 -preset rep9",
 		"pool 1 -ctl 1=127.0.0.1:7000 -write-limit 300",
 		"pool 1 -ctl 1=127.0.0.1:7000 -replicas -1",
+		"pg give-up 2 -ctl 1=127.0.0.1:7000",
+		"pg give-up 0 1 -ctl 1=127.0.0.1:7000",
+		"pg give-up 2 x -ctl 1=127.0.0.1:7000",
+		"pg give-up 2 4294967296 -ctl 1=127.0.0.1:7000",
+		"pg give-up 2 1 -ctl 1=127.0.0.1:7000 -replicas 2",
 	} {
 		if _, _, err := parseAdmin(strings.Fields(args)); err == nil {
 			t.Errorf("%q taken", args)
+		}
+	}
+}
+
+// A give-up prints the interval it gave up and each chunk it dropped, or that it dropped none.
+func TestAGiveUpPrintsWhatItDropped(t *testing.T) {
+	a := meta.Admin{Op: meta.AdminGiveUp, Pool: 1, PG: 3}
+	for g, want := range map[*chunkstore.GiveUp]string{
+		{Interval: 5, All: true}: "PG 1.3 interval 5 given up, every chunk kept as its members hold it\n",
+		{Interval: 6, Drop: true, Chunks: []core.ChunkID{{Volume: 1, Index: 4}, {Volume: 1, Inode: 2, Index: 9}}}: "PG 1.3 interval 6 given up, 2 chunks dropped\nchunk 1/0/4 dropped\nchunk 1/2/9 dropped\n",
+	} {
+		var out bytes.Buffer
+		printDone(&out, &a, &meta.AdminAnswer{GiveUp: *g})
+		if out.String() != want {
+			t.Errorf("%+v printed %q, want %q", *g, out.String(), want)
 		}
 	}
 }

@@ -33,7 +33,8 @@ const adminUsage = `usage:
   rock-solid disk lost <disk> -ctl node=host:port,...      declare a down disk lost for good
   rock-solid disk remove <disk> -ctl node=host:port,...    remove a drained disk
   rock-solid disk failed -ctl node=host:port,...           list the devices nodes left failed at start
-  rock-solid pool <pool> -ctl node=host:port,... [settings] create or change a pool`
+  rock-solid pool <pool> -ctl node=host:port,... [settings] create or change a pool
+  rock-solid pg give-up <pool> <pg> -ctl node=host:port,...  give up what a PG's lost disks alone held`
 
 // runAdmin runs an operator's command line, args after the program's name, and returns its exit
 // code: 0 once the command took effect, 1 when the leader refused it or none answered, 2 for a
@@ -53,6 +54,12 @@ func runAdmin(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "rock-solid: refused: %s\n", an.Refused)
 		return 1
 	}
+	printDone(stdout, &a, &an)
+	return 0
+}
+
+// printDone prints what command a, answered an, did.
+func printDone(stdout io.Writer, a *meta.Admin, an *meta.AdminAnswer) {
 	switch a.Op {
 	case meta.AdminLost:
 		_, _ = fmt.Fprintf(stdout, "disk %d declared lost\n", a.Disk)
@@ -60,6 +67,19 @@ func runAdmin(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stdout, "disk %d removed\n", a.Disk)
 	case meta.AdminPool:
 		_, _ = fmt.Fprintf(stdout, "pool %d set\n", a.Pool)
+	case meta.AdminGiveUp:
+		g := an.GiveUp
+		switch {
+		case g.All && g.Drop:
+			_, _ = fmt.Fprintf(stdout, "PG %d.%d interval %d given up, every chunk dropped\n", a.Pool, a.PG, g.Interval)
+		case g.All:
+			_, _ = fmt.Fprintf(stdout, "PG %d.%d interval %d given up, every chunk kept as its members hold it\n", a.Pool, a.PG, g.Interval)
+		default:
+			_, _ = fmt.Fprintf(stdout, "PG %d.%d interval %d given up, %d chunks dropped\n", a.Pool, a.PG, g.Interval, len(g.Chunks))
+		}
+		for _, c := range g.Chunks {
+			_, _ = fmt.Fprintf(stdout, "chunk %d/%d/%d dropped\n", c.Volume, c.Inode, c.Index)
+		}
 	case meta.AdminFailed:
 		if len(an.Failed) == 0 {
 			_, _ = fmt.Fprintln(stdout, "no failed devices")
@@ -68,10 +88,9 @@ func runAdmin(args []string, stdout, stderr io.Writer) int {
 			_, _ = fmt.Fprintf(stdout, "node %d device %#x failed\n", f.Node, f.Device)
 		}
 	}
-	return 0
 }
 
-// parseAdmin parses `disk lost|remove <disk>`, `disk failed` or `pool <pool> [settings]` with the
+// parseAdmin parses `disk lost|remove <disk>`, `disk failed`, `pool <pool> [settings]` or `pg give-up <pool> <pg>` with the
 // flags that say where the command goes, before or after the positional arguments.
 func parseAdmin(args []string) (meta.Admin, adminConfig, error) {
 	var a meta.Admin
@@ -114,6 +133,19 @@ func parseAdmin(args []string) (meta.Admin, adminConfig, error) {
 		a.Pool = core.PoolID(id)
 		if err == nil {
 			a.Spec, err = pool.spec(fs)
+		}
+	case len(pos) == 4 && pos[0] == "pg" && pos[1] == "give-up" && !pooled:
+		a.Op = meta.AdminGiveUp
+		var id uint32
+		id, err = number(pos[2])
+		a.Pool = core.PoolID(id)
+		if err == nil {
+			var n uint64
+			n, err = strconv.ParseUint(pos[3], 10, 32)
+			a.PG = uint32(n)
+			if err != nil {
+				err = fmt.Errorf("PG %q is not a number", pos[3])
+			}
 		}
 	default:
 		err = errors.New("no such command")

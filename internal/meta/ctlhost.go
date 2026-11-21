@@ -139,6 +139,8 @@ type adminWait struct {
 	starter
 	a    Admin
 	want chunkstore.Pool
+	// interval is the interval a give-up takes, its PG's current one when the command arrived.
+	interval uint32
 }
 
 // FormatCtlHost starts a host on a new disk, which it formats with sb. Its first round is the
@@ -494,6 +496,14 @@ func (h *CtlHost) admin(ctx *core.Context, ev *core.Event, request uint64, out *
 		err = wrap(err, "pool %d", w.a.Pool)
 	case w.a.Op == AdminLost:
 		err = wrap(c.Lost(ctx.Now, w.a.Disk), "disk %d", w.a.Disk)
+	case w.a.Op == AdminGiveUp:
+		pg := core.PGID{Pool: w.a.Pool, Index: w.a.PG}
+		err = ErrUnknownPG
+		if e := c.table.Entry(pg); e != nil {
+			w.interval = e.Interval
+			err = c.GiveUp(ctx.Now, pg, w.interval)
+		}
+		err = wrap(err, "PG %s", pgName(pg))
 	default:
 		err = wrap(c.Remove(ctx.Now, w.a.Disk), "disk %d", w.a.Disk)
 	}
@@ -503,6 +513,8 @@ func (h *CtlHost) admin(ctx *core.Context, ev *core.Event, request uint64, out *
 	}
 	h.admins = append(h.admins, w)
 }
+
+func pgName(pg core.PGID) string { return fmt.Sprintf("%d.%d", pg.Pool, pg.Index) }
 
 func wrap(err error, format string, arg any) error {
 	if err == nil {
@@ -518,7 +530,21 @@ func (h *CtlHost) settle(ctx *core.Context, out *CtlHostOutput) {
 	c := h.ctl
 	h.admins = slices.DeleteFunc(h.admins, func(w adminWait) bool {
 		var refused string
-		if w.a.Op == AdminPool {
+		var gave chunkstore.GiveUp
+		if w.a.Op == AdminGiveUp {
+			x := chunkstore.PGInterval{PG: core.PGID{Pool: w.a.Pool, Index: w.a.PG}, Interval: w.interval}
+			if slices.Contains(c.giveUps, x) {
+				return false
+			}
+			if e := c.table.Entry(x.PG); e != nil {
+				if i := slices.IndexFunc(e.GiveUps, func(g chunkstore.GiveUp) bool { return g.Interval == x.Interval }); i >= 0 {
+					gave = e.GiveUps[i]
+				}
+			}
+			if gave.Interval == 0 {
+				refused = fmt.Sprintf("PG %s: the committed state refused the give-up of interval %d before it committed", pgName(x.PG), x.Interval)
+			}
+		} else if w.a.Op == AdminPool {
 			if slices.ContainsFunc(c.staged, func(s PoolRecord) bool { return s.ID == w.a.Pool }) {
 				return false
 			}
@@ -533,7 +559,7 @@ func (h *CtlHost) settle(ctx *core.Context, out *CtlHostOutput) {
 				refused = fmt.Sprintf("disk %d: the committed state refused it before it committed", w.a.Disk)
 			}
 		}
-		h.answerAdmin(ctx, &w, &AdminAnswer{Refused: refused}, out)
+		h.answerAdmin(ctx, &w, &AdminAnswer{Refused: refused, GiveUp: gave}, out)
 		return true
 	})
 }
