@@ -428,11 +428,10 @@ func currentMinLiveTrace(t *testing.T, plant bool) error {
 	return c.found
 }
 
-// noDemoteTrace is neg-no-demote's trace: primary 1 orders 1.1, its sends to both members lost, and interval 2 makes disk 2
-// primary with disk 1 in maintenance. Disk 1, no longer leading, must refuse 1.1's client itself: no member refuses 1.1 and
-// peering, which drops it, commits nothing that would answer it. In the seeded runs a member reached by the demoted primary's
-// version answers it, a lost send comes only with a lost connection, whose resend a member refuses, and a version peering
-// keeps commits and is answered OK.
+// noDemoteTrace is neg-no-demote's trace: primary 1 orders 1.1 while cut off from both members, and interval 2 makes disk 2
+// primary with disk 1 in maintenance before the cut heals. Disk 1, no longer leading, must refuse 1.1's client itself: no
+// member ever held 1.1, a resend of an interval that ended is not sent, and peering, which drops 1.1, commits nothing that
+// would answer it. In the seeded runs a version that reached a member is answered by it, or by peering keeping it.
 func noDemoteTrace(t *testing.T, plant bool) error {
 	c := newRCluster(t, rtable(4, 2))
 	c.replicaPlants.noDemote = plant
@@ -441,16 +440,17 @@ func noDemoteTrace(t *testing.T, plant bool) error {
 	}
 	c.planted = true
 	ch := chunkIn(pg0, 4, 0)
-	c.drop = func(d int, a *core.Action) bool {
-		return d == 0 && a.Kind == core.ActNetSend && a.Msg.Len >= headSize && Kind(a.Msg.Body[1]) == KindReplicaWrite
-	}
+	c.s.Partition(0, 1, false)
+	c.s.Partition(0, 2, false)
 	w := c.write(pg0, ch, 0, []byte{1})
-	c.runFor(100_000)
+	c.runFor(2_000_000)
 	c.publish(c.next(func(t *Table) {
 		_, e := t.entry(pg0)
 		e.Members = []Member{{Disk: 2}, {Disk: 3}, {Disk: 1, Mark: MarkMaint}}
 		e.Interval = 2
 	}), true)
+	c.s.Heal(0, 1)
+	c.s.Heal(0, 2)
 	c.settle()
 	if _, ok := c.cl.replies[w]; !ok {
 		return cmp.Or(c.found, error(&sim.Violation{Name: invOneReply, Err: fmt.Errorf("1.1 unanswered once disk 1 lost its lead")}))
