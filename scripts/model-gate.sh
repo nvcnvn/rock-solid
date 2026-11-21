@@ -3,8 +3,9 @@
 #   scripts/model-gate.sh            checks the rule map and every commit since MODEL_GATE_BASE
 #   scripts/model-gate.sh for FILE   lists the model rules whose plants FILE holds, what to read before changing it
 # The rule map, scripts/model-rules.tsv, must name each negative model configuration, and each row a
-# plant its package holds and a test whose file names that plant, or an open checklist item. That the
-# test fails under its plant is the test's own assertion; this only keeps the link from going missing.
+# plant its package holds and a test whose file names that plant, an open checklist item, or none and
+# why the code has no such rule to remove. That the test fails under its plant is the test's own
+# assertion; this only keeps the link from going missing.
 # A commit that changes a protocol file must also change a spec or configuration under models/, or
 # say why not in a line "Model: none, <reason>" of its body. Every .go file of a protocol package is
 # a protocol file unless the exclusions name it, so a new file starts covered. MODEL_GATE_BASE
@@ -16,7 +17,7 @@ map=scripts/model-rules.tsv
 protocol='^(internal/(chunkstore|lease|meta|node|raftshard)|third_party/raft)/.*\.go$'
 exclude='_test\.go$|^internal/chunkstore/(admission|capacity|cleaner|detector|disks|index|pool)\.go$|^internal/meta/txn\.go$'
 tab=$'\t'
-shape="^[^$tab]+$tab(open$tab.+|[a-z]+\.[A-Za-z]+(,[A-Za-z]+)*${tab}Test[A-Za-z0-9_]+)\$"
+shape="^[^$tab]+$tab(open$tab.+|none$tab.+|[a-z]+\.[A-Za-z]+(,[A-Za-z]+)*${tab}Test[A-Za-z0-9_]+)\$"
 failed=0
 fail() {
 	echo "model gate: $*" >&2
@@ -58,6 +59,7 @@ done < <(rows | grep -v -E "$shape" || true)
 
 while IFS=$'\t' read -r rule plant test; do
 	[ -f "models/$rule.cfg" ] || fail "$rule: no such configuration"
+	[ "$plant" != none ] || continue
 	if [ "$plant" = open ]; then
 		case $test in
 		"phase "*) ! grep -q "^## Phase ${test#phase }:" docs/build-checklist.md || fail "$rule: $test is in the checklist, name its item or its plant" ;;

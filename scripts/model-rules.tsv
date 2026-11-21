@@ -3,6 +3,7 @@
 # Columns, tab separated:
 #   model/neg-config	package.plant[,plant]	Test
 #   model/neg-config	open	"Checklist item" or "phase N"
+#   model/neg-config	none	Why the code has no such rule to remove
 # A rule with no plant yet is open: its checklist item must be unticked, or its phase not yet listed.
 # The epoch lease rules whose configuration also plants NoResumeMargin have an error smaller than the 1 s
 # resume margin in every plan that fits the ci budget; the lease pair run plants Resume 0 beside them too.
@@ -115,7 +116,7 @@ recall/neg-rereg-no-wrote	open	phase 7
 recall/neg-timeout-answer	open	phase 7
 epoch/neg-answer-for-old-disk	chunkstore.answerForOldDisk	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-current-min-live	chunkstore.currentMinLive	TestPlantedBugsBreakTheirTraces
-epoch/neg-fail-only-one	open	Plants for the epoch model's new rules
+epoch/neg-fail-only-one	none	A member refuses each later version of a chunk past one it failed (replica.go, memberUpdate's failed check), and a version failing on the primary's own log fails the later ones queued behind it, so each is refused in its own right; the model's wait comes from its refusal costing a fault
 epoch/neg-log-past-failed	chunkstore.logPastFailed	TestPlantedBugsBreakTheirTraces
 epoch/neg-never-ask	chunkstore.neverAskOnFail	TestPlantedPeeringBugsBreakTheFaultRun
 epoch/neg-no-demote	chunkstore.noDemote	TestPlantedBugsBreakTheirTraces

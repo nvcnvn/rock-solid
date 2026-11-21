@@ -483,16 +483,14 @@ type replicaPlants struct {
 	readOldDisk       bool
 	// logPastFailed has a member log a chunk's later version of an interval past one it failed;
 	// orderPastFailed has a primary go on ordering in an interval a failed version ended, and
-	// neverAskOnFail never ask for the next; failOnlyOne refuses only the failed version, not the
-	// chunk's later ones; serveRefused maps the versions it refuses; noDemote leaves the versions of a PG
-	// it no longer leads unanswered; serveAfterOther keeps serving across intervals another primary
-	// led; noListAbove leaves off the missing list a member that holds a version above the kept one;
-	// answerForOldDisk has a disk formatted again answer peering for its old disk ID; currentMinLive
-	// judges a past interval by the current min_live.
+	// neverAskOnFail never ask for the next; serveRefused maps the versions it refuses; noDemote leaves
+	// the versions of a PG it no longer leads unanswered; serveAfterOther keeps serving across
+	// intervals another primary led; noListAbove leaves off the missing list a member that holds a
+	// version above the kept one; answerForOldDisk has a disk formatted again answer peering for its
+	// old disk ID; currentMinLive judges a past interval by the current min_live.
 	logPastFailed    bool
 	orderPastFailed  bool
 	neverAskOnFail   bool
-	failOnlyOne      bool
 	serveRefused     bool
 	noDemote         bool
 	serveAfterOther  bool
@@ -1614,7 +1612,7 @@ func (r *Replica) fail(ctx *core.Context, i int, ref Response, out *ReplicaOutpu
 	ref.Kind, ref.Status, ref.Version, ref.Fill = KindReply, StatusRefused, 0, 0
 	for j := len(r.vers) - 1; j >= 0; j-- {
 		w := &r.vers[j]
-		if w.u.Chunk != c || w.u.Version < from || w.u.Version == from && j < i || w.done || w.commit || r.plant.failOnlyOne && w.u.Version > from {
+		if w.u.Chunk != c || w.u.Version < from || w.u.Version == from && j < i || w.done || w.commit {
 			continue
 		}
 		w.done = true
