@@ -501,7 +501,7 @@ func TestIntervalsRaisedByTableChanges(t *testing.T) {
 
 // A give-up commits only in a PG whose members, marks and activation the table leaves as they were, in a pool whose settings
 // it leaves too, interval k+1 a copy of k; it is left out of a PG a settings change, an edit, a mark change, a refill or a
-// balance move changes.
+// balance move changes, which moves the PG past k so that the leader refuses the give-up at its next step.
 func TestAGiveUpCommitsOnlyWithItsMembersUnchanged(t *testing.T) {
 	for _, tc := range []struct {
 		name string
