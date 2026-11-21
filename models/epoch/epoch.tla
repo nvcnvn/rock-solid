@@ -2682,7 +2682,7 @@ StayNewPlans == {StayForNew}
 \* down: W, kept at the first of those intervals on the primary alone and
 \* refused, stays kept with its holder down, leaving and a member. To fit 5
 \* minutes ci-stays-stale needs PG 2 alone, no spare table, and the move and the
-\* leaving member's mark down in one table; deep-stays-stale has them apart, and
+\* leaving member's mark down in one table; heavy-stays-stale has them apart, and
 \* the plan with two partial writes instead of W. With them apart, neither no
 \* fold nor a chunk counter of 1 fits.
 StayStalePlans == {Plan(<<Tab(2, <<2, 3, 1>>, <<"up", "down", "up">>, {3}),
