@@ -4,8 +4,8 @@
 #   scripts/model-gate.sh for FILE   lists the model rules whose plants FILE holds, what to read before changing it
 # The rule map, scripts/model-rules.tsv, must name each negative model configuration, and each row a
 # plant its package holds and a test whose file names that plant, an open checklist item, or none and
-# why the code has no such rule to remove. That the test fails under its plant is the test's own
-# assertion; this only keeps the link from going missing.
+# why no plant of the rule can break a run, the code enforcing it elsewhere too. That the test fails
+# under its plant is the test's own assertion; this only keeps the link from going missing.
 # A commit that changes a protocol file must also change a spec or configuration under models/, or
 # say why not in a line "Model: none, <reason>" of its body. Every .go file of a protocol package is
 # a protocol file unless the exclusions name it, so a new file starts covered. MODEL_GATE_BASE
