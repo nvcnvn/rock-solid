@@ -417,6 +417,26 @@ func heldAndListedLater(t *testing.T) *harness {
 	return h
 }
 
+// A drop of interval 4 over a chunk listed in interval 5 keeps it, with a write of interval 4 ordered meanwhile, in the
+// index and in the store's newest version alike.
+func TestADropKeepsAChunkListedLater(t *testing.T) {
+	h := heldAndListedLater(t)
+	id := h.id()
+	h.s.Drop(&h.ctx, id, chunkC, 4, &h.out)
+	h.take()
+	w := h.memberWrite(chunkC, 1, 1, MakeVersion(4, 1), 4)
+	for _, done := h.replies[id]; !done && h.step(); _, done = h.replies[id] {
+	}
+	if v := h.s.Newest(chunkC); v != MakeVersion(4, 1) {
+		t.Fatalf("once the drop is durable, newest %#x, want %#x", v, MakeVersion(4, 1))
+	}
+	h.sync(id)
+	h.sync(w)
+	if x, _ := h.s.Index().Chunk(h.cfg.Pool, chunkC); x.Version != MakeVersion(4, 1) || x.ListedIn != 5 {
+		t.Fatalf("the index holds %+v", x)
+	}
+}
+
 // A give-up of interval 4 sends the store no drop of a chunk listed in interval 5, and leaves it out of the queue.
 func TestAGiveUpSendsNoDropOfAChunkListedLater(t *testing.T) {
 	h := heldAndListedLater(t)
