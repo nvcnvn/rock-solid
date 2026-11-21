@@ -1,6 +1,7 @@
 package chunkstore
 
 import (
+	"errors"
 	"slices"
 
 	"go.etcd.io/raft/v3/raftpb"
@@ -67,13 +68,21 @@ func (s *Store) WriteRound(ctx *core.Context, owner uint32, flush uint64, r *raf
 	return err
 }
 
+// ErrNotHosted is RemoveRaft's refusal of an owner whose shard the store does not host.
+var ErrNotHosted = errors.New("chunkstore: no Raft shard of that owner hosted")
+
 // RemoveRaft stops hosting owner's shard, as the driver does once the shard is deleted. Once no
-// checkpoint runs, every Raft blob of it and every piece of its tree are reported dead, and it
-// leaves the checkpoints and the merges. A restart that does not add it again skips its runs and
-// takes its blobs for dead, and its owner goes to no new shard while they can replay.
+// checkpoint runs, every Raft blob of it is reported dead and it leaves the checkpoints and the
+// merges; its tree's pieces are reported dead once the next checkpoint, whose manifest leaves it
+// out, ends. A restart that does not add it again skips its runs and takes its blobs for dead,
+// and its owner goes to no new shard while they can replay. ErrNotHosted for an owner the store
+// does not host or is already removing.
 func (s *Store) RemoveRaft(ctx *core.Context, owner uint32, out *Output) error {
 	if s.phase != serving {
 		return ErrUnavailable
+	}
+	if s.shardOf(owner) < 0 || slices.Contains(s.removing, owner) {
+		return ErrNotHosted
 	}
 	s.removing = append(s.removing, owner)
 	s.pump(ctx, out)
@@ -85,7 +94,7 @@ func (s *Store) removeShards() {
 		s.raft.Remove(owner)
 		k := s.shardOf(owner)
 		t := s.shards[k].sh.Tree()
-		s.piecesDead(t.Pieces(nil))
+		s.removedPieces = t.Pieces(s.removedPieces)
 		s.sched.Remove(t)
 		s.shards = slices.Delete(s.shards, k, k+1)
 	}
@@ -176,6 +185,8 @@ func (s *Store) shardsCheckpointed(ctx *core.Context, out *Output) {
 			}
 		}
 	}
+	s.piecesDead(s.removedPieces)
+	s.removedPieces = s.removedPieces[:0]
 	if s.cpBase != 0 {
 		s.lastBase, s.cpBase = s.cpBase, 0
 	}

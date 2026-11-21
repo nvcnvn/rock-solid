@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"slices"
 	"testing"
@@ -803,4 +804,70 @@ func TestARemovedShardStaysRemovedAcrossACrash(t *testing.T) {
 			t.Fatalf("after %v: the new shard under the removed one's owner restarted at applied %d with entries to %d, want 3", after, k.applied, last)
 		}
 	}
+}
+
+// A removed shard's tree pieces stay live until a checkpoint begun after the removal ends, since
+// until then the newest manifest recovery may load names them: their segments keep every live
+// block, and a crash at the last step before that checkpoint ends restarts the shard, added again
+// as a driver that learns its deletion from the replay would, with all it had applied.
+func TestARemovedShardsPiecesStayLiveUntilAManifestLeavesItOut(t *testing.T) {
+	// run removes the shard and steps until the checkpoint after it ends, crashing instead at
+	// step crashAt, and returns the steps it took.
+	cfg := raftConfig()
+	cfg.Log.MaxReplayBytes = 2 * uint64(raftGeometry.SegmentBlocks) * core.BlockSize
+	run := func(crashAt int) int {
+		r := newRaftRig(t, cfg, raftGeometry, 7, 9)
+		rnd := core.NewRand(5)
+		for range 300 {
+			r.write(r.shards[rnd.Below(2)], 1+int(rnd.Below(8)), 1000+int(rnd.Below(7000)))
+			for range rnd.Below(6) {
+				r.step()
+			}
+		}
+		r.settle()
+		removed := r.shards[1]
+		live := map[uint32]uint32{}
+		for _, p := range removed.tree.Pieces(nil) {
+			u, _ := r.s.log.Usage(p.Segment)
+			live[p.Segment] = u.Live
+		}
+		if err := r.s.RemoveRaft(&r.ctx, 9, &r.out); err != nil {
+			t.Fatal(err)
+		}
+		r.take()
+		r.shards = r.shards[:1]
+		began, n := false, 0
+		for ; !began || r.s.checkpointing; n++ {
+			if n == crashAt {
+				r.shards = append(r.shards, removed)
+				r.crash(rnd)
+				return n
+			}
+			for seg, was := range live {
+				if u, _ := r.s.log.Usage(seg); u.Live < was || u.State == disklog.SegmentFree {
+					t.Fatalf("step %d: segment %d holding the removed shard's pieces fell to %d live blocks from %d before a manifest left it out", n, seg, u.Live, was)
+				}
+			}
+			r.write(r.shards[0], 4, 4000)
+			r.step()
+			began = began || r.s.checkpointing
+		}
+		return n
+	}
+	run(run(-1) - 1)
+}
+
+// RemoveRaft refuses an owner the store does not host, or one it is already removing.
+func TestRemoveRaftRefusesAnOwnerNotHosted(t *testing.T) {
+	r := newRaftRig(t, raftConfig(), raftGeometry, 7)
+	if err := r.s.RemoveRaft(&r.ctx, 9, &r.out); !errors.Is(err, ErrNotHosted) {
+		t.Fatalf("removing an owner never hosted: %v", err)
+	}
+	if err := r.s.RemoveRaft(&r.ctx, 7, &r.out); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.s.RemoveRaft(&r.ctx, 7, &r.out); !errors.Is(err, ErrNotHosted) {
+		t.Fatalf("removing an owner twice: %v", err)
+	}
+	r.take()
 }

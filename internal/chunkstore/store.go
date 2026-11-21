@@ -366,12 +366,14 @@ type Store struct {
 
 	// raft hosts the Raft shards on the disk, shards in the order their trees checkpoint, the
 	// first cpShards in the running checkpoint, removing the owners of those RemoveRaft removes
-	// once it ends; lastBase is the base of the last manifest a due checkpoint wrote, cpBase that
+	// once it ends, removedPieces the pieces of their trees, dead once a checkpoint begun after the
+	// removal ends; lastBase is the base of the last manifest a due checkpoint wrote, cpBase that
 	// of the one running.
 	raft             *raftshard.Host
 	shards           []raftShard
 	cpShards         int
 	removing         []uint32
+	removedPieces    []disklog.BlobRef
 	lastBase, cpBase uint64
 
 	loading map[disklog.BlobRef]*loadingRun
