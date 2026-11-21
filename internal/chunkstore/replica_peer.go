@@ -130,9 +130,10 @@ func (r *Replica) peerDisksOf(e *PGEntry, dst []uint32) []uint32 {
 	return dst
 }
 
-// peers reports whether peering of e's interval reaches past interval k: one since the last activated.
+// peers reports whether peering of e's interval reaches past interval k: one since the last activated and after the newest give-up.
 func (r *Replica) peers(e *PGEntry, k uint32) bool {
-	return k >= e.Activated && k < e.Interval && (!r.plant.stopPreviousOnly || k+1 == e.Interval) && (!r.plant.lastActivatedOnly || k == e.Activated)
+	return k >= e.Activated && k < e.Interval && (!r.plant.stopPreviousOnly || k+1 == e.Interval) && (!r.plant.lastActivatedOnly || k == e.Activated) &&
+		(k > e.givenUp() && !r.plant.skipPastGiveUp || e.givenUp() == 0)
 }
 
 func (r *Replica) queueAsk(a peerAsk) {

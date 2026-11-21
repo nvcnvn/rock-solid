@@ -82,7 +82,7 @@ func (r *Replica) leadStates(dst []LeadState) []LeadState {
 					s.Chunks = append(s.Chunks, k.chunk)
 				}
 			}
-			slices.SortFunc(s.Chunks, cmpChunk)
+			slices.SortFunc(s.Chunks, compareChunk)
 			s.Chunks = s.Chunks[:min(len(s.Chunks), MaxReportUnfound)]
 			for _, n := range l.listed {
 				s.Lacking += uint32(n)

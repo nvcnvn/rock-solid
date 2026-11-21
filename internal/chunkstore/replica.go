@@ -445,10 +445,12 @@ type replicaPlants struct {
 	// version both keep; forgetImageDown drops the image once an interval has the disk a member
 	// not up; ignoreImageFlag has a restarted disk carry no image until it decides again; mapOnDemote
 	// maps a demoted primary's gated versions as a member's.
-	listerVetoes    bool
-	keepPastMember  bool
-	writeOnUnfound  bool
-	neverUnfound    bool
+	listerVetoes   bool
+	keepPastMember bool
+	writeOnUnfound bool
+	neverUnfound   bool
+	// skipPastGiveUp has peering of a PG given up skip every past interval, not only those up to the give-up.
+	skipPastGiveUp  bool
 	forgetImage     bool
 	forgetImageDown bool
 	ignoreImageFlag bool

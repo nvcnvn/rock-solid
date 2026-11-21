@@ -589,7 +589,7 @@ func DecodeReport(b []byte, data int, rp *Report) error {
 				break
 			}
 			c := r.chunk()
-			if j > 0 && cmpChunk(c, l.Chunks[j-1]) <= 0 {
+			if j > 0 && compareChunk(c, l.Chunks[j-1]) <= 0 {
 				r.bad = true
 			}
 			l.Chunks = append(l.Chunks, c)

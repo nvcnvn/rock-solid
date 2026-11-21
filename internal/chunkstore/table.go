@@ -223,10 +223,6 @@ const (
 	dropFlag = 0x02
 )
 
-func cmpChunk(a, b core.ChunkID) int {
-	return cmp.Or(cmp.Compare(a.Volume, b.Volume), cmp.Compare(a.Inode, b.Inode), cmp.Compare(a.Index, b.Index))
-}
-
 func flagIf(on bool, flag uint8) uint8 {
 	if on {
 		return flag
@@ -356,7 +352,7 @@ func (r *reader) entry() PGEntry {
 		}
 		for j := range cs {
 			c := r.chunk()
-			if j > 0 && cmpChunk(c, g.Chunks[j-1]) <= 0 {
+			if j > 0 && compareChunk(c, g.Chunks[j-1]) <= 0 {
 				r.bad = true
 			}
 			g.Chunks = append(g.Chunks, c)

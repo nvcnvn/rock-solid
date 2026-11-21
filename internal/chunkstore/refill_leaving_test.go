@@ -272,6 +272,19 @@ func (r *soleRun) declare(t *testing.T, disk uint32) {
 	}
 }
 
+// giveUp has an operator give up PG 0's current interval through the authority, as the leader checks it from the disk
+// record and the primary's report the watch heard, and publishes the table that commits it.
+func (r *soleRun) giveUp() error {
+	gone := func(d uint32) bool { return slices.ContainsFunc(r.a.rec.Disks(), func(x RecordedDisk) bool { return x.ID == d && x.Gone }) }
+	g, err := checkGiveUp(pg0, r.c.table.Entry(pg0), gone, r.w.Lead(pg0), r.a.plant)
+	if err != nil {
+		return err
+	}
+	r.a.giveUps = append(r.a.giveUps, g)
+	r.publish()
+	return nil
+}
+
 // repaired fails unless the PG ended on width members none leaving, each holding version v of ch, and the leaving disks went.
 func (r *soleRun) repaired(t *testing.T, width int, ch core.ChunkID, v uint64) {
 	t.Helper()
@@ -459,6 +472,26 @@ func TestTwoDisksLostTogetherStayStopped(t *testing.T) {
 	}
 	if rp, ok := r.answered(r.c.write(pg0, chunkIn(pg0, 2, 0), 0, bytes.Repeat([]byte{0x22}, core.BlockSize)), 5_000_000); ok {
 		t.Fatalf("a new write answered %+v", rp)
+	}
+	giveUpAndWrite(t, r, ch)
+}
+
+// giveUpAndWrite gives up PG 0 through the authority, which the PG then peers past, and writes ch again and reads it back.
+func giveUpAndWrite(t *testing.T, r *soleRun, ch core.ChunkID) {
+	t.Helper()
+	k := r.c.table.Entry(pg0).Interval
+	if err := r.giveUp(); err != nil {
+		t.Fatal(err)
+	}
+	if e := r.c.table.Entry(pg0); e.Interval != k+1 || e.givenUp() != k {
+		t.Fatalf("after the give-up of %d: %+v", k, e)
+	}
+	data := bytes.Repeat([]byte{0x33}, core.BlockSize)
+	if rp, ok := r.answered(r.c.write(pg0, ch, 0, data), 10_000_000); !ok || rp.Status != StatusOK {
+		t.Fatalf("a write after the give-up answered %+v, %v", rp, ok)
+	}
+	if rp, got := r.read(ch); rp.Status != StatusOK || !bytes.Equal(got, data) {
+		t.Fatalf("read after the give-up %+v", rp)
 	}
 }
 

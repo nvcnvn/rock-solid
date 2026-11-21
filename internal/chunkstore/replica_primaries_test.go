@@ -30,6 +30,7 @@ type authority struct {
 	down       map[uint32]core.Tick
 	drain      map[uint32]bool
 	edits      []Edit
+	giveUps    []PGGiveUp
 	asks       []PGInterval
 	acts, seen int
 	moves      bool
@@ -41,8 +42,8 @@ type authority struct {
 }
 
 func (a *authority) inputs(c *rcluster) *Inputs {
-	in := &Inputs{Now: c.s.Time(), Pools: a.pools(), Edits: a.edits, Asks: a.asks}
-	a.edits, a.asks = nil, nil
+	in := &Inputs{Now: c.s.Time(), Pools: a.pools(), Edits: a.edits, Asks: a.asks, GiveUps: a.giveUps}
+	a.edits, a.asks, a.giveUps = nil, nil, nil
 	for _, x := range c.activations[a.acts:] {
 		in.Activations = append(in.Activations, PGInterval{x.PG, x.Interval})
 	}

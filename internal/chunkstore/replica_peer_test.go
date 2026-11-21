@@ -304,3 +304,16 @@ func TestNoActivationBeforeEveryMemberPersistedItsList(t *testing.T) {
 	c.drop = nil
 	c.until(w)
 }
+
+// Peering of a PG given up reaches only the past intervals after the give-up; with skipPastGiveUp, none.
+func TestPeeringSkipsGivenUpIntervals(t *testing.T) {
+	e := &PGEntry{Interval: 5, Activated: 1, GiveUps: []GiveUp{{Interval: 3, All: true}}}
+	var r Replica
+	if r.peers(e, 3) || !r.peers(e, 4) {
+		t.Fatalf("interval 3 reached %v, 4 %v", r.peers(e, 3), r.peers(e, 4))
+	}
+	r.plant.skipPastGiveUp = true
+	if r.peers(e, 4) {
+		t.Fatal("skipPastGiveUp reaches interval 4")
+	}
+}
