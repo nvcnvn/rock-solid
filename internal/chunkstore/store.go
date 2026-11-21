@@ -1393,7 +1393,7 @@ func (s *Store) persisted(ctx *core.Context, oi int32, err error, out *Output) {
 			if s.rec == nil {
 				s.freeSlots(false)
 			}
-			if ci, ok := s.chunkOf[last.Chunk]; ok {
+			if ci, ok := s.chunkOf[last.Chunk]; ok && intervalOf(s.chunks[ci].version) <= last.Interval {
 				cs := &s.chunks[ci]
 				cs.version, cs.epoch, cs.failed, cs.ordered = 0, 0, 0, 0
 			}

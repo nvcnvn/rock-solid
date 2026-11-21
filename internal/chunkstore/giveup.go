@@ -127,11 +127,11 @@ func (r *Replica) dropGivenUp(ctx *core.Context) {
 	}
 }
 
-// holdsGivenUp reports whether the store holds anything of d's chunk, all of it from no later than d's interval.
+// holdsGivenUp reports whether the store holds or lists anything of d's chunk, all of it from no later than d's interval.
 func (r *Replica) holdsGivenUp(d giveUpDrop) bool {
 	_, cached := r.st.chunkOf[d.chunk]
-	_, indexed := r.st.ix.Chunk(r.st.cfg.Pool, d.chunk)
-	return (cached || indexed) && intervalOf(r.st.Newest(d.chunk)) <= d.interval
+	x, indexed := r.st.ix.Chunk(r.st.cfg.Pool, d.chunk)
+	return (cached || indexed) && intervalOf(r.st.Newest(d.chunk)) <= d.interval && !x.after(d.interval)
 }
 
 // dropped takes the store's answer to a drop: done, or asked again on the next drain.

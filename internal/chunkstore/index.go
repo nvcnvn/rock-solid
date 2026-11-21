@@ -153,6 +153,11 @@ type Chunk struct {
 	Image    bool
 }
 
+// after reports whether ch holds or lists anything later than interval, which a give-up of interval leaves alone.
+func (ch Chunk) after(interval uint32) bool {
+	return intervalOf(ch.Version) > interval || intervalOf(ch.Listed) > interval || ch.ListedIn > interval
+}
+
 // Index is one disk's chunk index in an LSM tree: per chunk its entry, live map and frozen maps, and per record its live blocks.
 type Index struct {
 	tree          *lsm.Tree
@@ -341,7 +346,9 @@ func (x *Index) Apply(ev *disklog.Event) error {
 		case disklog.EntryRecovered:
 			x.recovered(e)
 		case disklog.EntryDropped:
-			x.drop(e.Pool, e.Chunk)
+			if ch, _ := x.Chunk(e.Pool, e.Chunk); !ch.after(e.Interval) {
+				x.drop(e.Pool, e.Chunk)
+			}
 		}
 	}
 	return nil

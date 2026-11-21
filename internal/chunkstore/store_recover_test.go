@@ -408,3 +408,32 @@ func TestADropEmptiesAChunkAcrossARestart(t *testing.T) {
 		}
 	}
 }
+
+// A write ordered while a drop of its chunk persists, of an interval past the drop's, stays the chunk's version once the
+// drop is durable, and across a restart.
+func TestAWriteOrderedDuringADropOutlivesIt(t *testing.T) {
+	h := newRecoveryHarness(t)
+	h.sync(h.memberWrite(chunkC, 0, 4, MakeVersion(3, 1), 1))
+	id := h.id()
+	h.s.Drop(&h.ctx, id, chunkC, 4, &h.out)
+	h.take()
+	w := h.memberWrite(chunkC, 1, 1, MakeVersion(5, 1), 5)
+	for _, done := h.replies[id]; !done && h.step(); _, done = h.replies[id] {
+	}
+	if _, done := h.replies[w]; !done {
+		if v := h.s.Newest(chunkC); v != MakeVersion(5, 1) {
+			t.Fatalf("with the write pending past the drop, newest %#x, want %#x", v, MakeVersion(5, 1))
+		}
+	}
+	h.sync(id)
+	h.sync(w)
+	for range 2 {
+		if v := h.s.Newest(chunkC); v != MakeVersion(5, 1) {
+			t.Fatalf("newest %#x, want %#x", v, MakeVersion(5, 1))
+		}
+		if got := h.readNow(chunkC, core.BlockSize, core.BlockSize); !bytes.Equal(got, fill(core.BlockSize, 5)) {
+			t.Fatalf("block 1 reads %#x, want 5", got[0])
+		}
+		restart(h)
+	}
+}

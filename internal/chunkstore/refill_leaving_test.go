@@ -794,3 +794,56 @@ func TestBlockedNamesItsCandidates(t *testing.T) {
 		t.Fatalf("blocked %+v with nothing reported", c.Blocked)
 	}
 }
+
+// A member that holds nothing of a given-up chunk but lists Z, written after the give-up, keeps that listing across a
+// restart, whose first table names the give-up again: with every disk that held Z declared lost, Z reads unfound.
+func TestARestartKeepsTheListingOfAWriteAfterAGiveUp(t *testing.T) {
+	r, ch, _ := refillRun(t, 2, 2, 5, nil, "")
+	r.watch()
+	r.recovery(false)
+	ms := r.members()
+	d1, d2 := ms[0].Disk, ms[1].Disk
+	r.lose(d2)
+	r.tick(DegradedRefillAfter + 2_000_000)
+	r.lose(d1)
+	r.recovery(true)
+	r.tick(DegradedRefillAfter + 2_000_000)
+	r.declare(t, d1)
+	r.declare(t, d2)
+	r.tick(10_000_000)
+	if err := r.giveUp(); err != nil {
+		t.Fatal(err)
+	}
+	r.tick(3_000_000)
+	ms = r.members()
+	a, b := ms[0].Disk, ms[1].Disk
+	r.lose(a)
+	r.a.maint = map[uint32]bool{a: true}
+	r.tick(2_000_000)
+	z := bytes.Repeat([]byte{0x44}, core.BlockSize)
+	if rp, ok := r.answered(r.c.write(pg0, ch, 0, z), 10_000_000); !ok || rp.Status != StatusOK {
+		t.Fatalf("Z answered %+v, %v", rp, ok)
+	}
+	r.recovery(false)
+	r.back(a)
+	r.a.maint = nil
+	r.tick(3_000_000)
+	na := r.c.node(a)
+	if x, _ := r.c.reps[na].Store().Index().Chunk(testPool, ch); x.ListedIn == 0 || x.Version != 0 {
+		t.Fatalf("disk %d holds %+v, not only a listing of Z", a, x)
+	}
+	r.lose(b)
+	r.tick(2_000_000)
+	r.c.s.CrashRandom(uint32(na))
+	r.c.s.Restart(uint32(na))
+	r.tick(5_000_000)
+	if x, _ := r.c.reps[na].Store().Index().Chunk(testPool, ch); x.ListedIn == 0 {
+		t.Fatalf("disk %d lost its listing of Z across a restart: %+v", a, x)
+	}
+	r.declare(t, b)
+	r.recovery(true)
+	r.tick(DegradedRefillAfter + 10_000_000)
+	if rp, _ := r.read(ch); rp.Status == StatusOK {
+		t.Fatalf("Z, acknowledged after the give-up and held by no disk left, reads OK, not unfound")
+	}
+}
