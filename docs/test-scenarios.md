@@ -2662,7 +2662,8 @@ every acknowledged record, and Corrupt never occurs (Pebble `TestErrors`, `TestD
   - The test runs in about 14 s and 210 MB; the planted-bug test in about 6 s.
 - The chunk store's `TestCrashAtEveryAction` also crashes, at every action with the three
   landings, a workload on the default disk with unaligned writes, a cut, a whole-chunk write, a
-  give-up's drop of a chunk and a checkpoint, and the slot tests run the same property over chunk
+  give-up's drop of a chunk, a write of it at a later interval that a second drop leaves alone and
+  a checkpoint, and the slot tests run the same property over chunk
   slots.
 
 ## Crash oracle
@@ -5237,12 +5238,16 @@ member settled every run while the split's PGs, not yet reported, could not move
   disks are cut off, come back, are declared lost and restart, and give-ups at random through the
   leader's check; no give-up breaks `invOnlyLost` and no chunk written since every give-up of it reads
   zeros (`TestGiveUpsUnderFaultsLoseOnlyWhatIsLost`).
-- A give-up commits interval k+1 as a copy of k: next to an edit, a mark change, a refill, a
-  balance move or an activation of its PG it is left out of the table, alone it commits
-  (`TestAGiveUpCommitsOnlyWithItsMembersUnchanged`). A store's drop leaves a write ordered while it
-  persists, of a later interval, the chunk's version, across a restart too
-  (`TestAWriteOrderedDuringADropOutlivesIt`); a drop round-trips the disk log, interval 0 or a
-  version refused (`TestDroppedEntryErrors`, `FuzzDecodeRecord`).
+- A give-up commits interval k+1 as a copy of k: next to a settings change, an edit, a mark
+  change, a refill, a balance move or an activation of its PG it is left out of the table, alone
+  it commits (`TestAGiveUpCommitsOnlyWithItsMembersUnchanged`). A store's drop leaves a write
+  ordered while it persists, of a later interval, the chunk's version, across a restart too
+  (`TestAWriteOrderedDuringADropOutlivesIt`); a drop of interval 4 over a chunk listed in interval
+  5 keeps it, with a write of interval 4 ordered meanwhile the newest version in the store and the
+  index alike (`TestADropKeepsAChunkListedLater`), and a replica sends no such drop
+  (`TestAGiveUpSendsNoDropOfAChunkListedLater`). The index's drop leaves a chunk with a later
+  version or listing alone (`TestADropLeavesAChunkWithALaterIntervalAlone`); a drop round-trips
+  the disk log, interval 0 or a version refused (`TestDroppedEntryErrors`, `FuzzDecodeRecord`).
 - A refilled primary returns behind the others, and does not lead while one of them is up
   (`TestARefilledPrimaryReturnsBehindTheOthers`).
 - A leaving member that is up takes the place of a member merely down, which leaves in turn
