@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lease"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 	"github.com/nvcnvn/rock-solid/internal/sim/clock"
@@ -360,6 +361,48 @@ func logPastFailedTrace(t *testing.T, plant bool) error {
 	return c.found
 }
 
+// orderPastFailedTrace is neg-order-past-failed's trace: disk 1's log, all but a few segments held back as reserve, fills
+// with the members' writes of PGs 1 and 2, so 1.2 fails on disk 1's own log with NoSpace after it went out to disks 2 and 3.
+// Its chunk then has nothing pending, so disk 1's store forgets it and would number the next write 1.2 again: only the
+// interval's end keeps that number from going out twice. No seeded run fills a primary's log.
+func orderPastFailedTrace(t *testing.T, plant bool) error {
+	geo, err := disklog.GeometryFor(diskBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := true
+	c := newRClusterOnDisks(t, rtable(4, 2), sim.New(1, sim.DefaultSettings()), func(cfg *Config) {
+		if first {
+			cfg.Log.NoReserve, cfg.Log.Reserve = false, geo.SegmentCount-12
+		}
+		first = false
+	}, geo)
+	c.replicaPlants.orderPastFailed = plant
+	for _, r := range c.reps {
+		r.plant = c.replicaPlants
+	}
+	c.planted = true
+	ch := chunkIn(pg0, 4, 0)
+	c.writeWhole(pg0, ch, 0, 1, 0xaa)
+	for _, f := range []struct {
+		pg   uint32
+		size int
+	}{{1, 16 * core.BlockSize}, {2, 1}} {
+		pg := core.PGID{Pool: testPool, Index: f.pg}
+		for i := range uint32(2000) {
+			if c.status(c.write(pg, chunkIn(pg, 4, i), 0, make([]byte, f.size))) != StatusOK {
+				break
+			}
+		}
+	}
+	if st := c.status(c.write(pg0, ch, 10, []byte{1})); st != StatusRefused {
+		t.Fatalf("1.2 answered %v", st)
+	}
+	c.write(pg0, ch, 20, []byte{2})
+	c.settle()
+	return c.found
+}
+
 // currentMinLiveTrace is neg-current-min-live's trace: interval 2 lowers min_live to 1 and marks disk 3 down, and W is acknowledged on disk 2 alone; interval 3 sets min_live back to 2, makes disk 3 primary and puts disk 2 in maintenance, while disk 2 is cut off from disk 3: peering of 3 must wait to reach disk 2, live in interval 2, which ran under min_live 1, and keeps W once the cut heals. No seeded run changes min_live.
 func currentMinLiveTrace(t *testing.T, plant bool) error {
 	c := plantedPG2(t, func(p *replicaPlants) { p.currentMinLive = plant })
@@ -433,6 +476,7 @@ func TestPlantedBugsBreakTheirTraces(t *testing.T) {
 		{"pending versions settled by number", invAckedKept, settleChainTrace},
 		{"past interval judged by the current min_live", invAckedKept, currentMinLiveTrace},
 		{"logged past a failed version", invKeptWritten, logPastFailedTrace},
+		{"ordered past a failed version", invSendOrder, orderPastFailedTrace},
 		{"pending versions left unanswered on demotion", invOneReply, noDemoteTrace},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

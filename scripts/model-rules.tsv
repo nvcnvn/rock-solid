@@ -120,7 +120,7 @@ epoch/neg-log-past-failed	chunkstore.logPastFailed	TestPlantedBugsBreakTheirTrac
 epoch/neg-never-ask	chunkstore.neverAskOnFail	TestPlantedPeeringBugsBreakTheFaultRun
 epoch/neg-no-demote	chunkstore.noDemote	TestPlantedBugsBreakTheirTraces
 epoch/neg-no-list-above	open	Plants for the epoch model's new rules
-epoch/neg-order-past-failed	open	Plants for the epoch model's new rules
+epoch/neg-order-past-failed	chunkstore.orderPastFailed	TestPlantedBugsBreakTheirTraces
 epoch/neg-recovery-read-old-disk	chunkstore.readOldDisk	TestADiskFormattedAgainAnswersNoRecoveryReadForItsOldID
 epoch/neg-serve-after-other-primary	chunkstore.serveAfterOther	TestPlantedReadBugsBreakTheReadRun
 epoch/neg-serve-refused	chunkstore.serveRefused	TestPlantedReadBugsBreakTheReadRun
