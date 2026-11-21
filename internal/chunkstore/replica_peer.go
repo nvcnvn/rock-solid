@@ -31,6 +31,7 @@ type peerAsk struct {
 	pg       core.PGID
 	interval uint32
 	local    bool
+	disk     uint32
 }
 
 // persistReq is a missing list the store is persisting, for a primary's loop or, when local, this disk's own lead.
@@ -148,12 +149,12 @@ func (r *Replica) queueAsk(a peerAsk) {
 func (r *Replica) peerAsked(ctx *core.Context, ev *core.Event, p *Peering, out *ReplicaOutput) bool {
 	_, e := r.table.entry(p.PG.PG)
 	switch {
-	case e == nil || p.Disk != r.cfg.Disk:
+	case e == nil || p.Disk != r.cfg.Disk && !r.plant.answerForOldDisk:
 	case p.PG.Interval > e.Interval && p.PG.Epoch > r.table.Epoch:
 		r.park(ev, p.PG.Epoch, out)
 		return true
 	case p.PG.Interval == e.Interval:
-		r.queueAsk(peerAsk{peer: ev.Peer, id: p.ID, pg: p.PG.PG, interval: p.PG.Interval})
+		r.queueAsk(peerAsk{peer: ev.Peer, id: p.ID, pg: p.PG.PG, interval: p.PG.Interval, disk: p.Disk})
 	}
 	return false
 }
@@ -182,7 +183,7 @@ func (r *Replica) answerPeers(ctx *core.Context, out *ReplicaOutput) {
 			r.peerReply(ctx, r.cfg.Disk, a.pg, a.interval, a.id, decided, chunks, out)
 			continue
 		}
-		r.frame = AppendPeering(r.frame[:0], &Peering{Kind: KindPeerReply, ID: a.id, PG: PGFields{Epoch: r.table.Epoch, PG: a.pg, Interval: a.interval}, Disk: r.cfg.Disk, Decided: decided, Chunks: chunks})
+		r.frame = AppendPeering(r.frame[:0], &Peering{Kind: KindPeerReply, ID: a.id, PG: PGFields{Epoch: r.table.Epoch, PG: a.pg, Interval: a.interval}, Disk: a.disk, Decided: decided, Chunks: chunks})
 		r.sendLong(ctx, a.peer, out)
 	}
 }
@@ -279,7 +280,7 @@ func (r *Replica) peerReply(ctx *core.Context, disk uint32, pg core.PGID, interv
 	} else {
 		pr.replies = append(pr.replies, rp)
 	}
-	_, e := r.table.entry(pg)
+	pl, e := r.table.entry(pg)
 	answered := func(ms []Member, all bool) bool {
 		for _, m := range ms {
 			got := m.Mark == MarkUp && slices.ContainsFunc(pr.replies, func(p peerReply) bool { return p.disk == m.Disk })
@@ -297,6 +298,9 @@ func (r *Replica) peerReply(ctx *core.Context, disk uint32, pg core.PGID, interv
 	}
 	for _, past := range e.Past {
 		x := PGEntry{Members: past.Members}
+		if r.plant.currentMinLive {
+			past.MinLive = pl.MinLive
+		}
 		if _, up := x.primary(); r.peers(e, past.Interval) && up && x.live() >= int(past.MinLive) && !answered(past.Members, false) {
 			return
 		}

@@ -481,6 +481,24 @@ type replicaPlants struct {
 	clearNoSource     bool
 	goneWhileUp       bool
 	readOldDisk       bool
+	// logPastFailed has a member log a chunk's later version of an interval past one it failed;
+	// orderPastFailed has a primary go on ordering in an interval a failed version ended, and
+	// neverAskOnFail never ask for the next; failOnlyOne refuses only the failed version, not the
+	// chunk's later ones; serveRefused maps the versions it refuses; noDemote leaves the versions of a PG
+	// it no longer leads unanswered; serveAfterOther keeps serving across intervals another primary
+	// led; noListAbove leaves off the missing list a member that holds a version above the kept one;
+	// answerForOldDisk has a disk formatted again answer peering for its old disk ID; currentMinLive
+	// judges a past interval by the current min_live.
+	logPastFailed    bool
+	orderPastFailed  bool
+	neverAskOnFail   bool
+	failOnlyOne      bool
+	serveRefused     bool
+	noDemote         bool
+	serveAfterOther  bool
+	noListAbove      bool
+	answerForOldDisk bool
+	currentMinLive   bool
 	// readBelowMinLive serves reads in an interval with fewer than min_live live members;
 	// freshGrantNoCheck grants a lease afresh to a holder that reported an older table; noLeaseCheck
 	// serves reads with no lease from the other up members.
@@ -621,7 +639,7 @@ func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 				switch {
 				case old.interval == e.Interval:
 					l = old
-				case r.keptPrimary(e, old.interval):
+				case r.keptPrimary(e, old.interval) || r.plant.serveAfterOther:
 					l.since, l.serving, l.kept = old.since, old.serving, old.kept
 				case r.plant.reorderAfterOther:
 					l.since = old.since
@@ -828,7 +846,7 @@ func (r *Replica) names(pg core.PGID) bool {
 func (r *Replica) demote(ctx *core.Context, out *ReplicaOutput) {
 	for i := len(r.vers) - 1; i >= 0; i-- {
 		v := &r.vers[i]
-		if v.done || !v.ordered || r.lead(v.u.PG.PG) >= 0 {
+		if v.done || !v.ordered || r.lead(v.u.PG.PG) >= 0 || r.plant.noDemote {
 			continue
 		}
 		v.done = true
@@ -1154,7 +1172,7 @@ func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 			r.park(ev, u.PG.Epoch, out)
 			return
 		}
-	case !r.leads[i].active || r.leads[i].asking || r.leads[i].isUnfound(u.Chunk) && !r.plant.writeOnUnfound || r.leads[i].short(e, int(p.MinLive), u.Chunk) && !r.plant.noDegradedHold ||
+	case !r.leads[i].active || r.leads[i].asking && !r.plant.orderPastFailed || r.leads[i].isUnfound(u.Chunk) && !r.plant.writeOnUnfound || r.leads[i].short(e, int(p.MinLive), u.Chunk) && !r.plant.noDegradedHold ||
 		r.leads[i].listsOwn(e, r.cfg.Disk, u.Chunk) && !(r.plant.listerOrders && (edgeBytes(u.Off, u.Len) == 0 || !r.leads[i].lacks(u.Chunk) || r.plant.mergeWhileLacking)):
 		l := &r.leads[i]
 		if l.active && !l.asking && l.isUnfound(u.Chunk) && !r.plant.writeOnUnfound {
@@ -1216,7 +1234,7 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 	gone := e != nil && (!slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk && m.Mark == MarkUp }) || r.plant.goneWhileUp && u.Version&15 == 7)
 	refuse := e == nil || newer || r.st.Sessions().Fenced(u.Session) && !r.plant.memberNoFence || u.PG.Interval != e.Interval && !r.sameMembersAt(e, u.PG.Interval) || r.plant.sendEpoch && u.PG.Epoch != r.table.Epoch || gone ||
 		slices.ContainsFunc(r.failed, func(f failedVer) bool {
-			return f.chunk == u.Chunk && uint32(f.version>>32) == u.PG.Interval && (f.version <= u.Version || recover)
+			return f.chunk == u.Chunk && uint32(f.version>>32) == u.PG.Interval && (f.version == u.Version || f.version < u.Version && !r.plant.logPastFailed || recover)
 		})
 	if !refuse && (recover || u.Version <= r.st.Newest(u.Chunk)) {
 		if j := slices.IndexFunc(r.reqs, func(q storeReq) bool {
@@ -1432,7 +1450,7 @@ func (r *Replica) ordered(ctx *core.Context, o Reply, out *ReplicaOutput) {
 		out.note(trace.OutOrder, uint64(v.msgID), v.u.Chunk.Hash(), o.Version, 0, 0)
 	}
 	l := r.lead(v.u.PG.PG)
-	if l < 0 || r.leads[l].asking || r.leads[l].interval != v.interval {
+	if l < 0 || r.leads[l].asking && !r.plant.orderPastFailed || r.leads[l].interval != v.interval {
 		r.fail(ctx, i, Response{}, out)
 		return
 	}
@@ -1588,6 +1606,7 @@ func (r *Replica) fail(ctx *core.Context, i int, ref Response, out *ReplicaOutpu
 	out.note(trace.OutFail, c.Hash(), from, 0, 0, 0)
 	if l := r.lead(pg); l >= 0 && r.leads[l].interval == v.interval {
 		r.leads[l].asking = true
+		r.leads[l].asked = r.leads[l].asked || r.plant.neverAskOnFail
 	}
 	if own := r.refusal(pg); ref.Epoch <= own.Epoch {
 		ref = own
@@ -1595,10 +1614,13 @@ func (r *Replica) fail(ctx *core.Context, i int, ref Response, out *ReplicaOutpu
 	ref.Kind, ref.Status, ref.Version, ref.Fill = KindReply, StatusRefused, 0, 0
 	for j := len(r.vers) - 1; j >= 0; j-- {
 		w := &r.vers[j]
-		if w.u.Chunk != c || w.u.Version < from || w.u.Version == from && j < i || w.done || w.commit {
+		if w.u.Chunk != c || w.u.Version < from || w.u.Version == from && j < i || w.done || w.commit || r.plant.failOnlyOne && w.u.Version > from {
 			continue
 		}
 		w.done = true
+		if r.plant.serveRefused && w.ordered && !w.recover {
+			r.st.Commit(ctx, w.u.Chunk, w.req, &r.sout)
+		}
 		if !w.recover {
 			r.takeReq(w.req)
 		}
@@ -1629,7 +1651,7 @@ func (r *Replica) dropWaiting(ctx *core.Context, out *ReplicaOutput) {
 		if v.done || v.ordered {
 			continue
 		}
-		if l := r.lead(v.u.PG.PG); l >= 0 && !r.leads[l].asking && r.leads[l].interval == v.interval || !r.st.Cancel(ctx, v.u.Chunk, v.req, &r.sout) {
+		if l := r.lead(v.u.PG.PG); l >= 0 && (!r.leads[l].asking || r.plant.orderPastFailed) && r.leads[l].interval == v.interval || !r.st.Cancel(ctx, v.u.Chunk, v.req, &r.sout) {
 			continue
 		}
 		v.done = true

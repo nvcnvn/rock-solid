@@ -1,6 +1,7 @@
 package chunkstore
 
 import (
+	"bytes"
 	"cmp"
 	"fmt"
 	"maps"
@@ -325,6 +326,65 @@ func readsFirstTrace(t *testing.T, plant bool) error {
 	return c.found
 }
 
+// logPastFailedTrace is neg-log-past-failed's trace: disk 3, its table marking it in maintenance for a moment, refuses 1.1,
+// block 0, and the refusal is lost; back up in the same interval, it takes 1.2, block 1. Interval 2's peering then keeps
+// 1.2 and counts disk 3, which holds 1.2 whole but lacks 1.1's block, as holding it.
+func logPastFailedTrace(t *testing.T, plant bool) error {
+	c := plantedPG2(t, func(p *replicaPlants) { p.logPastFailed = plant })
+	ch := chunkIn(pg0, 1, 0)
+	refusing := cloneTable(c.table)
+	_, e := refusing.entry(pg0)
+	e.Members[1].Mark = MarkMaint
+	c.call(2, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.table = refusing })
+	lost := false
+	c.drop = func(d int, a *core.Action) bool {
+		if d == 2 && !lost && a.Kind == core.ActNetSend && a.Msg.Len >= headSize && Kind(a.Msg.Body[1]) == KindAck {
+			lost = true
+			return true
+		}
+		return false
+	}
+	c.write(pg0, ch, 0, []byte{1})
+	for !lost && c.step() {
+	}
+	c.call(2, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.table = c.table })
+	c.write(pg0, ch, core.BlockSize, []byte{2})
+	c.runFor(100_000)
+	c.publish(c.next(func(t *Table) { setInterval(t, pg0, 2) }), true)
+	c.settle()
+	for b := range uint16(2) {
+		if p, m := c.diskBlock(1, ch, b), c.diskBlock(2, ch, b); !bytes.Equal(p, m) {
+			return cmp.Or(c.found, error(&sim.Violation{Name: invKeptWritten, Err: fmt.Errorf("disk 3 maps block %d as %d, disk 2 as %d", b, m[0], p[0])}))
+		}
+	}
+	return c.found
+}
+
+// currentMinLiveTrace is neg-current-min-live's trace: interval 2 lowers min_live to 1 and marks disk 3 down, and W is acknowledged on disk 2 alone; interval 3 sets min_live back to 2, makes disk 3 primary and puts disk 2 in maintenance, while disk 2 is cut off from disk 3: peering of 3 must wait to reach disk 2, live in interval 2, which ran under min_live 1, and keeps W once the cut heals. No seeded run changes min_live.
+func currentMinLiveTrace(t *testing.T, plant bool) error {
+	c := plantedPG2(t, func(p *replicaPlants) { p.currentMinLive = plant })
+	ch := chunkIn(pg0, 1, 0)
+	c.publish(c.next(func(t *Table) {
+		members(Member{Disk: 2}, Member{Disk: 3, Mark: MarkDown})(t)
+		t.Pools[0].MinLive = 1
+	}), true)
+	w := c.incWrite(map[core.RequestID]incWrite{}, ch, 1, 1)
+	c.until(w)
+	if rp := c.reply(w); rp.Status != StatusOK {
+		t.Fatalf("W answered %+v", rp)
+	}
+	c.inv.Register(invAckedKept, c.keepsAcked(ch, w))
+	c.s.Partition(1, 2, false)
+	c.publish(c.next(func(t *Table) {
+		members(Member{Disk: 3}, Member{Disk: 2, Mark: MarkMaint})(t)
+		t.Pools[0].MinLive = 2
+	}), false)
+	c.runFor(2 * lease.DefaultConfig.Lease)
+	c.s.Heal(1, 2)
+	c.runFor(2 * lease.DefaultConfig.Lease)
+	return c.found
+}
+
 // Each planted bug whose counterexample needs a trace no seeded run reaches breaks its invariant on that trace, which the correct code passes.
 func TestPlantedBugsBreakTheirTraces(t *testing.T) {
 	for _, tc := range []struct {
@@ -341,6 +401,8 @@ func TestPlantedBugsBreakTheirTraces(t *testing.T) {
 		{"peering reaches only the last activated interval", invOneReader, lastActivatedTrace},
 		{"peer messages handled after reads in a pass", invOneReader, readsFirstTrace},
 		{"pending versions settled by number", invAckedKept, settleChainTrace},
+		{"past interval judged by the current min_live", invAckedKept, currentMinLiveTrace},
+		{"logged past a failed version", invKeptWritten, logPastFailedTrace},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := tc.trace(t, false); err != nil {

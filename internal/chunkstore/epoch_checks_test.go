@@ -20,6 +20,7 @@ const (
 	invHasSource     = "an activated primary has a source of each chunk it kept, or calls it unfound"
 	invLeftGated     = "no running disk keeps a write gated of a PG its table names it in no interval of since the last activated"
 	invHeldOrdered   = "once the run settles, no active primary holds a client write"
+	invAsks          = "once the run settles, no running primary still leads an interval a failed version or a restart ended"
 )
 
 // heldWrites is the first active lead on a running node that holds a client write (property 22, checked once the run settles).
@@ -88,6 +89,22 @@ func (c *rcluster) inactive() error {
 			r := c.reps[n]
 			if j := r.lead(core.PGID{Pool: p.ID, Index: uint32(i)}); j < 0 || r.leads[j].interval != e.Interval || !r.leads[j].active {
 				return fmt.Errorf("%s: PG %d of pool %d has not activated interval %d on disk %d", invActivates, i, p.ID, e.Interval, d)
+			}
+		}
+	}
+	return nil
+}
+
+// stillAsking is the first running primary of c's table still leading the interval of a PG a failed version ended: it never asked
+// for the next, or its ask was never answered.
+func (c *rcluster) stillAsking() error {
+	for n, r := range c.reps {
+		if !c.s.Node(uint32(n)).Up() {
+			continue
+		}
+		for _, l := range r.leads {
+			if _, e := c.table.entry(l.pg); l.asking && e != nil && e.Interval == l.interval {
+				return fmt.Errorf("%s: disk %d still leads interval %d of PG %d, asked %v", invAsks, c.ids[n], l.interval, l.pg.Index, l.asked)
 			}
 		}
 	}

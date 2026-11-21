@@ -813,6 +813,12 @@ func runFaultsOn(t *testing.T, seed uint64, clients, writes int, plant *faultPla
 		}
 		return c.heldWrites()
 	})
+	c.inv.Register(invAsks, func() error {
+		if !f.ended {
+			return nil
+		}
+		return c.stillAsking()
+	})
 	x := c.record()
 	c.inv.Register(invLinearizable, func() error {
 		if !f.ended {
@@ -822,7 +828,9 @@ func runFaultsOn(t *testing.T, seed uint64, clients, writes int, plant *faultPla
 	})
 	if plant != nil {
 		c.planted = true
-		c.inv.Only(plant.inv)
+		if plant.inv != "" {
+			c.inv.Only(plant.inv)
+		}
 	}
 	if f.rng.Chance(1, 2) {
 		c.reps[0].Store().cfg.MergeCache = 0
@@ -860,8 +868,8 @@ func runFaultsOn(t *testing.T, seed uint64, clients, writes int, plant *faultPla
 		f.tend(false)
 	}
 	for id := core.RequestID(1); id <= c.nextID; id++ {
-		if _, ok := f.ops[id]; ok && f.replied[id] != 1 && !(f.replied[id] == 0 && f.lost[id]) && plant == nil {
-			t.Fatalf("request %d answered %d times", id, f.replied[id])
+		if _, ok := f.ops[id]; ok && f.replied[id] != 1 && !(f.replied[id] == 0 && f.lost[id]) {
+			f.fail(invOneReply, fmt.Errorf("request %d answered %d times", id, f.replied[id]))
 		}
 	}
 	for _, ch := range x.readBack(2*faultSpan, f.chunks[:]...) {
