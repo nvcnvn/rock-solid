@@ -853,7 +853,11 @@ func (s *Shard) applyConf(e *raftpb.Entry, out *Output) bool {
 	}
 	was := s.conf
 	s.applying = true
-	if _, enters := cc.EnterJoint(); enters && s.plant.jointOneHalf {
+	split := false
+	if s.plant.jointOneHalf {
+		_, split = cc.EnterJoint()
+	}
+	if split {
 		for _, c := range cc.Changes {
 			s.conf = *s.rn.ApplyConfChange(raftpb.ConfChangeV2{Changes: []raftpb.ConfChangeSingle{c}})
 		}

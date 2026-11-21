@@ -629,8 +629,8 @@ func TestACampaignWithAConfigurationChangeUnappliedElectsTwoLeaders(t *testing.T
 }
 
 // The voter model's neg-joint-one-half: a replica that applies the swap's changes one by one counts
-// the incoming half alone; under the split fault the old voter, which knows no change committed,
-// wins on the replaced replica's vote the term the fourth replica won on the leader's.
+// the incoming half alone; under the split fault the old voter, which applied only the learner's
+// addition, wins on the replaced replica's vote the term the fourth replica won on the leader's.
 func TestAJointConfigurationCountingOneHalfElectsTwoLeaders(t *testing.T) {
 	plantBreaks(t, 0, invOneLeader, plants{jointOneHalf: true}, splitCluster)
 }

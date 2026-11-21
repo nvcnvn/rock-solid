@@ -726,6 +726,9 @@ ReportsHold == \A r \in reported : Left(ConfAt(log[r], commit[r]))
 ChosenConf == ConfOf([k \in 1 .. Len(chosen) |-> chosen[k].e])
 DeletesOnlyRemoved == \A r \in Replicas : gone[r] => r \notin Members(ChosenConf)
 
+\* A replica learns its removal only once a committed configuration lacks it.
+LearnsOnlyRemoved == \A r \in Replicas : out[r] => r \notin Members(ChosenConf)
+
 \* A leader serves a lease read while it runs, has not learned its removal, has
 \* committed an entry of its term, and counts the support of a quorum of each half of its
 \* applied configuration, itself included.
