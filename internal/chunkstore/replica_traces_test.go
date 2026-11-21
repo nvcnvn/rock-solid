@@ -327,9 +327,12 @@ func readsFirstTrace(t *testing.T, plant bool) error {
 	return c.found
 }
 
-// logPastFailedTrace is neg-log-past-failed's trace: disk 3, its table marking it in maintenance for a moment, refuses 1.1,
-// block 0, and the refusal is lost; back up in the same interval, it takes 1.2, block 1. Interval 2's peering then keeps
-// 1.2 and counts disk 3, which holds 1.2 whole but lacks 1.1's block, as holding it.
+// logPastFailedTrace is neg-log-past-failed's trace: disk 3 refuses 1.1, block 0, and the refusal is lost; then, in the same
+// interval, it takes 1.2, block 1. Interval 2's peering keeps 1.2 and counts disk 3, which holds 1.2 whole but lacks 1.1's
+// block, as holding it. A table marking disk 3 in maintenance for a moment and a dropped ack stand in for a refusal the
+// member then gets past, such as its own log failing 1.1 with NoSpace or its session waits overflowing, and for its loss:
+// no table can do that, since any change of members starts a new interval, nor can the network, which loses a connection
+// as a unit and so has the primary resend 1.1, which the member refuses again.
 func logPastFailedTrace(t *testing.T, plant bool) error {
 	c := plantedPG2(t, func(p *replicaPlants) { p.logPastFailed = plant })
 	ch := chunkIn(pg0, 1, 0)
