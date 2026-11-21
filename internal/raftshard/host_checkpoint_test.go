@@ -154,6 +154,40 @@ func TestACheckpointRewritesAnIdleShardsHardState(t *testing.T) {
 	}
 }
 
+// A deleted shard whose oldest live round holds an entry past its commit is written again whole
+// by a checkpoint, the deletion flag with it: once the rewrite kills the deletion round, a crash
+// still restarts the shard deleted, with every entry and its hard state.
+func TestAFullRewriteOfADeletedShardKeepsItDeleted(t *testing.T) {
+	r := newRig(t)
+	busy, deleted := NewStorage(), NewStorage()
+	r.host.Add(5, busy)
+	r.host.Add(6, deleted)
+	hs := raftpb.HardState{Term: 2, Vote: 3, Commit: 2}
+	held := r.commit(deleted, 6, 1, Round{Entries: entries(1, 3, 2, 100), HardState: hs, Removed: true, Deleted: true})
+	r.commit(busy, 5, 1, Round{Entries: entries(1, 1, 1, 100), HardState: raftpb.HardState{Term: 1, Vote: 1, Commit: 1}})
+	base := r.host.Log.DurableLSN()
+	if floor := r.checkpoint(); floor != held {
+		t.Fatalf("the first manifest's floor is %d, want %d before the deleted shard's round", floor, held)
+	}
+	if err := r.host.Rewrite(&r.ctx, base, &r.out); err != nil {
+		t.Fatal(err)
+	}
+	r.absorb()
+	r.run()
+	if len(r.takeDone()) != 0 {
+		t.Fatal("the host's own round was reported done to the shard")
+	}
+	if floor := r.checkpoint(); floor <= held {
+		t.Fatalf("after the rewrite the floor is %d, still at or before the old round's %d", floor, held)
+	}
+	r.roll()
+	sts := r.crashCleaned(5, 6)
+	got := sts[6]
+	if last, _ := got.LastIndex(); last != 3 || got.HardState() != hs || !got.Removed() || !got.Deleted() {
+		t.Fatalf("the deleted shard recovered entries to %d, hard state %+v, removed %v, deleted %v; want 3, %+v, removed and deleted", last, got.HardState(), got.Removed(), got.Deleted(), hs)
+	}
+}
+
 // A shard whose round lies past the LSN a rewrite is given is not rewritten; one with a round in
 // flight is left to that round, whose hard state is newer; one whose oldest live round holds
 // entries a compaction has not reached is not rewritten either.
