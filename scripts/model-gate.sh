@@ -31,7 +31,7 @@ if [ "${1:-}" = for ]; then
 	[ -f "$file" ] || { echo "model gate: no file $file" >&2; exit 2; }
 	found=0
 	while IFS=$'\t' read -r rule plant _; do
-		[ "$plant" = open ] && continue
+		case $plant in open | none) continue ;; esac
 		cfg=models/${rule%%/*}/${rule#*/}.cfg
 		for p in $(echo "${plant#*.}" | tr , ' '); do
 			if lines=$(grep -n -w "$p" "$file" | cut -d: -f1 | paste -s -d, -); then
