@@ -89,7 +89,7 @@ for m in $models; do
 	if [ -f "$pass" ]; then
 		skips+=("models-$m|$(head -1 "$pass")")
 	else
-		steps+=("models-$m|scripts/models.sh ci $m && echo 'passed in the gate of $ref at $short, $(date +%F)' >$pass")
+		steps+=("models-$m|CI_LIMIT=${CI_LIMIT:-600} scripts/models.sh ci $m && echo 'passed in the gate of $ref at $short, $(date +%F)' >$pass")
 	fi
 done
 if [ -n "$full" ]; then
