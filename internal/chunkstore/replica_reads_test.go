@@ -694,6 +694,7 @@ func TestPlantedReadBugsBreakTheReadRun(t *testing.T) {
 		{"commit on the primary's own log", 0, false, readPlant{inv: invReadVersion, set: func(r *readRun) { r.d.replicaPlants.commitOnOwnLog = true }}},
 		{"a refused version served", 2, false, readPlant{inv: invReadVersion, set: func(r *readRun) { r.d.replicaPlants.serveRefused = true }}},
 		{"served on after another primary led", 8, false, readPlant{inv: invLinearizable, set: func(r *readRun) { r.d.replicaPlants.serveAfterOther = true }}},
+		{"a member above the kept version left off the list", 4, false, readPlant{inv: invLinearizable, set: func(r *readRun) { r.d.replicaPlants.noListAbove = true }}},
 		{"session checked on arrival", 223, true, readPlant{inv: invFencedWrite, set: func(r *readRun) { r.d.replicaPlants.fenceOnArrival = true }}},
 		{"member takes a fenced session's write", 5, true, readPlant{inv: invFencedWrite, set: func(r *readRun) { r.d.replicaPlants.memberNoFence = true }}},
 	} {
