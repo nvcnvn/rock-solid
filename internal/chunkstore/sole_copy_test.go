@@ -19,6 +19,8 @@ type soleRun struct {
 	// w, once watch starts it, is what the replicas' reports say of the PG, and cond the pool's conditions it gives each second.
 	w    *Watcher
 	cond Conditions
+	// lostErr is what the first give-up that broke invOnlyLost found.
+	lostErr error
 }
 
 // watch starts an authority on a node of its own that every replica heartbeats from each start and that hears their reports in w.
@@ -66,6 +68,7 @@ func newSoleRun(t *testing.T, replicas, minLive, disks int) *soleRun {
 		}
 		return nil
 	})
+	c.inv.Register(invOnlyLost, func() error { return r.lostErr })
 	return r
 }
 

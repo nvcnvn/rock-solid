@@ -21,6 +21,7 @@ const (
 	invKeptWritten = "a member listing nothing maps the kept writes applied in version order"
 	invRemoval     = "no move lowers the members of a PG holding an acknowledged version below its width"
 	invStranded    = "an acknowledged write a disk can serve, a member can serve"
+	invOnlyLost    = "a give-up loses only what no disk left holds"
 )
 
 // authority stands in for the control plane: it knows each disk by the log ID it reports, computes every table with Next from the disks' marks and drains and operators' edits, and records the activations and asks the replicas report; with moves it makes a balance move per table and hands Next every recovered report again each time, as reports delivered late or twice.
@@ -29,6 +30,7 @@ type authority struct {
 	pool       Pool
 	down       map[uint32]core.Tick
 	drain      map[uint32]bool
+	maint      map[uint32]bool
 	edits      []Edit
 	giveUps    []PGGiveUp
 	asks       []PGInterval
@@ -71,6 +73,9 @@ func (a *authority) pools() []PoolInputs {
 		dk := Disk{ID: d.ID, Node: d.Node, Blocks: tb(1), Drain: a.drain[d.ID]}
 		if since, ok := a.down[d.ID]; ok {
 			dk.Mark, dk.DownSince = MarkDown, since
+		}
+		if a.maint[d.ID] {
+			dk.Mark = MarkMaint
 		}
 		if a.det != nil {
 			dk.Mark, dk.DownSince = a.det.Mark(d.ID)

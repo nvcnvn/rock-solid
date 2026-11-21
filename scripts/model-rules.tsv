@@ -151,7 +151,7 @@ voters/neg-halted-silent	raftshard.haltedSilent	TestAHaltedLeaderThatStepsDownAn
 voters/neg-conf-commit-not-durable	raftshard.noConfRound	TestAConfigurationChangeAppliedBeforeItsCommitIsDurableIsForgotten
 voters/neg-hard-state-old	raftshard.oldHardState	TestRoundsThatLeaveTheCommitOfASwapBehindElectTwoLeaders
 voters/neg-joint-report-counts	meta.jointCounts	TestCountingJointReportsDeletesWhileAVoterAppliedOnlyTheJointConfiguration
-epoch/neg-give-up-found	open	Operator gives up an unfound chunk
-epoch/neg-give-up-candidate	open	Operator gives up an unfound chunk
-epoch/neg-skip-past-give-up	open	Operator gives up an unfound chunk
-epoch/neg-give-up-not-stopped	open	Operator gives up an unfound chunk
+epoch/neg-give-up-found	chunkstore.giveUpFound	TestPlantedGiveUpBugsLoseWrites
+epoch/neg-give-up-candidate	chunkstore.giveUpWithCandidate	TestPlantedGiveUpBugsLoseWrites
+epoch/neg-skip-past-give-up	chunkstore.skipPastGiveUp	TestPeeringPastAGiveUpKeepsLaterWrites
+epoch/neg-give-up-not-stopped	chunkstore.giveUpNotStopped	TestPlantedGiveUpBugsLoseWrites

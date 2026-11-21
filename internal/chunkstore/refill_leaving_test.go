@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"bytes"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -278,12 +279,41 @@ func (r *soleRun) giveUp() error {
 	gone := func(d uint32) bool {
 		return slices.ContainsFunc(r.a.rec.Disks(), func(x RecordedDisk) bool { return x.ID == d && x.Gone })
 	}
-	g, err := checkGiveUp(pg0, r.c.table.Entry(pg0), gone, r.w.Lead(pg0), r.a.plant)
+	e := r.c.table.Entry(pg0)
+	g, err := checkGiveUp(pg0, e, gone, r.w.Lead(pg0), r.a.plant)
 	if err != nil {
 		return err
 	}
+	if r.lostErr == nil {
+		r.lostErr = r.onlyLost(e, g)
+	}
 	r.a.giveUps = append(r.a.giveUps, g)
 	r.publish()
+	return nil
+}
+
+// onlyLost reports, as g commits on e, a disk not declared lost that holds an acknowledged version of a chunk not given up
+// already and is no up member of e, or can serve a chunk g drops. Unlike the model's property 23 it excepts no removed disk.
+func (r *soleRun) onlyLost(e *PGEntry, g PGGiveUp) error {
+	for ch, v := range r.acked {
+		if slices.ContainsFunc(e.GiveUps, func(x GiveUp) bool { return x.Interval >= intervalOf(v) && (x.All || slices.Contains(x.Chunks, ch)) }) {
+			continue
+		}
+		drops := g.Drop && (g.All || slices.Contains(g.Chunks, ch))
+		for n := range r.c.reps {
+			d, idx := r.c.ids[n], r.c.reps[n].Store().Index()
+			if r.c.declared[d] || idx == nil {
+				continue
+			}
+			x, _ := idx.Chunk(testPool, ch)
+			if x.Version >= v && !slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == d && m.Mark == MarkUp }) {
+				return fmt.Errorf("giving up %d: %#x of %v is on disk %d, no up member of %v", g.Interval, v, ch, d, e.Members)
+			}
+			if drops && x.ListedIn == 0 && x.Whole >= v {
+				return fmt.Errorf("giving up %d drops %v, which disk %d can serve at %#x", g.Interval, ch, d, v)
+			}
+		}
+	}
 	return nil
 }
 
@@ -453,17 +483,8 @@ func TestDropAllLeavingStrandsAWrite(t *testing.T) {
 
 // Both old disks lost together and declared lost: no interval activated since they went, and peering still needs an answer from the last activated one, so the PG stays stopped with its members refilled, and the pool reports it Stuck and Blocked, its count unknown and no candidate left to return, until given up: its peering then skips the lost intervals and it takes writes again.
 func TestTwoDisksLostTogetherStayStopped(t *testing.T) {
-	r, ch, _ := refillRun(t, 2, 2, 5, nil, "")
-	r.watch()
-	ms := r.members()
-	d1, d2 := ms[0].Disk, ms[1].Disk
-	r.lose(d1)
-	r.lose(d2)
-	r.tick(DegradedRefillAfter + 5_000_000)
-	r.declare(t, d1)
-	r.declare(t, d2)
-	r.tick(120_000_000)
-	if ms = r.members(); len(ms) != 2 || leavingIn(ms) != 0 {
+	r, ch := twoLost(t)
+	if ms := r.members(); len(ms) != 2 || leavingIn(ms) != 0 {
 		t.Fatalf("members %v", ms)
 	}
 	if want := []BlockedPG{{Stopped: true}}; !slices.Equal(r.cond.Stuck, []uint32{0}) || !reflect.DeepEqual(r.cond.Blocked, want) {
@@ -476,6 +497,123 @@ func TestTwoDisksLostTogetherStayStopped(t *testing.T) {
 		t.Fatalf("a new write answered %+v", rp)
 	}
 	giveUpAndWrite(t, r, ch, false)
+}
+
+// twoLost has both disks of a rep2 pool holding X lost together and declared lost, which leaves PG 0 stopped.
+func twoLost(t *testing.T) (*soleRun, core.ChunkID) {
+	r, ch, _ := refillRun(t, 2, 2, 5, nil, "")
+	r.watch()
+	ms := r.members()
+	d1, d2 := ms[0].Disk, ms[1].Disk
+	r.lose(d1)
+	r.lose(d2)
+	r.tick(DegradedRefillAfter + 5_000_000)
+	r.declare(t, d1)
+	r.declare(t, d2)
+	r.tick(120_000_000)
+	return r, ch
+}
+
+// Peering of a PG given up still reaches the intervals since: Z, acknowledged on member B alone while A was in maintenance,
+// is kept when A leads with B in maintenance. With skipPastGiveUp, A's peering skips B's interval and Z reads back lost.
+func TestPeeringPastAGiveUpKeepsLaterWrites(t *testing.T) {
+	for _, plant := range []bool{false, true} {
+		r, ch := twoLost(t)
+		giveUpAndWrite(t, r, ch, false)
+		plantAll(r.c, func(p *replicaPlants) { p.skipPastGiveUp = plant })
+		r.c.planted = plant
+		ms := r.members()
+		a, b := ms[0].Disk, ms[1].Disk
+		r.lose(a)
+		r.a.maint = map[uint32]bool{a: true}
+		r.tick(2_000_000)
+		z := bytes.Repeat([]byte{0x44}, core.BlockSize)
+		if rp, ok := r.answered(r.c.write(pg0, ch, 0, z), 10_000_000); !ok || rp.Status != StatusOK {
+			t.Fatalf("Z with %d in maintenance answered %+v, %v", a, rp, ok)
+		}
+		r.back(a)
+		r.lose(b)
+		r.a.maint = map[uint32]bool{b: true}
+		r.tick(2_000_000)
+		rp, got := r.read(ch)
+		if lost := rp.Status == StatusOK && got[0] != 0x44; lost != plant {
+			t.Fatalf("skipPastGiveUp %v: with %d in maintenance, Z reads %+v %#x", plant, b, rp, got)
+		}
+		if plant {
+			continue
+		}
+		r.back(b)
+		r.a.maint = nil
+		r.tick(2_000_000)
+		if rp, got := r.read(ch); rp.Status != StatusOK || got[0] != 0x44 {
+			t.Fatalf("with %d back, Z reads %+v %#x", b, rp, got)
+		}
+	}
+}
+
+// A give-up commits only where something is lost: with nothing unfound (found), with a member down whose disk may return
+// (candidate), or on an interval that has not activated while its peering reaches every interval it needs (not stopped),
+// it is refused. Planted, each commits and gives up X, which a disk left holds.
+func TestPlantedGiveUpBugsLoseWrites(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		plant   func(*placementPlants)
+		refused error
+		run     func(t *testing.T, plant func(*authority)) (*soleRun, error)
+	}{
+		{"found", func(p *placementPlants) { p.giveUpFound = true }, ErrNothingLost, giveUpFound},
+		{"candidate", func(p *placementPlants) { p.giveUpWithCandidate = true }, ErrGiveUpCandidate, giveUpWithCandidate},
+		{"not stopped", func(p *placementPlants) { p.giveUpNotStopped = true }, ErrNothingLost, giveUpNotStopped},
+	} {
+		if _, err := tc.run(t, nil); err != tc.refused {
+			t.Fatalf("%s: give-up returned %v, want %v", tc.name, err, tc.refused)
+		}
+		r, err := tc.run(t, func(a *authority) { tc.plant(&a.plant) })
+		if err != nil {
+			t.Fatalf("%s planted: give-up returned %v", tc.name, err)
+		}
+		r.tick(1_000_000)
+		if r.c.found == nil || !strings.Contains(r.c.found.Error(), invOnlyLost) {
+			t.Fatalf("%s planted: found %v", tc.name, r.c.found)
+		}
+	}
+}
+
+// giveUpFound gives up PG 0 with X on both members and nothing unfound.
+func giveUpFound(t *testing.T, plant func(*authority)) (*soleRun, error) {
+	r, _, _ := refillRun(t, 2, 2, 5, plant, "")
+	r.watch()
+	r.tick(2_000_000)
+	return r, r.giveUp()
+}
+
+// giveUpWithCandidate gives up PG 0 with X unfound on its refilled members, while both old disks holding X are down, not declared lost.
+func giveUpWithCandidate(t *testing.T, plant func(*authority)) (*soleRun, error) {
+	r, _, _ := refillRun(t, 2, 2, 5, plant, "")
+	r.watch()
+	r.recovery(false)
+	ms := r.members()
+	r.lose(ms[1].Disk)
+	r.tick(DegradedRefillAfter + 2_000_000)
+	r.lose(ms[0].Disk)
+	r.recovery(true)
+	r.tick(DegradedRefillAfter + 2_000_000)
+	return r, r.giveUp()
+}
+
+// giveUpNotStopped gives up PG 0 as an operator's edit replaces a member holding X, before the new interval activates.
+func giveUpNotStopped(t *testing.T, plant func(*authority)) (*soleRun, error) {
+	r, _, _ := refillRun(t, 2, 2, 5, plant, "")
+	r.watch()
+	r.tick(2_000_000)
+	ms := r.members()
+	d := uint32(1)
+	for slices.ContainsFunc(ms, func(m Member) bool { return m.Disk == d }) {
+		d++
+	}
+	r.a.edits = []Edit{{PG: pg0, Disks: []uint32{ms[0].Disk, d}}}
+	r.publish()
+	return r, r.giveUp()
 }
 
 // giveUpAndWrite gives up PG 0 through the authority, which the PG then peers past, and writes ch's second block, which
