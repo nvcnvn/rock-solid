@@ -275,7 +275,9 @@ func (r *soleRun) declare(t *testing.T, disk uint32) {
 // giveUp has an operator give up PG 0's current interval through the authority, as the leader checks it from the disk
 // record and the primary's report the watch heard, and publishes the table that commits it.
 func (r *soleRun) giveUp() error {
-	gone := func(d uint32) bool { return slices.ContainsFunc(r.a.rec.Disks(), func(x RecordedDisk) bool { return x.ID == d && x.Gone }) }
+	gone := func(d uint32) bool {
+		return slices.ContainsFunc(r.a.rec.Disks(), func(x RecordedDisk) bool { return x.ID == d && x.Gone })
+	}
 	g, err := checkGiveUp(pg0, r.c.table.Entry(pg0), gone, r.w.Lead(pg0), r.a.plant)
 	if err != nil {
 		return err
