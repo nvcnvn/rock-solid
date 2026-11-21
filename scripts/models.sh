@@ -4,12 +4,12 @@
 # configuration's first line, "\* expect: <name>", names the invariant or property it must violate;
 # TLC does not name a liveness property it finds violated, so a negative that expects one checks it
 # alone.
-#   scripts/models.sh [ci|deep|heavy|sim] [model | model/config.cfg ...]
+#   scripts/models.sh [ci|deep|heavy|sim|fetch] [model | model/config.cfg ...]
 # ci (the default) runs the ci and negative configurations, each failing past CI_LIMIT seconds
 # (default 300); deep runs the deep ones, each failing past DEEP_LIMIT (default 8100); heavy runs
 # the heavy ones, each failing past 12 hours; sim runs TLC's random simulation of each model's ci
 # configurations at depth 100, splitting SIM_SECONDS (default 3600) per model evenly among them,
-# each with a fresh seed, printed for replay. sim skips FairSpec configurations: TLC 1.7.4's
+# each with a fresh seed, printed for replay. fetch only downloads TLC. sim skips FairSpec configurations: TLC 1.7.4's
 # -simulate reports a liveness violation wherever a trace reaches a terminal state. A
 # model/config.cfg argument runs that configuration alone. TLC uses WORKERS (default 4) workers and
 # a heap of HEAP (default 4g).
@@ -33,7 +33,8 @@ ci) limit=${CI_LIMIT:-300} ;;
 deep) limit=${DEEP_LIMIT:-8100} ;;
 heavy) limit=43200 ;;
 sim) ;;
-*) echo "usage: $0 [ci|deep|heavy|sim] [model | model/config.cfg ...]" >&2; exit 2 ;;
+fetch) exit 0 ;;
+*) echo "usage: $0 [ci|deep|heavy|sim|fetch] [model | model/config.cfg ...]" >&2; exit 2 ;;
 esac
 models=${*:-$(ls models)}
 tmp=$(mktemp -d)

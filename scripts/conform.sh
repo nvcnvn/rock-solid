@@ -19,7 +19,7 @@ cd "$(dirname "$0")/.."
 
 version=1.7.4
 jar=${XDG_CACHE_HOME:-$HOME/.cache}/rock-solid/tla2tools-$version.jar
-[ -f "$jar" ] || scripts/models.sh ci epoch/ci-asks.cfg >/dev/null
+[ -f "$jar" ] || scripts/models.sh fetch
 
 tmp=${KEEP:-$(mktemp -d)}
 mkdir -p "$tmp/traces"
