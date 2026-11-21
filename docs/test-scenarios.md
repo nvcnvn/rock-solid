@@ -2661,8 +2661,9 @@ every acknowledged record, and Corrupt never occurs (Pebble `TestErrors`, `TestD
     block-range punches and a store that answers a failed write OK.
   - The test runs in about 14 s and 210 MB; the planted-bug test in about 6 s.
 - The chunk store's `TestCrashAtEveryAction` also crashes, at every action with the three
-  landings, a workload on the default disk with unaligned writes, a cut, a whole-chunk write and a
-  checkpoint, and the slot tests run the same property over chunk slots.
+  landings, a workload on the default disk with unaligned writes, a cut, a whole-chunk write, a
+  give-up's drop of a chunk and a checkpoint, and the slot tests run the same property over chunk
+  slots.
 
 ## Crash oracle
 
@@ -3652,7 +3653,7 @@ invariants](#placement-faults-and-invariants) (phase 3) unless the row names ano
 | 20 | A restarted member's replayed writes settle: with every step that is due taken in time, once a PG's current interval has activated and no later one is asked for, no up member on a running node keeps gated a version of the PG that its log holds | `GatesSettle` | `invRecovered` ("once recovery settles, every member lists nothing and maps the kept writes, but in an unfound chunk"), which a member that keeps replayed writes gated breaks, as it does not map them |
 | 21 | A left PG's gated versions settle: with every step that is due taken in time, once the newest table names a disk in no interval of a PG since the last activated one, the running node on it, unless cut off from the control plane, keeps no version of the PG gated, which would hold its log's replay point short of the version for good | `LeftGatesSettle` | "no running disk keeps a write gated of a PG its table names it in no interval of since the last activated" (`invLeftGated`), registered in every run of the primary-change seeds and of `TestALeftMemberDownAtItsMovesEndKeepsAcknowledgedWrites` by [Gated versions of a PG the disk left](build-checklist.md#phase-4-embedded-metastore) |
 | 22 | A write held for its chunk's copies is ordered in the end: with every step that is due taken in time, no active primary holds for ever a write it would order but that its chunk has fewer than `min_live` clean copies or that it lists the chunk itself, since recovery reaches the chunk, the primary's own copy included | `HeldWritesOrdered` | "once the run settles, no active primary holds a client write" (`invHeldOrdered`), an end check of the primary-change and fault runs, which `writeOnUnfound` breaks at seed 3 of the fault run (53 of 500), with `invRecovered`, which sees a chunk recovery never reaches. `TestAWriteToAChunkWithOneCleanCopyWaitsForRecovery` and `TestAWriteWaitsWhileThePrimaryListsTheChunk` cover it as regression tests |
-| 23 | A give-up loses only what no disk left holds: when an operator gives up a PG's interval, no disk that is not gone nor removed with every member that took its place gone, but an up member of that interval, holds any acknowledged version of a chunk of the PG, and no such disk can serve all of the acknowledged writes, holding them and listing nothing, of a chunk the give-up drops; a removed disk does not count, for 18's reason | `GiveUpOnlyLost` | "a give-up loses only what no disk left holds" (`invOnlyLost`), checked as each give-up of the sole-copy runs commits; it counts a removed disk too |
+| 23 | A give-up loses only what no disk left holds: when an operator gives up a PG's interval, no disk that is not gone nor removed with every member that took its place gone, but an up member of that interval, holds any acknowledged version of a chunk of the PG, and no such disk can serve all of the acknowledged writes, holding them and listing nothing, of a chunk the give-up drops; a removed disk does not count, for 18's reason | `GiveUpOnlyLost` | "a give-up loses only what no disk left holds" (`invOnlyLost`), checked over every acknowledged version of every chunk as each give-up of the sole-copy runs and of the seeded give-up run (`TestGiveUpsUnderFaultsLoseOnlyWhatIsLost`) commits |
 
 **Counterexamples.** Each row is a variant of the spec with one rule removed (`neg-*.cfg`). TLC must
 find a violation of the named property, which is never the property that only restates the removed
@@ -5221,14 +5222,27 @@ member settled every run while the split's PGs, not yet reported, could not move
   writes refused, until given up: peering then skips the lost intervals and the PG takes writes
   (`TestTwoDisksLostTogetherStayStopped`).
 - An operator's give-up (property 23 of the [Epoch change model](#epoch-change-model), registered
-  as `invOnlyLost`, which unlike 23 counts removed disks too): refused with nothing unfound, with
+  as `invOnlyLost`): refused with nothing unfound, with
   both old disks down and not declared lost, and on an interval an edit started that has not
   activated; under `giveUpFound`, `giveUpWithCandidate` and `giveUpNotStopped` each commits and
   breaks `invOnlyLost` (`neg-give-up-found`, `neg-give-up-candidate`, `neg-give-up-not-stopped`,
   `TestPlantedGiveUpBugsLoseWrites`). After the stopped give-up, Z acknowledged on member B alone
   while A is in `maintenance` reads back once A leads with B in `maintenance` and B returns; under
   `skipPastGiveUp`, A's peering skips B's interval and Z reads back lost (`neg-skip-past-give-up`,
-  `TestPeeringPastAGiveUpKeepsLaterWrites`).
+  `TestPeeringPastAGiveUpKeepsLaterWrites`). After X's give-up, A lists only Z, written since; A
+  restarts with the give-up in its first table and keeps the listing, so with B declared lost Z
+  reads unfound, not zeros (`TestARestartKeepsTheListingOfAWriteAfterAGiveUp`). A give-up staged with
+  an edit replacing both members is left out of that table, and Y, which it does not record, reads
+  back (`TestAGiveUpWithAnEditKeepsTheChunksItDoesNotRecord`). Seeded: writes to three chunks while
+  disks are cut off, come back, are declared lost and restart, and give-ups at random through the
+  leader's check; no give-up breaks `invOnlyLost` and no chunk written since every give-up of it reads
+  zeros (`TestGiveUpsUnderFaultsLoseOnlyWhatIsLost`).
+- A give-up commits interval k+1 as a copy of k: next to an edit, a mark change, a refill, a
+  balance move or an activation of its PG it is left out of the table, alone it commits
+  (`TestAGiveUpCommitsOnlyWithItsMembersUnchanged`). A store's drop leaves a write ordered while it
+  persists, of a later interval, the chunk's version, across a restart too
+  (`TestAWriteOrderedDuringADropOutlivesIt`); a drop round-trips the disk log, interval 0 or a
+  version refused (`TestDroppedEntryErrors`, `FuzzDecodeRecord`).
 - A refilled primary returns behind the others, and does not lead while one of them is up
   (`TestARefilledPrimaryReturnsBehindTheOthers`).
 - A leaving member that is up takes the place of a member merely down, which leaves in turn
@@ -8460,8 +8474,8 @@ The leader's side is `meta.CtlHost` on the single-voter group of [Control-plane 
 | The failed devices command and a pool command at a leader whose lease does not run | Neither answered, waiting nor staged (`TestACommandAtALeaderWithoutItsLeaseIsDropped`) |
 | An operator's command at a follower of a three-voter group | Answered with the leader's node, as a node's report is (`TestAFollowerRedirectsANodeToTheLeader`) |
 | Each command, a pool spec with every setting, and answers with no text, 300 bytes of refusal, 100 failed devices and give-ups, across the wire | Decode to what was sent; fuzzed (`TestAdminCrossesTheWireWhole`, `FuzzDecodeAdmin`, `FuzzDecodeAdminAnswer`) |
-| A give-up of a PG the table lacks and of one with nothing lost; then, once the primary's report names two chunks unfound, a give-up of that PG | The first two answered at once with `ErrUnknownPG` and `chunkstore.ErrNothingLost`; the third answered only once it commits, with the interval given up and both chunks dropped, the PG in its next interval (`TestAGiveUpIsAnsweredWithWhatItDropped`) |
-| A stopped PG's give-up and an unfound one's, answered | Printed as the interval given up, every chunk kept as its members hold it, and as the count and each chunk dropped (`TestAGiveUpPrintsWhatItDropped`) |
+| A give-up or a read of a PG the table lacks, a give-up of an interval past the current, and one with nothing lost; then, once the primary's report names two chunks unfound, a read of the PG and a give-up of its interval; then, once the next interval's report names chunks unfound too, the give-up sent again | The first four answered at once with `ErrUnknownPG`, `ErrIntervalMoved` and `chunkstore.ErrNothingLost`; the read with the interval and 2 unfound; the give-up only once it commits, with the interval given up and both chunks dropped, the PG in its next interval; the one sent again with the same give-up, the newer interval not given up (`TestAGiveUpIsAnsweredWithWhatItDropped`, and `TestAGiveUpCommitsOnlyWhatIsLost` on the `Control`) |
+| A stopped PG's give-up and an unfound one's, answered, one with more chunks unfound than it dropped | Printed as the interval given up, every chunk kept as its members hold it, and as the count and each chunk dropped, and how many more stay unfound (`TestAGiveUpPrintsWhatItDropped`) |
 | `disk lost`, `disk remove`, `disk failed`, `pool` and `pg give-up` with flags before and after their arguments; a disk of 0, a missing `-ctl`, pool settings on a disk command, an unknown preset, a `write_limit` past a byte, a give-up of pool 0 or of a PG that is no 32-bit number | The commands parse to what was given; the rest are refused (`TestParseAdminTakesEachCommand`) |
 | A blocking connection, as the command line's, to a loop's TCP driver: a message with inline bytes and data, then the loop's answer | The loop receives it from the node the hello named, and the connection the answer (`TestAConnTradesMessagesWithALoop`, `internal/driver/tcp`) |
 | A blocking connection under node 9 to a loop, which then dials a second loop; the connection closes; then the second loop sends to the first, and the first to it | The first loop delivers node 9's `PeerLost` and forgets it, keeping one peer; the second loop's message names it, and the first loop's send goes on the connection it dialed, with no new dial (`TestAPeerThatDialedInIsForgottenOnceItCloses`, `internal/driver/tcp`) |
