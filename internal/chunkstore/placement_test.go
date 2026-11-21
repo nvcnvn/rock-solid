@@ -499,8 +499,9 @@ func TestIntervalsRaisedByTableChanges(t *testing.T) {
 	})
 }
 
-// A give-up commits only in a PG whose members, marks and activation the table leaves as they were, interval k+1 a copy of
-// k; in a PG an edit, a mark change, a refill or a balance move changes it is left out, for the leader to check again.
+// A give-up commits only in a PG whose members, marks and activation the table leaves as they were, in a pool whose settings
+// it leaves too, interval k+1 a copy of k; it is left out of a PG a settings change, an edit, a mark change, a refill or a
+// balance move changes.
 func TestAGiveUpCommitsOnlyWithItsMembersUnchanged(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -511,6 +512,7 @@ func TestAGiveUpCommitsOnlyWithItsMembersUnchanged(t *testing.T) {
 			e := &l.pools().PGs[0]
 			in.Edits = []Edit{{PG: pg(0), Disks: []uint32{l.onNode(l.freeNode(e))[0], e.Members[1].Disk}}}
 		}},
+		{"with a settings change", func(l *layout, _ *Inputs) { l.pool.MinLive = 2 }},
 		{"with a mark change", func(l *layout, _ *Inputs) { l.mark(MarkDown, l.pools().PGs[0].Members[0].Disk) }},
 		{"with a refill", func(l *layout, _ *Inputs) {
 			l.mark(MarkDown, l.pools().PGs[0].Members[0].Disk)
@@ -546,7 +548,7 @@ func TestAGiveUpCommitsOnlyWithItsMembersUnchanged(t *testing.T) {
 			var left int
 			for i, e := range l.pools().PGs {
 				b := &prev.Pools[0].PGs[i]
-				copied := slices.Equal(e.Members, b.Members) && e.Activated == b.Activated
+				copied := slices.Equal(e.Members, b.Members) && e.Activated == b.Activated && l.pools().MinLive == prev.Pools[0].MinLive
 				if gave := e.givenUp() == b.Interval; gave != copied || gave && e.Interval != b.Interval+1 {
 					t.Fatalf("PG %d from %+v to %+v", i, b, e)
 				}
