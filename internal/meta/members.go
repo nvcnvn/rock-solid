@@ -341,19 +341,27 @@ func (c *Control) Lost(now core.Tick, id uint32) error { return c.stageExit(now,
 // ones included, or in an interval since its last activated one.
 func (c *Control) Remove(now core.Tick, id uint32) error { return c.stageExit(now, diskExit{id, true}) }
 
-// ErrUnknownPG reports an operator's give-up of a PG the committed table lacks, or of an interval that is not its current one.
-var ErrUnknownPG = errors.New("meta: no such PG interval")
+var (
+	// ErrUnknownPG reports an operator's command naming a PG the committed table lacks.
+	ErrUnknownPG = errors.New("meta: no such PG")
+	// ErrIntervalMoved reports a give-up of an interval that is neither the PG's current one nor one a give-up records.
+	ErrIntervalMoved = errors.New("meta: the PG's interval moved")
+)
 
 // GiveUp takes an operator's give-up at now of PG pg's current interval, interval, and of what it left unfound or, if
 // stopped, every chunk of the PG, which the next Step commits as chunkstore.CheckGiveUp makes it from the committed table,
-// the disk record and the primary's latest report. ErrUnknownPG for a PG or interval the committed table does not have as
-// current; chunkstore.ErrGiveUpCandidate or ErrNothingLost for one it refuses. A give-up the table records passes, so
-// an operator may repeat a command whose answer was lost; it has committed once GivenUp reports it.
+// the disk record and the primary's latest report. ErrUnknownPG for a PG the committed table lacks, ErrIntervalMoved for
+// an interval it does not have as current; chunkstore.ErrGiveUpCandidate or ErrNothingLost for one it refuses. A
+// give-up of an interval the table's newest give-up covers passes, giving up nothing more, so an operator may repeat
+// a command whose answer was lost; it has committed once GivenUp reports it.
 func (c *Control) GiveUp(now core.Tick, pg core.PGID, interval uint32) error {
 	c.begin(now)
 	x := chunkstore.PGInterval{PG: pg, Interval: interval}
-	if _, err := c.giveUp(x); err != nil || c.GivenUp(x) {
+	if _, err := c.giveUp(x); err != nil {
 		return err
+	}
+	if _, done := c.GivenUp(x); done {
+		return nil
 	}
 	if !slices.Contains(c.giveUps, x) {
 		c.giveUps = append(c.giveUps, x)
@@ -361,22 +369,27 @@ func (c *Control) GiveUp(now core.Tick, pg core.PGID, interval uint32) error {
 	return nil
 }
 
-// GivenUp reports whether the committed table records the give-up of x.
-func (c *Control) GivenUp(x chunkstore.PGInterval) bool {
-	e := c.table.Entry(x.PG)
-	return e != nil && slices.ContainsFunc(e.GiveUps, func(g chunkstore.GiveUp) bool { return g.Interval == x.Interval })
+// GivenUp is the first give-up the committed table records of x's PG at or past x's interval, which covers it.
+func (c *Control) GivenUp(x chunkstore.PGInterval) (chunkstore.GiveUp, bool) {
+	if e := c.table.Entry(x.PG); e != nil {
+		if i := slices.IndexFunc(e.GiveUps, func(g chunkstore.GiveUp) bool { return g.Interval >= x.Interval }); i >= 0 {
+			return e.GiveUps[i], true
+		}
+	}
+	return chunkstore.GiveUp{}, false
 }
 
 // giveUp checks give-up x against the committed state.
 func (c *Control) giveUp(x chunkstore.PGInterval) (chunkstore.PGGiveUp, error) {
 	e := c.table.Entry(x.PG)
-	switch {
-	case e == nil:
+	if e == nil {
 		return chunkstore.PGGiveUp{}, ErrUnknownPG
-	case c.GivenUp(x):
+	}
+	if _, done := c.GivenUp(x); done {
 		return chunkstore.PGGiveUp{}, nil
-	case e.Interval != x.Interval:
-		return chunkstore.PGGiveUp{}, ErrUnknownPG
+	}
+	if e.Interval != x.Interval {
+		return chunkstore.PGGiveUp{}, ErrIntervalMoved
 	}
 	return chunkstore.CheckGiveUp(x.PG, e, func(d uint32) bool { return d != 0 && int(d) <= len(c.disks) && c.disks[d-1].Gone }, c.watch.Lead(x.PG))
 }
@@ -446,12 +459,13 @@ func (c *Control) reapply() ([]chunkstore.PGGiveUp, error) {
 	var gs []chunkstore.PGGiveUp
 	c.giveUps = slices.DeleteFunc(c.giveUps, func(x chunkstore.PGInterval) bool {
 		g, err := c.giveUp(x)
+		_, done := c.GivenUp(x)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("meta: PG %d.%d interval %d: %w", x.PG.Pool, x.PG.Index, x.Interval, err))
-		} else if !c.GivenUp(x) {
+		} else if !done {
 			gs = append(gs, g)
 		}
-		return err != nil || c.GivenUp(x)
+		return err != nil || done
 	})
 	c.exits = slices.DeleteFunc(c.exits, func(x diskExit) bool {
 		err := c.exit(x)

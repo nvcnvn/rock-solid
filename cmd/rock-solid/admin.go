@@ -45,7 +45,20 @@ func runAdmin(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "rock-solid: %v\n%s\n", err, adminUsage)
 		return 2
 	}
+	var unfound uint32
+	if a.Op == meta.AdminGiveUp {
+		an, err := sendAdmin(cfg, &meta.Admin{Op: meta.AdminPG, Pool: a.Pool, PG: a.PG})
+		if err == nil && an.Refused != "" {
+			err = errors.New("refused: " + an.Refused)
+		}
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "rock-solid: %v\n", err)
+			return 1
+		}
+		a.Interval, unfound = an.GiveUp.Interval, an.Unfound
+	}
 	an, err := sendAdmin(cfg, &a)
+	an.Unfound = unfound
 	switch {
 	case err != nil:
 		_, _ = fmt.Fprintf(stderr, "rock-solid: %v\n", err)
@@ -58,7 +71,8 @@ func runAdmin(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// printDone prints what command a, answered an, did.
+// printDone prints what command a, answered an, did; for a give-up, an.Unfound is the chunks its PG's primary reported
+// unfound before it.
 func printDone(stdout io.Writer, a *meta.Admin, an *meta.AdminAnswer) {
 	switch a.Op {
 	case meta.AdminLost:
@@ -79,6 +93,9 @@ func printDone(stdout io.Writer, a *meta.Admin, an *meta.AdminAnswer) {
 		}
 		for _, c := range g.Chunks {
 			_, _ = fmt.Fprintf(stdout, "chunk %d/%d/%d dropped\n", c.Volume, c.Inode, c.Index)
+		}
+		if n := len(g.Chunks); !g.All && int(an.Unfound) > n {
+			_, _ = fmt.Fprintf(stdout, "%d more chunks stay unfound: give up again\n", int(an.Unfound)-n)
 		}
 	case meta.AdminFailed:
 		if len(an.Failed) == 0 {

@@ -11,13 +11,14 @@ import (
 // An operator's command travels to the control-plane group in the same framing as a node's
 // messages, its token the request number the command line chose, and its body an op byte and the
 // op's arguments: a disk ID for a declaration or a removal, a pool ID and the pool's spec for a
-// pool, nothing for the failed devices, a pool ID and a PG number for a give-up. A spec is a uvarint whose bit i is set when the i-th of its
+// pool, nothing for the failed devices, a pool ID, a PG number and the interval for a give-up, a pool ID and a PG number
+// for a PG's state. A spec is a uvarint whose bit i is set when the i-th of its
 // optional settings is (replicas, min_live, data, parity, encode_on_write, max_per_domain,
 // overcommit, write_limit, pg_count), each set one as a uvarint in that order, then sealed,
 // failure domain, locality and disk class as strings. The answer carries the command's request as
 // its token, and its body is the refusal as a string, empty once the command took effect, then a
-// count and each failed device's node and device, then for a give-up the interval given up, a
-// byte whose bit 0 says every chunk and bit 1 dropped, a count and each chunk's ID. A voter that does not lead answers with the
+// count and each failed device's node and device, then for a give-up or a PG's state the interval, a byte whose bit 0
+// says every chunk and bit 1 dropped, a count and each chunk's ID, and the count of chunks unfound. A voter that does not lead answers with the
 // leader it knows (KindLeader).
 const (
 	KindAdmin       byte = 0x4d
@@ -28,32 +29,36 @@ const (
 type AdminOp byte
 
 // The operator's commands: declare a disk lost, remove a drained disk, create or change a pool,
-// list the devices nodes left failed, and give up a PG's current interval.
+// list the devices nodes left failed, give up a PG's current interval, and read a PG's state.
 const (
 	AdminLost AdminOp = 1 + iota
 	AdminRemove
 	AdminPool
 	AdminFailed
 	AdminGiveUp
+	AdminPG
 )
 
 // Admin is an operator's command: Disk for AdminLost and AdminRemove, Pool and Spec for AdminPool,
-// Pool and PG for AdminGiveUp.
+// Pool, PG and the PG's current Interval for AdminGiveUp, Pool and PG for AdminPG.
 type Admin struct {
-	Op   AdminOp
-	Disk uint32
-	Pool core.PoolID
-	PG   uint32
-	Spec chunkstore.PoolSpec
+	Op       AdminOp
+	Disk     uint32
+	Pool     core.PoolID
+	PG       uint32
+	Interval uint32
+	Spec     chunkstore.PoolSpec
 }
 
 // AdminAnswer is the answer to an operator's command: why the leader refused it, empty once it
-// took effect, the failed devices AdminFailed asked for, and the give-up AdminGiveUp committed,
-// its Interval 0 for none.
+// took effect, the failed devices AdminFailed asked for, the give-up AdminGiveUp committed or, for
+// AdminPG, the PG's current interval alone, its Interval 0 for none, and for AdminPG the chunks the
+// PG's primary last reported unfound in that interval.
 type AdminAnswer struct {
 	Refused string
 	Failed  []FailedDevice
 	GiveUp  chunkstore.GiveUp
+	Unfound uint32
 }
 
 // EncodeAdmin writes command a, numbered request, into msg, or returns the pool's error.
@@ -65,6 +70,8 @@ func EncodeAdmin(pool core.BufPool, group, request uint64, a *Admin, msg *core.M
 	case AdminPool:
 		body = appendSpec(binary.AppendUvarint(body, uint64(a.Pool)), &a.Spec)
 	case AdminGiveUp:
+		body = binary.AppendUvarint(binary.AppendUvarint(binary.AppendUvarint(body, uint64(a.Pool)), uint64(a.PG)), uint64(a.Interval))
+	case AdminPG:
 		body = binary.AppendUvarint(binary.AppendUvarint(body, uint64(a.Pool)), uint64(a.PG))
 	}
 	return encodeBody(pool, group, KindAdmin, request, body, msg)
@@ -89,10 +96,15 @@ func DecodeAdmin(pool core.BufPool, msg *core.Msg) (Admin, error) {
 		d.bad = d.bad || n > math.MaxUint32
 		a.Pool = core.PoolID(n)
 		d.spec(&a.Spec)
-	case AdminGiveUp:
+	case AdminGiveUp, AdminPG:
 		pool, pg := d.uvarint(), d.uvarint()
 		d.bad = d.bad || pool > math.MaxUint32 || pg > math.MaxUint32
 		a.Pool, a.PG = core.PoolID(pool), uint32(pg)
+		if a.Op == AdminGiveUp {
+			k := d.uvarint()
+			d.bad = d.bad || k == 0 || k > math.MaxUint32
+			a.Interval = uint32(k)
+		}
 	case AdminFailed:
 	default:
 		d.bad = true
@@ -203,6 +215,7 @@ func EncodeAdminAnswer(pool core.BufPool, group, request uint64, a *AdminAnswer,
 		for _, c := range g.Chunks {
 			body = c.AppendTo(body)
 		}
+		body = binary.AppendUvarint(body, uint64(a.Unfound))
 	}
 	return encodeBody(pool, group, KindAdminAnswer, request, body, msg)
 }
@@ -235,6 +248,9 @@ func DecodeAdminAnswer(pool core.BufPool, msg *core.Msg) (AdminAnswer, error) {
 			g.Chunks = append(g.Chunks, core.ChunkIDFromBytes([core.ChunkIDSize]byte(d.b)))
 			d.b = d.b[core.ChunkIDSize:]
 		}
+		n := d.uvarint()
+		d.bad = d.bad || n > math.MaxUint32
+		a.Unfound = uint32(n)
 	}
 	if d.bad || len(d.b) != 0 {
 		return AdminAnswer{}, ErrMalformed

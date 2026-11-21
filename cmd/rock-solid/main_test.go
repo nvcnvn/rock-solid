@@ -97,15 +97,17 @@ func TestParseAdminTakesEachCommand(t *testing.T) {
 	}
 }
 
-// A give-up prints the interval it gave up and each chunk it dropped, or that it dropped none.
+// A give-up prints the interval it gave up and each chunk it dropped, or that it dropped none, and how many more stay unfound.
 func TestAGiveUpPrintsWhatItDropped(t *testing.T) {
 	a := meta.Admin{Op: meta.AdminGiveUp, Pool: 1, PG: 3}
-	for g, want := range map[*chunkstore.GiveUp]string{
-		{Interval: 5, All: true}: "PG 1.3 interval 5 given up, every chunk kept as its members hold it\n",
-		{Interval: 6, Drop: true, Chunks: []core.ChunkID{{Volume: 1, Index: 4}, {Volume: 1, Inode: 2, Index: 9}}}: "PG 1.3 interval 6 given up, 2 chunks dropped\nchunk 1/0/4 dropped\nchunk 1/2/9 dropped\n",
+	two := []core.ChunkID{{Volume: 1, Index: 4}, {Volume: 1, Inode: 2, Index: 9}}
+	for g, want := range map[*meta.AdminAnswer]string{
+		{GiveUp: chunkstore.GiveUp{Interval: 5, All: true}, Unfound: 3}:                    "PG 1.3 interval 5 given up, every chunk kept as its members hold it\n",
+		{GiveUp: chunkstore.GiveUp{Interval: 6, Drop: true, Chunks: two}, Unfound: 2}:      "PG 1.3 interval 6 given up, 2 chunks dropped\nchunk 1/0/4 dropped\nchunk 1/2/9 dropped\n",
+		{GiveUp: chunkstore.GiveUp{Interval: 6, Drop: true, Chunks: two[:1]}, Unfound: 70}: "PG 1.3 interval 6 given up, 1 chunks dropped\nchunk 1/0/4 dropped\n69 more chunks stay unfound: give up again\n",
 	} {
 		var out bytes.Buffer
-		printDone(&out, &a, &meta.AdminAnswer{GiveUp: *g})
+		printDone(&out, &a, g)
 		if out.String() != want {
 			t.Errorf("%+v printed %q, want %q", *g, out.String(), want)
 		}

@@ -139,8 +139,6 @@ type adminWait struct {
 	starter
 	a    Admin
 	want chunkstore.Pool
-	// interval is the interval a give-up takes, its PG's current one when the command arrived.
-	interval uint32
 }
 
 // FormatCtlHost starts a host on a new disk, which it formats with sb. Its first round is the
@@ -496,14 +494,20 @@ func (h *CtlHost) admin(ctx *core.Context, ev *core.Event, request uint64, out *
 		err = wrap(err, "pool %d", w.a.Pool)
 	case w.a.Op == AdminLost:
 		err = wrap(c.Lost(ctx.Now, w.a.Disk), "disk %d", w.a.Disk)
+	case w.a.Op == AdminPG:
+		pg := core.PGID{Pool: w.a.Pool, Index: w.a.PG}
+		an := AdminAnswer{Refused: wrap(ErrUnknownPG, "PG %s", pgName(pg)).Error()}
+		if e := c.table.Entry(pg); e != nil {
+			an = AdminAnswer{GiveUp: chunkstore.GiveUp{Interval: e.Interval}}
+			if l := c.watch.Lead(pg); l != nil && l.Interval == e.Interval {
+				an.Unfound = l.Unfound
+			}
+		}
+		h.answerAdmin(ctx, &w, &an, out)
+		return
 	case w.a.Op == AdminGiveUp:
 		pg := core.PGID{Pool: w.a.Pool, Index: w.a.PG}
-		err = ErrUnknownPG
-		if e := c.table.Entry(pg); e != nil {
-			w.interval = e.Interval
-			err = c.GiveUp(ctx.Now, pg, w.interval)
-		}
-		err = wrap(err, "PG %s", pgName(pg))
+		err = wrap(c.GiveUp(ctx.Now, pg, w.a.Interval), "PG %s", pgName(pg))
 	default:
 		err = wrap(c.Remove(ctx.Now, w.a.Disk), "disk %d", w.a.Disk)
 	}
@@ -532,16 +536,11 @@ func (h *CtlHost) settle(ctx *core.Context, out *CtlHostOutput) {
 		var refused string
 		var gave chunkstore.GiveUp
 		if w.a.Op == AdminGiveUp {
-			x := chunkstore.PGInterval{PG: core.PGID{Pool: w.a.Pool, Index: w.a.PG}, Interval: w.interval}
+			x := chunkstore.PGInterval{PG: core.PGID{Pool: w.a.Pool, Index: w.a.PG}, Interval: w.a.Interval}
 			if slices.Contains(c.giveUps, x) {
 				return false
 			}
-			if e := c.table.Entry(x.PG); e != nil {
-				if i := slices.IndexFunc(e.GiveUps, func(g chunkstore.GiveUp) bool { return g.Interval == x.Interval }); i >= 0 {
-					gave = e.GiveUps[i]
-				}
-			}
-			if gave.Interval == 0 {
+			if gave, _ = c.GivenUp(x); gave.Interval == 0 {
 				refused = fmt.Sprintf("PG %s: the committed state refused the give-up of interval %d before it committed", pgName(x.PG), x.Interval)
 			}
 		} else if w.a.Op == AdminPool {
