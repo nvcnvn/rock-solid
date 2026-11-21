@@ -113,24 +113,26 @@ summary=$out/summary.md
 {
 	echo "# Gate of $ref at $short (change since ${base:0:7}${full:+, full})"
 	echo
-	echo "| step | verdict | time | log |"
-	echo "|---|---|---|---|"
-	for s in ${skips[@]+"${skips[@]}"}; do echo "| ${s%%|*} | skipped: ${s#*|} | | |"; done
+	echo "| step | verdict | lock wait | run | log |"
+	echo "|---|---|---|---|---|"
+	for s in ${skips[@]+"${skips[@]}"}; do echo "| ${s%%|*} | skipped: ${s#*|} | | | |"; done
 } >"$summary"
 failed=0
 failures=
 for s in "${steps[@]}"; do
 	name=${s%%|*}
 	log=$out/$name.log
-	start=$SECONDS
+	start=$(date +%s)
 	echo "$(date +%T) $name"
 	verdict=pass
-	if ! lockf -k "$lock" bash -c "${s#*|}" >"$log" 2>&1; then
+	if ! lockf -k "$lock" bash -c 'date +%s >"$0"; eval "$1"' "$out/$name.locked" "${s#*|}" >"$log" 2>&1; then
 		verdict=FAIL
 		failed=1
 		failures+=$'\n'"## $name"$'\n\n```\n'"$(grep -E '^(--- FAIL|FAIL|panic:|Error:)|(is|was) violated' "$log" | head -40)"$'\n```\n'
 	fi
-	echo "| $name | $verdict | $((SECONDS - start))s | $log |" >>"$summary"
+	end=$(date +%s)
+	locked=$(cat "$out/$name.locked" 2>/dev/null || echo "$end")
+	echo "| $name | $verdict | $((locked - start))s | $((end - locked))s | $log |" >>"$summary"
 done
 echo "$failures" >>"$summary"
 
