@@ -6218,6 +6218,7 @@ commit, it must pass unplanted and break its invariant planted.
 | Peering judges a past interval by the current `min_live` | | Trace, as no seeded run changes `min_live`: interval 2 lowers it to 1 and marks disk 3 down, W is acknowledged on disk 2 alone; interval 3 raises it to 2, makes disk 3 primary with disk 2 in `maintenance`, cut off from disk 3 | | | "no acknowledged version is ever dropped" |
 | A primary whose interval a failed version ended never asks for the next | | Fault | 7 | 16 | Property 15's |
 | A primary serves a version a member refused, before peering settles it | A primary maps the versions it refuses | Read | 33 | 2 | Property 14's `ReadsMapped`, as "no read returns a version before it commits, or one later lost": a read returns a version neither acknowledged nor kept |
+| A node that no longer leads a PG keeps its pending versions unanswered | | Trace, as in the seeded runs (none of 200 in the fault and read runs) a member reached by the version answers it, a lost send comes only with a lost connection, whose resend a member refuses, and a version peering keeps commits and is answered OK: primary 1's sends of 1.1 to both members are lost, and interval 2 makes disk 2 primary with disk 1 in `maintenance`, so peering drops 1.1 | | | Property 16's |
 
 The lease pair run's plants, seeds of 500 failing and the first. No margin for a suspend that
 delivers no `Resumed` (`Config.Resume` 0) 2 (28). The 1 s of that margin covers the errors of most other plants, so

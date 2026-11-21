@@ -385,6 +385,36 @@ func currentMinLiveTrace(t *testing.T, plant bool) error {
 	return c.found
 }
 
+// noDemoteTrace is neg-no-demote's trace: primary 1 orders 1.1, its sends to both members lost, and interval 2 makes disk 2
+// primary with disk 1 in maintenance. Disk 1, no longer leading, must refuse 1.1's client itself: no member refuses 1.1 and
+// peering, which drops it, commits nothing that would answer it. In the seeded runs a member reached by the demoted primary's
+// version answers it, a lost send comes only with a lost connection, whose resend a member refuses, and a version peering
+// keeps commits and is answered OK.
+func noDemoteTrace(t *testing.T, plant bool) error {
+	c := newRCluster(t, rtable(4, 2))
+	c.replicaPlants.noDemote = plant
+	for _, r := range c.reps {
+		r.plant = c.replicaPlants
+	}
+	c.planted = true
+	ch := chunkIn(pg0, 4, 0)
+	c.drop = func(d int, a *core.Action) bool {
+		return d == 0 && a.Kind == core.ActNetSend && a.Msg.Len >= headSize && Kind(a.Msg.Body[1]) == KindReplicaWrite
+	}
+	w := c.write(pg0, ch, 0, []byte{1})
+	c.runFor(100_000)
+	c.publish(c.next(func(t *Table) {
+		_, e := t.entry(pg0)
+		e.Members = []Member{{Disk: 2}, {Disk: 3}, {Disk: 1, Mark: MarkMaint}}
+		e.Interval = 2
+	}), true)
+	c.settle()
+	if _, ok := c.cl.replies[w]; !ok {
+		return cmp.Or(c.found, error(&sim.Violation{Name: invOneReply, Err: fmt.Errorf("1.1 unanswered once disk 1 lost its lead")}))
+	}
+	return c.found
+}
+
 // Each planted bug whose counterexample needs a trace no seeded run reaches breaks its invariant on that trace, which the correct code passes.
 func TestPlantedBugsBreakTheirTraces(t *testing.T) {
 	for _, tc := range []struct {
@@ -403,6 +433,7 @@ func TestPlantedBugsBreakTheirTraces(t *testing.T) {
 		{"pending versions settled by number", invAckedKept, settleChainTrace},
 		{"past interval judged by the current min_live", invAckedKept, currentMinLiveTrace},
 		{"logged past a failed version", invKeptWritten, logPastFailedTrace},
+		{"pending versions left unanswered on demotion", invOneReply, noDemoteTrace},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := tc.trace(t, false); err != nil {
