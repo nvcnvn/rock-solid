@@ -1,6 +1,7 @@
 #!/bin/bash
 # Plants each violation scripts/model-gate.sh must catch in a throwaway clone, since a gate that cannot fail passes too.
 set -euo pipefail
+unset MODEL_GATE_BASE CI
 repo=$(cd "$(dirname "$0")/.." && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
