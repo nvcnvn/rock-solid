@@ -92,6 +92,7 @@ type Control struct {
 	pin             []chunkstore.PoolInputs
 	drains          []uint32
 	exits           []diskExit
+	giveUps         []chunkstore.PGInterval
 	nodes           []nodeState
 	// voters are the control-plane group's voters heard from, by node, each holding only its replicas.
 	voters []nodeState
@@ -325,7 +326,8 @@ func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) erro
 	if err := c.recheck(); err != nil {
 		return err
 	}
-	if err := c.reapply(); err != nil {
+	giveUps, err := c.reapply()
+	if err != nil {
 		return err
 	}
 	p := &commit{token: token, asks: len(c.asks), acts: len(c.acts), rc: len(c.rcv)}
@@ -338,7 +340,7 @@ func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) erro
 	}
 	c.pin = pin
 	c.det.View(&c.table, pin)
-	n.table, _ = chunkstore.Next(&c.table, &chunkstore.Inputs{Now: in.Now, Pools: pin, Asks: c.asks, Activations: c.acts, Recovered: c.rcv, Edits: in.Edits, Moves: in.Moves})
+	n.table, _ = chunkstore.Next(&c.table, &chunkstore.Inputs{Now: in.Now, Pools: pin, Asks: c.asks, Activations: c.acts, Recovered: c.rcv, Edits: in.Edits, GiveUps: giveUps, Moves: in.Moves})
 	p.delta = chunkstore.MakeDelta(&c.table, &n.table)
 	var moved []core.PoolID
 	for _, de := range p.delta.Entries {
@@ -360,7 +362,6 @@ func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) erro
 	n.smapV = c.smapV
 	n.disks, n.diskV, n.format, n.sess = c.diskView(live, in.Now), c.diskV, max(c.format, c.stagedFormat), c.sess
 	var ops []Op
-	var err error
 	for _, g := range n.smap.Groups {
 		if old, ok := c.group(g.ID); !ok || !bytes.Equal(appendGroup(nil, old), appendGroup(nil, &g)) {
 			p.plans = append(p.plans, g)

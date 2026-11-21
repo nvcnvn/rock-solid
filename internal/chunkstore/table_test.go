@@ -150,6 +150,32 @@ func TestDeltaCarriesEveryNewPG(t *testing.T) {
 	}
 }
 
+func givenUpTwice() []GiveUp {
+	return []GiveUp{{Interval: 1, All: true}, {Interval: 2, Drop: true, Chunks: []core.ChunkID{{Volume: 1, Index: 3}, {Volume: 1, Index: 9}}}}
+}
+
+// An entry's give-ups encode after its past intervals and decode back; out of order, of every chunk and some listed, or of no chunk listed, they are malformed.
+func TestGiveUpEncoding(t *testing.T) {
+	e := PGEntry{Interval: 3, Activated: 1, Members: []Member{{Disk: 1}}, GiveUps: givenUpTwice()}
+	got, err := DecodeEntry(AppendEntry(nil, &e))
+	if err != nil || !got.equal(&e) {
+		t.Fatalf("decoded %+v, %v", got, err)
+	}
+	for name, gs := range map[string][]GiveUp{
+		"descending":      {e.GiveUps[1], e.GiveUps[0]},
+		"all and listed":  {{Interval: 1, All: true, Chunks: e.GiveUps[1].Chunks}},
+		"none listed":     {{Interval: 1, Drop: true}},
+		"chunks reversed": {{Interval: 1, Chunks: []core.ChunkID{e.GiveUps[1].Chunks[1], e.GiveUps[1].Chunks[0]}}},
+		"current":         {{Interval: 3, All: true}},
+	} {
+		bad := e
+		bad.GiveUps = gs
+		if _, err := DecodeEntry(AppendEntry(nil, &bad)); !errors.Is(err, ErrMalformed) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
 func hugeDelta(prev *Table) Delta {
 	e := prev.Pools[0].PGs[0]
 	return Delta{Epoch: prev.Epoch + 1, Pools: []DeltaPool{{1, 3, 1, 4}, {2, 3, 1, 1 << 31}}, Entries: []DeltaEntry{{core.PGID{Pool: 2, Index: 1<<31 - 1}, e}}}
@@ -168,6 +194,8 @@ func FuzzDecodeTable(f *testing.F) {
 		stalled.Past = append(stalled.Past, PastInterval{Interval: i + 1, MinLive: 1, Members: stalled.Members})
 	}
 	stalled.Interval = 301
+	f.Add(AppendTable(nil, &tbl))
+	tbl.Pools[0].PGs[1].GiveUps = givenUpTwice()
 	f.Add(AppendTable(nil, &tbl))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		got, err := DecodeTable(b)

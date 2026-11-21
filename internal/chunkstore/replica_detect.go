@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"math/bits"
+	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 )
@@ -76,6 +77,13 @@ func (r *Replica) leadStates(dst []LeadState) []LeadState {
 		if l.active {
 			// ponytail: counts the lead's decisions on every heartbeat; count once per decision if it shows in a profile.
 			s.Unfound, _ = r.Unfound(l.pg)
+			for _, k := range l.kept {
+				if k.unfound {
+					s.Chunks = append(s.Chunks, k.chunk)
+				}
+			}
+			slices.SortFunc(s.Chunks, cmpChunk)
+			s.Chunks = s.Chunks[:min(len(s.Chunks), MaxReportUnfound)]
 			for _, n := range l.listed {
 				s.Lacking += uint32(n)
 			}

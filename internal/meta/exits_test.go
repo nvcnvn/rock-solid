@@ -2,6 +2,7 @@ package meta
 
 import (
 	"errors"
+	"reflect"
 	"slices"
 	"testing"
 
@@ -246,4 +247,49 @@ func TestADrainedDiskIsRemovedOnceNoPGNamesIt(t *testing.T) {
 	if err := r.ctl.Heartbeat(r.now, &NodeReport{Node: 4, Meta: true, Opened: []OpenedDisk{{Device: devOf(4), Log: logOf(4)}}}, &out); !errors.Is(err, chunkstore.ErrLogRefused) {
 		t.Fatalf("a removed disk's log reported again answered %v", err)
 	}
+}
+
+// A give-up commits only what its PG lost: refused for an interval that is not current and for a PG with nothing unfound,
+// it records the chunks the primary reports unfound in a new interval, and a repeat passes. A PG with a member down whose
+// disk is not gone refuses it, since that disk may return with what it lacks.
+func TestAGiveUpCommitsOnlyWhatIsLost(t *testing.T) {
+	r, in := poolRun(t)
+	r.heal(true)
+	r.settle(in)
+	r.settle(in)
+	pg := core.PGID{Pool: 1}
+	k := r.ctl.Table().Entry(pg).Interval
+	if err := r.ctl.GiveUp(r.now, pg, k+1); !errors.Is(err, ErrUnknownPG) {
+		t.Fatalf("a give-up of interval %d answered %v", k+1, err)
+	}
+	if err := r.ctl.GiveUp(r.now, pg, k); !errors.Is(err, chunkstore.ErrNothingLost) {
+		t.Fatalf("a give-up with nothing unfound answered %v", err)
+	}
+	lost := []core.ChunkID{{Volume: 1, Index: 4}}
+	r.event(0, chunkstore.AppendReport(nil, &chunkstore.Report{ID: 2, Leads: []chunkstore.LeadState{{PG: pg, Interval: k, Active: true, Unfound: 1, Chunks: lost}}}))
+	if err := r.ctl.GiveUp(r.now, pg, k); err != nil {
+		t.Fatal(err)
+	}
+	r.settle(in)
+	want := []chunkstore.GiveUp{{Interval: k, Drop: true, Chunks: lost}}
+	if e := r.ctl.Table().Entry(pg); e.Interval != k+1 || !reflect.DeepEqual(e.GiveUps, want) || !r.ctl.GivenUp(chunkstore.PGInterval{PG: pg, Interval: k}) {
+		t.Fatalf("after the give-up: %+v", e)
+	}
+	if err := r.ctl.GiveUp(r.now, pg, k); err != nil {
+		t.Fatalf("a repeated give-up answered %v", err)
+	}
+
+	delete(r.reports, 0)
+	r.run(chunkstore.NodeDownAfter, 0)
+	r.settle(in)
+	for i, e := range r.ctl.Table().Pools[0].PGs {
+		if slices.ContainsFunc(e.Members, func(m chunkstore.Member) bool { return m.Disk == 1 }) {
+			pg := core.PGID{Pool: 1, Index: uint32(i)}
+			if err := r.ctl.GiveUp(r.now, pg, e.Interval); !errors.Is(err, chunkstore.ErrGiveUpCandidate) {
+				t.Fatalf("a give-up of PG %d with disk 1 down answered %v", i, err)
+			}
+			return
+		}
+	}
+	t.Fatal("no PG has disk 1")
 }

@@ -39,7 +39,15 @@ type PastInterval struct {
 	Members  []Member
 }
 
-// PGEntry is a PG's entry in the placement table: its members with the primary first, its interval, its last activated interval, the intervals since, whether an operator pinned it, and whether its primary reported the interval recovered.
+// GiveUp is an operator's give-up recorded in a PG's entry: the interval given up, up to which peering skips the PG's intervals, and the chunks it may lose, every chunk of the PG with All or else Chunks in ascending order. With Drop, for an interval that activated, every node drops those chunks on adopting the first table that holds the record.
+type GiveUp struct {
+	Interval uint32
+	All      bool
+	Drop     bool
+	Chunks   []core.ChunkID
+}
+
+// PGEntry is a PG's entry in the placement table: its members with the primary first, its interval, its last activated interval, the intervals since, whether an operator pinned it, whether its primary reported the interval recovered, and its give-ups in ascending order.
 type PGEntry struct {
 	Members   []Member
 	Interval  uint32
@@ -47,6 +55,15 @@ type PGEntry struct {
 	Past      []PastInterval
 	Pinned    bool
 	Recovered bool
+	GiveUps   []GiveUp
+}
+
+// givenUp is the interval of e's newest give-up, 0 for none.
+func (e *PGEntry) givenUp() uint32 {
+	if len(e.GiveUps) == 0 {
+		return 0
+	}
+	return e.GiveUps[len(e.GiveUps)-1].Interval
 }
 
 // PoolTable is a pool's part of the placement table: the settings its intervals depend on, and its PGs.
@@ -83,7 +100,13 @@ type Edit struct {
 	Pinned bool
 }
 
-// Inputs are what the next table is computed from beside the previous one: the pools, the PGs whose primary asks for a new interval, the activations and recoveries reported, operators' edits, and how many balance moves the table may make.
+// PGGiveUp is a give-up of a PG, as CheckGiveUp makes it.
+type PGGiveUp struct {
+	PG core.PGID
+	GiveUp
+}
+
+// Inputs are what the next table is computed from beside the previous one: the pools, the PGs whose primary asks for a new interval, the activations and recoveries reported, operators' edits and give-ups, and how many balance moves the table may make.
 type Inputs struct {
 	Now         core.Tick
 	Pools       []PoolInputs
@@ -91,6 +114,7 @@ type Inputs struct {
 	Activations []PGInterval
 	Recovered   []PGInterval
 	Edits       []Edit
+	GiveUps     []PGGiveUp
 	Moves       int
 	plant       placementPlants
 }
@@ -106,6 +130,12 @@ type placementPlants struct {
 	editKeepsInterval  bool
 	refillSoleHolder   bool
 	dropAllLeaving     bool
+	// giveUpFound has a give-up take an activated interval with no chunk unfound and drop every chunk of the PG;
+	// giveUpWithCandidate ignores a member down whose disk may return; giveUpNotStopped takes an interval that never
+	// activated though its peering still reaches every interval it needs.
+	giveUpFound         bool
+	giveUpWithCandidate bool
+	giveUpNotStopped    bool
 }
 
 // Next computes the table after prev: live marks, settings, splits, asks and activations, leaving members removed on a recovered report for their PG's current interval while its other members stay up, reports ignored in a pool it splits since they name the parent's PG numbers, every missing member refilled, then up to in.Moves balance moves. It reports the moves it made.
@@ -172,6 +202,12 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 			asked[a.PG.Index] = true
 		}
 	}
+	gaveUp := make([]*GiveUp, n)
+	for i, g := range all.GiveUps {
+		if !split && g.PG.Pool == in.ID && int(g.PG.Index) < n && g.Interval == base[g.PG.Index].Interval {
+			gaveUp[g.PG.Index], asked[g.PG.Index] = &all.GiveUps[i].GiveUp, true
+		}
+	}
 	edits := make([]*Edit, n)
 	for i, ed := range all.Edits {
 		if ed.PG.Pool == in.ID && int(ed.PG.Index) < n && pl.accepts(&ed) {
@@ -183,6 +219,9 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 		*e = base[i]
 		e.Members = slices.Clone(e.Members)
 		e.Past = slices.Clone(e.Past)
+		if g := gaveUp[i]; g != nil {
+			e.GiveUps = append(slices.Clone(e.GiveUps), *g)
+		}
 		if ed := edits[i]; ed != nil {
 			e.Members, e.Pinned = e.Members[:0], ed.Pinned
 			for _, d := range ed.Disks {

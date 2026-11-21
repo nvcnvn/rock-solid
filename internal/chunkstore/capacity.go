@@ -406,13 +406,15 @@ func (w *Watcher) find(pg core.PGID) (int, bool) {
 	})
 }
 
-// Hear keeps each PG's latest report from the primary of its newest interval, of the PGs Watch has
+// Hear keeps a copy of each PG's latest report from the primary of its newest interval, of the PGs Watch has
 // seen; a report of any other is dropped, and the next heartbeat repeats it.
 func (w *Watcher) Hear(ls []LeadState) {
 	for _, l := range ls {
 		if i, ok := w.find(l.PG); ok {
 			if x := &w.pgs[i]; !x.heard || l.Interval >= x.lead.Interval {
+				cs := append(x.lead.Chunks[:0], l.Chunks...)
 				x.lead, x.heard = l, true
+				x.lead.Chunks = cs
 			}
 		}
 	}
@@ -455,6 +457,14 @@ func (w *Watcher) Watch(now core.Tick, pt *PoolTable, cond *Conditions) {
 		}
 	}
 	cond.Watch(now, w.copying, pt)
+}
+
+// Lead is the latest report Hear kept of pg's primary, nil for none.
+func (w *Watcher) Lead(pg core.PGID) *LeadState {
+	if i, ok := w.find(pg); ok && w.pgs[i].heard {
+		return &w.pgs[i].lead
+	}
+	return nil
 }
 
 // Forget drops the PGs t does not have.

@@ -93,6 +93,9 @@ func (e *PGEntry) equal(o *PGEntry) bool {
 	return e.Interval == o.Interval && e.Activated == o.Activated && e.Pinned == o.Pinned && e.Recovered == o.Recovered && slices.Equal(e.Members, o.Members) &&
 		slices.EqualFunc(e.Past, o.Past, func(a, b PastInterval) bool {
 			return a.Interval == b.Interval && a.MinLive == b.MinLive && slices.Equal(a.Members, b.Members)
+		}) &&
+		slices.EqualFunc(e.GiveUps, o.GiveUps, func(a, b GiveUp) bool {
+			return a.Interval == b.Interval && a.All == b.All && a.Drop == b.Drop && slices.Equal(a.Chunks, b.Chunks)
 		})
 }
 
@@ -187,20 +190,42 @@ func DecodeEntry(b []byte) (PGEntry, error) {
 
 func appendEntry(dst []byte, e *PGEntry) []byte {
 	dst = le.AppendUint32(le.AppendUint32(dst, e.Interval), e.Activated)
-	dst = append(dst, flagIf(e.Pinned, pinnedFlag)|flagIf(e.Recovered, recoveredFlag))
+	dst = append(dst, flagIf(e.Pinned, pinnedFlag)|flagIf(e.Recovered, recoveredFlag)|flagIf(len(e.GiveUps) > 0, giveUpFlag))
 	dst = appendMembers(dst, e.Members)
 	dst = binary.AppendUvarint(dst, uint64(len(e.Past)))
 	for _, pi := range e.Past {
 		dst = appendMembers(append(le.AppendUint32(dst, pi.Interval), pi.MinLive), pi.Members)
 	}
+	if len(e.GiveUps) == 0 {
+		return dst
+	}
+	dst = binary.AppendUvarint(dst, uint64(len(e.GiveUps)))
+	for _, g := range e.GiveUps {
+		dst = append(le.AppendUint32(dst, g.Interval), flagIf(g.All, allFlag)|flagIf(g.Drop, dropFlag))
+		dst = binary.AppendUvarint(dst, uint64(len(g.Chunks)))
+		for _, c := range g.Chunks {
+			dst = c.AppendTo(dst)
+		}
+	}
 	return dst
 }
 
-// The flags byte of a PG entry.
+// The flags byte of a PG entry; an entry with give-ups lists them after its past intervals.
 const (
 	pinnedFlag    = 0x01
 	recoveredFlag = 0x02
+	giveUpFlag    = 0x04
 )
+
+// The flags byte of a give-up.
+const (
+	allFlag  = 0x01
+	dropFlag = 0x02
+)
+
+func cmpChunk(a, b core.ChunkID) int {
+	return cmp.Or(cmp.Compare(a.Volume, b.Volume), cmp.Compare(a.Inode, b.Inode), cmp.Compare(a.Index, b.Index))
+}
 
 func flagIf(on bool, flag uint8) uint8 {
 	if on {
@@ -289,12 +314,12 @@ func (r *reader) deltaPool() DeltaPool {
 	return p
 }
 
-// entry reads a PG entry: an interval of at least 1, a last activated interval not above it, no leaving member in a recovered interval, and past intervals rising from the last activated one to below it, each with a min_live of at least 1.
+// entry reads a PG entry: an interval of at least 1, a last activated interval not above it, no leaving member in a recovered interval, past intervals rising from the last activated one to below it, each with a min_live of at least 1, and give-ups of intervals rising from 1 to below it, each of every chunk and none listed or of chunks listed in ascending order.
 func (r *reader) entry() PGEntry {
 	e := PGEntry{Interval: r.u32(), Activated: r.u32()}
 	flags := r.u8()
 	e.Pinned, e.Recovered, e.Members = flags&pinnedFlag != 0, flags&recoveredFlag != 0, r.members()
-	if e.Interval == 0 || e.Activated > e.Interval || flags&^(pinnedFlag|recoveredFlag) != 0 {
+	if e.Interval == 0 || e.Activated > e.Interval || flags&^(pinnedFlag|recoveredFlag|giveUpFlag) != 0 {
 		r.bad = true
 	}
 	if e.Recovered && leavingIn(e.Members) > 0 {
@@ -312,6 +337,31 @@ func (r *reader) entry() PGEntry {
 			break
 		}
 		e.Past = append(e.Past, pi)
+	}
+	if flags&giveUpFlag == 0 || r.bad {
+		return e
+	}
+	n = r.uvarint()
+	if n == 0 {
+		r.bad = true
+	}
+	for range n {
+		g := GiveUp{Interval: r.u32()}
+		gf := r.u8()
+		g.All, g.Drop = gf&allFlag != 0, gf&dropFlag != 0
+		cs := r.uvarint()
+		if r.bad || gf&^(allFlag|dropFlag) != 0 || g.Interval <= e.givenUp() || g.Interval >= e.Interval || g.All != (cs == 0) || cs*core.ChunkIDSize > len(r.b) {
+			r.bad = true
+			break
+		}
+		for j := range cs {
+			c := r.chunk()
+			if j > 0 && cmpChunk(c, g.Chunks[j-1]) <= 0 {
+				r.bad = true
+			}
+			g.Chunks = append(g.Chunks, c)
+		}
+		e.GiveUps = append(e.GiveUps, g)
 	}
 	return e
 }

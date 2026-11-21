@@ -341,6 +341,46 @@ func (c *Control) Lost(now core.Tick, id uint32) error { return c.stageExit(now,
 // ones included, or in an interval since its last activated one.
 func (c *Control) Remove(now core.Tick, id uint32) error { return c.stageExit(now, diskExit{id, true}) }
 
+// ErrUnknownPG reports an operator's give-up of a PG the committed table lacks, or of an interval that is not its current one.
+var ErrUnknownPG = errors.New("meta: no such PG interval")
+
+// GiveUp takes an operator's give-up at now of PG pg's current interval, interval, and of what it left unfound or, if
+// stopped, every chunk of the PG, which the next Step commits as chunkstore.CheckGiveUp makes it from the committed table,
+// the disk record and the primary's latest report. ErrUnknownPG for a PG or interval the committed table does not have as
+// current; chunkstore.ErrGiveUpCandidate or ErrNothingLost for one it refuses. A give-up the table records passes, so
+// an operator may repeat a command whose answer was lost; it has committed once GivenUp reports it.
+func (c *Control) GiveUp(now core.Tick, pg core.PGID, interval uint32) error {
+	c.begin(now)
+	x := chunkstore.PGInterval{PG: pg, Interval: interval}
+	if _, err := c.giveUp(x); err != nil || c.GivenUp(x) {
+		return err
+	}
+	if !slices.Contains(c.giveUps, x) {
+		c.giveUps = append(c.giveUps, x)
+	}
+	return nil
+}
+
+// GivenUp reports whether the committed table records the give-up of x.
+func (c *Control) GivenUp(x chunkstore.PGInterval) bool {
+	e := c.table.Entry(x.PG)
+	return e != nil && slices.ContainsFunc(e.GiveUps, func(g chunkstore.GiveUp) bool { return g.Interval == x.Interval })
+}
+
+// giveUp checks give-up x against the committed state.
+func (c *Control) giveUp(x chunkstore.PGInterval) (chunkstore.PGGiveUp, error) {
+	e := c.table.Entry(x.PG)
+	switch {
+	case e == nil:
+		return chunkstore.PGGiveUp{}, ErrUnknownPG
+	case c.GivenUp(x):
+		return chunkstore.PGGiveUp{}, nil
+	case e.Interval != x.Interval:
+		return chunkstore.PGGiveUp{}, ErrUnknownPG
+	}
+	return chunkstore.CheckGiveUp(x.PG, e, func(d uint32) bool { return d != 0 && int(d) <= len(c.disks) && c.disks[d-1].Gone }, c.watch.Lead(x.PG))
+}
+
 // diskExit is a declaration or a removal staged until it commits.
 type diskExit struct {
 	id     uint32
@@ -399,9 +439,20 @@ func (c *Control) names(id uint32, past bool) bool {
 }
 
 // reapply applies again each staged declaration and removal, which a reload of the record drops,
-// and drops those the committed state now refuses, returning their errors.
-func (c *Control) reapply() error {
+// and drops those the committed state now refuses, returning their errors; it does the same with
+// the staged give-ups, dropping those committed, and returns the others' records.
+func (c *Control) reapply() ([]chunkstore.PGGiveUp, error) {
 	var errs []error
+	var gs []chunkstore.PGGiveUp
+	c.giveUps = slices.DeleteFunc(c.giveUps, func(x chunkstore.PGInterval) bool {
+		g, err := c.giveUp(x)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("meta: PG %d.%d interval %d: %w", x.PG.Pool, x.PG.Index, x.Interval, err))
+		} else if !c.GivenUp(x) {
+			gs = append(gs, g)
+		}
+		return err != nil || c.GivenUp(x)
+	})
 	c.exits = slices.DeleteFunc(c.exits, func(x diskExit) bool {
 		err := c.exit(x)
 		if err != nil {
@@ -409,7 +460,7 @@ func (c *Control) reapply() error {
 		}
 		return err != nil
 	})
-	return errors.Join(errs...)
+	return gs, errors.Join(errs...)
 }
 
 // SetFormat stages level as the cluster's format level for the next Step; it must be above the

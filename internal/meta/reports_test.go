@@ -103,9 +103,9 @@ func TestAReportOfUnfoundChunksBlocksItsPG(t *testing.T) {
 	r := reportRun(t, "", "", "", "")
 	iv := r.ctl.Table().Pools[0].PGs[2].Interval
 	r.leads(0,
-		chunkstore.LeadState{PG: core.PGID{Pool: 1, Index: 2}, Interval: iv, Active: true, Unfound: 2},
-		chunkstore.LeadState{PG: core.PGID{Pool: 1, Index: 99}, Interval: 1, Active: true, Unfound: 1},
-		chunkstore.LeadState{PG: core.PGID{Pool: 7}, Interval: 1, Active: true, Unfound: 1})
+		chunkstore.LeadState{PG: core.PGID{Pool: 1, Index: 2}, Interval: iv, Active: true, Unfound: 2, Chunks: []core.ChunkID{{Index: 1}, {Index: 2}}},
+		chunkstore.LeadState{PG: core.PGID{Pool: 1, Index: 99}, Interval: 1, Active: true, Unfound: 1, Chunks: []core.ChunkID{{}}},
+		chunkstore.LeadState{PG: core.PGID{Pool: 7}, Interval: 1, Active: true, Unfound: 1, Chunks: []core.ChunkID{{}}})
 	c := r.conditions()
 	if len(c.Stuck) != 0 || len(c.Blocked) != 1 || c.Blocked[0].PG != 2 || c.Blocked[0].Unfound != 2 || c.Blocked[0].Stopped {
 		t.Fatalf("conditions %+v, want PG 2 Blocked with 2 unfound", c)

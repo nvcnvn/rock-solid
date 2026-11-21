@@ -202,13 +202,17 @@ type DiskState struct {
 // MaxDiskPools is the most pools a disk heartbeat reports live blocks of.
 const MaxDiskPools = 256
 
-// LeadState is what a primary reports of a PG it leads: its interval, whether it leads it active and, when active, the chunks its last peering left unfound and the copies its members still lack, which recovery counts down.
+// MaxReportUnfound is the most unfound chunks a primary names in a report of a PG; an operator's give-up records those named, and another gives up the rest.
+const MaxReportUnfound = 64
+
+// LeadState is what a primary reports of a PG it leads: its interval, whether it leads it active and, when active, how many chunks its last peering left unfound, the first MaxReportUnfound of them in ascending order, and the copies its members still lack, which recovery counts down.
 type LeadState struct {
 	PG       core.PGID
 	Interval uint32
 	Active   bool
 	Unfound  uint32
 	Lacking  uint32
+	Chunks   []core.ChunkID
 }
 
 // Report is a node's heartbeat to the authority: the PGs whose primary activated, the PGs whose activated primary has recovered every member but a leaving one, member latencies, its disks and the PGs it leads.
@@ -505,7 +509,7 @@ const (
 	latencySize   = 12
 	diskStateSize = 29
 	poolLiveSize  = 12
-	leadStateSize = 21
+	leadStateSize = 25
 	chunkVerSize  = core.ChunkIDSize + 8
 	chunkPeerSize = core.ChunkIDSize + 8 + 8 + 1 + 8
 )
@@ -535,7 +539,10 @@ func AppendReport(dst []byte, rp *Report) []byte {
 	dst = le.AppendUint32(dst, uint32(len(rp.Leads)))
 	for _, l := range rp.Leads {
 		dst = le.AppendUint32(le.AppendUint32(le.AppendUint32(dst, uint32(l.PG.Pool)), l.PG.Index), l.Interval)
-		dst = le.AppendUint32(le.AppendUint32(appendBool(dst, l.Active), l.Unfound), l.Lacking)
+		dst = le.AppendUint32(le.AppendUint32(le.AppendUint32(appendBool(dst, l.Active), l.Unfound), l.Lacking), uint32(len(l.Chunks)))
+		for _, c := range l.Chunks {
+			dst = c.AppendTo(dst)
+		}
 	}
 	return dst
 }
@@ -568,9 +575,24 @@ func DecodeReport(b []byte, data int, rp *Report) error {
 	}
 	rp.Leads = rp.Leads[:0]
 	for n := r.count(leadStateSize); n > 0; n-- {
-		l := LeadState{PG: core.PGID{Pool: core.PoolID(r.u32()), Index: r.u32()}, Interval: r.u32(), Active: r.bool(), Unfound: r.u32(), Lacking: r.u32()}
-		if l.Interval == 0 || !l.Active && (l.Unfound != 0 || l.Lacking != 0) {
+		var chunks []core.ChunkID
+		if len(rp.Leads) < cap(rp.Leads) {
+			chunks = rp.Leads[:len(rp.Leads)+1][len(rp.Leads)].Chunks[:0]
+		}
+		l := LeadState{PG: core.PGID{Pool: core.PoolID(r.u32()), Index: r.u32()}, Interval: r.u32(), Active: r.bool(), Unfound: r.u32(), Lacking: r.u32(), Chunks: chunks}
+		cs := r.count(core.ChunkIDSize)
+		if l.Interval == 0 || !l.Active && (l.Unfound != 0 || l.Lacking != 0) || cs != min(int(l.Unfound), MaxReportUnfound) {
 			r.bad = true
+		}
+		for j := range cs {
+			if r.bad {
+				break
+			}
+			c := r.chunk()
+			if j > 0 && cmpChunk(c, l.Chunks[j-1]) <= 0 {
+				r.bad = true
+			}
+			l.Chunks = append(l.Chunks, c)
 		}
 		rp.Leads = append(rp.Leads, l)
 	}
