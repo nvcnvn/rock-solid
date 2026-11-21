@@ -123,7 +123,7 @@ epoch/neg-no-list-above	open	Plants for the epoch model's new rules
 epoch/neg-order-past-failed	open	Plants for the epoch model's new rules
 epoch/neg-recovery-read-old-disk	chunkstore.readOldDisk	TestADiskFormattedAgainAnswersNoRecoveryReadForItsOldID
 epoch/neg-serve-after-other-primary	open	Plants for the epoch model's new rules
-epoch/neg-serve-refused	open	Plants for the epoch model's new rules
+epoch/neg-serve-refused	chunkstore.serveRefused	TestPlantedReadBugsBreakTheReadRun
 epoch/neg-settle-by-number	chunkstore.settleByNumber	TestPlantedBugsBreakTheirTraces
 epoch/neg-write-on-unfound	chunkstore.writeOnUnfound	TestWriteOnUnfoundHoldsAWriteForEver
 epoch/neg-forget-image	chunkstore.forgetImage	TestForgetImageLeavesTheChunkUnfound

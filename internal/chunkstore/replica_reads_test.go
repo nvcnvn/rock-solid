@@ -678,7 +678,7 @@ func TestNoFencedSessionsWriteIsApplied(t *testing.T) {
 	})
 }
 
-// Each planted bug breaks its invariant, checked alone, at a seed of the first 500: the epoch change model's neg-fence-on-arrival (17 of 500), a primary that checks a write's incarnation as it arrives rather than as its store orders it, so that a dead incarnation's write held on a chunk the primary lacks is ordered after its successor's, here with listerOrders, as the successor's whole-block write would otherwise wait behind it while the primary lists the chunk; and a primary that commits a version once its own log holds it (360 of 500), so that a read returns a version the next interval drops.
+// Each planted bug breaks its invariant, checked alone, at a seed of the first 500: the epoch change model's neg-fence-on-arrival (17 of 500), a primary that checks a write's incarnation as it arrives rather than as its store orders it, so that a dead incarnation's write held on a chunk the primary lacks is ordered after its successor's, here with listerOrders, as the successor's whole-block write would otherwise wait behind it while the primary lists the chunk; a primary that commits a version once its own log holds it (360 of 500), so that a read returns a version the next interval drops; and the model's neg-serve-refused (33 of 500), a primary that maps the versions it refuses, so that a read returns one neither acknowledged nor kept.
 // With the writers as two sessions, the sessions model's neg-check-on-arrival (5 of 500), the same
 // primary, orders a fenced session's write that waited in its store as the fence came; and its
 // neg-replica-no-check (130 of 500), a member that takes a replicated write without checking its
@@ -692,6 +692,7 @@ func TestPlantedReadBugsBreakTheReadRun(t *testing.T) {
 	}{
 		{"incarnation checked on arrival", 24, false, readPlant{inv: invIncarnation, set: func(r *readRun) { r.d.replicaPlants.fenceOnArrival, r.d.replicaPlants.listerOrders = true, true }}},
 		{"commit on the primary's own log", 0, false, readPlant{inv: invReadVersion, set: func(r *readRun) { r.d.replicaPlants.commitOnOwnLog = true }}},
+		{"a refused version served", 2, false, readPlant{inv: invReadVersion, set: func(r *readRun) { r.d.replicaPlants.serveRefused = true }}},
 		{"session checked on arrival", 223, true, readPlant{inv: invFencedWrite, set: func(r *readRun) { r.d.replicaPlants.fenceOnArrival = true }}},
 		{"member takes a fenced session's write", 5, true, readPlant{inv: invFencedWrite, set: func(r *readRun) { r.d.replicaPlants.memberNoFence = true }}},
 	} {
