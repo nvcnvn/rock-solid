@@ -926,12 +926,13 @@ func (v *storeView) overlaps(rs []lbaRange) bool {
 
 var zeroBlock = make([]byte, core.BlockSize)
 
-// change is a write (data set) or punch (data nil) the harness sent and the store has not answered.
+// change is a write (data set), punch (data nil) or drop the harness sent and the store has not answered.
 type change struct {
 	c      core.ChunkID
 	off, n uint32
 	data   []byte
 	epoch  uint64
+	drop   bool
 }
 
 // ackChange applies the change answered OK at version to the byte-range oracle; a version at or

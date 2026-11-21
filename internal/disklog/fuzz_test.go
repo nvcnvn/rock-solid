@@ -54,6 +54,7 @@ func FuzzDecodeRecord(f *testing.F) {
 	f.Add(goldenSlotRecord(f).image)
 	f.Add(goldenPeeringRecord(f).image)
 	f.Add(recoveryRecord(f).image)
+	f.Add(droppedRecord(f).image)
 	f.Add(encodeRecord(f, Record{Place: testPlace, LSN: 12, Durable: 11}, []Entry{ImageEntry(1, testChunk, 0x200000003, 4), DecisionEntry(1, 5, 8, 4)}, [][]byte{nil, nil}).image)
 	f.Fuzz(func(t *testing.T, img []byte) {
 		d, err := DecodeRecord(img, testPlace, math.MaxUint32, nil)

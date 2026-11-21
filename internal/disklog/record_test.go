@@ -373,6 +373,32 @@ func TestRecoveredEntryErrors(t *testing.T) {
 	wantErr(t, "layout", err, ErrMalformed)
 }
 
+// droppedRecord is a give-up's drop of a chunk.
+func droppedRecord(t testing.TB) testRecord {
+	t.Helper()
+	return encodeRecord(t, Record{Place: testPlace, LSN: 15, Durable: 14}, []Entry{DroppedEntry(1, testChunk, 5)}, [][]byte{nil})
+}
+
+// A drop round-trips and names its interval, which is not 0, and no version.
+func TestDroppedEntryErrors(t *testing.T) {
+	tr := droppedRecord(t)
+	if d := decodeExact(t, tr); len(d.Entries) != 1 || d.Entries[0] != DroppedEntry(1, testChunk, 5) {
+		t.Fatalf("decoded %+v", d.Entries)
+	}
+	for name, mod := range map[string]func(b []byte){
+		"interval 0": func(b []byte) { clear(b[preludeSize+29 : preludeSize+33]) },
+		"a version":  func(b []byte) { b[preludeSize+21] = 1 },
+	} {
+		b := bytes.Clone(tr.image)
+		mod(b)
+		fixCRC(b[:core.BlockSize], recCRC)
+		_, err := DecodeRecord(b, testPlace, manyLeft, nil)
+		wantErr(t, name, err, ErrMalformed)
+	}
+	_, err := LayoutOf([]Entry{DroppedEntry(1, testChunk, 0)})
+	wantErr(t, "layout", err, ErrMalformed)
+}
+
 func TestRecordErrors(t *testing.T) {
 	tr := goldenRecord(t)
 	hdr := func(b []byte) []byte { return b[:core.BlockSize] }

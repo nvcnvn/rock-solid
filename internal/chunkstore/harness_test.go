@@ -344,6 +344,11 @@ func (h *harness) take() {
 			delete(h.sent, r.ID)
 			switch {
 			case h.bytes == nil:
+			case ch.drop:
+				if r.Err == nil {
+					delete(h.bytes.chunks, ch.c)
+					h.dirty[ch.c] = true
+				}
 			case r.Err == nil:
 				h.ackChange(ch, r.Version)
 			case r.Version != 0 && !errors.Is(r.Err, ErrDropped):
@@ -818,6 +823,15 @@ func (h *harness) punch(c core.ChunkID, off, n uint32, epoch uint64) uint64 {
 	id := h.change(c)
 	h.send(id, change{c: c, off: off, n: n, epoch: epoch})
 	h.s.Punch(&h.ctx, Request{ID: id, Chunk: c, Off: off, Len: n, Epoch: epoch}, &h.out)
+	h.take()
+	return id
+}
+
+// drop drops chunk c for a give-up of its PG's intervals up to interval.
+func (h *harness) drop(c core.ChunkID, interval uint32) uint64 {
+	id := h.id()
+	h.send(id, change{c: c, drop: true})
+	h.s.Drop(&h.ctx, id, c, interval, &h.out)
 	h.take()
 	return id
 }

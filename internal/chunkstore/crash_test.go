@@ -26,7 +26,8 @@ type frozenBlocks struct {
 // LSN order. A freeze at cut e keeps the chunk as it then stands for the snapshot of e, and of
 // every earlier cut no earlier freeze kept, whatever version it names. A write or punch of an
 // interval at or past its PG's newest decision is held, durable and not visible, until the next
-// decision marker of the PG maps or drops it. A drop removes the chunk whole.
+// decision marker of the PG maps or drops it. A drop removes the chunk whole unless it holds or lists
+// something of a later interval.
 type storeModel struct {
 	chunks map[core.ChunkID]Chunk
 	live   map[blockKey][]byte
@@ -104,6 +105,9 @@ func (m *storeModel) Apply(r writtenRecord) {
 			m.chunks[e.Chunk] = ch
 		case disklog.EntryDropped:
 			m.held = slices.DeleteFunc(m.held, func(h heldEntry) bool { return h.entry.Chunk == e.Chunk })
+			if m.chunks[e.Chunk].after(e.Interval) {
+				break
+			}
 			delete(m.chunks, e.Chunk)
 			delete(m.frozen, e.Chunk)
 			maps.DeleteFunc(m.live, func(k blockKey, _ []byte) bool { return k.c == e.Chunk })
@@ -232,7 +236,7 @@ func (m *storeModel) at(c core.ChunkID, b uint16, epoch uint64) []byte {
 // crashChunks are the chunks of the crash workload.
 var crashChunks = []core.ChunkID{chunkC, {Volume: 1, Inode: 7, Index: 4}}
 
-// crashWorkload writes unaligned bytes, a cut, a whole chunk and enough records for a checkpoint,
+// crashWorkload writes unaligned bytes, a cut, a whole chunk, a drop and enough records for a checkpoint,
 // settling only now and then so that rounds pipeline.
 func crashWorkload(h *harness) {
 	c, d := crashChunks[0], crashChunks[1]
@@ -248,6 +252,10 @@ func crashWorkload(h *harness) {
 	h.step()
 	h.step()
 	h.write(d, 10, fill(3, 0xa7), 2)
+	h.settle()
+	h.drop(d, 1)
+	h.step()
+	h.write(c, 20, fill(5, 0xa9), 2)
 	h.settle()
 	h.punch(d, 0, core.ChunkSize, 2)
 	h.write(c, 0, fill(core.BlockSize+1, 0xa8), 2)
