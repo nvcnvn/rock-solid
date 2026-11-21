@@ -117,7 +117,7 @@ epoch/neg-answer-for-old-disk	open	Plants for the epoch model's new rules
 epoch/neg-current-min-live	chunkstore.currentMinLive	TestPlantedBugsBreakTheirTraces
 epoch/neg-fail-only-one	open	Plants for the epoch model's new rules
 epoch/neg-log-past-failed	chunkstore.logPastFailed	TestPlantedBugsBreakTheirTraces
-epoch/neg-never-ask	open	Plants for the epoch model's new rules
+epoch/neg-never-ask	chunkstore.neverAskOnFail	TestPlantedPeeringBugsBreakTheFaultRun
 epoch/neg-no-demote	open	Plants for the epoch model's new rules
 epoch/neg-no-list-above	open	Plants for the epoch model's new rules
 epoch/neg-order-past-failed	open	Plants for the epoch model's new rules
