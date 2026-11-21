@@ -825,8 +825,9 @@ func (s *Scheduler) Next() *Compaction {
 }
 
 // Install installs c's step in its tree; the merge keeps its worker until it is finished.
+// ErrStale for a step whose tree has left the scheduler since it was handed out.
 func (s *Scheduler) Install(c *Compaction) error {
-	if c == nil {
+	if c == nil || !slices.Contains(s.trees, c.tree) {
 		return ErrStale
 	}
 	return c.tree.Install(c)

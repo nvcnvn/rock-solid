@@ -247,6 +247,26 @@ func TestARemovedTreesMergeFreesItsWorker(t *testing.T) {
 	}
 }
 
+// A merge step handed out before its tree left the scheduler is refused at its install, and its
+// tree keeps its runs.
+func TestAMergeOfARemovedTreeIsStale(t *testing.T) {
+	a := treeWithRuns(t, 8, 10)
+	s, err := NewScheduler(SchedulerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Add(a)
+	c := s.Next()
+	if c == nil {
+		t.Fatal("no merge started")
+	}
+	s.Remove(a)
+	c.Run()
+	if err := s.Install(c); !errors.Is(err, ErrStale) || a.Runs() != 10 {
+		t.Fatalf("installing a removed tree's merge: %v, the tree left with %d runs of 10", err, a.Runs())
+	}
+}
+
 // holds with forward cursors agrees with a fresh search of every older run for each key, the
 // keys given in increasing order with repeats, as a flush retries the entry that ends a block.
 func TestHoldsForwardCursors(t *testing.T) {

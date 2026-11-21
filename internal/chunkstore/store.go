@@ -2494,7 +2494,7 @@ func (s *Store) MergeDue() *lsm.Compaction {
 
 // InstallMerge installs a merge step MergeDue returned, which the next checkpoint writes to the
 // merge worker's lane, beginning one if none is due; a step that fails its run check rebuilds the
-// index from the log.
+// index from the log, and one of a shard RemoveRaft removed since is dropped with lsm.ErrStale.
 func (s *Store) InstallMerge(ctx *core.Context, c *lsm.Compaction, out *Output) error {
 	if s.phase != serving {
 		return ErrUnavailable
