@@ -2158,8 +2158,9 @@ func (s *Store) itemFailed(ctx *core.Context, oi, ii int32, err error, out *Outp
 
 // itemDone counts an item of the op resolved and reports whether all are; a failed op gives back
 // the chunk's epoch when its freeze did not become durable, and its version when none of its items
-// did, unless it is gated: a primary may have sent a gated version to members, so it is never
-// handed out again.
+// did, unless it is gated: a primary may have sent a gated version to members, so it is not given
+// back here. Its number can still return once releaseChunk forgets the chunk; the replica ends the
+// interval, and the next numbers from a later one.
 func (s *Store) itemDone(oi int32, out *Output) bool {
 	o := &s.ops[oi]
 	if o.left--; o.left > 0 {
