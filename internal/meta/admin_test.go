@@ -342,13 +342,13 @@ func TestAdminCrossesTheWireWhole(t *testing.T) {
 	pool := sim.NewPool(1<<20, 0)
 	full := chunkstore.PoolSpec{Replicas: new(3), MinLive: new(2), Data: new(4), Parity: new(2), EncodeOnWrite: new(true), MaxPerDomain: new(1),
 		Overcommit: new(false), WriteLimit: new(uint8(90)), PGCount: new(uint32(1 << 31)), Sealed: "ec", FailureDomain: "disk", Locality: "node", DiskClass: "nvme"}
-	for _, a := range []Admin{{Op: AdminLost, Disk: 1 << 31}, {Op: AdminRemove, Disk: 1}, {Op: AdminFailed}, {Op: AdminPool, Pool: 7}, {Op: AdminPool, Pool: 1, Spec: full}} {
+	for _, a := range []Admin{{Op: AdminLost, Disk: 1 << 31}, {Op: AdminRemove, Disk: 1}, {Op: AdminFailed}, {Op: AdminPool, Pool: 7}, {Op: AdminPool, Pool: 1, Spec: full}, {Op: AdminGiveUp, Pool: 1 << 31, PG: 1<<32 - 1}} {
 		var m core.Msg
 		if err := EncodeAdmin(pool, 1, 5, &a, &m); err != nil {
 			t.Fatal(err)
 		}
 		got, err := DecodeAdmin(pool, &m)
-		if _, _, tok, _ := Peek(&m); err != nil || tok != 5 || string(appendSpec(nil, &got.Spec)) != string(appendSpec(nil, &a.Spec)) || got.Op != a.Op || got.Disk != a.Disk || got.Pool != a.Pool {
+		if _, _, tok, _ := Peek(&m); err != nil || tok != 5 || string(appendSpec(nil, &got.Spec)) != string(appendSpec(nil, &a.Spec)) || got.Op != a.Op || got.Disk != a.Disk || got.Pool != a.Pool || got.PG != a.PG {
 			t.Fatalf("sent %+v, decoded %+v, %v", a, got, err)
 		}
 	}
@@ -356,13 +356,15 @@ func TestAdminCrossesTheWireWhole(t *testing.T) {
 	for i := range 100 {
 		fs = append(fs, FailedDevice{Node: uint32(i) << 24, Device: uint64(i) << 56})
 	}
-	for _, a := range []AdminAnswer{{}, {Refused: strings.Repeat("x", 300)}, {Failed: fs}} {
+	lost := []core.ChunkID{{Volume: 1 << 31, Inode: 1 << 63, Index: 1<<32 - 1}, {Volume: 1, Index: 2}}
+	for _, a := range []AdminAnswer{{}, {Refused: strings.Repeat("x", 300)}, {Failed: fs},
+		{Failed: fs[:1], GiveUp: chunkstore.GiveUp{Interval: 1<<32 - 1, All: true}}, {GiveUp: chunkstore.GiveUp{Interval: 4, Drop: true, Chunks: lost}}} {
 		var m core.Msg
 		if err := EncodeAdminAnswer(pool, 1, 5, &a, &m); err != nil {
 			t.Fatal(err)
 		}
 		got, err := DecodeAdminAnswer(pool, &m)
-		if err != nil || got.Refused != a.Refused || !slices.Equal(got.Failed, a.Failed) {
+		if err != nil || got.Refused != a.Refused || !slices.Equal(got.Failed, a.Failed) || !reflect.DeepEqual(got.GiveUp, a.GiveUp) {
 			t.Fatalf("sent %+v, decoded %+v, %v", a, got, err)
 		}
 		free(&core.Context{Pool: pool}, &m)
