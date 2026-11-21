@@ -261,11 +261,12 @@ type Replica struct {
 	leaseAt  core.Tick
 	leaseID  uint64
 	beatAt   core.Tick
-	// answers is the peering requests this disk has yet to answer as a member, peerAt when PeerTimer is armed for, seen the table epoch each holder last reported, persists the missing lists its store persists; peerID numbers peering's requests and persists.
+	// answers is the peering requests this disk has yet to answer as a member, peerAt when PeerTimer is armed for, seen the table epoch each holder last reported, persists the missing lists its store persists, drops the chunks it drops for give-ups; peerID numbers peering's requests, persists and drops.
 	answers    []peerAsk
 	peerAt     core.Tick
 	seen       []seenEpoch
 	persists   []persistReq
+	drops      []giveUpDrop
 	peerID     uint64
 	peerDisks  []uint32
 	peerChunks []ChunkPeer
@@ -602,6 +603,7 @@ func comparePG(a, b core.PGID) int {
 func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 	out.note(trace.OutAdopt, t.Epoch, 0, 0, 0, 0)
 	first := r.table.Epoch == 0
+	r.noteDrops(&r.table, &t)
 	r.table = t
 	if t.Epoch >= r.want {
 		r.want, r.wantWhole = 0, false
@@ -1389,6 +1391,7 @@ func (r *Replica) drain(ctx *core.Context, out *ReplicaOutput) {
 	if r.leftDue {
 		r.dropLeft(ctx)
 	}
+	r.dropGivenUp(ctx)
 	r.drainStore(ctx, out)
 	r.peerWork(ctx, out)
 	r.recoverWork(ctx, out)
@@ -1670,6 +1673,10 @@ func (r *Replica) dropWaiting(ctx *core.Context, out *ReplicaOutput) {
 func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 	if rp.ID&persistBit != 0 {
 		r.persisted(ctx, rp, out)
+		return
+	}
+	if rp.ID&dropBit != 0 {
+		r.dropped(rp)
 		return
 	}
 	q, ok := r.takeReq(rp.ID)

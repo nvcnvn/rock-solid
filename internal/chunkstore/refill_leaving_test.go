@@ -451,7 +451,7 @@ func TestDropAllLeavingStrandsAWrite(t *testing.T) {
 	}
 }
 
-// Both old disks lost together and declared lost: no interval activated since they went, and peering still needs an answer from the last activated one, so the PG stays stopped with its members refilled, and the pool reports it Stuck and Blocked, its count unknown and no candidate left to return.
+// Both old disks lost together and declared lost: no interval activated since they went, and peering still needs an answer from the last activated one, so the PG stays stopped with its members refilled, and the pool reports it Stuck and Blocked, its count unknown and no candidate left to return, until given up: its peering then skips the lost intervals and it takes writes again.
 func TestTwoDisksLostTogetherStayStopped(t *testing.T) {
 	r, ch, _ := refillRun(t, 2, 2, 5, nil, "")
 	r.watch()
@@ -475,11 +475,12 @@ func TestTwoDisksLostTogetherStayStopped(t *testing.T) {
 	if rp, ok := r.answered(r.c.write(pg0, chunkIn(pg0, 2, 0), 0, bytes.Repeat([]byte{0x22}, core.BlockSize)), 5_000_000); ok {
 		t.Fatalf("a new write answered %+v", rp)
 	}
-	giveUpAndWrite(t, r, ch)
+	giveUpAndWrite(t, r, ch, false)
 }
 
-// giveUpAndWrite gives up PG 0 through the authority, which the PG then peers past, and writes ch again and reads it back.
-func giveUpAndWrite(t *testing.T, r *soleRun, ch core.ChunkID) {
+// giveUpAndWrite gives up PG 0 through the authority, which the PG then peers past, and writes ch's second block, which
+// reads back, after its first as zeros if dropped.
+func giveUpAndWrite(t *testing.T, r *soleRun, ch core.ChunkID, dropped bool) {
 	t.Helper()
 	k := r.c.table.Entry(pg0).Interval
 	if err := r.giveUp(); err != nil {
@@ -489,15 +490,16 @@ func giveUpAndWrite(t *testing.T, r *soleRun, ch core.ChunkID) {
 		t.Fatalf("after the give-up of %d: %+v", k, e)
 	}
 	data := bytes.Repeat([]byte{0x33}, core.BlockSize)
-	if rp, ok := r.answered(r.c.write(pg0, ch, 0, data), 10_000_000); !ok || rp.Status != StatusOK {
+	if rp, ok := r.answered(r.c.write(pg0, ch, core.BlockSize, data), 10_000_000); !ok || rp.Status != StatusOK {
 		t.Fatalf("a write after the give-up answered %+v, %v", rp, ok)
 	}
-	if rp, got := r.read(ch); rp.Status != StatusOK || !bytes.Equal(got, data) {
+	rp, got := r.readLen(ch, 2*core.BlockSize)
+	if rp.Status != StatusOK || !bytes.Equal(got[core.BlockSize:], data) || dropped && !bytes.Equal(got[:core.BlockSize], make([]byte, core.BlockSize)) {
 		t.Fatalf("read after the give-up %+v", rp)
 	}
 }
 
-// Both old disks declared lost: repair ends with the chunk they alone held unfound for good, which keeps the PG from recovering, so the pool reports it Stuck and Blocked with the count and no candidate left to return, and the PG serves the rest.
+// Both old disks declared lost: repair ends with the chunk they alone held unfound, which keeps the PG from recovering, so the pool reports it Stuck and Blocked with the count and no candidate left to return, and the PG serves the rest. Given up, the chunk is dropped, takes a write as an empty chunk, and keeps it when its members restart with the give-up in their first table.
 func TestAChunkOnlyLostDisksHeldStaysUnfound(t *testing.T) {
 	r, ch, _ := refillRun(t, 2, 2, 5, nil, "")
 	r.watch()
@@ -526,6 +528,16 @@ func TestAChunkOnlyLostDisksHeldStaysUnfound(t *testing.T) {
 	}
 	if rp, ok := r.answered(r.c.write(pg0, ch, 0, bytes.Repeat([]byte{0x22}, core.BlockSize)), 5_000_000); !ok || rp.Status != StatusUnfound {
 		t.Fatalf("a write of the unfound chunk answered %+v, %v", rp, ok)
+	}
+	giveUpAndWrite(t, r, ch, true)
+	for _, m := range r.members() {
+		n := uint32(r.c.node(m.Disk))
+		r.c.s.CrashRandom(n)
+		r.c.s.Restart(n)
+	}
+	r.tick(10_000_000)
+	if rp, got := r.readLen(ch, 2*core.BlockSize); rp.Status != StatusOK || got[core.BlockSize] != 0x33 {
+		t.Fatalf("after the members restarted, the write since the give-up reads %+v", rp)
 	}
 }
 

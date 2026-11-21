@@ -160,7 +160,7 @@ func (r *Replica) peerAsked(ctx *core.Context, ev *core.Event, p *Peering, out *
 	return false
 }
 
-// answerPeers answers each peering request it may: in the PG's current interval, once the restart wait is over, no grant to a primary the interval moves away from runs, and the store has resolved every write of the PG and every list it persists.
+// answerPeers answers each peering request it may: in the PG's current interval, once the restart wait is over and every chunk of the PG a give-up drops is dropped, no grant to a primary the interval moves away from runs, and the store has resolved every write of the PG and every list it persists.
 func (r *Replica) answerPeers(ctx *core.Context, out *ReplicaOutput) {
 	for i := 0; i < len(r.answers); {
 		a := r.answers[i]
@@ -169,7 +169,7 @@ func (r *Replica) answerPeers(ctx *core.Context, out *ReplicaOutput) {
 			r.answers = slices.Delete(r.answers, i, i+1)
 			continue
 		}
-		if !r.mayPeer(ctx, e, out) {
+		if r.dropping(a.pg) || !r.mayPeer(ctx, e, out) {
 			i++
 			continue
 		}

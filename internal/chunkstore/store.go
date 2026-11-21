@@ -1323,6 +1323,37 @@ func (s *Store) Persist(ctx *core.Context, id uint64, pg, pgs, interval uint32, 
 		o.items = append(o.items, item{entry: e})
 	}
 	o.items = append(o.items, item{entry: disklog.DecisionEntry(s.cfg.Pool, pg, pgs, interval)})
+	s.submitPersist(ctx, oi, out)
+}
+
+// Drop logs that chunk c, of a PG whose intervals up to interval an operator gave up, is dropped whole, its entry,
+// listing and every map, and answers id once that is durable, when the index drops it. Its gated writes and punches
+// are dropped first; while one of its writes or punches waits to be ordered or has records neither durable nor failed,
+// or a member's waits to be mapped, it answers ErrUnresolved, dropping nothing.
+func (s *Store) Drop(ctx *core.Context, id uint64, c core.ChunkID, interval uint32, out *Output) {
+	err := s.unavailable()
+	if err == nil && interval == 0 {
+		err = ErrRange
+	}
+	if err == nil {
+		if _, err = s.settle(ctx, c, 0, true, out); err == nil {
+			if ci, ok := s.chunkOf[c]; ok && len(s.chunks[ci].pending) > 0 {
+				err = ErrUnresolved
+			}
+		}
+	}
+	if err != nil {
+		out.Replies = append(out.Replies, Reply{ID: id, Err: err})
+		return
+	}
+	oi := s.newOp(opPersist, Request{ID: id})
+	s.ops[oi].items = append(s.ops[oi].items, item{entry: disklog.DroppedEntry(s.cfg.Pool, c, interval)})
+	s.submitPersist(ctx, oi, out)
+}
+
+// submitPersist logs the items of persist op oi.
+func (s *Store) submitPersist(ctx *core.Context, oi int32, out *Output) {
+	o := &s.ops[oi]
 	o.left = len(o.items)
 	s.persists = append(s.persists, oi)
 	for j := range o.items {
@@ -1357,8 +1388,17 @@ func (s *Store) persisted(ctx *core.Context, oi int32, err error, out *Output) {
 		if err := s.ix.Apply(&s.apply); err != nil {
 			panic("chunkstore: the index refused the store's own missing list: " + err.Error())
 		}
-		if s.plant.clearListed {
-			s.clearListed(o.items[len(o.items)-1].entry)
+		if last := o.items[len(o.items)-1].entry; last.Kind == disklog.EntryDropped {
+			s.reportLive()
+			if s.rec == nil {
+				s.freeSlots(false)
+			}
+			if ci, ok := s.chunkOf[last.Chunk]; ok {
+				cs := &s.chunks[ci]
+				cs.version, cs.epoch, cs.failed, cs.ordered = 0, 0, 0, 0
+			}
+		} else if s.plant.clearListed {
+			s.clearListed(last)
 		}
 		for j := range o.items[:len(o.items)-1] {
 			e := &o.items[j].entry
@@ -1950,7 +1990,7 @@ func (s *Store) logEvent(ctx *core.Context, ev *disklog.Event, out *Output) {
 // replay applies a replayed record's entries in order, holding back each write and punch of an
 // interval at or past its PG's newest persisted decision: that decision's peering, or a later
 // one, may drop it, and only the next marker says which. A decision marker settles the held
-// versions of its PG.
+// versions of its PG, and a drop drops those of its chunk.
 func (s *Store) replay(ev *disklog.Event) error {
 	for i := range ev.Entries {
 		e := &ev.Entries[i]
@@ -1960,6 +2000,15 @@ func (s *Store) replay(ev *disklog.Event) error {
 		}
 		if e.Kind == disklog.EntryRecovered {
 			s.recoveredHeld(e)
+		}
+		if e.Kind == disklog.EntryDropped {
+			s.held = slices.DeleteFunc(s.held, func(it item) bool {
+				if it.entry.Pool != e.Pool || it.entry.Chunk != e.Chunk {
+					return false
+				}
+				s.dropSlot(&it)
+				return true
+			})
 		}
 		s.apply = disklog.Event{Kind: ev.Kind, LSN: ev.LSN, LBA: ev.LBA, HeaderBlocks: ev.HeaderBlocks, Entries: ev.Entries[i : i+1], Payloads: ev.Payloads[i : i+1]}
 		if err := s.ix.Apply(&s.apply); err != nil {

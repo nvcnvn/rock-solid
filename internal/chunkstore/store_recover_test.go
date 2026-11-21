@@ -366,3 +366,45 @@ func TestARecoveryReadIntoAFullPoolFails(t *testing.T) {
 	}
 	h.pool.Free(hog)
 }
+
+// A drop removes a chunk whole, its entry, listing and blocks, and replay drops it again; the chunk then takes writes as an
+// empty one, while the PG's other chunks stay as they were.
+func TestADropEmptiesAChunkAcrossARestart(t *testing.T) {
+	h := newRecoveryHarness(t)
+	c2 := core.ChunkID{Volume: 1, Inode: 7, Index: 9}
+	for _, c := range []core.ChunkID{chunkC, c2} {
+		h.sync(h.memberWrite(c, 0, 4, MakeVersion(3, 1), 1))
+	}
+	h.changed = true
+	h.sync(h.persist(0, 1, 4, []ChunkVersion{{Chunk: chunkC, Version: MakeVersion(3, 1)}}))
+	h.sync(h.memberWrite(chunkC, 0, 1, MakeVersion(4, 1), 2))
+	live := func() uint64 {
+		var n uint64
+		for _, p := range h.s.Index().PoolsLive(nil) {
+			n += p.Live
+		}
+		return n
+	}
+	id := h.id()
+	h.s.Drop(&h.ctx, id, chunkC, 4, &h.out)
+	h.take()
+	h.sync(id)
+	for range 2 {
+		if ch, ok := h.s.Index().Chunk(testPool, chunkC); ok {
+			t.Fatalf("a dropped chunk holds %+v", ch)
+		}
+		if got, _ := h.peerState(0, 1); len(got) != 1 || got[0].Chunk != c2 {
+			t.Fatalf("peering hears %+v", got)
+		}
+		if n := live(); n != 4 {
+			t.Fatalf("%d live blocks, want c2's 4", n)
+		}
+		restart(h)
+	}
+	h.sync(h.memberWrite(chunkC, 1, 1, MakeVersion(5, 1), 5))
+	for b, want := range []byte{0, 5, 0} {
+		if got := h.readNow(chunkC, uint32(b)*core.BlockSize, core.BlockSize); !bytes.Equal(got, fill(core.BlockSize, want)) {
+			t.Fatalf("block %d reads %#x, want %#x", b, got[0], want)
+		}
+	}
+}

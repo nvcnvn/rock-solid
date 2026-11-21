@@ -298,7 +298,7 @@ func (x *Index) must(err error) {
 	}
 }
 
-// Apply maps a Durable or Replayed record's entries in order: writes and punches into the live map, freezes as copies of it, copies wherever a map still stores the copied blocks at their source, missing-list entries once their PG's decision marker follows, and recovery's end.
+// Apply maps a Durable or Replayed record's entries in order: writes and punches into the live map, freezes as copies of it, copies wherever a map still stores the copied blocks at their source, missing-list entries once their PG's decision marker follows, recovery's end, and drops.
 func (x *Index) Apply(ev *disklog.Event) error {
 	for i := range ev.Entries {
 		e := &ev.Entries[i]
@@ -340,6 +340,8 @@ func (x *Index) Apply(ev *disklog.Event) error {
 			x.decide(e)
 		case disklog.EntryRecovered:
 			x.recovered(e)
+		case disklog.EntryDropped:
+			x.drop(e.Pool, e.Chunk)
 		}
 	}
 	return nil
@@ -522,6 +524,29 @@ func (x *Index) removeMap(pool core.PoolID, c core.ChunkID, version uint64, exts
 		x.hi = binary.BigEndian.AppendUint64(x.hi, version+1)
 	}
 	x.must(x.tree.DeleteRange(x.lo, x.hi))
+}
+
+// drop removes the chunk's entry, with its listing, and every map of it, live and frozen.
+func (x *Index) drop(pool core.PoolID, c core.ChunkID) {
+	prefix := appendChunkPrefix(nil, pool, c)
+	var frozen []uint64
+	x.tree.Iter(&x.it)
+	for ok := x.it.SeekPrefixGE(prefix); ok && bytes.HasPrefix(x.it.Key(), prefix); ok = x.it.Next() {
+		if len(x.it.Key()) == frozenKeySize {
+			frozen = append(frozen, binary.BigEndian.Uint64(x.it.Key()[chunkKeySize:]))
+		}
+	}
+	for _, v := range frozen {
+		if v == 0 {
+			x.must(x.tree.Delete(binary.BigEndian.AppendUint64(slices.Clip(prefix), 0)))
+			continue
+		}
+		x.exts = x.overlapping(x.exts[:0], pool, c, v, 0, core.BlocksPerChunk)
+		x.removeMap(pool, c, v, x.exts)
+	}
+	x.exts = x.overlapping(x.exts[:0], pool, c, 0, 0, core.BlocksPerChunk)
+	x.removeMap(pool, c, 0, x.exts)
+	x.must(x.tree.Delete(prefix))
 }
 
 // Release removes a frozen version no snapshot reads any more with one range removal over its epoch and map; the absent version 0, whose empty map shares the live map's key range, removes no keys.

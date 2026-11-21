@@ -26,7 +26,7 @@ type frozenBlocks struct {
 // LSN order. A freeze at cut e keeps the chunk as it then stands for the snapshot of e, and of
 // every earlier cut no earlier freeze kept, whatever version it names. A write or punch of an
 // interval at or past its PG's newest decision is held, durable and not visible, until the next
-// decision marker of the PG maps or drops it.
+// decision marker of the PG maps or drops it. A drop removes the chunk whole.
 type storeModel struct {
 	chunks map[core.ChunkID]Chunk
 	live   map[blockKey][]byte
@@ -102,6 +102,11 @@ func (m *storeModel) Apply(r writtenRecord) {
 				ch.Listed, ch.ListedIn = 0, 0
 			}
 			m.chunks[e.Chunk] = ch
+		case disklog.EntryDropped:
+			m.held = slices.DeleteFunc(m.held, func(h heldEntry) bool { return h.entry.Chunk == e.Chunk })
+			delete(m.chunks, e.Chunk)
+			delete(m.frozen, e.Chunk)
+			maps.DeleteFunc(m.live, func(k blockKey, _ []byte) bool { return k.c == e.Chunk })
 		}
 	}
 }
