@@ -236,8 +236,8 @@ func (m *storeModel) at(c core.ChunkID, b uint16, epoch uint64) []byte {
 // crashChunks are the chunks of the crash workload.
 var crashChunks = []core.ChunkID{chunkC, {Volume: 1, Inode: 7, Index: 4}}
 
-// crashWorkload writes unaligned bytes, a cut, a whole chunk, a drop and enough records for a checkpoint,
-// settling only now and then so that rounds pipeline.
+// crashWorkload writes unaligned bytes, a cut, a whole chunk, a drop, a later write a second drop leaves alone and enough
+// records for a checkpoint, settling only now and then so that rounds pipeline.
 func crashWorkload(h *harness) {
 	c, d := crashChunks[0], crashChunks[1]
 	h.write(c, 100, fill(300, 0xa1), 0)
@@ -257,6 +257,11 @@ func crashWorkload(h *harness) {
 	h.step()
 	h.write(c, 20, fill(5, 0xa9), 2)
 	h.settle()
+	h.writeReq(d, 0, fill(core.BlockSize, 0xaa), Request{Version: MakeVersion(2, 1)})
+	h.settle()
+	h.s.Drop(&h.ctx, h.id(), d, 1, &h.out)
+	h.take()
+	h.step()
 	h.punch(d, 0, core.ChunkSize, 2)
 	h.write(c, 0, fill(core.BlockSize+1, 0xa8), 2)
 	h.settle()

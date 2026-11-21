@@ -261,6 +261,30 @@ func TestApplyRejectsFreezeOfLiveMap(t *testing.T) {
 	apply(t, x, record(300, disklog.FreezeEntry(1, chunk(3), 0, 1), disklog.WriteEntry(1, chunk(3), 2, 0, 1)))
 }
 
+func TestADropLeavesAChunkWithALaterIntervalAlone(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		later []disklog.Entry
+	}{
+		{"version", []disklog.Entry{disklog.WriteEntry(1, chunk(1), MakeVersion(2, 1), 0, 1)}},
+		{"listing", []disklog.Entry{disklog.MissingEntry(1, chunk(1), MakeVersion(1, 1), 2), disklog.DecisionEntry(1, 0, 1, 2)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			x := newIndex(t)
+			apply(t, x, record(100, disklog.WriteEntry(1, chunk(1), MakeVersion(1, 1), 0, 1)))
+			apply(t, x, record(200, tc.later...))
+			apply(t, x, record(300, disklog.DroppedEntry(1, chunk(1), 1)))
+			if _, ok := x.Chunk(1, chunk(1)); !ok {
+				t.Fatal("a drop of interval 1 removed a chunk with something of interval 2")
+			}
+			apply(t, x, record(400, disklog.DroppedEntry(1, chunk(1), 2)))
+			if _, ok := x.Chunk(1, chunk(1)); ok {
+				t.Fatal("a drop of interval 2 left the chunk")
+			}
+		})
+	}
+}
+
 func TestCheckFindsOverlap(t *testing.T) {
 	x := newIndex(t)
 	apply(t, x, record(100, disklog.WriteEntry(1, chunk(1), 1, 0, 4)))

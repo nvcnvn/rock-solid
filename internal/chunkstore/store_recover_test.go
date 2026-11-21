@@ -409,6 +409,24 @@ func TestADropEmptiesAChunkAcrossARestart(t *testing.T) {
 	}
 }
 
+// heldAndListedLater is a store holding chunkC at a version of interval 3 that the peering of interval 5 lists.
+func heldAndListedLater(t *testing.T) *harness {
+	h := newRecoveryHarness(t)
+	h.sync(h.memberWrite(chunkC, 0, 1, MakeVersion(3, 1), 1))
+	h.sync(h.persist(0, 1, 5, []ChunkVersion{{Chunk: chunkC, Version: MakeVersion(5, 1)}}))
+	return h
+}
+
+// A give-up of interval 4 sends the store no drop of a chunk listed in interval 5, and leaves it out of the queue.
+func TestAGiveUpSendsNoDropOfAChunkListedLater(t *testing.T) {
+	h := heldAndListedLater(t)
+	r := &Replica{st: h.s, drops: []giveUpDrop{{chunk: chunkC, interval: 4}}}
+	r.dropGivenUp(&h.ctx)
+	if len(r.drops) != 0 || len(r.sout.Actions) != 0 {
+		t.Fatalf("queue %+v, %d store actions", r.drops, len(r.sout.Actions))
+	}
+}
+
 // A write ordered while a drop of its chunk persists, of an interval past the drop's, stays the chunk's version once the
 // drop is durable, and across a restart.
 func TestAWriteOrderedDuringADropOutlivesIt(t *testing.T) {

@@ -804,19 +804,20 @@ func (h *harness) writeBuf(off uint32, data []byte) core.IOBuf {
 }
 
 func (h *harness) write(c core.ChunkID, off uint32, data []byte, epoch uint64) uint64 {
-	id := h.change(c)
-	h.send(id, change{c: c, off: off, n: uint32(len(data)), data: data, epoch: epoch})
-	h.s.Write(&h.ctx, Request{ID: id, Chunk: c, Off: off, Len: uint32(len(data)), Buf: h.writeBuf(off, data), Epoch: epoch}, &h.out)
-	h.take()
-	return id
+	return h.writeReq(c, off, data, Request{Epoch: epoch})
 }
 
 func (h *harness) writeExpect(c core.ChunkID, off uint32, data []byte, ver uint64) uint64 {
-	id := h.change(c)
-	h.send(id, change{c: c, off: off, n: uint32(len(data)), data: data})
-	h.s.Write(&h.ctx, Request{ID: id, Chunk: c, Off: off, Len: uint32(len(data)), Buf: h.writeBuf(off, data), HasVer: true, Ver: ver}, &h.out)
+	return h.writeReq(c, off, data, Request{HasVer: true, Ver: ver})
+}
+
+// writeReq writes data at off of chunk c with r's other fields.
+func (h *harness) writeReq(c core.ChunkID, off uint32, data []byte, r Request) uint64 {
+	r.ID, r.Chunk, r.Off, r.Len, r.Buf = h.change(c), c, off, uint32(len(data)), h.writeBuf(off, data)
+	h.send(r.ID, change{c: c, off: off, n: r.Len, data: data, epoch: r.Epoch})
+	h.s.Write(&h.ctx, r, &h.out)
 	h.take()
-	return id
+	return r.ID
 }
 
 func (h *harness) punch(c core.ChunkID, off, n uint32, epoch uint64) uint64 {
