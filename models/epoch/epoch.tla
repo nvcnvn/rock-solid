@@ -3001,10 +3001,15 @@ SplitM == [k |-> "split"]
 \* and while a member shared by both PGs is down.
 SplitPlans == {Plan(<<SplitM>>, <<Partial[1], Partial2[1]>>, {"restart"}),
                Plan(<<Mark(2, "down"), SplitM, Mark(2, "up")>>, <<Partial[1], Partial2[1]>>, {})}
-\* ci-split-report, at min_live 1: PG 1's write lands on disk 1 alone while
-\* disk 2 is down, PG 2 activates interval 3, then disk 1 goes down and the
-\* pool splits. PG 2's report names number 1, which is PG 1's after the split,
-\* whose interval 3 never activated.
+\* heavy-split-report and neg-report-across-split, at min_live 1 on nodes 1
+\* and 2, PG 2's primary node 2: PG 1's write lands on disk 1 alone while disk
+\* 2 is down, PG 2 activates interval 3, then disk 1 goes down and the pool
+\* splits. PG 2's report names number 1, which is PG 1's after the split,
+\* whose interval 3 never activated. ci-split-report stops before disk 1 goes
+\* down, to fit 5 minutes.
+Nodes2 == {1, 2}
+MemPool2 == [p \in PGs |-> IF p = 1 THEN <<1, 2>> ELSE <<2, 1>>]
 SplitReportPlans == {Plan(<<Mark(2, "down"), Mark(2, "up"), Mark(1, "down"), SplitM>>, <<Partial[1]>>, {})}
+SplitRacePlans == {Plan(<<Mark(2, "down"), Mark(2, "up"), SplitM>>, <<Partial[1]>>, {})}
 
 =============================================================================
