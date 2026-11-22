@@ -4196,14 +4196,12 @@ A TLA+ specification of a metadata group's voter replacement ([Replica placement
 
 **Configuration results.** Each `ci` run as `scripts/models.sh ci` printed it, and each `deep` and
 `heavy` run as `scripts/models.sh deep` printed it, with 4 workers and a 4 GB heap on a Mac mini (M4 Pro). The
-sessions model's `ci` runs and the epoch change model's `deep` and `heavy` runs ran alone; the epoch
-change model's `ci` runs ran beside other jobs' Go tests, and the rest beside two other 4-worker TLC
-jobs, but the voter replacement model's two-plans rows, which ran with 1 worker beside one
+sessions model's `ci` runs and the epoch change model's `deep` and `heavy` runs ran alone, and the epoch
+change model's `ci` runs under the heavy-run lock, which keeps other TLC jobs off; the rest ran beside two
+other 4-worker TLC jobs, but the voter replacement model's two-plans rows, which ran with 1 worker beside one
 4-worker TLC job, where the model's other `ci` configurations took about three times their 4-worker
 time. Constants are in each configuration's first line and in its model's section. The epoch change
-model's `ci` rows are one run on the spec with the hold on a write to a chunk with too few clean
-copies, at a load average of 10 to 17, but `ci-refills-stay` and `ci-refills-stay-node1`, which that
-load put over the 300 s budget, from a second run of the two alone. A configuration cut to fit keeps
+model's `ci` rows are one run on the spec with pool splits. A configuration cut to fit keeps
 its full size in a `deep` twin, as the configuration table says. Its `deep` and `heavy` rows ran on the spec before the acknowledgement became a step of its own
 (`Answer`) and before the keep rule left out members torn above a version; they are stale until the
 next milestone's run, which is also the twins' first.
@@ -4223,56 +4221,56 @@ next milestone's run, which is also the twins' first.
 | Purge | `ci-write` | 1 inode of 7 bytes, 2 nodes, writes at 2 and 6, truncates to 1, 5 or 8, 2 crashes | 38 | 797,082 | 11 s |
 | Purge | `ci-extend` | 1 inode of 3 bytes, 2 nodes, writes at 4 and 6, truncates to 2 or 8, 2 crashes | 39 | 1,145,014 | 13 s |
 | Purge | `ci-orphan` | 1 inode of 3 bytes, 2 nodes, writes at 5, an unlink, a fence, an owner failover, a crash | 30 | 35,516 | 2 s |
-| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 32 | 1,130,517 | 170 s |
-| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 27 | 1,195,024 | 209 s |
-| Epoch change | `ci-restarts-moved` | [Epoch change model](#epoch-change-model) | 29 | 265,548 | 58 s |
-| Epoch change | `ci-edits` | [Epoch change model](#epoch-change-model) | 29 | 839,530 | 131 s |
-| Epoch change | `ci-tears` | [Epoch change model](#epoch-change-model) | 26 | 172,070 | 44 s |
-| Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 84 | 1,414,913 | 135 s |
-| Epoch change | `ci-hide` | [Epoch change model](#epoch-change-model) | 76 | 234,832 | 21 s |
-| Epoch change | `ci-hide-clocks` | [Epoch change model](#epoch-change-model) | 83 | 1,741,366 | 160 s |
-| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 32 | 1,347,108 | 242 s |
-| Epoch change | `ci-stays` | [Epoch change model](#epoch-change-model) | 27 | 116,279 | 33 s |
-| Epoch change | `ci-stays-as-primary` | [Epoch change model](#epoch-change-model) | 27 | 365,012 | 102 s |
-| Epoch change | `ci-stays-new` | [Epoch change model](#epoch-change-model) | 27 | 485,798 | 126 s |
-| Epoch change | `ci-stays-stale` | [Epoch change model](#epoch-change-model) | 31 | 410,814 | 56 s |
-| Epoch change | `ci-stays-gone` | [Epoch change model](#epoch-change-model) | 28 | 63,772 | 6 s |
-| Epoch change | `ci-late-ask` | [Epoch change model](#epoch-change-model) | 27 | 546,275 | 80 s |
-| Epoch change | `ci-gates` | [Epoch change model](#epoch-change-model) | 26 | 5,380 | 147 s |
-| Epoch change | `ci-gates-left` | [Epoch change model](#epoch-change-model) | 25 | 46,551 | 149 s |
-| Epoch change | `ci-refills` | [Epoch change model](#epoch-change-model) | 29 | 403,123 | 50 s |
-| Epoch change | `ci-refills-down` | [Epoch change model](#epoch-change-model) | 38 | 1,544,287 | 165 s |
-| Epoch change | `ci-refills-down-restart` | [Epoch change model](#epoch-change-model) | 30 | 446,361 | 56 s |
-| Epoch change | `ci-refills-down-restart-second` | [Epoch change model](#epoch-change-model) | 30 | 446,361 | 82 s |
-| Epoch change | `ci-refills-stay` | [Epoch change model](#epoch-change-model) | 32 | 1,649,733 | 209 s |
-| Epoch change | `ci-refills-stay-node1` | [Epoch change model](#epoch-change-model) | 31 | 1,413,013 | 190 s |
-| Epoch change | `ci-refills-primary` | [Epoch change model](#epoch-change-model) | 31 | 652,011 | 88 s |
-| Epoch change | `ci-refills-back` | [Epoch change model](#epoch-change-model) | 34 | 1,116,045 | 176 s |
-| Epoch change | `ci-refills-two` | [Epoch change model](#epoch-change-model) | 30 | 153,394 | 22 s |
-| Epoch change | `ci-refills-two-second` | [Epoch change model](#epoch-change-model) | 30 | 153,394 | 22 s |
-| Epoch change | `ci-refills-together` | [Epoch change model](#epoch-change-model) | 26 | 58,123 | 10 s |
-| Epoch change | `ci-giveup-stopped` | [Epoch change model](#epoch-change-model) | 30 | 559,285 | 81 s |
-| Epoch change | `ci-giveup-two-chunks` | [Epoch change model](#epoch-change-model) | 30 | 612,816 | 109 s |
-| Epoch change | `ci-giveup-removed` | [Epoch change model](#epoch-change-model) | 28 | 1,074,987 | 128 s |
-| Epoch change | `ci-split` | [Epoch change model](#epoch-change-model) | 27 | 600,750 | 115 s |
-| Epoch change | `ci-split-report` | [Epoch change model](#epoch-change-model) | 24 | 320,578 | 49 s |
-| Epoch change | `ci-image` | [Epoch change model](#epoch-change-model) | 35 | 1,503,794 | 166 s |
-| Epoch change | `ci-image-restart` | [Epoch change model](#epoch-change-model) | 31 | 1,038,890 | 128 s |
-| Epoch change | `ci-bounce` | [Epoch change model](#epoch-change-model) | 35 | 1,128,596 | 129 s |
-| Epoch change | `ci-sources` | [Epoch change model](#epoch-change-model) | 26 | 421,509 | 60 s |
-| Epoch change | `ci-sources-move` | [Epoch change model](#epoch-change-model) | 28 | 157,656 | 26 s |
-| Epoch change | `ci-sources-lister` | [Epoch change model](#epoch-change-model) | 34 | 121,697 | 19 s |
-| Epoch change | `ci-sources-lister-one` | [Epoch change model](#epoch-change-model) | 34 | 121,975 | 20 s |
-| Epoch change | `ci-held` | [Epoch change model](#epoch-change-model) | 26 | 117,454 | 19 s |
+| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 32 | 1,130,517 | 208 s |
+| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 27 | 1,225,541 | 258 s |
+| Epoch change | `ci-restarts-moved` | [Epoch change model](#epoch-change-model) | 29 | 265,548 | 66 s |
+| Epoch change | `ci-edits` | [Epoch change model](#epoch-change-model) | 29 | 839,530 | 147 s |
+| Epoch change | `ci-tears` | [Epoch change model](#epoch-change-model) | 26 | 172,070 | 50 s |
+| Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 84 | 1,414,913 | 133 s |
+| Epoch change | `ci-hide` | [Epoch change model](#epoch-change-model) | 76 | 234,832 | 25 s |
+| Epoch change | `ci-hide-clocks` | [Epoch change model](#epoch-change-model) | 83 | 1,741,366 | 181 s |
+| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 32 | 1,390,883 | 297 s |
+| Epoch change | `ci-stays` | [Epoch change model](#epoch-change-model) | 27 | 116,279 | 37 s |
+| Epoch change | `ci-stays-as-primary` | [Epoch change model](#epoch-change-model) | 27 | 365,012 | 122 s |
+| Epoch change | `ci-stays-new` | [Epoch change model](#epoch-change-model) | 27 | 485,798 | 142 s |
+| Epoch change | `ci-stays-stale` | [Epoch change model](#epoch-change-model) | 31 | 410,814 | 65 s |
+| Epoch change | `ci-stays-gone` | [Epoch change model](#epoch-change-model) | 28 | 63,948 | 7 s |
+| Epoch change | `ci-late-ask` | [Epoch change model](#epoch-change-model) | 27 | 572,342 | 90 s |
+| Epoch change | `ci-gates` | [Epoch change model](#epoch-change-model) | 26 | 6,030 | 165 s |
+| Epoch change | `ci-gates-left` | [Epoch change model](#epoch-change-model) | 25 | 46,551 | 164 s |
+| Epoch change | `ci-refills` | [Epoch change model](#epoch-change-model) | 29 | 411,973 | 58 s |
+| Epoch change | `ci-refills-down` | [Epoch change model](#epoch-change-model) | 38 | 1,551,495 | 176 s |
+| Epoch change | `ci-refills-down-restart` | [Epoch change model](#epoch-change-model) | 30 | 451,603 | 62 s |
+| Epoch change | `ci-refills-down-restart-second` | [Epoch change model](#epoch-change-model) | 30 | 451,603 | 61 s |
+| Epoch change | `ci-refills-stay` | [Epoch change model](#epoch-change-model) | 32 | 1,662,065 | 242 s |
+| Epoch change | `ci-refills-stay-node1` | [Epoch change model](#epoch-change-model) | 31 | 1,431,909 | 210 s |
+| Epoch change | `ci-refills-primary` | [Epoch change model](#epoch-change-model) | 31 | 654,747 | 94 s |
+| Epoch change | `ci-refills-back` | [Epoch change model](#epoch-change-model) | 34 | 1,116,045 | 154 s |
+| Epoch change | `ci-refills-two` | [Epoch change model](#epoch-change-model) | 30 | 153,394 | 26 s |
+| Epoch change | `ci-refills-two-second` | [Epoch change model](#epoch-change-model) | 30 | 153,394 | 24 s |
+| Epoch change | `ci-refills-together` | [Epoch change model](#epoch-change-model) | 26 | 58,123 | 11 s |
+| Epoch change | `ci-giveup-stopped` | [Epoch change model](#epoch-change-model) | 30 | 559,285 | 84 s |
+| Epoch change | `ci-giveup-two-chunks` | [Epoch change model](#epoch-change-model) | 30 | 612,816 | 108 s |
+| Epoch change | `ci-giveup-removed` | [Epoch change model](#epoch-change-model) | 28 | 1,074,987 | 126 s |
+| Epoch change | `ci-split` | [Epoch change model](#epoch-change-model) | 27 | 600,750 | 121 s |
+| Epoch change | `ci-split-report` | [Epoch change model](#epoch-change-model) | 24 | 320,578 | 50 s |
+| Epoch change | `ci-image` | [Epoch change model](#epoch-change-model) | 35 | 1,503,970 | 182 s |
+| Epoch change | `ci-image-restart` | [Epoch change model](#epoch-change-model) | 31 | 1,100,199 | 146 s |
+| Epoch change | `ci-bounce` | [Epoch change model](#epoch-change-model) | 35 | 1,128,808 | 139 s |
+| Epoch change | `ci-sources` | [Epoch change model](#epoch-change-model) | 26 | 433,782 | 71 s |
+| Epoch change | `ci-sources-move` | [Epoch change model](#epoch-change-model) | 28 | 161,037 | 29 s |
+| Epoch change | `ci-sources-lister` | [Epoch change model](#epoch-change-model) | 34 | 121,697 | 22 s |
+| Epoch change | `ci-sources-lister-one` | [Epoch change model](#epoch-change-model) | 34 | 121,975 | 23 s |
+| Epoch change | `ci-held` | [Epoch change model](#epoch-change-model) | 26 | 117,454 | 21 s |
 | Epoch change | `ci-held-live` | [Epoch change model](#epoch-change-model) | 19 | 1,990 | 15 s |
-| Epoch change | `ci-held-rotated` | [Epoch change model](#epoch-change-model) | 25 | 21,087 | 156 s |
-| Epoch change | `ci-faults` | [Epoch change model](#epoch-change-model) | 26 | 858,579 | 121 s |
-| Epoch change | `ci-faults-more` | [Epoch change model](#epoch-change-model) | 26 | 187,119 | 26 s |
-| Epoch change | `ci-asks` | [Epoch change model](#epoch-change-model) | 23 | 55,868 | 170 s |
-| Epoch change | `ci-answers` | [Epoch change model](#epoch-change-model) | 20 | 12,603 | 166 s |
-| Epoch change | `ci-answers-node2` | [Epoch change model](#epoch-change-model) | 20 | 11,588 | 164 s |
-| Epoch change | `ci-answers-node3` | [Epoch change model](#epoch-change-model) | 20 | 10,920 | 174 s |
-| Epoch change | `ci-answers-move` | [Epoch change model](#epoch-change-model) | 22 | 10,267 | 195 s |
+| Epoch change | `ci-held-rotated` | [Epoch change model](#epoch-change-model) | 24 | 21,087 | 153 s |
+| Epoch change | `ci-faults` | [Epoch change model](#epoch-change-model) | 26 | 869,096 | 144 s |
+| Epoch change | `ci-faults-more` | [Epoch change model](#epoch-change-model) | 26 | 187,119 | 27 s |
+| Epoch change | `ci-asks` | [Epoch change model](#epoch-change-model) | 23 | 55,868 | 152 s |
+| Epoch change | `ci-answers` | [Epoch change model](#epoch-change-model) | 20 | 13,212 | 145 s |
+| Epoch change | `ci-answers-node2` | [Epoch change model](#epoch-change-model) | 20 | 11,588 | 145 s |
+| Epoch change | `ci-answers-node3` | [Epoch change model](#epoch-change-model) | 20 | 10,920 | 150 s |
+| Epoch change | `ci-answers-move` | [Epoch change model](#epoch-change-model) | 22 | 10,418 | 183 s |
 | Sessions and fencing | `deep-lease` | `ci-lease` with a 145-unit lease (about 8 ticks), `dead_wait` 182 | 71 | 803,978,256 | 4,904 s |
 | Sessions and fencing | `deep-terms` | `ci-lease` with 3 terms | 50 | 81,717,036 | 415 s |
 | Sessions and fencing | `deep-down` | `ci-fence` with 2 partitions, 1 write in flight per client, 2-tick lease, `node_down_after` 1 tick | 50 | 151,663,068 | 1,676 s |
