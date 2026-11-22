@@ -74,6 +74,8 @@ type gen struct {
 	primary    map[uint64]int
 	ownOpen    map[int][][2]uint64
 	memberOpen map[int][][2]uint64
+	// landAt is the line of the first maydeliver of each [node, chunk, version] a member has open.
+	landAt map[[3]uint64]int
 	// lists holds each [disk, pg, interval] a Persisted record named.
 	lists map[[3]uint64]bool
 	// operatorAsk holds each PG the harness, no primary, asked a new interval of: its next table is an Edit that changes nothing.
@@ -146,6 +148,9 @@ func dropVersion(l [][2]uint64, c, v uint64) [][2]uint64 {
 // landOpen lets the versions node n's store took and has not reported durable land now: the spec logs a version as a member takes it, and a table or a crash may come before the record.
 func (g *gen) landOpen(n int) {
 	for _, x := range g.memberOpen[n] {
+		if k := [3]uint64{uint64(n), x[0], x[1]}; g.landAt[k] == 0 {
+			g.landAt[k] = len(g.lines) + 1
+		}
 		g.line(`k |-> "maydeliver", n |-> %d, c |-> %d, v |-> %s`, n, g.chunk(x[0]), ver(x[1]))
 	}
 }
@@ -165,6 +170,11 @@ func (g *gen) crash(n int) {
 		g.line(`k |-> "mayfail", n |-> %d, c |-> %d, v |-> %s`, n, g.chunk(own[j][0]), ver(own[j][1]))
 	}
 	g.memberOpen[n], g.ownOpen[n] = nil, nil
+	for k := range g.landAt {
+		if k[0] == uint64(n) {
+			delete(g.landAt, k)
+		}
+	}
 	g.line(`k |-> "restart", n |-> %d`, n)
 }
 
@@ -217,6 +227,11 @@ func (g *gen) lineAt(at int, format string, args ...any) {
 	for k, p := range g.orderAt {
 		if p >= at {
 			g.orderAt[k] = p + 1
+		}
+	}
+	for k, p := range g.landAt {
+		if p > at {
+			g.landAt[k] = p + 1
 		}
 	}
 }
@@ -612,6 +627,11 @@ func (g *gen) run(recs []trace.Record) {
 			}
 			g.ownOpen[n] = dropVersion(g.ownOpen[n], r.Fields[0], r.Fields[1])
 			g.memberOpen[n] = dropVersion(g.memberOpen[n], r.Fields[0], r.Fields[1])
+			// A version the member logs after a table that came while it was open landed before that table: its first maydeliver delivers it.
+			if k := [3]uint64{uint64(n), r.Fields[0], r.Fields[1]}; g.landAt[k] != 0 {
+				g.lines[g.landAt[k]-1] = strings.Replace(g.lines[g.landAt[k]-1], `"maydeliver"`, `"logged"`, 1)
+				delete(g.landAt, k)
+			}
 			g.line(`k |-> "%s", n |-> %d, c |-> %d, v |-> %s`, kind, n, g.chunk(r.Fields[0]), ver(r.Fields[1]))
 		case trace.OutRecoverOrder:
 			s, at := g.source(r.Fields[1]), len(g.lines)
@@ -817,7 +837,7 @@ func main() {
 	}
 	g := &gen{entries: map[uint64]*entry{}, initial: map[uint64]entry{}, wid: map[uint64]int{}, epochs: map[uint64]int{}, replies: map[[3]uint64]map[uint64]*reply{}, decisions: map[[3]uint64]bool{},
 		lists: map[[3]uint64]bool{}, operatorAsk: map[uint64]bool{}, restarted: map[[2]uint64]bool{}, diskIDs: map[uint64]uint64{}, primary: map[uint64]int{}, ownOpen: map[int][][2]uint64{}, memberOpen: map[int][][2]uint64{},
-		activated: map[uint64]uint64{}, tableIv: map[uint64]map[uint64]uint64{}, left: map[[2]uint64]int{}, formatAt: map[uint64]int{}, outOfPool: map[uint64]bool{}, nodeDisk: map[int]uint64{}, recovering: map[int][][3]uint64{}, orderAt: map[[2]uint64]int{}, served: map[[3]uint64]bool{}, refused: map[uint64][]refusal{}}
+		activated: map[uint64]uint64{}, tableIv: map[uint64]map[uint64]uint64{}, left: map[[2]uint64]int{}, formatAt: map[uint64]int{}, outOfPool: map[uint64]bool{}, nodeDisk: map[int]uint64{}, recovering: map[int][][3]uint64{}, orderAt: map[[2]uint64]int{}, served: map[[3]uint64]bool{}, landAt: map[[3]uint64]int{}, refused: map[uint64][]refusal{}}
 	recs := g.load(flag.Arg(0))
 	if len(recs) == 0 {
 		fatal("no table in the trace")
