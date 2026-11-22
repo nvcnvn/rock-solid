@@ -3604,7 +3604,9 @@ plans enable.
 
 Not modelled: more than one split, a split of a pool whose PGs hold chunks in both halves, whose
 halves inherit the parent's state on every member as the modelled half does, and the reports
-placement ignores in the table that splits a pool, a table the model's folds never share. Nor is a change of `replicas`, so
+placement ignores in the table that splits a pool, a table the model's folds never share. A node's
+per-PG state is not modelled either: the model follows a PG across the split, where a node matches its
+lead, asks and failed versions by PG number, so the code half re-keys them at a split. Nor is a change of `replicas`, so
 neither is the leaving mark that narrows a PG when `replicas` goes down, or a leaving member kept
 because a raised `replicas` needs it; a leaving member that takes a missing member's place is
 modelled, as `Stay`. Of moves, no plan makes a table that
@@ -7548,7 +7550,7 @@ Phase 3's placement seeds run unchanged against the real group in place of the s
 
 - the split report rule: a heartbeat that reports an activation or a recovered report under a table
   epoch older than its pool's last split is dropped, since it names its PG in the numbering before
-  the split, by this leader and by the next; one sent under the split's table is recorded;
+  the split, by this leader and by the next, from the pool's `pg_count` the report carries; one sent under the split's table is recorded;
 - P7 under that rule;
 - P20 while [Space grants](#space-grants) are out and a refill after a disk failure moves members onto the fullest disks;
 - P23 end to end, from the leader's record of when each PG last copied;
