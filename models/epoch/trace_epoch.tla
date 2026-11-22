@@ -225,7 +225,7 @@ Line(l) ==
        /\ \/ UNCHANGED vars
           \/ RecoverLine(l)
     \/ /\ l.k = "reported"
-       /\ IF ivs[l.p][l.iv].lv = {} \/ [p |-> l.p, k |-> l.iv] \in recd
+       /\ IF ivs[l.p][l.iv].lv = {} \/ \E r \in recd : r.p = l.p /\ r.k = l.iv
           THEN UNCHANGED vars
           ELSE IvAt(l.n, l.p) = l.iv /\ ReportRecovered(l.n, l.p)
     \/ /\ l.k = "ask"

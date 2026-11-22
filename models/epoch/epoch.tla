@@ -77,14 +77,15 @@ Infinity == MaxTime + 1
 
 VARIABLES
     \* Control plane and tables
-    tbl,      \* Seq([PG -> [iv, la, gu]]): every committed table; gu: the PG's give-ups,
+    tbl,      \* Seq([PG -> [iv, la, gu, sp]]): every committed table; sp: its pool's splits; gu: the PG's give-ups,
               \* each [k, cs, drop]: the interval it covers the PG's intervals up to, the
               \* chunks it may lose, and whether members drop them
     ivs,      \* [PG -> Seq([mem: Seq(Disk), st: [Disk -> mark], lv: SUBSET Disk, ml: Nat])]:
               \* each interval's members, leaving members and min_live
     reqIv,    \* [PG -> Nat]: the interval whose primary asked for a new one
-    reports,  \* set of [p, k]: activation reports on heartbeats, possibly late or repeated
-    recd,     \* set of [p, k]: recovered reports on heartbeats, possibly late or repeated
+    reports,  \* set of [p, k, s]: activation reports on heartbeats, possibly late or repeated, from a table
+              \* whose pool split s times
+    recd,     \* set of [p, k, s]: recovered reports on heartbeats, possibly late or repeated
     plan,     \* the planned membership changes of this behavior
     step,     \* the next planned change
     \* Nodes and disks
@@ -300,7 +301,7 @@ InitIv(p) ==[mem |-> InitMem[p], st |-> [d \in Disk |-> IF d \in Node THEN "up" 
              ml |-> MinLive[p]]
 
 Init ==
-    /\ tbl = <<[p \in PG |-> [iv |-> 1, la |-> 1, gu |-> {}]]>>
+    /\ tbl = <<[p \in PG |-> [iv |-> 1, la |-> 1, gu |-> {}, sp |-> 0]]>>
     /\ ivs = [p \in PG |-> <<InitIv(p)>>]
     /\ reqIv = [p \in PG |-> 0]
     /\ plan \in Plans
@@ -449,9 +450,23 @@ Add(p, old, new) ==
                       !.st[new] = "up", !.lv = @ \cup {old}]])
        /\ UNCHANGED <<reqIv, reports, recd>>
 
+\* A PG's number in a table whose pool split s times. A split doubles the pool's
+\* pg_count, and PG q's halves are 2q and 2q + 1. Where a plan splits, both PGs
+\* are of one pool: PGs 1 and 2 are numbers 0 and 1 before the split and, after
+\* it, the halves holding their chunks, 2 * 0 + 1 and 2 * 1 + 0. The other
+\* halves hold no chunk, so the model leaves them out.
+Num(s, p) == p - 1 + s
+Sp(p) == tbl[Len(tbl)][p].sp
+
+\* A report names its PG by number in the reporter's table. The leader drops
+\* one from a table older than its pool's last split; with ReportAcrossSplit it
+\* takes it for the PG that number names now.
+Rep(n, p, k) == [p |-> p, k |-> k, s |-> tbl[ep[n]][p].sp]
+For(r, p) == Num(r.s, r.p) = Num(Sp(p), p) /\ (r.s = Sp(p) \/ Bug("ReportAcrossSplit"))
+
 \* A recovered report for the PG's current interval; a late one, for an earlier
 \* interval, does nothing.
-Reported(p) == \E r \in recd : r.p = p /\ (r.k = Cur(p) \/ Bug("AcceptOldReport"))
+Reported(p) == \E r \in recd : For(r, p) /\ (r.k = Cur(p) \/ Bug("AcceptOldReport"))
 
 \* The leader removes the leaving members on a recovered report.
 Remove(p) ==
@@ -532,8 +547,9 @@ Renew(p) ==
 \* starts no interval.
 Fold(p, k) ==
     /\ "fold" \in Moves
-    /\ [p |-> p, k |-> k] \in reports
+    /\ \E r \in reports : For(r, p) /\ r.k = k
     /\ k > tbl[Len(tbl)][p].la
+    /\ k <= Cur(p)
     /\ Commit([tbl[Len(tbl)] EXCEPT ![p].la = Max({k, tbl[Len(tbl)][p].la})])
     /\ UNCHANGED <<ivs, reqIv, reports, recd>>
 
@@ -556,11 +572,19 @@ Edit(p, mem, marks) ==
           ELSE NewIntervals({p}, [q \in PG |-> y])
        /\ UNCHANGED <<reqIv, reports, recd>>
 
+\* Doubling the pool's pg_count splits every PG into two halves over its
+\* members, each starting the parent's interval plus one with the parent's
+\* past intervals, last activated interval and give-ups.
+Split ==
+    /\ Commit([p \in PG |-> [tbl[Len(tbl)][p] EXCEPT !.iv = @ + 1, !.sp = @ + 1]])
+    /\ ivs' = [p \in PG |-> Append(ivs[p], ivs[p][Cur(p)])]
+    /\ UNCHANGED <<reqIv, reports, recd>>
+
 \* A planned change: [k |-> "mark", d, to], [k |-> "replace", p, old, new],
 \* [k |-> "rotate", p], [k |-> "add", p, old, new], [k |-> "remove", p],
 \* [k |-> "drop", p], [k |-> "stay", p, l, out], [k |-> "refill", p, mem, marks, lv],
-\* [k |-> "minlive", p, to], [k |-> "edit", p, mem, marks], [k |-> "lost", d] (LostPlanned) or
-\* [k |-> "giveup", p] (GiveUpPlanned).
+\* [k |-> "minlive", p, to], [k |-> "edit", p, mem, marks], [k |-> "split"],
+\* [k |-> "lost", d] (LostPlanned) or [k |-> "giveup", p] (GiveUpPlanned).
 Planned(m) ==
     \/ m.k = "mark" /\ MarkDisk(m.d, m.to)
     \/ m.k = "replace" /\ Replace(m.p, m.old, m.new)
@@ -572,6 +596,7 @@ Planned(m) ==
     \/ m.k = "refill" /\ Refill(m.p, m.mem, m.marks, m.lv)
     \/ m.k = "minlive" /\ SetMinLive(m.p, m.to)
     \/ m.k = "edit" /\ Edit(m.p, m.mem, m.marks)
+    \/ m.k = "split" /\ Split
 
 \* A free plan makes any change in Moves at any time; another makes its
 \* changes in order.
@@ -858,7 +883,7 @@ Activated(n, p, k, K, ls) ==
     IN /\ ~\E r \in ownw' : r.n = n /\ ChunkPG[r.c] = p
        /\ pr' = [pr EXCEPT ![n][p] = [@ EXCEPT !.act = TRUE, !.srv = TRUE]]
        /\ act' = act \cup {[p |-> p, k |-> k, r |-> run[n]]}
-       /\ reports' = reports \cup {[p |-> p, k |-> k]}
+       /\ reports' = reports \cup {Rep(n, p, k)}
        /\ pend' = pend \ mine
        /\ refd' = {r \in refd : ~(r.n = n /\ ChunkPG[r.c] = p)}
        /\ ackd' = ackd \cup {[c |-> r.c, v |-> r.v] : r \in ok}
@@ -1006,7 +1031,7 @@ PeerOn(n, p, J, P, U) ==
                /\ UNCHANGED <<miss, persIv, drp, rdrp, ldrp, imf, gat>>
           ELSE IF CanStall(n, p, k)
           THEN /\ PersistAll(P, p, k, lists, img, FALSE)
-               /\ reports' = IF Bug("ReportBeforeActivate") THEN reports \cup {[p |-> p, k |-> k]}
+               /\ reports' = IF Bug("ReportBeforeActivate") THEN reports \cup {Rep(n, p, k)}
                              ELSE reports
                /\ UNCHANGED <<pr, act, mrecv, pend, refd, ackd, wst>>
           ELSE /\ PersistAll(P, p, k, lists, img, TRUE)
@@ -1184,9 +1209,9 @@ ReportRecovered(n, p) ==
        /\ Leads(n, p)
        /\ pr[n][p].act
        /\ x.lv # {}
-       /\ [p |-> p, k |-> k] \notin recd
+       /\ Rep(n, p, k) \notin recd
        /\ \A d \in Mem(p, k) \ x.lv : St(p, k, d) = "up" /\ \A c \in ChunksOf(p) : miss[d][c] = NoMiss
-       /\ recd' = recd \cup {[p |-> p, k |-> k]}
+       /\ recd' = recd \cup {Rep(n, p, k)}
        /\ UNCHANGED <<tbl, ivs, reqIv, reports, plan, step, nodeVars, priVars, dataVars, leaseVars,
                       clockVars, raftVars>>
 
@@ -2967,5 +2992,19 @@ SlowPlans == {HandoverSlow}
 \* starts outside both PGs, a spare a change can move a member to.
 Free == [free |-> TRUE, m |-> <<>>, w |-> SubSeq(Partial, 1, 1), f |-> {}, t |-> 0, k |-> 1, s |-> 0, n |-> 3]
 DeepPeerPlans == PeerPlans \cup RestartPlans \cup {Free}
+
+\* Splits: both PGs in one rep2 pool, PG 1 on nodes 1 and 2, PG 2 on 2 and 3.
+MemPool == [p \in PGs |-> IF p = 1 THEN <<1, 2>> ELSE <<2, 3>>]
+NoMaint == [p \in PGs |-> FALSE]
+SplitM == [k |-> "split"]
+\* ci-split: a split with a write to each PG in flight, alone with a restart,
+\* and while a member shared by both PGs is down.
+SplitPlans == {Plan(<<SplitM>>, <<Partial[1], Partial2[1]>>, {"restart"}),
+               Plan(<<Mark(2, "down"), SplitM, Mark(2, "up")>>, <<Partial[1], Partial2[1]>>, {})}
+\* ci-split-report, at min_live 1: PG 1's write lands on disk 1 alone while
+\* disk 2 is down, PG 2 activates interval 3, then disk 1 goes down and the
+\* pool splits. PG 2's report names number 1, which is PG 1's after the split,
+\* whose interval 3 never activated.
+SplitReportPlans == {Plan(<<Mark(2, "down"), Mark(2, "up"), Mark(1, "down"), SplitM>>, <<Partial[1]>>, {})}
 
 =============================================================================
