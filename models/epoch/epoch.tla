@@ -1253,8 +1253,10 @@ Pre(i) ==
 
 \* The primary takes a client write tagged with an interval at least the one
 \* its term began in, and a restarted primary one of the interval it restarted
-\* on, which it holds until a later interval's peering. Once the hello of
-\* incarnation 2 reached it, it refuses every write of incarnation 1.
+\* on, which it holds until a later interval's peering; the code refuses that
+\* write before its first table and holds it only while asking, which the hold
+\* covers, as it only adds behaviours. Once the hello of incarnation 2 reached
+\* it, it refuses every write of incarnation 1.
 Send(i) ==
     LET w == Writes[i]
         p == ChunkPG[w.c]
