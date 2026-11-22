@@ -4453,7 +4453,7 @@ Results, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries`, t
 | `primaries-333` | 697 | passes: a member with 8 versions open at two tables, discrepancy 4 | 30 |
 | `primaries-387423` | 735 | passes: the primary's own recovery copy landing after it decided the next interval, discrepancy 36 | 6 |
 
-The depth-2 seeds are 4, 7, 12, 15 and every eighth after each, off every planted bug's seed; seed 7 leaves a gap. All 40 seeds, the 14 scripted traces and the 2 sweep seeds pass TLC. The holds on a write's clean copies reschedule seeds 0, 7, 18 and 24, which pass once discrepancies 33 to 35 are settled. A member's open versions landing at their first `maydeliver` line once it logs them (discrepancy 4) took seed 18 from 381 s to 76 s and seed 0 from 146 s to 8 s. None broke a safety invariant,
+The depth-2 seeds are 4, 7, 12, 15 and every eighth after each, off every planted bug's seed; seed 7 leaves a gap. All 40 seeds, the 14 scripted traces and the 2 sweep seeds pass TLC. The holds on a write's clean copies reschedule seeds 0, 7, 18 and 24, which pass once discrepancies 33 to 35 are settled. A member's open versions landing at their first `maydeliver` line once it logs them (discrepancy 4) let seed 0 pass in 8 s and seed 18 in 76 s. None broke a safety invariant,
 and each that passes ran the four invariants checked at its end. A trace's time follows how many `maydeliver`
 and `mayfail` branches stay alive, not its length.
 
