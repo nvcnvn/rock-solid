@@ -258,6 +258,16 @@ func TestConformScriptedSecondFailure(t *testing.T) {
 	}
 }
 
+// Sweep seeds the check once stopped at: 387423's primary records its own copy of a recovery write after it decided the
+// next interval, whose decision lists the chunk again (discrepancy 36).
+func TestConformSweepSeeds(t *testing.T) {
+	for _, seed := range []uint64{387423} {
+		if err := runPrimaries(t, seed, nil); err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+	}
+}
+
 // conformPlants are the plants of the rule map and of the oracle test that scripts/conform.sh runs in the primary-change run.
 var conformPlants = []struct {
 	name string

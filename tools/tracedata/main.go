@@ -168,7 +168,7 @@ func (g *gen) crash(n int) {
 	g.line(`k |-> "restart", n |-> %d`, n)
 }
 
-// repliedLater reports whether node n, PG f's primary of iv, took its own disk's peering reply, or its disk answered a later primary, listing chunk c, for an interval after iv and after every interval n decided: a recovery write of c in iv that lands now changes no list that decision reads, as a demoted primary's gated write lands only at the next decision its disk persists. A reply of an interval a later decision of n passed over is no longer read.
+// repliedLater reports whether node n, PG f's primary of iv, took its own disk's peering reply, or its disk answered a later primary, listing chunk c, for an interval after iv and after every interval n decided that some primary activated since: a recovery write of c in iv that lands now changes no list that decision reads, as a demoted primary's gated write lands only at the next decision its disk persists. A reply of an interval a later activated decision of n passed over is no longer read.
 func (g *gen) repliedLater(n int, f, c, iv uint64) bool {
 	own, ok := g.nodeDisk[n]
 	if !ok {
@@ -176,7 +176,7 @@ func (g *gen) repliedLater(n int, f, c, iv uint64) bool {
 	}
 	after := iv
 	for k := range g.decisions {
-		if k[0] == uint64(n) && k[1] == f {
+		if k[0] == uint64(n) && k[1] == f && k[2] <= g.activated[f] {
 			after = max(after, k[2])
 		}
 	}
