@@ -3383,6 +3383,8 @@ nodes without finishing.
 | `ci-giveup-two-chunks` | 4 | `ci-giveup-stopped` with W1 on chunk 2 and a write to chunk 1, both chunks in PG 2: an unfound give-up of chunk 2 keeps chunk 1's write, which a later peering keeps |
 | `heavy-giveup-second` | 4 | `ci-giveup-stopped`'s PG and writes with node 1 joining first, so peering lists the chunk on it for W1, then both members lost: a give-up of the stopped PG keeps what node 1 holds, W2 without W1's block, which the next peering finds unfound and a second give-up ends. It reaches the second give-up within 71 s, but the whole space is too large for `ci`, past 2.1 million states at 300 s, and not yet run |
 | `ci-giveup-removed` | 4 | PG 2 and its chunk alone, the first partial write: disk 4 joins in disk 3's place and disk 3 is removed on the recovered report, then both members are lost and the stopped PG given up while disk 3, removed, still holds the write, which properties 18 and 23 do not count |
+| `ci-split` | 3 | Both PGs in one `rep2` pool at `min_live` 2, a partial write to each chunk (P7): the pool split alone with a restart, and split while disk 2, a member of both PGs, is down and then back. Every write in flight is refused by a member that adopted the split, and the halves peer the parent's intervals |
+| `ci-split-report` | 2 | Both PGs in one `rep2` pool at `min_live` 1, PG 1 on nodes 1 and 2 and PG 2 on nodes 2 and 1, PG 1's chunk alone, of 1 block, with one partial write and a spare table for a fold: disk 2 down, so the write may land on disk 1 alone, and back, so PG 2 may activate interval 3, then the split. PG 2's activation reports from before the split name number 1, PG 1's after it, and the leader drops them |
 | `ci-image` | 3 | PG 2 and its chunk alone, two partial writes, a format: a move that removes disk 3, Y on the primary alone while the other member is down, so the primary lists the chunk, then that member's disk formatted, with no table after it to fit 5 minutes. Only the removed disk and the primary's carried image hold X, so property 18 holds only with the image carried; `neg-forget-image` fails it |
 | `deep-image` | 3 | `ci-image` with the table after the format. Too large for `ci`, and not yet run |
 | `ci-image-restart` | 3 | `ci-image`'s move alone, then two faults, a restart of any node and a format, with a chunk counter of 1 to fit 5 minutes. A restart before the peering that drops Y needs replay to leave Y gated (`neg-map-on-replay`); one after it needs the entry's image flag (`neg-ignore-image-flag`), and replay to settle Y away at the decision's entry once the primary decides again (`neg-replay-forgets-drops`, which needs a spare table). With `Spare` 0 and no table after the move, this plan cannot reach that shape, so only `deep-image-restart`, whose plan has tables after it, checks the correct rule there |
@@ -3428,7 +3430,7 @@ run in `heavy-leases`; the variants that need one run on it alone.
 
 | Constant | Value |
 | --- | --- |
-| PGs | 2, sharing nodes, so a table that changes one PG is seen by the other PG's members: PG 1 in a `rep3` pool with `min_live` 2 on nodes 1, 2, 3; PG 2 in a `rep2` pool with `min_live` 2 and `maintenance` on nodes 2, 3; in `deep`, node 4 starts in neither, a spare a change can move a member to |
+| PGs | 2, sharing nodes, so a table that changes one PG is seen by the other PG's members: PG 1 in a `rep3` pool with `min_live` 2 on nodes 1, 2, 3; PG 2 in a `rep2` pool with `min_live` 2 and `maintenance` on nodes 2, 3; in `deep`, node 4 starts in neither, a spare a change can move a member to. The split configurations put both in one `rep2` pool, PG 1 on nodes 1 and 2 and PG 2 on nodes 2 and 3, without `maintenance` |
 | Chunks | Chunk 1 in PG 1 and chunk 2 in PG 2, each of 2 blocks; `ci-leases` and its `deep` runs have chunk 1 alone, of 1 block |
 | Writes | A partial write to each block of chunk 1, or of chunk 2. Chunk 2: a daemon's whole-block write W, its successor's reissue W′ once it died, and the successor's next write W2 once W′ is acknowledged. The lease plans: one whole-block write to chunk 1. Each plan takes one family; the free plan one partial write to chunk 1 |
 | Counter limit | 2, so running out is reachable at small depth; the real limit is 2³² − 1 |
@@ -3442,6 +3444,12 @@ run in `heavy-leases`; the variants that need one run on it alone.
   activated interval; the members and `min_live` of every interval are kept beside them, and a plan
   may change `min_live`, which starts a new interval. Nodes adopt the next table or the newest, so
   they may skip some, and never go back. A node cut off from the control plane adopts none.
+- **Splits.** A split doubles the pool's `pg_count` in one table: every PG starts its interval plus
+  one over the same members, keeping its past intervals, last activated interval and give-ups. PG q's
+  halves are 2q and 2q + 1, so PGs 1 and 2 are numbers 0 and 1 before the split and, after it, the
+  halves that hold their chunks, numbers 1 and 2; the other halves hold no chunk and are left out.
+  Every report names its PG by number in the reporter's table and carries how many times that
+  table's pool split, and the leader drops one from before the pool's last split.
 - **Messages.** Each replicated write is tagged with the sender's table epoch and the PG's interval
   number. A member accepts it only in the PG's current interval, and catches up to a newer table
   before it judges a higher number. A primary takes a client write whose number is at least the one
@@ -3552,6 +3560,8 @@ plans enable.
 - A primary restart.
 - A counter running out.
 - An activation report lost or late.
+- A pool split with a write to each PG in flight, alone, with a restart, and while a member of both
+  PGs is down; and an activation report from before the split, folded after it.
 - Recovery cut short by the next interval.
 - An interval that never activated, including one whose decision some of its members persisted.
 - A member live in the last activated interval that its peering never reached, returning after a
@@ -3592,9 +3602,9 @@ plans enable.
 - A grantor that has peered a new interval moving a PG's primary away, then grants the old primary
   under a fresh support epoch while the old primary still holds the older table.
 
-Not modelled: a PG split with writes in flight, whose children take the parent's interval plus one
-like any new interval, and the recovered reports placement ignores in the table that splits a pool;
-both need a PG created mid-run, left to the phase 3 simulator. Nor is a change of `replicas`, so
+Not modelled: more than one split, a split of a pool whose PGs hold chunks in both halves, whose
+halves inherit the parent's state on every member as the modelled half does, and the reports
+placement ignores in the table that splits a pool, a table the model's folds never share. Nor is a change of `replicas`, so
 neither is the leaving mark that narrows a PG when `replicas` goes down, or a leaving member kept
 because a raised `replicas` needs it; a leaving member that takes a missing member's place is
 modelled, as `Stay`. Of moves, no plan makes a table that
@@ -3617,7 +3627,7 @@ on that log fails.
 the Raft group and lease time need clocks, 13, since their plans make no move, 15 and 16, which
 only `ci-asks` checks, 20, which only `ci-gates` and `ci-gates-left` check, and 21, which only `ci-gates-left` checks; `heavy-peering` adds the unbounded liveness property 12. `ci-asks` checks only the unbounded liveness properties 15
 and 16 and the action property 17, on its small plans. `ci-gates` checks only the liveness properties 12 and 20, on the restart plan with
-a spare table: without one no table starts the interval a restarted member asks for, and 20 holds only through its exception. `ci-gates-left` checks 20 and 21, with 4, 14 and 18, on a leaving member down when its move completes and then restarted. `deep-gates-left` checks 4, 5, 11, 14, 18 and 19 on the same with the disk put back into the PG after its drop.
+a spare table: without one no table starts the interval a restarted member asks for, and 20 holds only through its exception. `ci-split` and `ci-split-report` check what `ci-restarts` does, with 18. `ci-gates-left` checks 20 and 21, with 4, 14 and 18, on a leaving member down when its move completes and then restarted. `deep-gates-left` checks 4, 5, 11, 14, 18 and 19 on the same with the disk put back into the PG after its drop.
 `ci-moves`, `ci-stays`, `ci-stays-stale`, `ci-stays-new`, `ci-stays-gone`, `ci-image`, `ci-image-restart`, `ci-bounce` and the `ci-refills` configurations check the same, property 13, an action property checked at each removal, which a `Stay` is not, and property 18, that no acknowledged write is stranded on a disk that is no member; `ci-sources`, `ci-sources-move`, `ci-sources-lister` and `ci-late-ask` check 18 and 19 among a few. The plans of the peering configurations replace up members, which stands for an operator's edit, so they leave 18 out. The first three
 send only the daemon's one write W, which keeps each within its 5 minutes: the replica's move
 with the successor's writes and a process restart, run alone, passes property 13 at 2.3 million
@@ -3741,6 +3751,7 @@ under fairness, as `heavy-peering` does, on the restart plan alone, and those fo
 | A give-up while a candidate can return (`neg-give-up-candidate`) | 23 | `ci-giveup-stopped`'s first table and one write: both members down and refilled in one table, peering reaches one of them, so W1 is unfound on nodes 1 and 4, and given up while disks 2 and 3, down, can serve it. 1 s at 4 workers |
 | A give-up of an interval that has not activated though its peering can reach every interval it needs (`neg-give-up-not-stopped`) | 23 | 3 nodes and one write: up disk 3 replaced by node 1, and the PG given up while disks 2 and 3 hold W1. 1 s at 4 workers |
 | Peering skips intervals past the give-up (`neg-skip-past-give-up`) | 4 | `ci-giveup-stopped`'s give-up, then W2 acknowledged on node 1 alone with node 4 in `maintenance`; the primary moves to node 4 with node 1 in `maintenance`, and its peering skips node 1's interval and drops W2. 16 s at 4 workers |
+| The leader folds an activation report from a table older than its pool's last split (`neg-report-across-split`, `ci-split-report`'s constants) | 4 | W is acknowledged on disks 1 and 2 in interval 1; disk 2 goes down, and node 1 activates PG 2's interval 2 and reports it as number 1; disk 2 returns and the pool splits; PG 1, number 1 now, takes the report as its interval 2's activation, which never came, and its next peering, starting from interval 2's decision, which no member persisted, drops W though both disks hold it. 12 s at 4 workers |
 
 - The holder's slower and the grantor's faster clock run on `ci-hide-clocks`'s plan and break
   property 1 with the second a holder leaves for a suspend that delivers no `Resumed` kept: the
@@ -4241,6 +4252,8 @@ next milestone's run, which is also the twins' first.
 | Epoch change | `ci-giveup-stopped` | [Epoch change model](#epoch-change-model) | 30 | 559,285 | 81 s |
 | Epoch change | `ci-giveup-two-chunks` | [Epoch change model](#epoch-change-model) | 30 | 612,816 | 109 s |
 | Epoch change | `ci-giveup-removed` | [Epoch change model](#epoch-change-model) | 28 | 1,074,987 | 128 s |
+| Epoch change | `ci-split` | [Epoch change model](#epoch-change-model) | 27 | 600,750 | 115 s |
+| Epoch change | `ci-split-report` | [Epoch change model](#epoch-change-model) | 24 | 320,578 | 49 s |
 | Epoch change | `ci-image` | [Epoch change model](#epoch-change-model) | 35 | 1,503,794 | 166 s |
 | Epoch change | `ci-image-restart` | [Epoch change model](#epoch-change-model) | 31 | 1,038,890 | 128 s |
 | Epoch change | `ci-bounce` | [Epoch change model](#epoch-change-model) | 35 | 1,128,596 | 129 s |
