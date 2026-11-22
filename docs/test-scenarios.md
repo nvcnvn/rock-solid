@@ -3352,7 +3352,8 @@ nodes without finishing.
 | `ci-edits` | 3 | As `ci-peering`, with an operator's edits of PG 1 in one table each: the primary moved and marked down, then back first; and the members reordered twice with no mark, the second keeping the primary the first moved |
 | `ci-tears` | 3 | As `ci-peering`, on PG 1's primary down and back, with `TornLists` on: a decision may also list any member Entry leaves off that has a version above its newest ordered, as a crash that left part of a version does in the code. No spare table, to fit 5 minutes |
 | `deep-tears` | 3 | `ci-tears` with a spare table. Too large for `ci`, and not yet run |
-| `ci-moves` | 3 | As `ci-peering`, with the move plans: PG 2's replica and then its primary moved to node 1; the replica's move with the leaving member marked down before its replacement recovers, or with a process restart; the replica's move with primary 2 put in `maintenance` and back before the removal; and the replica's move with a refill before the removal, a disk formatted again replacing node 1's. Each sends only the daemon's one write W |
+| `ci-moves` | 3 | As `ci-peering`, with the move plans: PG 2's replica and then its primary moved to node 1; the replica's move with the leaving member marked down before its replacement recovers; and the replica's move with primary 2 put in `maintenance` and back before the removal. Each sends only the daemon's one write W |
+| `ci-moves-faults` | 3 | `ci-moves`' other move plans, kept apart so that each fits its 5 minutes: the replica's move with a process restart, and with a refill before the removal, a disk formatted again replacing node 1's |
 | `ci-stays` | 3 | As `ci-moves`, with the move that a leaving member ends by taking the place of the primary, marked down, and no spare table. The other two moves that end so, in the place of the other member of a leaving primary and of the new member, are `ci-stays-as-primary` and `ci-stays-new`; the three are kept apart from `ci-moves` and from each other so that each fits its 5 minutes |
 | `deep-stays` | 3 | `ci-stays` with a spare table. Too large for `ci`, and not yet run |
 | `ci-stays-as-primary` | 3 | `ci-stays`' move that ends with the other member of a leaving primary, with a spare table |
@@ -3630,7 +3631,7 @@ the Raft group and lease time need clocks, 13, since their plans make no move, 1
 only `ci-asks` checks, 20, which only `ci-gates` and `ci-gates-left` check, and 21, which only `ci-gates-left` checks; `heavy-peering` adds the unbounded liveness property 12. `ci-asks` checks only the unbounded liveness properties 15
 and 16 and the action property 17, on its small plans. `ci-gates` checks only the liveness properties 12 and 20, on the restart plan with
 a spare table: without one no table starts the interval a restarted member asks for, and 20 holds only through its exception. `ci-split` and `ci-split-report` check what `ci-restarts` does, with 18. `ci-gates-left` checks 20 and 21, with 4, 14 and 18, on a leaving member down when its move completes and then restarted. `deep-gates-left` checks 4, 5, 11, 14, 18 and 19 on the same with the disk put back into the PG after its drop.
-`ci-moves`, `ci-stays`, `ci-stays-stale`, `ci-stays-new`, `ci-stays-gone`, `ci-image`, `ci-image-restart`, `ci-bounce` and the `ci-refills` configurations check the same, property 13, an action property checked at each removal, which a `Stay` is not, and property 18, that no acknowledged write is stranded on a disk that is no member; `ci-sources`, `ci-sources-move`, `ci-sources-lister` and `ci-late-ask` check 18 and 19 among a few. The plans of the peering configurations replace up members, which stands for an operator's edit, so they leave 18 out. The first three
+`ci-moves`, `ci-moves-faults`, `ci-stays`, `ci-stays-stale`, `ci-stays-new`, `ci-stays-gone`, `ci-image`, `ci-image-restart`, `ci-bounce` and the `ci-refills` configurations check the same, property 13, an action property checked at each removal, which a `Stay` is not, and property 18, that no acknowledged write is stranded on a disk that is no member; `ci-sources`, `ci-sources-move`, `ci-sources-lister` and `ci-late-ask` check 18 and 19 among a few. The plans of the peering configurations replace up members, which stands for an operator's edit, so they leave 18 out. The first three
 send only the daemon's one write W, which keeps each within its 5 minutes: the replica's move
 with the successor's writes and a process restart, run alone, passes property 13 at 2.3 million
 states in 224 s. An operator's [give-up](design.md#epoch-changes-and-failure-detection) is
@@ -4201,7 +4202,8 @@ change model's `ci` runs under the heavy-run lock, which keeps other TLC jobs of
 other 4-worker TLC jobs, but the voter replacement model's two-plans rows, which ran with 1 worker beside one
 4-worker TLC job, where the model's other `ci` configurations took about three times their 4-worker
 time. Constants are in each configuration's first line and in its model's section. The epoch change
-model's `ci` rows are one run on the spec with pool splits. A configuration cut to fit keeps
+model's `ci` rows are one run on the spec with pool splits, but `ci-moves` and `ci-moves-faults`, from a
+run of the two alone. A configuration cut to fit keeps
 its full size in a `deep` twin, as the configuration table says. Its `deep` and `heavy` rows ran on the spec before the acknowledgement became a step of its own
 (`Answer`) and before the keep rule left out members torn above a version; they are stale until the
 next milestone's run, which is also the twins' first.
@@ -4229,7 +4231,8 @@ next milestone's run, which is also the twins' first.
 | Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 84 | 1,414,913 | 133 s |
 | Epoch change | `ci-hide` | [Epoch change model](#epoch-change-model) | 76 | 234,832 | 25 s |
 | Epoch change | `ci-hide-clocks` | [Epoch change model](#epoch-change-model) | 83 | 1,741,366 | 181 s |
-| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 32 | 1,390,883 | 297 s |
+| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 32 | 850,973 | 171 s |
+| Epoch change | `ci-moves-faults` | [Epoch change model](#epoch-change-model) | 32 | 539,910 | 114 s |
 | Epoch change | `ci-stays` | [Epoch change model](#epoch-change-model) | 27 | 116,279 | 37 s |
 | Epoch change | `ci-stays-as-primary` | [Epoch change model](#epoch-change-model) | 27 | 365,012 | 122 s |
 | Epoch change | `ci-stays-new` | [Epoch change model](#epoch-change-model) | 27 | 485,798 | 142 s |

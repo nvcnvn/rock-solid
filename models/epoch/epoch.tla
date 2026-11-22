@@ -2831,6 +2831,10 @@ StayAsPrimary == Plan(<<AddM(2, 2, 1), Mark(3, "down"), StayM(2, 2, 3)>>, Sessio
 StayForNew == Plan(<<AddM(2, 3, 1), Mark(1, "down"), StayM(2, 3, 1)>>, Session, {})
 StayStale == Plan(<<AddM(2, 3, 1), Mark(3, "down"), Mark(3, "up"), Mark(2, "down"), StayM(2, 3, 2)>>, Session, {})
 MovePlans == {MoveReplica, MovePrimary, MoveLeavingDown, MoveRestart, MoveMaint, MoveRefill}
+\* ci-moves-faults splits off the moves with a restart or a format, each config
+\* under the 300 s budget.
+MoveCleanPlans == {MoveReplica, MovePrimary, MoveLeavingDown, MoveMaint}
+MoveFaultPlans == {MoveRestart, MoveRefill}
 \* ci-stays splits the stays off, each config under the 300 s budget.
 StayForPrimaryPlans == {StayForPrimary}
 StayAsPrimaryPlans == {StayAsPrimary}
