@@ -4754,7 +4754,11 @@ or `Replicate` ends, so a vote is checked against the supports the code's voter 
 answer to an ask whenever the spec's follower still supports that leader. A `replicate` line's
 commit at most its log's length checks the data module, not the code: `votersdata` counts both
 from the same entries, capped at the replica's last, so its own output always meets it, and only a
-hand-edited module fails it.
+hand-edited module fails it. One gap is left: a `fortify` line lapses every replica the code's leader
+has no support from, so one that falls between a supporter's vote for another replica and the
+election that vote helps win would hide the vote; no seed or plant places one there, and skipping
+the replicas whose support a term move ended would refuse a legal trace in which the same leader
+leads again.
 
 Results, `COUNT` 50, in one run with `JOBS=4`, 49 s for both models' traces:
 
@@ -4764,7 +4768,7 @@ Results, `COUNT` 50, in one run with `JOBS=4`, 49 s for both models' traces:
 | `voters-replace-0` to `voters-replace-49` | 73 to 9,008 | pass, across crashes, halts, deaths, the outgoing fault's hand-off and the wedge | 0 to 2 |
 
 A voter trace takes 0 to 2 s, so the 51 fit a `JOBS=1` gate in about a minute; that is the default
-count. Over those traces:
+count. The merge gate of the check itself passed them, conform 149 s at the default. Over those traces:
 
 | Action | Line | Took it | Stuttered | Traces |
 | --- | --- | --- | --- | --- |
