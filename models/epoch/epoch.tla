@@ -1252,8 +1252,9 @@ Pre(i) ==
        /\ w.re # 0 => wst[w.re] # 2
 
 \* The primary takes a client write tagged with an interval at least the one
-\* its term began in. Once the hello of incarnation 2 reached it, it refuses
-\* every write of incarnation 1.
+\* its term began in, and a restarted primary one of the interval it restarted
+\* on, which it holds until a later interval's peering. Once the hello of
+\* incarnation 2 reached it, it refuses every write of incarnation 1.
 Send(i) ==
     LET w == Writes[i]
         p == ChunkPG[w.c]
@@ -1265,8 +1266,8 @@ Send(i) ==
        /\ Running(n)
        /\ wst' = [wst EXCEPT ![i] = 1]
        /\ sends' = [sends EXCEPT ![i] = @ + 1]
-       /\ IF /\ pr[n][p].iv # 0
-             /\ Cur(p) >= pr[n][p].since
+       /\ IF /\ \/ pr[n][p].iv # 0 /\ Cur(p) >= pr[n][p].since
+                \/ pr[n][p].iv = 0 /\ rsIv[n][p] = Cur(p)
              /\ w.inc = 0 \/ w.inc >= known[n][p]
           THEN /\ pin' = [pin EXCEPT ![n] = @ \cup {[w |-> i, hold |-> 0]}]
                /\ known' = [known EXCEPT ![n][p] = Max({@, w.inc})]
