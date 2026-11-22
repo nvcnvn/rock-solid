@@ -4436,7 +4436,7 @@ Results, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries`, t
 | `scripted-primary-change` | 35 | passes | 1 |
 | `scripted-lone-copy` | 41 | passes | 1 |
 | `scripted-refill` | 83 | passes: two members merely down refilled as `Add`s, both leaving, a recovered report ending it | 1 |
-| `scripted-stay` | 78 | passes, but takes no `Stay`: its tables are two marks, two `Add`s and a `Remove` | 1 |
+| `scripted-stay` | 84 | passes: the leaving disk, back up, takes the place of a member merely down, one `Stay` | 1 |
 | `scripted-leaving-first` | 51 | passes: on 3 disks, the leaving disk's return marks it up and has it take a member's place in one table, one `Refill` | 1 |
 | `scripted-drop` | 72 | passes: a leaving disk declared lost goes in the table that refills the member down after it, one `Refill` | 2 |
 | `scripted-lost` | 106 | passes: two leaving, one declared lost, `Drop` takes it alone, the other returns and heals the PG | 2 |
@@ -4484,7 +4484,7 @@ scripts/conform.sh` replays it. On a pull request that changes the epoch model, 
 local run with the scripted traces, and the plants over them, and a failure there is a discrepancy to settle
 before the change merges.
 
-`refillSoleHolder` is not in `conformPlants`: the primary-change run is too short for a member merely down to go missing, so a refill of one appears only in `scripted-refill`, and a `Stay` in no trace now, and `TestPlantedPeeringBugsBreakTheOracle` breaks the rule through the simulator's invariant.
+`refillSoleHolder` is not in `conformPlants`: the primary-change run is too short for a member merely down to go missing, so a refill of one appears only in `scripted-refill`, and a `Stay` only in `scripted-stay`, and `TestPlantedPeeringBugsBreakTheOracle` breaks the rule through the simulator's invariant.
 
 Each run ends with what its passing traces covered, and each trace's rows stay in its directory's
 `cover` file. TLC prints the behavior a trace passed by, and `cover` in `scripts/conform.sh` reads it: a
@@ -4502,22 +4502,22 @@ Over the 56 traces of that run, which pass. `RestartAsk` takes 59 `restartask` l
 | `Deliver` | `logged` | 5,106 | 648 | 56 |
 | `Send` | `send` | 4,060 | 0 | 56 |
 | `Order` | `order` | 3,653 | 0 | 56 |
-| `Adopt` | `adopt` | 3,519 | 257 | 55 |
+| `Adopt` | `adopt` | 3,523 | 257 | 55 |
 | `OwnLogged` | `ownlogged` | 3,382 | 0 | 56 |
 | `Answer` | `committed` | 2,708 | 0 | 56 |
-| `Peer` | `peer` | 583 | 0 | 55 |
-| `Activate` | `activate` | 571 | 0 | 55 |
-| `Fold` | `fold` | 569 | 0 | 54 |
+| `Peer` | `peer` | 584 | 0 | 55 |
+| `Activate` | `activate` | 572 | 0 | 55 |
+| `Fold` | `fold` | 570 | 0 | 54 |
 | `OwnFail` | `mayfail` | 271 | 0 | 20 |
-| `Recover` | `recovered` | 253 | 97 | 51 |
+| `Recover` | `recovered` | 252 | 96 | 50 |
 | `Renew` | `renew` | 165 | 0 | 32 |
-| `MarkDisk` | `plan` | 105 | 0 | 39 |
+| `MarkDisk` | `plan` | 106 | 0 | 39 |
 | `GoneRefuses` | `gone` | 102 | 0 | 13 |
 | `Edit` | `plan` | 96 | 0 | 42 |
-| `Add` | `plan` | 80 | 0 | 28 |
-| `ReportRecovered` | `reported` | 75 | 357 | 27 |
+| `Add` | `plan` | 79 | 0 | 28 |
 | `Restart` | `restart` | 75 | 0 | 35 |
-| `Remove` | `plan` | 73 | 0 | 26 |
+| `ReportRecovered` | `reported` | 74 | 356 | 26 |
+| `Remove` | `plan` | 72 | 0 | 25 |
 | `Replace` | `plan` | 61 | 0 | 19 |
 | `RestartAsk` | `restartask` | 59 | 106 | 19 |
 | `Rotate` | `plan` | 44 | 0 | 44 |
@@ -4525,6 +4525,7 @@ Over the 56 traces of that run, which pass. `RestartAsk` takes 59 `restartask` l
 | `Refill` | `plan` | 4 | 0 | 4 |
 | `Drop` | `plan` | 2 | 0 | 2 |
 | `Lost` | `lost` | 2 | 0 | 2 |
+| `Stay` | `plan` | 1 | 0 | 1 |
 | `Deliver` | `maydeliver` | 0 | 217 | 0 |
 | `AskNext` | `ask` | 0 | 13 | 0 |
 | `GoneRefusesRecovery` | `gonerecover` | 0 | 5 | 0 |
@@ -4542,7 +4543,6 @@ changes nothing on its lines (discrepancy 33). The actions of `Next` no trace to
 | `MemberFail` | No traced run injects a disk fault, so the plan gives it no budget |
 | `GoneRefusesRecovery` | Its lines change nothing, as the interval had already ended, so they count as stutters (discrepancy 33) |
 | `AskNext` | Each of its 13 `ask` lines finds the PG's ask already made |
-| `Stay` | Open: `scripted-stay`'s tables map to two marks, two `Add`s and a `Remove`, none to `Stay` |
 | `Refuse` | A fenced client write. No record maps it |
 | `SetMinLive`, `Die`, `Isolate` | No run of the test changes `min_live`, ends a daemon or cuts a node from the control plane |
 | `OpenGrant`, `OpenLapse`, `Ask`, `Grant`, `GrantRefused`, `SendHb`, `RecvGrant`, `RecvHb`, `RoundTrip`, `Beat`, `EndWait` | The lease half, not traced |
