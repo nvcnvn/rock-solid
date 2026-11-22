@@ -4407,15 +4407,15 @@ since no line moves a lease, and so is `NoResurrectedWrite`, since no traced wri
 | `Adopt` | `Adopt` | A repeat of the table the spec's node holds, as after a restart, which empties the code's table and leaves `ep`, is a stutter. An epoch no `Table` named stops `tracedata` |
 | `Send` | `Send` | A send the spec has disabled is a stutter, so ordering it later fails |
 | `Order` | `Order` | Logs on the primary and sends to members in one step; the primary's record is durable at its `Logged` |
-| `Accepted`, `Logged` | `Deliver` | A store's in-flight version may land before an `Adopt` or crash (`maydeliver`), and `Logged` is then a stutter |
+| `Accepted`, `Logged` | `Deliver` | A store's in-flight version may land before an `Adopt` or crash (`maydeliver`), and `Logged` is then a stutter. One its member logs after the `Adopt`, with no crash between, was taken before it, so `tracedata` writes its first `maydeliver` line as `logged`, which delivers it there; only a crash leaves open versions to land in any subset |
 | `Logged` of the primary's own copy | `OwnLogged` | Its record durable, in any version order, as a write covering part of a block waits for its base |
 | `Committed` | `Answer` | Once the own record and every member's are durable and the chunk's earlier pending versions are answered, as the store maps committed versions in version order. A stutter for a version the decision that settled its interval already acknowledged |
 | `PeerReply`, `PeerChunk`, `Decide`, `Kept`, `Listed` | `Peer`, taken as `PeerOn` | `askPeers`, `peerAsked`, `answerPeers`, `mayPeer`, `peerReplied` and `decide`, with each reply compared to the spec's `Reply` at the decision. `tracedata` places the line before the format of a disk that answered first. The line gives the set `J` the code decided on, the disks that persist are those of the trace's `Persisted` lines for the interval, and the members listed beyond `Entry`, `T`, are those the code's `Listed` records name, so the trace adds no branching. `T` must meet `TornSets`' guard, the lists must equal `ListOf`'s under it for every up member, and every reply with `logged` above `whole` on a member `Entry` leaves off must be in it. A `logged` above `whole` must name a version ordered; otherwise the two are equal, the one number the spec's reply has |
 | `Persisted` | `PeerOn` | `persistLists`, `persist`, `persisted`, `persistAck`, `persistAcked`: a stutter for a disk that persisted at the decision, refused once the interval activated unless it repeats that disk's list |
 | `Activate` | `Activate` | `tryActivate`, once every up member's `Persisted` was seen, so `Activate` itself persists no list |
-| `Crash` | `Restart` | Own records not reported durable may be lost (`mayfail`, by `OwnFail`), newest first: a line loses its version only if the line before lost its own. A crash loses a suffix of the disk's log in LSN order, and a primary's store submits its own records in the order it orders them, so what a crash keeps of them is a prefix of that order (`TestACrashKeepsAPrefixOfTheOrderedVersions`), and a crash with n such lines has n + 1 branches, not the product of each chunk's. With two or more rounds in flight a later round can land before an earlier one, and replay ends at the gap: a quarter of the seeds run at `CommitDepth` 2 for it, the test at 3. No traced run injects a disk fault nor fills a disk, so an own record is never refused without a crash, which would leave its line open below a kept one |
+| `Crash` | `Restart` | Own records not reported durable may be lost (`mayfail`, by `OwnFail`), newest first: a line loses its version only if the line before lost its own. A crash loses a suffix of the disk's log in LSN order, and a primary's store submits its own records in the order it orders them, so what a crash keeps of them is a prefix of that order (`TestACrashKeepsAPrefixOfTheOrderedVersions`), and a crash with n such lines has n + 1 branches, not the product of each chunk's. A reply's `logged` above `whole` for a version of its node's last crash names the record that crash kept in part, the oldest it lost, so the `mayfail` line after it kept its version (discrepancy 32). With two or more rounds in flight a later round can land before an earlier one, and replay ends at the gap: a quarter of the seeds run at `CommitDepth` 2 for it, the test at 3. No traced run injects a disk fault nor fills a disk, so an own record is never refused without a crash, which would leave its line open below a kept one |
 | `Format` | `Format` | |
-| `Recovered` | `Recover`, taken as `RecoverFrom` | The line binds the source the record names, which a member has from the recovery write, and 0 for no source must meet a listed version of 0. The version is the listed one or one the interval ordered. `tracedata` places a record from after the primary, the target or the source left the interval before the first of those steps, if the primary ordered the write before it, and leaves any other where the line fails. A primary's record of its own copy of a recovery write is a stutter while a member lists the chunk or once one recovered that version, and so is the record of a gated write settled by a later activation of the PG by the same primary, whose entry stays. Either stutter needs the line's node to have decided the record's interval, its version to be that decision's kept one or one of the interval, and its source an up member of the interval, none only at kept version 0. A primary's record of its own copy that lands after it took its own disk's reply for an interval later than the record's and than every one it decided, and before it decided that interval, is `recoveredlate`, a stutter once the primary left the interval (discrepancy 23). A line for a chunk no disk lists fails |
+| `Recovered` | `Recover`, taken as `RecoverFrom` | The line binds the source the record names, which a member has from the recovery write, and 0 for no source must meet a listed version of 0. The version is the listed one or one the interval ordered. `tracedata` places a record from after the primary, the target or the source left the interval before the first of those steps, if the primary ordered the write before it, and leaves any other where the line fails. A primary's record of its own copy of a recovery write is a stutter while a member lists the chunk or once one recovered that version, and so is the record of a gated write settled by a later activation of the PG by the same primary, whose entry stays. Either stutter needs the line's node to have decided the record's interval, its version to be that decision's kept one or one of the interval, and its source an up member of the interval, none only at kept version 0. A primary's record of its own copy that lands after it took its own disk's reply for an interval later than the record's and than every one it decided that some primary activated, and before that interval activated, is `recoveredlate`, a stutter once the primary left the interval: the decision of that interval, made or to come, reads the reply and lists the chunk again (discrepancies 23 and 36). A line for a chunk no disk lists fails |
 | `RecoverOrder` | A stutter | The primary ordering a recovery write, target or not: it must lead the interval, activated, with some disk listing the chunk, and every `recovered` or `mayrecover` line needs its order earlier. A primary ordering after it left stays at its record and fails. An order naming a source formatted since goes before that `format` when the source's `RecoverRead` record, the member reading the image for the primary, came before it, as `Recover` takes the read with the write; otherwise it stays, and the `recovered` line after it fails on a source with no node |
 | `Recovering` | `Recover` or a stutter | A store taking a recovery write. A crash before its `Recovered` lets it land (`mayrecover`), as replay maps it |
 | `Reported`, `Ask` | `ReportRecovered`, `AskNext`, `CounterOut` or `RestartAsk` | The action's interval is compared to the line's. `tracedata` names an ask `restartask` if its node restarted and has not activated the PG since, which only `RestartAsk` takes |
@@ -4428,7 +4428,7 @@ The record kinds of the event loop, such as `NetRecv` and `DiskDone`, have no sp
 the machine's steps below the protocol's, and the records above say what those steps did. `tracedata`
 lists them in `belowProtocol`, and stops on a record neither mapped nor listed.
 
-Results, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries` and the scripted traces, in a run where seeds 1, 5, 9 and every fourth after kept two rounds in flight (`CommitDepth` 2) and the rest one. The format change that trims every segment (`add7c9f`) shifts the simulator's choices, so every seed took a new path from it on:
+Results, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries`, the scripted traces and the sweep seeds `TestConformSweepSeeds` keeps, in one run with `JOBS=4`. The format change that trims every segment (`add7c9f`) shifts the simulator's choices, so every seed took a new path from it on:
 
 | Trace | Lines | Result | Seconds |
 | --- | --- | --- | --- |
@@ -4436,22 +4436,24 @@ Results, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries` an
 | `scripted-primary-change` | 35 | passes | 1 |
 | `scripted-lone-copy` | 41 | passes | 1 |
 | `scripted-refill` | 83 | passes: two members merely down refilled as `Add`s, both leaving, a recovered report ending it | 1 |
-| `scripted-stay` | 84 | passes: a `Stay` that keeps a member merely down as the leaving one | 1 |
+| `scripted-stay` | 78 | passes, but takes no `Stay`: its tables are two marks, two `Add`s and a `Remove` | 1 |
 | `scripted-leaving-first` | 51 | passes: on 3 disks, the leaving disk's return marks it up and has it take a member's place in one table, one `Refill` | 1 |
-| `scripted-drop` | 72 | passes: a leaving disk declared lost goes in the table that refills the member down after it, one `Refill` | 1 |
-| `scripted-lost` | 100 | passes: two leaving, one declared lost, `Drop` takes it alone, the other returns and heals the PG | 2 |
+| `scripted-drop` | 72 | passes: a leaving disk declared lost goes in the table that refills the member down after it, one `Refill` | 2 |
+| `scripted-lost` | 106 | passes: two leaving, one declared lost, `Drop` takes it alone, the other returns and heals the PG | 2 |
 | `scripted-second-failure` | 97 | passes: `rep3`, the second disk down during the copy, two `Add`s, a recovered report removing both | 2 |
 | `scripted-together` | 65 | passes: `rep3`, two marks in one table, one `Refill`, then two `Add`s | 1 |
 | `scripted-move-restarted` | 46 | passes: a move and a restart, the restarted primary's replay gating Y until its next decision | 1 |
 | `scripted-move-primary` | 39 | passes: a move to a new primary that holds Y, peering keeping Y, which every up member holds, over the removed disk | 2 |
-| `scripted-lister-restarted` | 54 | passes: a restart during recovery, the restarted primary's replay gating Y until its next decision | 2 |
-| `scripted-lister-rotated` | 51 | passes: a rotation during recovery, the new primary holding Y logged and peering keeping it over the member that lists the chunk | 2 |
-| 37 seeds | 559 to 912 | pass, across restarts and formats | 4 to 84 |
-| `primaries-0` | 702 | passes: a demoted primary's gated recovery write landing at its disk's persist of a later primary's decision, discrepancy 30 | 146 |
-| `primaries-21` | 695 | passes: two rounds in flight, a crash leaves a gap in the log, which replay ends at, and 12 `mayfail` lines lose only a prefix of themselves | 17 |
-| `primaries-25` | 628 | passes: two rounds in flight, 21 `mayfail` lines | 91 |
+| `scripted-lister-restarted` | 54 | passes: a restart during recovery, the restarted primary's replay gating Y until its next decision | 1 |
+| `scripted-lister-rotated` | 51 | passes: a rotation during recovery, the new primary holding Y logged and peering keeping it over the member that lists the chunk | 1 |
+| 37 seeds | 582 to 836 | pass, across restarts and formats | 3 to 25 |
+| `primaries-0` | 686 | passes: a demoted primary's gated recovery write landing at its disk's persist of a later primary's decision, discrepancy 30 | 8 |
+| `primaries-18` | 648 | passes: 43 `mayfail` lines | 76 |
+| `primaries-33` | 637 | passes: 49 `mayfail` lines | 171 |
+| `primaries-333` | 697 | passes: a member with 8 versions open at two tables, discrepancy 4 | 30 |
+| `primaries-387423` | 735 | passes: the primary's own recovery copy landing after it decided the next interval, discrepancy 36 | 6 |
 
-The depth-2 seeds are 4, 7, 12, 15 and every eighth after each, off every planted bug's seed; seed 7 leaves a gap. All 40 seeds and the 14 scripted traces pass TLC. The holds on a write's clean copies reschedule seeds 0, 7, 18 and 24, which pass once discrepancies 33 to 35 are settled; seed 18 now takes 381 s, close to the 400 s budget, and gives no verdict when four checks share the machine. None broke a safety invariant,
+The depth-2 seeds are 4, 7, 12, 15 and every eighth after each, off every planted bug's seed; seed 7 leaves a gap. All 40 seeds, the 14 scripted traces and the 2 sweep seeds pass TLC. The holds on a write's clean copies reschedule seeds 0, 7, 18 and 24, which pass once discrepancies 33 to 35 are settled. A member's open versions landing at their first `maydeliver` line once it logs them (discrepancy 4) took seed 18 from 381 s to 76 s and seed 0 from 146 s to 8 s. None broke a safety invariant,
 and each that passes ran the four invariants checked at its end. A trace's time follows how many `maydeliver`
 and `mayfail` branches stay alive, not its length.
 
@@ -4482,7 +4484,7 @@ scripts/conform.sh` replays it. On a pull request that changes the epoch model, 
 local run with the scripted traces, and the plants over them, and a failure there is a discrepancy to settle
 before the change merges.
 
-`refillSoleHolder` is not in `conformPlants`: the primary-change run is too short for a member merely down to go missing, so a refill or a `Stay` of one appears only in `scripted-refill` and `scripted-stay`, and `TestPlantedPeeringBugsBreakTheOracle` breaks the rule through the simulator's invariant.
+`refillSoleHolder` is not in `conformPlants`: the primary-change run is too short for a member merely down to go missing, so a refill of one appears only in `scripted-refill`, and a `Stay` in no trace now, and `TestPlantedPeeringBugsBreakTheOracle` breaks the rule through the simulator's invariant.
 
 Each run ends with what its passing traces covered, and each trace's rows stay in its directory's
 `cover` file. TLC prints the behavior a trace passed by, and `cover` in `scripts/conform.sh` reads it: a
@@ -4493,53 +4495,54 @@ a stutter open to it: it shows only what that behavior did. TLC's own `-coverage
 over every branch of the search, abandoned ones and `ENABLED` too, so on seed 55 `Remove`'s first guard
 shows 8 against the 2 removals the trace took.
 
-Over the 39 passing seeds of 0 to 39 and the 14 scripted traces, which alone take `Refill`, `Lost`, `Drop`, `Stay` and `RestartAsk` as a real step on these seeds, `RestartAsk` in `scripted-move-restarted`; on its 49 other lines the spec already holds the ask:
+Over the 56 traces of that run, which pass. `RestartAsk` takes 59 `restartask` lines and finds the ask already made on 106, and `maydeliver` lines are left only at a crash or at a second table, and none landed in the behaviors TLC found:
 
 | Action | Line | Took it | Stuttered | Traces |
 | --- | --- | --- | --- | --- |
-| `Deliver` | `logged` | 4,243 | 354 | 53 |
-| `Send` | `send` | 3,772 | 0 | 53 |
-| `Order` | `order` | 3,234 | 0 | 53 |
-| `Adopt` | `adopt` | 3,071 | 237 | 52 |
-| `OwnLogged` | `ownlogged` | 2,931 | 0 | 53 |
-| `Answer` | `committed` | 2,393 | 1 | 53 |
-| `Peer` | `peer` | 494 | 0 | 52 |
-| `Activate` | `activate` | 488 | 0 | 52 |
-| `Fold` | `fold` | 486 | 0 | 51 |
-| `Deliver` | `maydeliver` | 355 | 350 | 35 |
-| `OwnFail` | `mayfail` | 188 | 10 | 17 |
-| `Recover` | `recovered` | 186 | 77 | 44 |
-| `GoneRefuses` | `gone` | 131 | 0 | 11 |
-| `MarkDisk` | `plan` | 109 | 0 | 39 |
-| `Edit` | `plan` | 88 | 0 | 39 |
-| `Restart` | `restart` | 77 | 0 | 34 |
-| `Add` | `plan` | 67 | 0 | 27 |
-| `ReportRecovered` | `reported` | 63 | 276 | 26 |
-| `Remove` | `plan` | 61 | 0 | 25 |
-| `Replace` | `plan` | 49 | 0 | 16 |
-| `Renew` | `renew` | 49 | 0 | 19 |
-| `Rotate` | `plan` | 41 | 0 | 41 |
-| `Format` | `format` | 16 | 0 | 16 |
-| `AskNext` | `ask` | 11 | 0 | 11 |
+| `Deliver` | `logged` | 5,106 | 648 | 56 |
+| `Send` | `send` | 4,060 | 0 | 56 |
+| `Order` | `order` | 3,653 | 0 | 56 |
+| `Adopt` | `adopt` | 3,519 | 257 | 55 |
+| `OwnLogged` | `ownlogged` | 3,382 | 0 | 56 |
+| `Answer` | `committed` | 2,708 | 0 | 56 |
+| `Peer` | `peer` | 583 | 0 | 55 |
+| `Activate` | `activate` | 571 | 0 | 55 |
+| `Fold` | `fold` | 569 | 0 | 54 |
+| `OwnFail` | `mayfail` | 271 | 0 | 20 |
+| `Recover` | `recovered` | 253 | 97 | 51 |
+| `Renew` | `renew` | 165 | 0 | 32 |
+| `MarkDisk` | `plan` | 105 | 0 | 39 |
+| `GoneRefuses` | `gone` | 102 | 0 | 13 |
+| `Edit` | `plan` | 96 | 0 | 42 |
+| `Add` | `plan` | 80 | 0 | 28 |
+| `ReportRecovered` | `reported` | 75 | 357 | 27 |
+| `Restart` | `restart` | 75 | 0 | 35 |
+| `Remove` | `plan` | 73 | 0 | 26 |
+| `Replace` | `plan` | 61 | 0 | 19 |
+| `RestartAsk` | `restartask` | 59 | 106 | 19 |
+| `Rotate` | `plan` | 44 | 0 | 44 |
+| `Format` | `format` | 20 | 0 | 19 |
 | `Refill` | `plan` | 4 | 0 | 4 |
+| `Drop` | `plan` | 2 | 0 | 2 |
 | `Lost` | `lost` | 2 | 0 | 2 |
-| `Stay` | `plan` | 1 | 0 | 1 |
-| `RestartAsk` | `restartask` | 1 | 49 | 1 |
-| `Drop` | `plan` | 1 | 0 | 1 |
-| `Recover` | `mayrecover` | 0 | 2 | 0 |
+| `Deliver` | `maydeliver` | 0 | 217 | 0 |
+| `AskNext` | `ask` | 0 | 13 | 0 |
 | `GoneRefusesRecovery` | `gonerecover` | 0 | 5 | 0 |
+| `Recover` | `recoveredlate` | 0 | 3 | 0 |
+| `Recover` | `mayrecover` | 0 | 1 | 0 |
 
 `table`, `persisted` and `recoverorder` lines check a state and take no action, as their
-mapping says. The `gonerecover` row is from the run at the holds on a write's clean copies, seeds 15, 18 and
-24: each refusal lands after the interval already ended, so `GoneRefusesRecovery` changes nothing on the two
-lines it takes and the other three are stutters (discrepancy 33). The actions of `Next` no trace took:
+mapping says. Each `gonerecover` refusal lands after the interval already ended, so `GoneRefusesRecovery`
+changes nothing on its lines (discrepancy 33). The actions of `Next` no trace took:
 
 | Action | Why |
 | --- | --- |
 | `Persist` | Compressed: a `peer` line takes it in `PeerOn`, and a `persisted` line only checks it |
 | `CounterOut` | An `ask` line can take it, but it needs a chunk at 1,000,000 versions, which no run writes |
 | `MemberFail` | No traced run injects a disk fault, so the plan gives it no budget |
-| `GoneRefusesRecovery` | Its two lines change nothing, as the interval had already ended, so they count as stutters (discrepancy 33) |
+| `GoneRefusesRecovery` | Its lines change nothing, as the interval had already ended, so they count as stutters (discrepancy 33) |
+| `AskNext` | Each of its 13 `ask` lines finds the PG's ask already made |
+| `Stay` | Open: `scripted-stay`'s tables map to two marks, two `Add`s and a `Remove`, none to `Stay` |
 | `Refuse` | A fenced client write. No record maps it |
 | `SetMinLive`, `Die`, `Isolate` | No run of the test changes `min_live`, ends a daemon or cuts a node from the control plane |
 | `OpenGrant`, `OpenLapse`, `Ask`, `Grant`, `GrantRefused`, `SendHb`, `RecvGrant`, `RecvHb`, `RoundTrip`, `Beat`, `EndWait` | The lease half, not traced |
@@ -4551,7 +4554,7 @@ lines it takes and the other three are stutters (discrepancy 33). The actions of
 | 1 | The spec's `Init` starts interval 1 activated; the code peers in it | compression | The trace starts after bootstrap |
 | 2 | One table can reorder a PG's members and carry a mark, one interval, which `Rotate` and `MarkDisk` make two, and no sequence of them gives every order of three members | spec | Settled: `Edit` is in `epoch.tla`, a reorder with at most one mark, what all 73 edits of seeds 0 to 39 need. `ci-edits` reaches it, and `neg-edit-keeps-interval` shows two primaries order in one interval if the table keeps it, as the Go plant `editKeepsInterval` does at seed 0, by "no two members hold different data under one version" |
 | 3 | `Activate`'s record came after the held writes it released were ordered | logging | The record moved to where the lead goes active |
-| 4 | A member takes a version into its store, then adopts a table, then logs it, while `Deliver` needs the interval | compression | `Accepted` opens the version, `maydeliver` lets it land before `Adopt` |
+| 4 | A member takes a version into its store, then adopts a table, then logs it, while `Deliver` needs the interval | compression | `Accepted` opens the version, and its first `maydeliver` line, before the `Adopt`, delivers it once its member logs it after, with no crash between, as `tracedata` then writes that line `logged`. Landing at each such line in any subset gave seed 333, a member with 8 versions open at two tables, 256 ways at each of its crash's 26 branches and no verdict at 400 s |
 | 5 | The code answers a write once the primary's own record is durable and every member logged it, and a crash loses an own record not yet durable | spec, compression | Settled. Spec: `Order` acknowledges nothing; `OwnLogged`, the primary's own `Logged`, makes its record durable in any order, and `Answer`, the code's `Committed`, acknowledges once it and every member's `Deliver` came and the chunk's earlier pending versions are answered, as `tryCommit` waits for `v.logged` and the store maps committed versions in version order. Before, the spec acknowledged at the last member's `Deliver`, so a crash could not take a version the code had never answered. Compression: `mayfail` before `Restart`, by `OwnFail`, which takes only a version whose own record is not durable. Nightly seeds 385629, 385680, 385721, 385747, 385753, 385791, 385852, 385911, 385917 and 385931, which stopped at a `peer` with the primary's `whole` below the spec's, pass, as do 385547, 385560 and 385864, whose own records become durable out of version order |
 | 6 | A primary that dropped its own gated version is listed for the chunk, yet its image is the kept version, so it merges at once and may be a recovery source | spec | Settled: each decision records in `gone` the gated versions it drops and in `img` the chunks whose image is the kept version once the primary settles. `Order` waits for `img` or an empty entry and merges on the log less `gone`, `Recover` takes such a primary as a source, and `MergesOnKept` now also says the version merged on is the kept one or one of the interval. `neg-merge-on-dropped` counts a mapped version as dropped, and fails it, and the Go plant `mergeOnDropped` breaks the merged bytes at seed 94. `mergeWhileLacking` is still caught at seed 6, line 84, by `Order` |
 | 7 | A node whose disk was formatted again refuses what the primary sends the old disk, as no member of the interval, while `MemberFail` needs the disk | spec | Settled, the 13 seeds with such a refusal: the record says `gone` when the disk is no up member, and `GoneRefuses` takes it, with the effect of `MemberFail` at the primary and no fault budget. `MemberFail` keeps none in a trace, which is what catches `sendEpoch`, whose refusal is not `gone` |
@@ -4560,7 +4563,7 @@ lines it takes and the other three are stutters (discrepancy 33). The actions of
 | 10 | A member persists a list twice, when its first acknowledgment was slower than `RetryAfter`, the second after the interval activated, which the `Persisted` stutter refuses | compression | Settled: 8 seeds at the last count. `tracedata` marks a repeat of a disk's list for an interval `again`, which the stutter lets past activation. A first persist after `Activate` still fails, which is what catches `activateEarly` |
 | 11 | A `Recovered` record `Recover` cannot take at its place | spec, compression | Settled. Seed 22, spec: a chunk no member keeps anything of, kept version 0, needs no source in `startRecovery`, and every up member listed it, so `Recover` needs none when the kept version is 0. Seeds 3 and 38, compression: a recovery write left a primary that then moved on, by adopting interval 3 at seed 3 and by a crash at seed 38, and landed later, where `Recover` needs a primary leading it. `tracedata` places the line before the first leaving step, across lines that keep what `Recover` reads. A record of an older interval's gated write settled by a later activation changes no list, as `Index.recovered` compares the intervals, so the record carries its interval and the line is a stutter |
 | 12 | A crash leaves part of a version's records, so a member reports a version logged above its newest whole one. `keep` lists that member for the kept version, where `Entry`, with one number, leaves it off | spec | Settled: `PeerOn` takes a set `U` of (disk, chunk) pairs that logged above their newest whole version and list nothing, which the keep rule counts as no source (discrepancy 24), and lists at the kept version, as `T`, those of `U` that `Entry` leaves off, which are no recovery source, and `Activate` keeps them; a primary in `T` keeps its `img` (discrepancy 22). `Peer` draws `U` only under `TornLists`, on in `ci-tears` alone, which passes every safety property at 1.0 million states against 132 thousand with it off. The trace takes `U` from the replies, so seeds 1, 5 and 24 pass. This shows extra listing is safe, not that listing is required: the logs hold whole versions, so nothing in the spec is wrong with a torn member left off, and no negative configuration exists. That listing is required rests on Go: `unlistTorn` breaks "a member listing nothing maps the kept writes applied in version order" at seed 148, where replay's durable records of the torn version stay mapped, and `TestTheKeepRule` and `TestAVersionHeldInPartIsNotWhole` state the rule and the store's half |
-| 13 | `Send` to a primary whose `pr` is empty after a restart loses the write in the spec, and the code holds it | spec, open, low priority | `neverAsk` shows it; no unplanted seed of 0 to 39 or of the sweep stops there. Losing the write is a liveness gap, not a safety one: a write the spec drops is one no client hears OK for. Settling it in `Send` changes `epoch.tla`, which costs a full `ci` run of the model, so it waits for the next change the model needs |
+| 13 | `Send` to a primary whose `pr` is empty after a restart loses the write in the spec, and the code holds it | spec | Settled: `Send` also takes a write into `pin` at a restarted primary of the interval it restarted on (`rsIv`), and the next `Adopt` tags it with that interval, as the code's held message carries it, so a later interval's peering orders it or `Fenced` refuses it; the model's `ci` run checks the change before it merges. Over seeds 0 to 39, `neverAsk`'s 19 fired traces pass, 7 of which stopped at `order` before, and `peerInOldInterval`'s seed 23 passes where it stopped at `order`; its other 14 rejections stay at `peer`, the rule |
 | 14 | A member's refusal is recorded when the member refuses, and `Order` of a later version can come before the primary hears, where `MemberFail` and `GoneRefuses` end the interval in one step | compression | Settled, all 10 seeds of 0 to 339 it stopped: the primary's `Fail` record says when it heard, and `tracedata` holds the member's line until it, or until that member adopts a table or crashes or the primary crashes, since past those the spec's refusal has no step |
 | 15 | A restarted primary asks a new interval on the first table it takes, even one newer than the table it restarted on, where the spec's `Restart` asks once and `rsIv` lets it peer without asking again | spec | Settled, seed 205: `RestartAsk` is that ask, an extra interval no rule needs, taken only by plans with `lateask`: every trace, and `ci-late-ask`, where TLC checks the safety properties around it |
 | 16 | The harness's final ask maps to an `Edit`, and `Edit` needs `x.lv = 0`, so it has no step on a PG with a leaving member | logging | Settled, seed 154, a form of discrepancy 8: `classify` maps any table it names no other change for to a `Refill`, which takes one that keeps members, marks and leaving members as they were, so the final ask on a PG with a leaving member is one. Seed 154 takes another path now and passes; no trace of 0 to 39 or of the sweep ends on such a table |
@@ -4579,20 +4582,20 @@ lines it takes and the other three are stutters (discrepancy 33). The actions of
 | 29 | The primary's own `Recovered` record of a recovery write of interval 4, gated by demotion and landed at its activation of interval 16, is `recoveredlate`, where `RecoveredLate` needs its disk still listed and interval 16's decision listed only disk 5 | compression | Settled, seed 15: `repliedLater` counted the primary's own replies for intervals 5 and 6, which no decision took, after it decided 16. It now counts only a reply for an interval past every one the primary decided, so the line is `recovered`, a stutter by `RecoveryOver`. The write relays, so the primary's store logged nothing for it |
 | 30 | A primary's own copy of a recovery write of interval 6, gated when it adopted interval 7 under another primary, lands at its disk's persist of interval 7's decision, after the disk answered that peering still listing the chunk. `recoveredAt` placed its `recovered` line where the primary left interval 6, before the reply, so the spec's `Recover` cleared the list the reply shows | compression | Settled, seed 0, a form of discrepancy 23: `repliedLater` also counts a reply of the primary's disk to a later primary's peering when it lists the chunk, so the line is `recoveredlate` at its place, a stutter. Interval 7's decision lists the chunk again, and its recovery writes the version once more. A relayed write, whose primary's disk lists nothing, keeps its place: seed 16 has two |
 | 31 | A crash cuts a format short, so the node formats its disk again at its next start, four times at seed 239, where the trace's configuration gave `MaxFormat` 1 | spec, a bound of the trace's configuration | Settled, seed 239: `tracedata` writes the trace's number of formats as `TMaxFormat`, which sets `MaxFormat` and so the spec's set of disks. The protocol is unchanged |
-| 32 | A crash that loses an own record and keeps a later one, against `LostAbove`, passes when the later version is logged but not whole on the disk: the reply's line checks `logged` only against the versions ever ordered, not the disk's `dlog`, and `whole` is the one number the spec's `Reply` carries, so the spec reads the kept record as lost too | compression, open | Not a code fault: the code keeps a prefix, which `TestACrashKeepsAPrefixOfTheOrderedVersions` shows and fails without. The check misses it: with the store's submit order swapped, seeds 0 and 15 of the test keep a later record logged but not whole above a lost one, and both traces pass. The check catches a middle loss only when the later record is kept whole. Settling it means checking a reply's `logged` against the disk's log in the trace spec |
+| 32 | A crash that loses an own record and keeps a later one, against `LostAbove`, passes when the later version is logged but not whole on the disk: the reply's line checks `logged` only against the versions ever ordered, not the disk's `dlog`, and `whole` is the one number the spec's `Reply` carries, so the spec reads the kept record as lost too | compression | Settled: not a code fault, as the code keeps a prefix, which `TestACrashKeepsAPrefixOfTheOrderedVersions` shows and fails without. A record a crash kept in part is the oldest it lost, so `KeptBelowTorn` has a reply's `logged` above `whole`, for a version a `mayfail` line of the node's last crash names, need the `mayfail` line after it to have kept its version, which the trace spec's `stayed` remembers. Swapping seed 5's two oldest `mayfail` lines, so that chunk 2's 1.2, kept in part, lies above chunk 1's 1.3, lost, stops at the `peer` line, line 84, and passes without the check; seeds 1 and 5, whose torn record is the oldest line of its crash, pass |
 | 33 | A node whose disk was formatted again refuses a recovery write for the old disk, and the primary ends the interval and refuses the chunk's later versions, as for a failed version, where the spec had no refusal of a recovery write | spec | `GoneRefusesRecovery` is that refusal, as [Recovery](design.md#epoch-changes-and-failure-detection) states a failed recovery write ends its interval. The `MemberFail` record says `recover` for a recovery write, and `tracedata` names the line `gonerecover`. Seeds 15, 18 and 24 have five such lines, and none shows the step's effect. On three (chunk 2 at seed 15, chunk 1 at seeds 18 and 24) the node's refusal of an earlier version of the chunk had already failed the recovery write, and the primary had left the interval: `fail` finds the write done and does nothing. The mapping takes such a line as a stutter only while no version of the chunk above the recovery write's is pending, since `fail` on a write not yet done refuses those whatever interval the primary is in. On the other two (chunk 2 at seeds 18 and 24) the chunk had no earlier version in the interval, and the primary's `fail` ran on the recovery write itself: the line takes `GoneRefusesRecovery`, which changes nothing, as chunk 1's refusal had already ended the interval and nothing above the write was pending. So the step's guard is checked on two lines and its refusal of pending versions on none. A member's refusal of a recovery write with its disk still up has no step yet, as no traced run has one |
 | 34 | The primary's own record of a recovery write on a disk that lists nothing landed after it took its own reply for a later interval, and `tracedata` named it `recoveredlate`, whose stutter needs the disk listed | compression | Settled, seed 7: `repliedLater` counts the primary's own reply only when it lists the chunk, as discrepancy 23 states, and the line is `recovered`, the stutter of a primary's own copy on a disk that lists nothing |
 | 35 | A disk that led interval 6 and lists chunk 1 for kept 4.6 holds 4.7 above it mapped, with its own recovery copy of 4.6 gated and not yet mapped, and answers the next primary's peering with 4.6 as its newest whole version where the spec's `Reply` has 4.7 | code | Settled, seed 0: the store's `peerGated` set the reply's whole version to each gated write's in turn, which a recovery copy of an older version lowered; it now only raises it, so until the copy maps the disk reports what its map holds, as `Reply` does. `TestAPrimarysGatedRecoveryCopyLowersNoWholeVersion` holds it. The decision was the same either way: the disk lists the chunk, and 4.7 is not kept |
-| 36 | The primary's own record of a recovery write of interval 4, of chunk 2 on its disk, which interval 4's decision listed at kept 1.4, lands after that disk answered interval 5's peering still listing the chunk, after the primary decided interval 5, which lists the disk again, and after the disk persisted that decision, before it activated. `repliedLater` counts the primary's own reply only for an interval after every one it decided, so the line is `recovered`, placed where the primary left interval 4, before the reply, and the spec's `Recover` clears the list the reply shows | compression, open | Nightly seed 387423 at line 308. A form of discrepancies 23 and 30 with one primary leading both intervals: the code does what 30 settled, the copy landing at the disk's persist of the next decision, which lists the chunk again. Settling it means `repliedLater` also counting the primary's own reply that its decision of that interval read, until the interval activates |
+| 36 | The primary's own record of a recovery write of interval 4, of chunk 2 on its disk, which interval 4's decision listed at kept 1.4, lands after that disk answered interval 5's peering still listing the chunk, after the primary decided interval 5, which lists the disk again, and after the disk persisted that decision, before it activated. `repliedLater` counted the primary's own reply only for an interval after every one it decided, so the line was `recovered`, placed where the primary left interval 4, before the reply, and the spec's `Recover` cleared the list the reply shows | compression | Settled, nightly seed 387423 at line 308, a form of discrepancies 23 and 30 with one primary leading both intervals: the code does what 30 settled, the copy landing at the disk's persist of the next decision, which lists the chunk again. `repliedLater` passes over only the intervals the primary decided that some primary activated, so the line is `recoveredlate` at its place, a stutter, and interval 5's recovery writes the version once more. `TestConformSweepSeeds` keeps the seed, which passes |
 
 Seeds 40 to 339: 272 passed at 150 s each at aa05106 and abb8966, and 110 and 205 once discrepancies 17 and 15
 were settled. The other 26, which gave no verdict or stopped at a line, were run again at 400 s each at this commit, where
-each takes a new path: 25 pass, and none names a safety invariant.
+each takes a new path: all 26 pass, and none names a safety invariant.
 
 | Outcome | Seeds | Read |
 | --- | --- | --- |
 | Pass | 51, 80, 87, 117, 118, 123, 127, 133, 148, 154, 159, 175, 176, 191, 195, 199, 221, 239, 256, 265, 267, 291, 313, 316, 327 | 4 to 393 s. 239 passes once the trace gives `MaxFormat` its number of formats, discrepancy 31 |
-| No verdict at 400 s | 333 | Its one crash's 25 `mayfail` lines are one chain, but the member that takes the next table holds 8 versions in flight, whose `maydeliver` lines land in any subset: 256 ways at each of the chain's 26 |
+| Pass in 30 s, where it gave no verdict at 400 s | 333 | Its one crash's 25 `mayfail` lines are one chain, and the member that takes the next table holds 8 versions in flight, whose `maydeliver` lines landed in any subset, 256 ways at each of the chain's 26, until its `Logged` records some 40 lines on. Each now lands at its first `maydeliver` line (discrepancy 4). `TestConformSweepSeeds` keeps it |
 
 The ten nightly traces that gave no verdict at 400 s, run again at 1,200 s each, one at a time on the M4 Pro:
 
@@ -4619,7 +4622,7 @@ broken invariant, keeping the trace up to there and saying which broke in a `.st
 10-minute test limit, so it runs a seed at a time. A rejection counts once the failing line has been
 read to be the planted behaviour.
 
-Results over the 39 seeds that passed, all but 2, in one run at one commit, and for `memberNoAsk` over the 37 that passed later. The rows of `mergeWhileLacking`, `mergeOnDropped`, `noDegradedHold`, `listerOrders`, `peerInOldInterval`, `coverAtRead`, `fenceOnArrival` and `writeOnUnfound` are from a run at the holds on a write's clean copies, over all 40 seeds, whose baselines pass there; seed 18's were checked alone at 1,200 s. Fired counts the seeds whose trace differs from the baseline's;
+Results over the 39 seeds that passed, all but 2, in one run at one commit, and for `memberNoAsk` over the 37 that passed later. The rows of `mergeWhileLacking`, `mergeOnDropped`, `noDegradedHold`, `listerOrders`, `coverAtRead`, `fenceOnArrival` and `writeOnUnfound` are from a run at the holds on a write's clean copies, over all 40 seeds, whose baselines pass there; seed 18's were checked alone at 1,200 s. Those of `neverAsk` and `peerInOldInterval` are from a run over all 40 seeds once discrepancy 13 was settled. Fired counts the seeds whose trace differs from the baseline's;
 passed, a trace TLC took to its end. A plant's rejected line is listed by kind, with the seeds where it held
 every invariant as clean. This run stops at the first broken invariant, so `sameMembers` and `keepID` pass: run on,
 over the 30 seeds that passed before discrepancy 12, they were rejected at 21 of 21 and 11 of 11.
@@ -4632,7 +4635,7 @@ over the 30 seeds that passed before discrepancy 12, they were rejected at 21 of
 | `mergeOnDropped` | `neg-merge-on-dropped` | 4 | 4 | 0 | 4, 2 | `recovered` at seeds 0, 11, 23 and 39, the primary's recovery from its own image, which the plant counts as the kept version | `Peer`'s `img`: `Newest(Held \ gone) = K` |
 | `editKeepsInterval` | `neg-edit-keeps-interval` | 39 | 39 | 0 | 39, 29 | `table`, the line that reorders and keeps the interval | No step changes members and keeps the interval |
 | `relistNever`, `clearListed` | `neg-peering-clears-missing` | 10 | 10 | 0 | 10, 8 | `peer`, the decision's list | `Peer`: the code's lists are `ListOf`'s, and a reply lists nothing the spec keeps listed |
-| `peerInOldInterval` | `neg-restart-same-interval` | 18 | 15 | 3 | 15, 15 | `peer` 14. Not the rule: `order` 1, at seed 23, as discrepancy 13. Seeds 15, 19 and 31 pass | `peer`: `pr[n][p].iv = iv` |
+| `peerInOldInterval` | `neg-restart-same-interval` | 18 | 14 | 4 | 14, 14 | `peer` 14. Seeds 15, 19, 23 and 31 pass, 23 since discrepancy 13 | `peer`: `pr[n][p].iv = iv` |
 | `ownInterval` | `neg-decide-by-own-interval` | 5 | 5 | 0 | 5, 0 | `peer` | `KeptMatches` |
 | `reportDecided` | `neg-report-before-activate` | 39 | 39 | 0 | 39, 0 | `fold` | `Fold`: no report yet |
 | `removeOnActivation` | `neg-remove-before-recovered` | 13 | 13 | 0 | 13, 0 | `plan` | `Remove`: no `recd` for the interval |
@@ -4640,7 +4643,7 @@ over the 30 seeds that passed before discrepancy 12, they were rejected at 21 of
 | `sameMembers` | `neg-compare-member-lists` | 27 | 0 | 27 | 0, 0 | Cut at the break; see above | `Accepts`: the interval differs |
 | `keepID` | `neg-keep-disk-id` | 16 | 0 | 16 | 0, 0 | Cut at the break; see above | The spec's `Format` gave the disk a new ID |
 | `sendEpoch` | `neg-compare-table-epochs` | 39 | 39 | 0 | 39, 0 | `mfail` | `mfail`: a refusal with no fault budget, and not `gone` |
-| `neverAsk` | `neg-restart-no-ask` | 19 | 7 | 11 | 0, 0 | Not the rule: `order` 7, as discrepancy 13. One gives no verdict | An `ask` that never comes is no line |
+| `neverAsk` | `neg-restart-no-ask` | 19 | 0 | 19 | 0, 0 | Passes: the 7 that stopped at `order`, discrepancy 13, pass since `Send` holds a write at a restarted primary | An `ask` that never comes is no line |
 | `memberNoAsk` | `neg-member-no-ask` | 27 | 0 | 27 | 0, 0 | Passes | An `ask` that never comes is no line |
 | `coverAtRead` | `neg-recovery-covers-at-read` | 6 | 0 | 6 | 0, 0 | Too loose: `Recover`'s cover is unobserved. The oracle's "no two members hold different data under one version" breaks at seeds 7, 15, 24 and 35 | |
 | `resendNewestFirst` | `neg-log-out-of-order` | 10 | 0 | 10 | 0, 0 | No member logs out of order, so the rule is not reached | |
