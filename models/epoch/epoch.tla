@@ -547,9 +547,9 @@ Renew(p) ==
 \* starts no interval.
 Fold(p, k) ==
     /\ "fold" \in Moves
-    /\ \E r \in reports : For(r, p) /\ r.k = k
-    /\ k > tbl[Len(tbl)][p].la
     /\ k <= Cur(p)
+    /\ k > tbl[Len(tbl)][p].la
+    /\ \E r \in reports : For(r, p) /\ r.k = k
     /\ Commit([tbl[Len(tbl)] EXCEPT ![p].la = Max({k, tbl[Len(tbl)][p].la})])
     /\ UNCHANGED <<ivs, reqIv, reports, recd>>
 
