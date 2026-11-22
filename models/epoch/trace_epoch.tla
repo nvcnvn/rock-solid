@@ -124,9 +124,9 @@ RecoveryOrdered(l) ==
         /\ Trace[i].c = l.c /\ Trace[i].iv = l.iv /\ Trace[i].s = l.s
 
 \* A primary's record of its own copy of a recovery write that landed after it
-\* took its own reply for a later interval and before it decided that interval:
-\* the decision reads the reply and lists the chunk again, so the line is a
-\* stutter once the primary left the interval.
+\* took its own reply for a later interval and before that interval activated:
+\* the decision, made or to come, reads the reply and lists the chunk again, so
+\* the line is a stutter once the primary left the interval.
 RecoveredLate(l) ==
     /\ RecoveryOrdered(l)
     /\ OwnRecovery(l)
