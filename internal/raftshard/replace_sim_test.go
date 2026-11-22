@@ -12,6 +12,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/sim"
 	"github.com/nvcnvn/rock-solid/internal/sim/clock"
 	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
+	"github.com/nvcnvn/rock-solid/internal/trace"
 )
 
 const (
@@ -133,9 +134,14 @@ func (c *simCluster) replace() {
 			}
 		}
 		p.plan = append(p.plan, Peer{ID: simNodes + 1, Node: core.NodeID{Node: simNodes}})
+		recorded := !c.conform
 		for _, r := range c.reps {
 			if r != nil && r.s != nil {
 				r.s.SetPlan(p.plan)
+				if !recorded && c.s.Node(uint32(r.id)).Up() {
+					r.output(trace.OutRaftPlan, [trace.MaxFields]uint64{bits(planned(p.plan))})
+					recorded = true
+				}
 			}
 		}
 		p.last = now

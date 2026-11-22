@@ -4,6 +4,10 @@
 *.test
 *.pprof
 
+# Conformance tools built from the repo root
+/votersdata
+/tracedata
+
 # Build output of the Rust spikes
 target/
 

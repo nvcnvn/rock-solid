@@ -70,6 +70,12 @@ var everyName = []string{
 	"3001061 3 output pass=90 Notice to=0 disk=1 lsn=812 batches=7",
 	"3000107 3 event pass=89 PoolWait from=0 disk=1 records=12 batch=7",
 	"1000255 2 output pass=81 RecoverRead chunk=9 interval=2",
+	"1000255 2 output pass=81 RaftEntry index=110 term=1 kind=2 change=50177",
+	"1000255 2 output pass=81 RaftSnap index=111 term=1 voters=14 outgoing=0 learners=16",
+	"1000255 2 output pass=81 RaftState term=2 lead=2 commit=9 applied=8 flags=1",
+	"1000256 2 output pass=82 RaftForced to=4",
+	"1000256 2 output pass=82 RaftPlan voters=26",
+	"1000256 2 output pass=82 RaftSupport lead=2 fort=24 end=0",
 }
 
 const scenarioExample = `1000250 2 syscall pass=81 epoll_wait ready=3
@@ -291,4 +297,12 @@ func randomRecord(rng *core.Rand) Record {
 		}
 	}
 	return r
+}
+
+func TestAMessageTypePastTheNamedOnesRoundTrips(t *testing.T) {
+	r := Record{Tick: 1, Pass: 2, Node: 1, Sim: true, Name: EvNetRecv, Fields: [MaxFields]uint64{Peer(core.NodeID{Node: 2}), 515}}
+	got, err := Parse(r.Append(nil))
+	if err != nil || got != r {
+		t.Fatalf("got %+v, %v, want %+v", got, err, r)
+	}
 }

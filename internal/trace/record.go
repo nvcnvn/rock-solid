@@ -153,7 +153,43 @@ const (
 	EvPoolWait
 	// OutRecoverRead, a member reading a chunk's image for its primary's recovery read: chunk interval.
 	OutRecoverRead
+	// OutRaftEntry, a Raft entry durable in a replica's log: index term kind change; kind 0 is a
+	// command, 1 an empty entry, 2 a configuration change, whose change packs its count in bits 0-7
+	// and each change's type and replica ID as type<<6 | id in the byte after.
+	OutRaftEntry
+	// OutRaftSnap, a replica's log replaced by a snapshot: index term voters outgoing learners, each
+	// a bit set of replica IDs.
+	OutRaftSnap
+	// OutRaftState, a replica's Raft state after a pass that changed it: term lead commit applied
+	// flags; term and commit are those of the newest hard state it took, and flags has bit 0 for
+	// leading, 1 for knowing its removal, 2 halted and 3 deleted.
+	OutRaftState
+	// OutRaftForced, a test asking a leading replica to hand its leadership to replica to: to.
+	OutRaftForced
+	// OutRaftPlan, a test handing the replicas the voters a replacement plans: voters, a bit set
+	// by replica ID.
+	OutRaftPlan
+	// OutRaftSupport, a replica's support after a pass that changed it: lead fort end; lead is the
+	// leader of its term it supports now, or 0, fort, while it leads, the bit set by replica ID of
+	// the peers whose fortification of its term runs now, and end, when the support of the leader
+	// it last had ended, why: a Support constant.
+	OutRaftSupport
 	numNames
+)
+
+// Why a replica's support of a leader ended, as RaftSupport's end gives it.
+const (
+	// SupportInTerm is an end in the support's term: the grant to the leader's node lapsed, or the
+	// leader's node or the leader itself showed that it no longer leads.
+	SupportInTerm = 1 + iota
+	// SupportTerm is the replica's term moving past the support's on anything SupportVote is not.
+	SupportTerm
+	// SupportVote is the replica's term moving past the support's on what the support lets it vote
+	// or campaign on: a transfer target's vote request, the supported leader's own, or a
+	// MsgTimeoutNow.
+	SupportVote
+	// SupportForced is a SupportVote in the term after one a test forced a hand-off in.
+	SupportForced
 )
 
 // MaxFields is the most fields a record holds.
@@ -263,6 +299,12 @@ var schemas = [numNames]schema{
 	EvTake:            {"Take", KindEvent, []field{{"from", typeNum}, fDisk, {"records", typeNum}, {"batch", typeNum}}},
 	EvPoolWait:        {"PoolWait", KindEvent, []field{{"from", typeNum}, fDisk, {"records", typeNum}, {"batch", typeNum}}},
 	OutRecoverRead:    {"RecoverRead", KindOutput, []field{fChunk, fIv}},
+	OutRaftEntry:      {"RaftEntry", KindOutput, []field{{"index", typeNum}, {"term", typeNum}, {"kind", typeNum}, {"change", typeNum}}},
+	OutRaftSnap:       {"RaftSnap", KindOutput, []field{{"index", typeNum}, {"term", typeNum}, {"voters", typeNum}, {"outgoing", typeNum}, {"learners", typeNum}}},
+	OutRaftState:      {"RaftState", KindOutput, []field{{"term", typeNum}, {"lead", typeNum}, {"commit", typeNum}, {"applied", typeNum}, {"flags", typeNum}}},
+	OutRaftForced:     {"RaftForced", KindOutput, []field{{"to", typeNum}}},
+	OutRaftPlan:       {"RaftPlan", KindOutput, []field{{"voters", typeNum}}},
+	OutRaftSupport:    {"RaftSupport", KindOutput, []field{{"lead", typeNum}, {"fort", typeNum}, {"end", typeNum}}},
 }
 
 // Kind is the kind of record the name belongs to, or 0 for an unknown name.
@@ -581,6 +623,9 @@ func parseValue(t fieldType, v []byte) (uint64, error) {
 func parseEnum(names []string, v []byte) (uint64, error) {
 	if i := lookup(names, v); i >= 0 {
 		return uint64(i), nil
+	}
+	if n, err := parseNumber(v, 64); err == nil && n >= uint64(len(names)) {
+		return n, nil
 	}
 	return 0, fmt.Errorf("%w: unknown value %q", ErrSyntax, v)
 }

@@ -4097,13 +4097,13 @@ A TLA+ specification of a metadata group's voter replacement ([Replica placement
 
 **What the model contains**
 
-- Messages are not modelled: an election, an append and a membership question each act in one step on the replicas they involve, since etcd-raft's own TLA+ spec checks the message level beneath. A failed election changes nothing, as pre-vote gives.
+- Messages are not modelled: an election, an append and a membership question each act in one step on the replicas they involve, since etcd-raft's own TLA+ spec checks the message level beneath. The leader commits on an append's answer, a step of its own, so a leader can crash holding a follower's copy of an entry it never committed. A failed election changes nothing, as pre-vote gives.
 - A configuration takes effect on a replica when it applies the entry, as in etcd-raft, and an entry holds the whole configuration it results in, which equals etcd-raft's delta while one change is pending at a time. A joint configuration needs a quorum of each half, for elections, commits and leases.
 - A replica campaigns only once it applied every configuration change it knows committed (etcd-raft's `hasUnappliedConfChanges`). A leader proposes a change only once it applied the change before and every entry ahead of its first of its term, as etcd-raft enforces (`pendingConfIndex`), and leaves a joint configuration at that point, as etcd-raft's auto-leave does, even before an entry of its term commits. The learner and the swap, which the code proposes, also wait for an applied entry of the leader's term (`reconcile`); that rule has no negative, since leaving it out breaks no property at `ci-swap`'s size.
 - The leader adds a planned replica as a learner, promotes it once it holds what the leader had committed a heartbeat earlier, in one joint change that also removes a voter the plan drops, never the leader itself, and leaves the joint configuration once applied, as etcd-raft's auto-leave does. A leader the current plan drops, outside a joint configuration or once its removal committed, transfers its leadership to a voter of that plan, or, once its removal committed, of the incoming half it applied, since its node may hand it no plan, once it committed an entry of its term (`reconcile`, `target`); once it learned its removal, it proposes no change of the next plan's. The target of any transfer has taken an append of the leader's term, which the code's bar, a voter replicating at or past the mark, implies.
 - Fortification as two sides of one grant: a follower's support, which keeps it from campaigning and from voting for anyone but its leader or a transfer target, and the leader's count of it. A lapse ends the count first, then the support; a crash lapses every grant to and from the node. A leader serves a lease read while it has committed an entry of its term and counts the support of a quorum of each half, itself included.
 - A leader elected from the outgoing half commits its own removal and goes on leading the joint configuration until it hands its leadership on; its node deletes it once the plan is complete, possibly while it still leads, and its followers keep supporting it while its node renews their grants. A follower that hears nothing from the leader it supports asks the leader's node, which answers once the leader learned its removal, and the follower then stops supporting it.
-- A replica learns its removal when it applies the entry, or on a peer's notice: the peer's applied configuration lacks it, the peer's applied index is at least its own, and its own applied configuration holds it. It never applies its removal to its configuration, but stays a voter of the joint one, campaigning, leading, voting, taking appends and fortifying, and serves no lease read; a leader that learns it from a notice goes on leading, as one that applies it does. Each voter of the current plan reports once it applied the configuration of that plan's voters alone, never a joint one, and a replica that learned its removal deletes its state only once all have, whichever plan dropped it: as `Control` does, the model keeps no plan but the current one, so a replica the first plan dropped waits for the second to complete.
+- A replica learns its removal when it applies the entry, or on a peer's notice: the peer's applied configuration lacks it, the peer's applied index is at least its own, and its own applied configuration holds it. A replica outside the base voters that applied nothing has no configuration, and its answer, index 0, is behind the bootstrap entry every configured replica applied, which the model's logs leave out. It never applies its removal to its configuration, but stays a voter of the joint one, campaigning, leading, voting, taking appends and fortifying, and serves no lease read; a leader that learns it from a notice goes on leading, as one that applies it does. Each voter of the current plan reports once it applied the configuration of that plan's voters alone, never a joint one, and a replica that learned its removal deletes its state only once all have, whichever plan dropped it: as `Control` does, the model keeps no plan but the current one, so a replica the first plan dropped waits for the second to complete.
 - A crashed replica restarts from its base, its last compaction, at or below what its state machine applied: its applied index and configuration are the base's, and its commit index is the one its hard state was last written with, or the base's if higher. etcd-raft hands out a hard state only when it changed, and a Ready that only moves the commit index writes it only when it commits a configuration change, so a Ready that appends writes it only when it changes the term or vote or moves the commit index too: the commit index an earlier commit-only Ready carried can be missing from the write, and the durable commit index lags. The code writes the newest hard state on each durable round, at least as often. The log is kept whole, since no step reads an entry at or below the base but as the base's configuration and last term.
 - A replica halts at a committed entry its state machine cannot decode. Raft goes on applying configuration changes, but the replica takes no append, votes and campaigns in no election and fortifies no leader. A halted leader still takes its followers' answers, commits and counts the support it had, and its node renews the grants, so its followers neither campaign nor hear from its node that it is gone; it hands its leadership to a voter of its applied configuration (`handOff`), joint or not, and serves no lease read from then on. When that election fails, the target's term rises, since a transfer's campaign skips pre-vote, and the leader steps down on hearing it (`HandOffFails`); it never campaigns again, and its node answers a follower's ask about it that it is gone. Its base stays below the entry, so after a restart it halts again on reaching it.
 - Faults: crashes and restarts from a base, a voter down from the start or dying later, a halt, a halted leader's hand-off whose election fails, a lapse of any grant, and a removed leader's commit that reaches no follower.
@@ -4267,19 +4267,19 @@ next milestone's run, which is also the twins' first.
 | Purge | `deep-list` | `ci-list` with 2 crashes, safety only | 74 | 38,193,992 | 384 s |
 | Purge | `deep-write` | `ci-write` with 3 crashes, `PurgeSettles` | 43 | 6,337,400 | 430 s |
 | Purge | `deep-orphan` | `ci-orphan` with 3 writes and 2 crashes, `PurgeSettles` | 38 | 935,148 | 44 s |
-| Voter replacement | `ci-swap` | [Voter replacement model](#voter-replacement-model) | 26 | 533,097 | 122 s |
-| Voter replacement | `ci-live` | [Voter replacement model](#voter-replacement-model) | 20 | 2,623 | 3 s |
-| Voter replacement | `ci-live-moved` | [Voter replacement model](#voter-replacement-model) | 24 | 45,904 | 58 s |
-| Voter replacement | `ci-lease` | [Voter replacement model](#voter-replacement-model) | 22 | 330,009 | 66 s |
-| Voter replacement | `ci-halt` | [Voter replacement model](#voter-replacement-model) | 22 | 1,091,547 | 201 s |
-| Voter replacement | `ci-restart` | [Voter replacement model](#voter-replacement-model) | 20 | 801,361 | 160 s |
-| Voter replacement | `ci-halt-live` | [Voter replacement model](#voter-replacement-model) | 22 | 5,550 | 5 s |
-| Voter replacement | `ci-die-live` | [Voter replacement model](#voter-replacement-model) | 22 | 11,980 | 11 s |
-| Voter replacement | `ci-leave-die-live` | [Voter replacement model](#voter-replacement-model) | 22 | 50,707 | 166 s, 1 worker |
-| Voter replacement | `ci-leave` | [Voter replacement model](#voter-replacement-model) | 18 | 146,007 | 37 s |
-| Voter replacement | `ci-two-plans` | [Voter replacement model](#voter-replacement-model) | 28 | 96,197 | 160 s, 1 worker |
-| Voter replacement | `ci-two-plans-live` | [Voter replacement model](#voter-replacement-model) | 24 | 3,022 | 13 s, 1 worker |
-| Voter replacement | `deep-two-plans` | [Voter replacement model](#voter-replacement-model) | 27 | 850,637 | 1,802 s, 1 worker |
+| Voter replacement | `ci-swap` | [Voter replacement model](#voter-replacement-model) | 30 | 814,970 | 169 s |
+| Voter replacement | `ci-live` | [Voter replacement model](#voter-replacement-model) | 24 | 2,923 | 3 s |
+| Voter replacement | `ci-live-moved` | [Voter replacement model](#voter-replacement-model) | 27 | 54,991 | 57 s |
+| Voter replacement | `ci-lease` | [Voter replacement model](#voter-replacement-model) | 25 | 385,484 | 72 s |
+| Voter replacement | `ci-halt` | [Voter replacement model](#voter-replacement-model) | 23 | 1,242,444 | 224 s, 76 s under the 300 s limit, which a loaded machine can take |
+| Voter replacement | `ci-restart` | [Voter replacement model](#voter-replacement-model) | 23 | 1,006,988 | 208 s, 92 s under the 300 s limit |
+| Voter replacement | `ci-halt-live` | [Voter replacement model](#voter-replacement-model) | 24 | 6,135 | 5 s |
+| Voter replacement | `ci-die-live` | [Voter replacement model](#voter-replacement-model) | 25 | 13,193 | 9 s |
+| Voter replacement | `ci-leave-die-live` | [Voter replacement model](#voter-replacement-model) | 25 | 59,651 | 158 s, 1 worker |
+| Voter replacement | `ci-leave` | [Voter replacement model](#voter-replacement-model) | 19 | 166,271 | 39 s |
+| Voter replacement | `ci-two-plans` | [Voter replacement model](#voter-replacement-model) | 32 | 107,095 | 178 s, 1 worker |
+| Voter replacement | `ci-two-plans-live` | [Voter replacement model](#voter-replacement-model) | 28 | 3,374 | 12 s, 1 worker |
+| Voter replacement | `deep-two-plans` | [Voter replacement model](#voter-replacement-model) | 33 | 933,168 | 534 s, 4 workers |
 | Epoch change | `heavy-peering` | [Epoch change model](#epoch-change-model) | 31 | 13,717,707 | 8,923 s |
 | Epoch change | `heavy-leases` | [Epoch change model](#epoch-change-model) | | over 73,673,319 | cut off at 19,800 s on the CI runner, not yet run to the end |
 | Epoch change | `deep-slow` | [Epoch change model](#epoch-change-model) | 72 | 20,909,636 | 2,265 s |
@@ -4368,9 +4368,12 @@ Not to be confused with the POSIX conformance suites of [Testing strategy](desig
 - A compressed spec action, one that stands for several code steps, names those steps in its
   mapping.
 - The trace spec holds no protocol logic of its own: the spec it wraps stays the only statement of
-  the protocol. The tool in `tools/` decides no protocol step, and holds the mapping's judgement in
-  two places: `classify` names the spec's changes for a table, and `landOpen` and `crash` name the
-  versions a node may have made durable with no record.
+  the protocol. The tools in `tools/` decide no protocol step, and each holds the mapping's judgement
+  in named places. In `tools/tracedata`, `classify` names the spec's changes for a table, and
+  `landOpen` and `crash` name the versions a node may have made durable with no record. In
+  `tools/votersdata`, `state` names the change of a replica's Raft state each line stands for,
+  `replicate` places an append at its send, and `support` writes the lapses a fortification's
+  lines need.
 - The verdict is the same on every run of a trace, spec and mapping, on TLC's one worker.
 - Each discrepancy is recorded as code, spec, compression or logging, and settled as
   [From spec to code](design.md#testing-strategy) says.
@@ -4477,12 +4480,14 @@ other six pass with it empty, as the Go run counts a drop in 4 of these 10 seeds
 Not yet run: `TestReplicatedWritesSurviveFaults` and the lease half.
 
 The `conform` workflow runs this check nightly on a window of 500 seeds that moves each day, from seed
-40 up, with 20 minutes per trace where a local run gives 400 s, and the plants over the window's first 40.
-A failure names its seed, and `RUN=TestPeeringKeepsAcknowledgedWritesAcrossPrimaries FIRST=<seed> COUNT=1
-scripts/conform.sh` replays it. On a pull request that changes the epoch model, its trace spec,
-`internal/chunkstore`, `internal/lease`, `internal/trace`, `tools/tracedata` or the script, it runs the 40 seeds of a
-local run with the scripted traces, and the plants over them, and a failure there is a discrepancy to settle
-before the change merges.
+40 up, of the primary-change run and of the voter model's replacement run, with 20 minutes per trace
+where a local run gives 400 s, and the plants over the window's first 40. A failure names its seed,
+and `RUN='TestPeeringKeepsAcknowledgedWritesAcrossPrimaries|^TestConformReplacementSeeds$' FIRST=<seed>
+COUNT=1 scripts/conform.sh` replays it. On a pull request that changes the epoch or voter model, its trace spec,
+`internal/chunkstore`, `internal/lease`, `internal/raftshard`, `internal/trace`, `tools/tracedata`,
+`tools/votersdata` or the script, it runs 40 seeds of each model with the scripted traces, and the plants,
+and a failure there is a discrepancy to settle before the change merges. `scripts/gate-branch.sh` runs
+the local default on a branch that touches those paths.
 
 `refillSoleHolder` is not in `conformPlants`: the primary-change run is too short for a member merely down to go missing, so a refill of one appears only in `scripted-refill`, and a `Stay` only in `scripted-stay`, and `TestPlantedPeeringBugsBreakTheOracle` breaks the rule through the simulator's invariant.
 
@@ -4690,6 +4695,167 @@ image is the kept version, and it merges at once or, as `startRecovery` prefers,
 planted step the check missed lies in a variable or record no line reads. A version a primary drops right after
 `OutOrder`, by `r.fail` in `ordered`, stays in `ownOpen` and becomes a `mayfail` at a later crash; that path needs
 a lead that is asking or has left the interval, which `Order`'s guards refuse first, so it loosens no passing trace.
+
+### The voter model's check
+
+`scripts/conform.sh` checks the `voters-*` traces of `internal/raftshard` against
+`models/voters/voters.tla`: `TestConformScriptedReplacement`, a replacement with no fault but the
+cut-off voter, and `TestConformReplacementSeeds`, the replacement run of
+`TestVoterReplacementRunsReplayFromTheirSeed` under the Raft runs' faults with its first leader
+crashed, over `COUNT` seeds, 50 unless set. While conforming, the harness records each round's
+entries (`RaftEntry`) and snapshot (`RaftSnap`) as the replica takes them, its Raft state after each
+pass that logged entries or moved its term, lead, commit, applied index or flags (`RaftState`), the
+leader of its term it supports and, as leader, the peers whose fortification of its term runs, after
+a pass that moved either, with why the support it had ended (`RaftSupport`), a test's forced hand-off (`RaftForced`) and the plan it
+hands the replicas (`RaftPlan`).
+`tools/votersdata` writes the run's constants (the replicas, base voters and plan, and the terms,
+crashes, halts and deaths taken, as bounds) and one line per Raft step. `models/voters/trace_voters.tla`,
+with `voters.tla` unchanged by it, takes each line as the epoch model's check does, with `TypeOK`,
+`AtMostOneLeader`, `CommittedNeverLost`, `CommittedAgree`, `ReportsHold`, `VotersCaughtUp`,
+`DeletesOnlyRemoved` and `LearnsOnlyRemoved` on every state; the lease invariants are left out,
+since no line reads a lease and a leader's count of a peer that ends and comes back on the node-pair
+lease is no line, so the spec's count runs ahead of the code's. `voters.tla` has no command entries
+and no failed-election terms but a halted leader's failed hand-off, so `votersdata` takes a code
+index as the entries up to it that are not commands, past the boot snapshot at index 1, and a code
+term as its rank among the terms a replica led in or a halted leader's hand-off failed in. A line that
+moves no spec index, such as a command's commit, is a stutter at every state, and holds back no
+placement below.
+
+| Records | Line | Spec action | Compression |
+| --- | --- | --- | --- |
+| `RaftState` taking the lead | `elect`, `transfer` | `Elect`, `Transfer` | A campaign on a `MsgTimeoutNow` is a `transfer`, unless a `RaftForced` record asked for it: the outgoing fault's hand-off to the replica the plan drops, which `Transfer` never makes, is the outgoing half's `Elect` (discrepancy 9). Only a `MsgTimeoutNow` taken in the campaign's own pass counts, so one the shard holds while a round is in flight and steps a pass later would make its campaign an `elect`. No seed has one: seed 12's three later term moves follow `MsgTimeoutNow`s from its halted leader of an older term, which etcd-raft drops, and seed 48's is a forced hand-off's. Such an `elect` fails, not passes, since the support of the leader handing off is not lapsed in a term a replica led. The line checks the term |
+| `RaftState` raising the term alone | `term` | A stutter | A heartbeat of a later term, or a failed election, which raises no spec term |
+| `RaftEntry` of a change the replica proposed | `addlearner`, `swap`, `leave` | `AddLearner`, `Swap`, `Leave` | The line compares the whole configuration. A pass's proposals follow its apply, as etcd-raft proposes the leave on applying the joint configuration (discrepancy 8). The leave a leader past its removal proposes again outside a joint configuration changes nothing and is no entry (discrepancy 10) |
+| A follower's `RaftState` after a pass that logged entries or moved its commit | `replicate` | `Replicate`, or a stutter while the spec's follower holds as much | `Replicate` hands the follower the leader's whole log and current commit in one step, where etcd-raft batches a long log: the follower's log terms are a prefix of the spec's and its commit at most the spec's (discrepancy 6). An append that lands after its leader stopped leading the term or applied a configuration without the follower is placed at the line where that happened, unless a later line of the follower's comes first (discrepancies 5 and 15) |
+| A leader's `RaftState` moving its commit | `commit` | `Commit`, the append's answer, or a stutter while the spec's is as high | |
+| `RaftState` moving the applied index | `apply` | `Apply`, or a stutter while the spec's is as high | |
+| `RaftState` flagging the removal | `removed`, `notice` | `Apply`, `Notice` | Learned by applying when the configuration the replica applied held it and the one it knows committed does not (discrepancy 1), a stutter once the spec learned it on an earlier apply (discrepancy 12); otherwise a notice from the peer whose message the pass took |
+| A halted leader's `RaftState` stepping down to a term no replica led | `handofffails` | `HandOffFails` | Its target's failed election raised the term; the line checks it (discrepancy 18) |
+| A leader's `RaftSupport` counting a voter of its applied configuration after a pass that took that voter's answer | `fortify`, then a `lapse` of each replica the code's leader has no support from | `Fortify`, or a stutter where the spec's leader cannot fortify, then `Lapse` or a stutter | `Fortify` has every voter of the term support the leader at once; the lapses leave the spec's supporters those of the code. A count of a learner, or one back on the node-pair lease with no answer, is no line (discrepancy 17); a test's halt that takes an earlier apply's place goes before it (discrepancy 19). The leader's count itself is not checked: a count that shrinks is no line, one that grows is checked as within the spec's only where `Fortify` is taken, and the lapses then strip the spec's count to the code's supporters, so a leader that counts a supporter it never had passes. The simulator's invariants that no two replicas serve lease reads at overlapping times and that a lease read sees every applied entry check it, and the epoch model checks the lease rules |
+| A follower's `RaftSupport` ending its support | `askleader` after a pass that took the leader's node's answer; `lapse` for an end in the support's term, a forced hand-off's vote, or a vote the support lets through in a term no replica led; no line for any other end | `AskLeader`, `Lapse`, or a stutter where the spec's follower supports no such leader | The record says why the support ended: in its term, as the grant lapsed or the leader or its node showed it no longer leads; or on a term move, by a vote the support lets through (a transfer target's request, the leader's own, a `MsgTimeoutNow`), in a forced hand-off's term, or by anything else. The code's leader stops counting before its follower stops supporting, where `Lapse` ends both at once. A support a term move ended stays the spec's until that term's `Run` or `Replicate` ends it, so `Run`'s rule that a supporter votes only for its leader or the target it hands off to is checked: a follower that votes while it supports a leader is refused at the election (the `disloyal` plant). A forced hand-off is an `Elect` with no leader handing off (discrepancy 9), and an election no replica won has no spec step (discrepancy 20), so their votes end the support with a `lapse` |
+| `RaftState` flagging a halt | `halt` | `Halt` | A test's `Shard.Halt`, with nothing left to apply, takes the place of the replica's last `apply` line, unless a later line of the replica's comes first (discrepancies 11 and 15) |
+| `RaftState` flagging a deletion | `delete` | `Delete` | |
+| `Crash`; a `Pause` for good; a `Restart` and the next `RaftState` | `crash`, `die`, `restart` | `Crash`, `Die`, `Restart` | The restart's commit index is at most the spec's, its applied index equal |
+| `RaftSnap`, `RaftPlan` | | | A snapshot sets the replica's base; the plan is the constant `Plan` (discrepancy 13) |
+
+Checking commit and applied indexes only as at most the spec's lets no trace pass where the code
+commits or applies an entry the spec never commits. Every `replicate` line carries the follower's
+log terms, a prefix of the spec's log there, so an index the code commits or applies is within the
+spec's log and at most its commit, the terms pin each entry up to it, an entry is named by index and
+term under `AtMostOneLeader`, and each proposal's configuration is compared at its line. Before the
+terms were on the line, a follower holding other entries at the same indexes passed. What the check
+does allow is the spec running ahead of the code, so a guard the code's own state did not meet can
+hold in the spec's: `NoticeIndex`, `OneAtATime`, `CampaignApplied`, `Delete`'s reports. The plants of
+those guards are still rejected below, so equality where the two agree is not needed. Running ahead
+can also refuse a step the code takes, as discrepancy 16 did; each such case is a discrepancy.
+Support does not run ahead: a `fortify` line's lapses and a support's end bring the spec's
+supporters to the code's, except where a term move ended the support, which only that term's `Run`
+or `Replicate` ends, so a vote is checked against the supports the code's voter held, and a node's
+answer to an ask whenever the spec's follower still supports that leader. A `replicate` line's
+commit at most its log's length checks the data module, not the code: `votersdata` counts both
+from the same entries, capped at the replica's last, so its own output always meets it, and only a
+hand-edited module fails it.
+
+Results, `COUNT` 50, in one run with `JOBS=4`, 49 s for both models' traces:
+
+| Trace | Lines | Result | Seconds |
+| --- | --- | --- | --- |
+| `voters-scripted-replacement` | 1,003 | passes | 1 |
+| `voters-replace-0` to `voters-replace-49` | 73 to 9,008 | pass, across crashes, halts, deaths, the outgoing fault's hand-off and the wedge | 0 to 2 |
+
+A voter trace takes 0 to 2 s, so the 51 fit a `JOBS=1` gate in about a minute; that is the default
+count. Over those traces:
+
+| Action | Line | Took it | Stuttered | Traces |
+| --- | --- | --- | --- | --- |
+| `Replicate` | `replicate` | 866 | 13,135 | 51 |
+| `Apply` | `apply` | 787 | 23,198 | 51 |
+| `Commit` | `commit` | 283 | 10,225 | 51 |
+| `Fortify` | `fortify` | 183 | 16 | 51 |
+| `Elect` | `elect` | 144 | 0 | 51 |
+| `Lapse` | `lapse` | 122 | 269 | 46 |
+| `AddLearner` | `addlearner` | 51 | 0 | 51 |
+| `Swap` | `swap` | 51 | 0 | 51 |
+| `Leave` | `leave` | 51 | 0 | 51 |
+| `Crash` | `crash` | 50 | 0 | 50 |
+| `Restart` | `restart` | 50 | 0 | 50 |
+| `Delete` | `delete` | 50 | 0 | 50 |
+| `Notice` | `notice` | 30 | 0 | 30 |
+| `Apply` | `removed` | 21 | 0 | 21 |
+| `AskLeader` | `askleader` | 19 | 0 | 10 |
+| `Transfer` | `transfer` | 6 | 0 | 6 |
+| `Halt` | `halt` | 5 | 0 | 5 |
+| `Die` | `die` | 4 | 0 | 4 |
+| none | `term` | 0 | 467 | 0 |
+
+The actions no trace took:
+
+| Action | Why |
+| --- | --- |
+| `DeleteOnPlan` | Enabled only with `DeleteOnCommitted` off, a rule the code keeps |
+| `HandOffFails` | No seed's halted leader steps down on the term its hand-off failed in: seed 12's steps down only on the next; the baseline of the `halted-silent` plant takes it |
+
+| # | What | Class | How settled |
+| --- | --- | --- | --- |
+| 1 | A replica that never applied a configuration holding it, as the fourth before its addition, was taken to learn its removal by applying | logging | Learned by applying only from a configuration that held it, otherwise from a notice |
+| 2 | Three plants never broke their invariant on their seed, so their traces equalled their baselines | logging | `TestVoterPlantsKeepTraces` searches up to 40 seeds for one that breaks it; `voter-first` runs to its end |
+| 3 | A follower's append that moved no index left no `RaftState`, so the leader's commit had no quorum in the spec | logging | A state is noted whenever the pass logged entries |
+| 4 | A follower's apply was written before the `replicate` line of the same record | logging | `votersdata` writes the append first |
+| 5 | An append landing after its leader crashed, lost its term or applied a configuration without the follower: `Replicate` is atomic at the leader | compression | The line is placed at the leader's change, unless a later line of the follower's comes first |
+| 6 | etcd-raft batches a long log, so a follower holds a prefix of what the leader had | compression | The follower's log terms are checked as a prefix of the spec's. A `Replicate` sending a prefix was rejected for the state space it adds |
+| 7 | `TReplicas` counted only nodes with a `RaftState` | logging | Every node of the trace is a replica |
+| 8 | A leader's proposals were written before the pass's apply, but etcd-raft proposes the leave on applying the joint configuration | logging | Proposals follow the apply |
+| 9 | The outgoing fault's forced hand-off to the replica the plan drops had no record, so its campaign was written as a `transfer` | logging | A `RaftForced` record, and the campaign it causes is an `elect` |
+| 10 | A leader past its removal proposes the leave again outside a joint configuration, an entry that changes nothing | compression | It is no spec entry |
+| 11 | The wedge fault halts a replica through `Shard.Halt` with nothing left to apply, where `Halt` needs a committed entry not yet applied. Halting on the next apply in the harness broke `TestAHaltedLeaderThat*`, as a removed leader never applies again | compression | The halt takes the place of the replica's last apply, its `a` checked as at most the spec's |
+| 12 | The spec, ahead, learns a removal on an earlier apply than the code | compression | A `removed` line stutters once the spec's replica learned it |
+| 13 | `votersdata` took the plan from the swap a trace's log chose, so a plant's run cut before its swap, or that never swaps, had the base voters as its plan, and `AddLearner` failed on the plan guard | logging | A `RaftPlan` record |
+| 14 | A replica outside the base voters that applied nothing had the base configuration in the spec, which holds every base voter, where the code's has none, so `notice-any-index` was rejected by the membership guard rather than `NoticeIndex` | spec | `AppliedConf` is empty for it, and `NoticeIndex` refuses its answer, index 0 below the bootstrap entry the spec leaves out. Every `ci` configuration reached the same states, and every negative still fails |
+| 15 | A follower's `term` line, and a leader's `commit` or `apply` line of a command, which move no spec state, held back an append placed at its send (seed 31) or a test's halt (seeds 12 and 20) | compression | Such lines are written as stutters, which hold back neither, and a halt takes the place of the last apply that moved a spec index |
+| 16 | `Replicate` committed at the leader as the follower took the append, and the leader's hard state took that commit: a leader that crashed before the answer came back restarted in the spec past a swap it never committed, and `CampaignApplied` refused the election the code made (seed 14) | spec | The leader commits in `Commit`, the answer's own step. `Replicate` then `Commit` is the old step, so the protocol is unchanged: every `ci` configuration passes at up to 1.5 times the states, and every negative still fails |
+| 17 | A leader's count of fortified peers grows on a learner's answer, and comes back on the node-pair lease with no answer at all: neither is a `Fortify`, which reaches only voters and only when asked | logging | A `fortify` line is written for an answer the pass took, of a voter of the configuration the leader applied |
+| 18 | A halted leader steps down on the term its hand-off's target failed an election in, a `term` stutter, so the spec kept it leading and refused a follower's `AskLeader` on its node's answer that it no longer leads (the `halted-silent` baseline) | compression | A `handofffails` line, the failed term counted among the spec's terms |
+| 19 | A test's halt that takes the place of an earlier apply came before the leader's `fortify` on an answer it took before the halt, and the halted leader cannot fortify (seeds 12, 20 and 28) | compression | A `fortify` line is a stutter where the spec's `Fortify` is not enabled, and checked only where it is |
+| 20 | Every end of a follower's support was a `lapse`, so `Run`'s rule that a supporter votes only for its leader or the target it hands off to could never fail, and the `disloyal` plant passed. Lapsing only an end in the support's term refused seed 12: a halted leader's hand-off whose target won no election, the leader stepping down only on the next term, left its voters supporting it in the spec, which has no failed election | compression | `RaftSupport` says why a support ended; a vote the support lets through, in a term no replica led, is a `lapse` |
+
+### Traces can fail in the voter model's check
+
+`scripts/conform.sh plants`, after the epoch model's plants, runs `TestVoterPlantsKeepTraces` over
+`conformPlants` in `internal/raftshard`, one row per voter rule with a Go plant and one for
+`disloyal`, whose rule, `Run`'s that a supporter votes only for its leader or the target it hands off
+to, no flag turns off: the plant's run on the
+first seed from its test's own whose run breaks the plant's invariant, to the step it broke, and the
+same seed's run with no plant to its end. Every baseline passes, and 11 of the 18 plants are
+caught: TLC rejects a line no state can take with every spec invariant intact. Four are clean,
+rejected before the run broke its own invariant: `voter-first`, `joint-one-half`,
+`one-at-a-time` and `disloyal`. The other seven are rejected at the run's last line, where the code's invariant
+broke too. Not every rejection is at the planted step or by the plant's own rule: each row names the
+guard that refuses the line, found by checking the trace again with flags set off. `restart-commit-at-base` and
+`hard-state-old` are rejected at the later election, not at the planted restart, and
+`hard-state-old` and `delete-on-plan` by a guard other than their own rule's. A row names the line
+where the plant's trace first differs from its baseline's, and the run fails when a baseline fails,
+a trace gives no data or no verdict, or one of those 11 passes; the other 7 may pass.
+
+| Plant | Rule | Seed | Rejected at | Guard, or why not caught |
+| --- | --- | --- | --- | --- |
+| `campaign-unapplied` | `neg-campaign-unapplied` | 0 | The last line, the second leader's `elect` | `CampaignApplied` |
+| `restart-commit-at-base` | `neg-restart-commit-at-base` | 0 | The last line, the second leader's `elect`. The planted `restart` (line 872, commit 1) passes, since a restart's commit is checked only as at most the spec's | `CampaignApplied`, on the spec's restart at its durable commit: with it or `DurableCommit` off the `elect` is taken and `AtMostOneLeader` breaks |
+| `hard-state-old` | `neg-hard-state-old` | 0 | The last line, the second leader's `elect`. The `restart` (line 872, commit 1) passes, as for `restart-commit-at-base` | `CampaignApplied`, not the plant's own rules: with `NewestHardState` and `DurableConfCommit` off the line is still refused, with `CampaignApplied` off too it is taken and `AtMostOneLeader` breaks |
+| `voter-first` | `neg-voter-first` | 0 | Line 747 of 1,576, the `addlearner` that adds 4 as a voter | `LearnerFirst` |
+| `eager` | `neg-eager` | 0 | The last line, the `swap` of a learner that holds nothing | `CatchUpFirst` |
+| `joint-one-half` | `neg-joint-one-half` | 0 | Line 843 of 2,349, the `commit` on one half's quorum | `JointQuorum` |
+| `one-at-a-time` | `neg-one-at-a-time` | 0 | Line 748 of 2,366, the `swap` before the learner's addition applied | `OneAtATime` |
+| `delete-on-plan` | `neg-delete-on-plan` | 0 | The last line, the removal the plant's deletion flags, which `votersdata` writes as a `notice` from the peer whose message the pass took | `Notice`'s test that the peer's applied configuration lacks the replica, not `DeleteOnCommitted`: with it off the line is still refused, as a `notice` line is never `DeleteOnPlan` |
+| `notice-any-index` | `neg-notice-any-index` | 0 | Line 1, a base voter's notice from the replacement that applied nothing | `NoticeIndex`: with it off the line is taken and `LearnsOnlyRemoved` breaks |
+| `notice-non-member` | `neg-notice-non-member` | 0 | Line 1, the replacement's notice before its addition | `NoticeMember` |
+| `disloyal` | None | 0 | Line 892 of 898, the `elect` of a replica that campaigned while it supported the leader, won with the vote of another that supported it too | `Run`'s support rule: with it left out the line is taken |
+| `no-support-ask` | `neg-no-support-ask` | 2 | Passes | The ask the plant leaves out is no line, and `NewLeader` is liveness, which a trace's lines do not check |
+| `removed-keeps-lease` | `neg-removed-keeps-lease` | 2 | Passes | No line reads a lease, and the lease invariants are left out |
+| `removed-applies-removal` | `neg-removed-applies-removal` | 30 | Passes | The plant stops a removed replica campaigning: no line shows a step not taken, and `NewLeader` is liveness |
+| `removed-deletes-at-once` | `neg-removed-deletes-at-once` | 1 | Passes | As `removed-applies-removal`: the deleted replica's missing vote is no line |
+| `halted-keeps-leading` | `neg-halted-keeps-leading` | 1 | Passes | The hand-off a halted leader never makes is no line, and `NewLeader` is liveness |
+| `halted-silent` | `neg-halted-silent` | 770 | Passes | As `halted-keeps-leading`: the node's answer it never gives is no line |
+| `conf-commit-not-durable` | `neg-conf-commit-not-durable` | 0 | Passes | The run breaks its storage invariant on applying, before any restart, the one step that reads a durable commit |
 
 ## Models in CI
 

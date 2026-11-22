@@ -16,6 +16,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/sim"
 	"github.com/nvcnvn/rock-solid/internal/sim/clock"
 	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
+	"github.com/nvcnvn/rock-solid/internal/trace"
 )
 
 const (
@@ -71,6 +72,10 @@ type simCluster struct {
 	cutOff            uint32
 	healAt            core.Tick
 	cuts, timeoutNows int
+	// conform is whether each pass notes its replica's Raft records for a conformance trace, and
+	// forcedTerm the leader's term of the last hand-off a test forced while it does.
+	conform    bool
+	forcedTerm uint64
 }
 
 type simReplica struct {
@@ -106,6 +111,13 @@ type simReplica struct {
 	lout  disklog.Output
 	rec   *disklog.Recovery
 	dones []Done
+	// state and support are the last RaftState and RaftSupport noted for a conformance trace,
+	// logged whether the pass noted a log change since, heldTerm the term of the last support
+	// noted, and allowed and held what noteEvent noted of the pass.
+	state, support [trace.MaxFields]uint64
+	logged         bool
+	heldTerm       uint64
+	allowed, held  bool
 }
 
 func newSimCluster(seed uint64, p plants) *simCluster {
@@ -318,6 +330,11 @@ func (c *simCluster) transfer(id int, to uint64) {
 	r := c.reps[id]
 	c.s.Node(uint32(id)).Call(r.loop, func(ctx *core.Context, acts []core.Action) []core.Action {
 		r.out.Reset()
+		if c.conform {
+			r.output(trace.OutRaftForced, [trace.MaxFields]uint64{to})
+			c.forcedTerm = r.s.rn.BasicStatus().Term
+			r.allowed, r.held = false, false
+		}
 		r.s.rn.TransferLeader(to)
 		r.s.ready(ctx, &r.out)
 		return r.finish(ctx, acts)
@@ -462,6 +479,7 @@ func (r *simReplica) leaseTick(ctx *core.Context) {
 
 func (r *simReplica) onEvent(ctx *core.Context, ev *core.Event, acts []core.Action) []core.Action {
 	r.out.Reset()
+	r.noteEvent(ev)
 	if r.lease(ctx, ev) {
 		return r.finish(ctx, acts)
 	}
@@ -576,6 +594,9 @@ func (r *simReplica) finish(ctx *core.Context, acts []core.Action) []core.Action
 			r.kept = r.taken
 		}
 		r.flight, r.taken = round, r.s.applied
+		if round != 0 {
+			r.noteRound(&r.out.Round)
+		}
 	}
 	if hs, _, _ := r.s.cfg.Storage.InitialState(); hs.Commit < max(r.confAt, r.kept) && c.forgot == nil {
 		c.forgot = fmt.Errorf("replica %d would restart at commit index %d, having applied a configuration change at %d and up to %d before its last durable round", r.id, hs.Commit, r.confAt, r.kept)
@@ -586,6 +607,8 @@ func (r *simReplica) finish(ctx *core.Context, acts []core.Action) []core.Action
 	if c.rep != nil {
 		c.replaced(r, &st)
 	}
+	r.noteState(&st)
+	r.noteSupport(ctx, &st)
 	if l, ok := c.leaders[st.Term]; r.leads && ok && l != r.id && c.twoLeaders == nil {
 		c.twoLeaders = fmt.Errorf("replicas %d and %d both led term %d", l, r.id, st.Term)
 	}

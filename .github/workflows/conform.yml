@@ -5,10 +5,14 @@ on:
     paths:
       - models/epoch/epoch.tla
       - models/epoch/trace_epoch.*
+      - models/voters/voters.tla
+      - models/voters/trace_voters.*
       - internal/chunkstore/**
       - internal/lease/**
+      - internal/raftshard/**
       - internal/trace/**
       - tools/tracedata/**
+      - tools/votersdata/**
       - scripts/conform.sh
       - .github/workflows/conform.yml
   schedule:
@@ -31,7 +35,7 @@ defaults:
     shell: bash
 
 env:
-  RUN: TestPeeringKeepsAcknowledgedWritesAcrossPrimaries
+  RUN: TestPeeringKeepsAcknowledgedWritesAcrossPrimaries|^TestConformReplacementSeeds$
   COUNT: "500"
   PLANT_COUNT: "40"
   # A slow lane: a trace that gives no verdict in 400 s locally gets 20 minutes here.
@@ -75,7 +79,7 @@ jobs:
           COUNT: ${{ steps.seeds.outputs.count }}
           RUN: ${{ steps.seeds.outputs.run }}
         run: |
-          echo "Seeds $FIRST to $((FIRST + COUNT - 1)); replay one: RUN=$RUN FIRST=<seed> COUNT=1 scripts/conform.sh" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Seeds $FIRST to $((FIRST + COUNT - 1)); replay one: RUN='$RUN' FIRST=<seed> COUNT=1 scripts/conform.sh" | tee -a "$GITHUB_STEP_SUMMARY"
           status=0
           scripts/conform.sh >conform.log 2>&1 || status=$?
           cat conform.log

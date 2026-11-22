@@ -1,14 +1,19 @@
 #!/bin/bash
 # Spec conformance: runs the simulator's conformance traces and has TLC 1.7.4 check each is a behavior
-# of models/epoch/epoch.tla ("Spec conformance" in docs/test-scenarios.md). Not part of lint; the conform workflow
-# runs it nightly and on a pull request that changes the epoch protocol.
+# of its model ("Spec conformance" in docs/test-scenarios.md): a trace named voters-* of models/voters/voters.tla,
+# any other of models/epoch/epoch.tla. Not part of lint; the conform workflow runs it nightly and on a pull
+# request that changes the epoch or voter protocol.
 #   scripts/conform.sh                  every trace of TestConform*, or of the test RUN names, seeded
-#                                       ones over COUNT seeds (default 10) from FIRST (default 0)
+#                                       ones over COUNT seeds from FIRST (default 0): by default 10 of
+#                                       the epoch model's, 50 of the voter model's
 #   scripts/conform.sh file.trace ...   those traces alone
 #   scripts/conform.sh plants           traces can fail: on each of COUNT seeds (default 10) from FIRST
 #                                       (default 0) whose unplanted trace passes, each plant of PLANTS
 #                                       (default all of conformPlants), one row each; a run stops at its
-#                                       first broken invariant, or goes on with CONFORM_RUNON=1
+#                                       first broken invariant, or goes on with CONFORM_RUNON=1; then
+#                                       each voter plant's trace and its unplanted baseline, failing when
+#                                       a baseline fails, a trace gives no data or verdict, or a plant
+#                                       whose rule the check catches passes
 # Each trace is one light TLC process with its own directory: one worker, HEAP (default 2g), TLC_SECONDS
 # (default 400). JOBS (default 1) of them run at once, and the lines print in order when all are done.
 # KEEP=dir keeps the traces and data, and skips a check whose spec and data have not changed.
@@ -26,6 +31,9 @@ mkdir -p "$tmp/traces"
 [ -n "${KEEP:-}" ] || trap 'rm -rf "$tmp"' EXIT
 tmp=$(cd "$tmp" && pwd)
 
+# model prints the model trace $1 is checked against.
+model() { case $(basename "$1") in voters-*) echo voters ;; *) echo epoch ;; esac; }
+
 # steps prints a data module's trace lines.
 steps() { sed -n '/^Trace == <</,$p' "$1" | sed '1d;$d' | sed '$d'; }
 
@@ -34,7 +42,9 @@ data() {
 	name=$(basename "$1" .trace)
 	dir=$tmp/check/$name
 	mkdir -p "$dir"
-	if ! "$tmp/tracedata" "$1" >"$dir/data.new"; then
+	tool=tracedata
+	[ "$(model "$1")" = epoch ] || tool=votersdata
+	if ! "$tmp/$tool" "$1" >"$dir/data.new"; then
 		rm -f "$dir/data.new" "$dir/verdict"
 		return 1
 	fi
@@ -44,19 +54,21 @@ data() {
 check() {
 	name=$(basename "$1" .trace)
 	dir=$tmp/check/$name
-	key=$(cat models/epoch/epoch.tla models/epoch/trace_epoch.tla models/epoch/trace_epoch.cfg "$dir/data.new" | cksum)
+	m=$(model "$1")
+	set -- "models/$m/$m.tla" "models/$m/trace_$m.tla" "models/$m/trace_$m.cfg"
+	key=$(cat "$@" "$dir/data.new" | cksum)
 	if [ -f "$dir/verdict" ] && [ "$(cat "$dir/key" 2>/dev/null)" = "$key" ]; then
 		grep -q '^ok' "$dir/verdict"
 		return
 	fi
 	rm -f "$dir/verdict"
 	mv "$dir/data.new" "$dir/trace_data.tla"
-	cp models/epoch/epoch.tla models/epoch/trace_epoch.tla models/epoch/trace_epoch.cfg "$dir"
+	cp "$@" "$dir"
 	total=$(steps "$dir/trace_data.tla" | wc -l | tr -d ' ')
 	start=$SECONDS
 	# TLC unpacks its standard modules into java.io.tmpdir and deletes them on exit, so a shared one fails a parse beside it.
 	mkdir -p "$dir/tmp"
-	(cd "$dir" && perl -e 'alarm shift; exec @ARGV' "${TLC_SECONDS:-400}" java -Xmx"${HEAP:-2g}" -Djava.io.tmpdir="$dir/tmp" -XX:+UseSerialGC -cp "$jar" tlc2.TLC -workers 1 -config trace_epoch.cfg trace_epoch.tla) >"$dir/out" 2>&1 || true
+	(cd "$dir" && perl -e 'alarm shift; exec @ARGV' "${TLC_SECONDS:-400}" java -Xmx"${HEAP:-2g}" -Djava.io.tmpdir="$dir/tmp" -XX:+UseSerialGC -cp "$jar" tlc2.TLC -workers 1 -config "trace_$m.cfg" "trace_$m.tla") >"$dir/out" 2>&1 || true
 	rm -rf "$dir/states" "$dir/tmp"
 	secs=$((SECONDS - start))
 	broken=$(sed -n 's/^Error: Invariant \([A-Za-z]*\) is violated.*/\1/p' "$dir/out" | head -1)
@@ -89,11 +101,12 @@ check() {
 # cover leaves in $dir/cover a row for each spec change a passing trace's lines name: action, line kind, lines that took it, lines that stuttered. The behavior TLC prints for a pass is the one it found: a line stutters when no variable of the spec moves from the state before it.
 cover() {
 	dir=$tmp/check/$(basename "$1" .trace)
+	m=$(model "$1")
 	{
-		sed -n '/^TPlan ==/,/^TWrites ==/p' "$dir/trace_data.tla" | sed -n '/^TWrites/d;s/^[^"]*"\([a-z]*\)".*/P \1/p'
+		[ "$m" = voters ] || sed -n '/^TPlan ==/,/^TWrites ==/p' "$dir/trace_data.tla" | sed -n '/^TWrites/d;s/^[^"]*"\([a-z]*\)".*/P \1/p'
 		steps "$dir/trace_data.tla" | sed 's/^[^"]*"\([a-z]*\)".*/L \1/'
 		cat "$dir/out"
-	} | awk '
+	} | awk -v model="$m" '
 		function step() {
 			if (n > 0) {
 				k = kind[n]
@@ -109,6 +122,10 @@ cover() {
 				"reported ReportRecovered ask AskNext restartask RestartAsk peer Peer activate Activate plan.mark MarkDisk " \
 				"plan.replace Replace plan.rotate Rotate plan.add Add plan.remove Remove plan.stay Stay plan.drop Drop plan.refill Refill " \
 				"plan.minlive SetMinLive plan.edit Edit lost Lost", m)
+			if (model == "voters")
+				split("elect Elect transfer Transfer addlearner AddLearner swap Swap leave Leave replicate Replicate commit Commit " \
+					"apply Apply removed Apply notice Notice delete Delete crash Crash restart Restart halt Halt die Die " \
+					"fortify Fortify lapse Lapse askleader AskLeader handofffails HandOffFails", m)
 			for (i = 1; i in m; i += 2) action[m[i]] = m[i + 1]
 		}
 		!on && $1 == "P" && NF == 2 { plan[++np] = $2; next }
@@ -128,11 +145,21 @@ cover() {
 coverage() {
 	for f in "$@"; do
 		c=$tmp/check/$(basename "$f" .trace)/cover
-		[ ! -f "$c" ] || cat "$c"
+		[ ! -f "$c" ] || sed "s/^/$(model "$f") /" "$c"
 	done | awk '
+		{ m[$1] = 1; $0 = substr($0, length($1) + 2) }
 		{ took[$1 " " $2] += $3; stutter[$1 " " $2] += $4; if ($3) traces[$1 " " $2]++; if ($3) done[$1] = 1 }
 		END {
 			for (k in took) print "cover", k, took[k], "real,", stutter[k], "stutter,", traces[k] + 0, "traces"
+			if ("voters" in m) {
+				n = split("Replicate Fortify Commit Leave Apply Restart AskLeader AddLearner Swap Delete DeleteOnPlan Crash Halt Die " \
+					"Notice Elect Transfer HandOffFails Lapse", a)
+				never = ""
+				for (i = 1; i <= n; i++) if (!(a[i] in done)) never = never " " a[i]
+				print "voters never taken:" never
+			}
+			if (!("epoch" in m)) exit
+			never = ""
 			n = split("Fold Renew Adopt Peer Activate CounterOut AskNext RestartAsk ReportRecovered Persist Recover Send Order Refuse Deliver OwnLogged Answer " \
 				"Fortify BootUp MarkDisk Replace Rotate Add Remove Drop Stay Refill Lost SetMinLive Edit Die Isolate MemberFail GoneRefuses GoneRefusesRecovery OwnFail " \
 				"OpenGrant OpenLapse Suspend Wake Freeze Thaw RateStep Restart Reboot Format NetFault Elect Transfer StepDown " \
@@ -198,6 +225,7 @@ each() {
 	shift
 	[ $# -gt 0 ] || return 0
 	export -f steps data check cover plain planted
+	export -f model
 	export tmp jar
 	printf '%s\0' "$@" | xargs -0 -n 1 -P "${JOBS:-1}" "$BASH" -c 'set -euo pipefail; "$@"' each "$fn"
 }
@@ -235,16 +263,69 @@ if [ "${1:-}" = plants ]; then
 			[ "$name" = "primaries-$seed" ] || cat "$tmp/check/$name/line"
 		done
 	done
-	exit 0
+	rm -f "$tmp"/traces/*
+	CONFORM_DIR=$tmp/traces GOMEMLIMIT=4GiB go test -count=1 ./internal/raftshard -run '^TestVoterPlantsKeepTraces$'
+	go build -o "$tmp/votersdata" ./tools/votersdata
+	each plain "$tmp"/traces/voters-*.trace
+	# The voter plants whose trace TLC rejects at the planted step; the others may pass.
+	caught=" campaign-unapplied restart-commit-at-base hard-state-old voter-first eager joint-one-half one-at-a-time delete-on-plan notice-any-index notice-non-member disloyal "
+	failed=0
+	for f in "$tmp"/traces/voters-*.trace; do
+		name=$(basename "$f" .trace)
+		dir=$tmp/check/$name
+		if [ "${name#voters-plant-}" = "$name" ]; then
+			cat "$dir/line"
+			grep -q '^ok' "$dir/line" || failed=1
+			continue
+		fi
+		plant=${name#voters-plant-}
+		plant=${plant%-*}
+		expect="not caught"
+		case $caught in *" $plant "*) expect=caught ;; esac
+		case $(head -1 "$dir/line") in
+		"ok   "*) verdict=PASSED ;;
+		*": no step for line "* | *": invariant "*" broken by line "*) verdict=rejected ;;
+		*)
+			echo "ERROR $(tr '\n' ' ' <"$dir/line")"
+			failed=1
+			continue
+			;;
+		esac
+		basedir=$tmp/check/voters-base-${name#voters-plant-}
+		if grep -q '^ok' "$basedir/line"; then
+			steps "$basedir/trace_data.tla" >"$dir/base.lines"
+			steps "$dir/trace_data.tla" >"$dir/plant.lines"
+			same=$(cmp "$dir/base.lines" "$dir/plant.lines" 2>&1 || true)
+			case $same in
+			*"EOF on "*base.lines*) fired="fired at line $(($(wc -l <"$dir/base.lines") + 1))" ;;
+			*" line "*) fired="fired at line $(echo "$same" | sed 's/.* line \([0-9]*\).*/\1/')" ;;
+			*) fired="not fired, its lines are a prefix of the baseline's" ;;
+			esac
+		else
+			fired="no baseline to compare"
+		fi
+		row="$fired: $(sed "s/^[a-zA-Z]* *$name: //" "$dir/line" | cut -c1-200 | tr '\n' ' ')"
+		if [ "$verdict $expect" = "PASSED caught" ]; then
+			echo "FAIL $name: PASSED, a plant expected rejected, $row"
+			failed=1
+		else
+			echo "$name: $verdict, $expect, $row"
+		fi
+	done
+	coverage "$tmp"/traces/voters-*.trace
+	exit $failed
 fi
 
 if [ $# -eq 0 ]; then
 	rm -f "$tmp"/traces/*
-	CONFORM_DIR=$tmp/traces GOMEMLIMIT=4GiB go test -p 4 -run "${RUN:-TestConform}" ./internal/chunkstore \
+	CONFORM_DIR=$tmp/traces GOMEMLIMIT=4GiB go test -run "${RUN:-TestConform}" ./internal/chunkstore \
 		-seeds.first "${FIRST:-0}" -seeds "${COUNT:-10}"
+	CONFORM_DIR=$tmp/traces GOMEMLIMIT=4GiB go test -run "${RUN:-TestConform}" ./internal/raftshard \
+		-seeds.first "${FIRST:-0}" -seeds "${COUNT:-50}"
 	set -- "$tmp"/traces/*.trace
 fi
 go build -o "$tmp/tracedata" ./tools/tracedata
+go build -o "$tmp/votersdata" ./tools/votersdata
 
 each plain "$@"
 failed=0

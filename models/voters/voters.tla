@@ -14,7 +14,8 @@
 \*
 \* Messages are not modelled: an election, an append and a membership question each act
 \* in one step on the state of the replicas they involve, as etcd-raft's own TLA+ spec
-\* checks the message-level protocol beneath. An election that fails changes nothing,
+\* checks the message-level protocol beneath; the leader commits on an append's answer, a
+\* step of its own, so a crash can come between. An election that fails changes nothing,
 \* which is what pre-vote gives: a candidate that could not win raises no term. A
 \* configuration takes effect on a replica when it applies the entry, as in etcd-raft;
 \* entries hold the configuration they result in, which equals etcd-raft's delta while
@@ -178,11 +179,12 @@ vars == <<term, leader, log, commit, applied, match, hbCommit, up, gone, crashes
 Min(S) == CHOOSE x \in S : \A y \in S : x <= y
 
 \* With RemovedStaysVoter, a replica past its own removal keeps the last configuration it
-\* applied that names it.
+\* applied that names it. A replica outside the base voters that applied nothing has none.
 AppliedConf(r) ==
     LET raw == ConfAt(log[r], applied[r])
         k == ConfIndexIn(log[r], applied[r], {r})
-    IN IF RemovedStaysVoter /\ r \notin Members(raw) /\ k # 0 THEN log[r][k].cfg ELSE raw
+    IN IF r \notin BaseVoters /\ applied[r] = 0 THEN NoConf
+       ELSE IF RemovedStaysVoter /\ r \notin Members(raw) /\ k # 0 THEN log[r][k].cfg ELSE raw
 LastConf(r) == ConfOf(log[r])
 Live(r) == up[r] /\ ~gone[r]
 Leads(r) == Live(r) /\ leader[r] /\ (RemovedStaysVoter \/ ~out[r])
@@ -415,9 +417,9 @@ CommitTo(i, n) ==
                  ELSE chosen \o [k \in 1 .. n - Len(chosen) |->
                                     [e |-> log[i][Len(chosen) + k], t |-> term[i]]]
 
-\* The leader sends its log to a member of its applied configuration, learners included;
-\* the replica keeps a longer log that agrees with it, and takes the leader's otherwise; a
-\* halted replica drops it. The replica writes its hard state when its term changes, or when
+\* The leader sends its log and commit index to a member of its applied configuration,
+\* learners included, and learns what it holds; the replica keeps a longer log that agrees
+\* with it, and takes the leader's otherwise; a halted replica drops it. The replica writes its hard state when its term changes, or when
 \* it appends, the newest one, or without NewestHardState only if its commit index moves in the
 \* same Ready.
 Replicate(i, j) ==
@@ -430,15 +432,13 @@ Replicate(i, j) ==
     /\ leader' = [leader EXCEPT ![j] = FALSE]
     /\ log' = [log EXCEPT ![j] = IF IsPrefix(log[i], @) THEN @ ELSE log[i]]
     /\ match' = [match EXCEPT ![i][j] = Len(log[i]), ![j] = NoMatch]
-    /\ LET n == Committable(i, match'[i])
-       IN /\ commit' = [commit EXCEPT ![j] = IF commit[i] > @ THEN commit[i] ELSE @, ![i] = n]
-          /\ hbCommit' = [hbCommit EXCEPT ![i] = HbCommit(i, n), ![j] = 0]
-          /\ CommitTo(i, n)
+    /\ commit' = [commit EXCEPT ![j] = IF commit[i] > @ THEN commit[i] ELSE @]
+    /\ hbCommit' = [hbCommit EXCEPT ![j] = 0]
     /\ support' = [support EXCEPT ![j] = IF term[j] < term[i] THEN {} ELSE @]
     /\ fort' = [fort EXCEPT ![j] = {}]
     /\ Persist(PassesConf(IF term[j] < term[i] \/ (log'[j] # log[j] /\ (NewestHardState \/ commit'[j] # commit[j]))
                           THEN {j} ELSE {}, commit'), commit')
-    /\ UNCHANGED <<applied, up, gone, crashes, elected, early, haltAt, out, dead, reported>>
+    /\ UNCHANGED <<applied, up, gone, crashes, elected, chosen, early, haltAt, out, dead, reported>>
 
 \* The leader commits on an answer, and again when it applies a configuration that a
 \* quorum of already holds (etcd-raft's maybeCommit on a configuration switch).
@@ -538,12 +538,14 @@ Leave(i) ==
 \* peer whose applied configuration lacks it answers with its applied index. An answer at
 \* or past the asker's applied index, while the asker's own applied configuration holds
 \* it, shows the removal committed after the asker's last applied entry; a peer behind
-\* the asker may not have applied its addition yet. With RemovedStaysVoter a leader that
-\* learns its removal so goes on leading, as one that applies it does, and hands off.
+\* the asker may not have applied its addition yet, and one with no configuration answers 0,
+\* behind the bootstrap entry every configured replica applied, which these logs leave out.
+\* With RemovedStaysVoter a leader that learns its removal so goes on leading, as one that
+\* applies it does, and hands off.
 Notice(r, p) ==
     /\ Live(r) /\ Live(p) /\ r # p /\ ~out[r]
     /\ r \notin Members(AppliedConf(p))
-    /\ NoticeIndex => applied[p] >= applied[r]
+    /\ NoticeIndex => AppliedConf(p) # NoConf /\ applied[p] >= applied[r]
     /\ NoticeMember => r \in Members(AppliedConf(r))
     /\ out' = [out EXCEPT ![r] = TRUE]
     /\ gone' = [gone EXCEPT ![r] = ~RemovedWaitsForPlan]
