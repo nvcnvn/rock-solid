@@ -82,7 +82,7 @@ func TestAStayKeepsTheLastSource(t *testing.T) {
 	}
 }
 
-// staySourceRun runs that scenario under plant, if any, keeping its conformance trace if named, and returns what the simulator's invariants find. Named, it lets recovery bring the refill member Y's chunk, which Y's OK waits for, so the trace holds no planted step and the refill member holds Y too.
+// staySourceRun runs that scenario under plant, if any, keeping its conformance trace if named, and returns what the simulator's invariants find. Named, Y goes to a chunk the refill member does not list, which needs neither noDegradedHold nor recovery, so the trace holds no planted step, and the leaving member, never removed, takes the place.
 func staySourceRun(t *testing.T, plant func(*authority), name string) error {
 	r := newSoleRun(t, 2, 2, 5)
 	c := r.c
@@ -104,20 +104,22 @@ func staySourceRun(t *testing.T, plant func(*authority), name string) error {
 	}
 	r.lose(d2)
 	r.tick(DegradedRefillAfter + 2_000_000)
-	id := c.write(pg0, ch, 0, bytes.Repeat([]byte{0x22}, core.BlockSize))
+	ych := ch
+	if name != "" {
+		ych = chunkIn(pg0, 1, 1)
+	}
+	id := c.write(pg0, ych, 0, bytes.Repeat([]byte{0x22}, core.BlockSize))
 	var rp Response
 	var ok bool
 	if name == "" {
 		rp, ok = r.loneWriteOK(id, 5_000_000)
 	} else {
-		r.recovery(true)
 		rp, ok = r.answered(id, 5_000_000)
-		r.recovery(false)
 	}
 	if !ok || rp.Status != StatusOK {
 		t.Fatalf("Y answered %+v, %v, members %v", rp, ok, r.members())
 	}
-	r.acked[ch] = rp.Version
+	r.acked[ych] = rp.Version
 	r.back(d2)
 	r.tick(2_000_000)
 	r.lose(d1)
