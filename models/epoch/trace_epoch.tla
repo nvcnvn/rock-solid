@@ -13,11 +13,12 @@
 
 EXTENDS epoch, trace_data
 
-VARIABLES line, healed
+VARIABLES line, healed, stayed
 
 \* healed: the [c, v] a recovered line took Recover for. A primary records its
 \* own copy of a recovery write, on a disk that lists nothing, so that line is a
 \* stutter while a member lists the chunk or once one recovered that version.
+\* stayed: the mayfail lines whose version the crash kept.
 
 \* A version in a trace needs more than the 3 bits of epoch.tla's counter.
 TBase == 1048576
@@ -37,11 +38,22 @@ TSlews == [n \in TNode |-> {0}]
 \* it on every disk of Node, and the keep rule reads at least the table's.
 Decided1(x) == Max({x, 1})
 
+\* A crash loses a suffix of the log in LSN order, so an own record it kept in
+\* part, logged above the newest whole version, is the oldest one it lost: the
+\* mayfail line after its own kept its version.
+KeptBelowTorn(r) ==
+    LET at == {i \in 1..line - 1 : /\ Trace[i].k = "mayfail" /\ Trace[i].n = dnode[r.d]
+                                   /\ Trace[i].c = r.c /\ Trace[i].v = r.logged}
+        i == Max(at)
+    IN at # {} /\ Trace[i + 1].k = "mayfail" /\ Trace[i + 1].n = Trace[i].n => i + 1 \in stayed
+
 ReplyMatches(l) ==
     \A r \in l.rep :
         /\ Reply(r.d, r.c).whole = r.whole
         /\ \/ r.logged = r.whole
-           \/ r.logged > r.whole /\ \E x \in vers : x.c = r.c /\ x.v = r.logged
+           \/ /\ r.logged > r.whole
+              /\ \E x \in vers : x.c = r.c /\ x.v = r.logged
+              /\ KeptBelowTorn(r)
         /\ Reply(r.d, r.c).list = r.list
         /\ Decided1(Reply(r.d, r.c).decided) = Decided1(r.decided)
 
@@ -248,7 +260,7 @@ Line(l) ==
        /\ \A d \in UpIn(l.p, l.iv) : persIv[d][l.p] = l.iv
        /\ Activate(l.n, l.p)
 
-TraceInit == Init /\ line = 1 /\ healed = {}
+TraceInit == Init /\ line = 1 /\ healed = {} /\ stayed = {}
 
 TraceNext ==
     /\ line <= Len(Trace)
@@ -258,8 +270,11 @@ TraceNext ==
                     /\ ~RecoveryOver(Trace[line])
                  THEN healed \cup {[c |-> Trace[line].c, v |-> Trace[line].v]}
                  ELSE healed
+    /\ stayed' = IF Trace[line].k = "mayfail" /\ Trace[line].v \in dlog'[ddisk[Trace[line].n]][Trace[line].c]
+                 THEN stayed \cup {line}
+                 ELSE stayed
 
-TraceSpec == TraceInit /\ [][TraceNext]_<<vars, line, healed>>
+TraceSpec == TraceInit /\ [][TraceNext]_<<vars, line, healed, stayed>>
 
 TraceIncomplete == line <= Len(Trace)
 
