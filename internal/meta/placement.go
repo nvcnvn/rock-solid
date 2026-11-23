@@ -33,15 +33,15 @@ type ShardMap struct {
 	Groups []Group
 }
 
-// Halt is a replica that halted at a committed entry it could not decode, as its node reports: its group, its replica ID, the entry's index, and since when.
+// Halt is a voter to replace on another node once stuck for refill_after: halted at a committed entry it could not decode, as its node reports with the entry's index, or not holding its plan, as the leader counts; its group, its replica ID, and since when.
 type Halt struct {
 	Group, ID, Index uint64
 	Since            core.Tick
 }
 
 // PlaceVoters returns the shard map after m: a voter whose disk's log is gone, whose disk has
-// been down for refill_after, or whose disk now reports from another node, replaced, and one that
-// has been halted for refill_after replaced on another node, and each group filled to Voters, one
+// been down for refill_after, or whose disk now reports from another node, replaced, and one stuck
+// in halts for refill_after replaced on another node, and each group filled to Voters, one
 // voter per node in nodes, each new one under a new replica ID on the up disk with the fewest
 // voters of any group. A voter with nowhere to go stays.
 func PlaceVoters(m *ShardMap, nodes []uint32, disks []chunkstore.RecordedDisk, halts []Halt, now core.Tick) ShardMap {
@@ -90,7 +90,7 @@ func replaced(v *Replica, d *chunkstore.RecordedDisk, now core.Tick) bool {
 	return d.Gone || d.Node != v.Node || !d.Up && now-min(d.DownSince, now) >= chunkstore.RefillAfter
 }
 
-// halted reports whether voter id of group has been halted for refill_after at now.
+// halted reports whether voter id of group has been stuck in halts for refill_after at now.
 func halted(halts []Halt, group, id uint64, now core.Tick) bool {
 	for _, h := range halts {
 		if h.Group == group && h.ID == id && now-min(h.Since, now) >= chunkstore.RefillAfter {

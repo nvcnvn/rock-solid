@@ -262,6 +262,21 @@ func (c *Control) deletes(reps []ReplicaReport, dst []ReplicaRef) []ReplicaRef {
 // voter is down for good never completes, but the next plan, which replaces that voter, does, and
 // so a plan never waits for the one before it.
 func (c *Control) complete(g *Group) bool {
+	leave := c.leave(g)
+	if leave == math.MaxUint64 {
+		return false
+	}
+	for _, v := range g.Voters {
+		if !c.applied(g.ID, v.ID, leave) {
+			return false
+		}
+	}
+	return true
+}
+
+// leave is the lowest index at which any replica reported a configuration of g's plan's voters
+// alone, MaxUint64 for none.
+func (c *Control) leave(g *Group) uint64 {
 	leave := uint64(math.MaxUint64)
 	c.eachReport(func(r *ReplicaReport) {
 		if r.Group == g.ID && (!r.Joint || c.jointCounts) && len(r.Voters) == len(g.Voters) && !slices.ContainsFunc(r.Voters, func(id uint64) bool {
@@ -270,17 +285,55 @@ func (c *Control) complete(g *Group) bool {
 			leave = min(leave, r.ConfIndex)
 		}
 	})
-	if leave == math.MaxUint64 {
-		return false
-	}
-	for _, v := range g.Voters {
-		applied := false
-		c.eachReport(func(r *ReplicaReport) { applied = applied || r.Group == g.ID && r.ID == v.ID && r.ConfIndex >= leave })
-		if !applied {
-			return false
+	return leave
+}
+
+// applied reports whether replica id of group last reported applying a configuration at or past at that
+// holds it as a voter, of the incoming half when joint.
+func (c *Control) applied(group, id, at uint64) bool {
+	held := false
+	c.eachReport(func(r *ReplicaReport) {
+		held = held || r.Group == group && r.ID == id && r.ConfIndex >= at && slices.Contains(r.Voters, id)
+	})
+	return held
+}
+
+// countStuck keeps in c.stuck, for each voter of a committed plan whose disk is up in live and that
+// has not reported holding the plan while a majority of the plan's voters have, since when this
+// leader has seen it so: a voter holds the plan once it reports a configuration holding it as a
+// voter, at or past the plan's leave once any replica reported that. A planned learner that never
+// catches up, a replica cut off from its group's leader or one its node never starts is so replaced
+// after refill_after, as a halted one is. The majority keeps a gap in the reports from replacing
+// a whole group, and a group without one could not commit the plan that replaces the voter.
+func (c *Control) countStuck(now core.Tick, live []chunkstore.RecordedDisk) {
+	was := c.stuck
+	c.stuck = nil
+	for gi := range c.smap.Groups {
+		g := &c.smap.Groups[gi]
+		at := c.leave(g)
+		if at == math.MaxUint64 {
+			at = 0
+		}
+		held := 0
+		for _, v := range g.Voters {
+			if c.applied(g.ID, v.ID, at) {
+				held++
+			}
+		}
+		if 2*held <= len(g.Voters) {
+			continue
+		}
+		for _, v := range g.Voters {
+			if k := find(live, v.Disk); k < 0 || !live[k].Up || c.applied(g.ID, v.ID, at) {
+				continue
+			}
+			h := Halt{Group: g.ID, ID: v.ID, Since: now}
+			if i := slices.IndexFunc(was, func(w Halt) bool { return w.Group == g.ID && w.ID == v.ID }); i >= 0 {
+				h.Since = was[i].Since
+			}
+			c.stuck = append(c.stuck, h)
 		}
 	}
-	return true
 }
 
 // eachReport calls f with each replica report the nodes and the control-plane voters last sent.

@@ -97,6 +97,8 @@ type Control struct {
 	exits   []diskExit
 	giveUps []chunkstore.PGInterval
 	nodes   []nodeState
+	// stuck is each planned voter this leader has seen up and not holding its plan, and since when.
+	stuck []Halt
 	// voters are the control-plane group's voters heard from, by node, each holding only its replicas.
 	voters []nodeState
 	// round counts failovers and error answers; resend is set while every committed shard-map
@@ -347,7 +349,8 @@ func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) erro
 		base, p.mapStaged = c.stagedMap, true
 	}
 	live := c.liveRecord()
-	n.smap = PlaceVoters(base, c.metaNodes(), live, c.halts(), in.Now)
+	c.countStuck(in.Now, live)
+	n.smap = PlaceVoters(base, c.metaNodes(), live, append(c.halts(), c.stuck...), in.Now)
 	n.smapV = c.smapV
 	n.disks, n.diskV, n.format, n.sess = c.diskView(live, in.Now), c.diskV, max(c.format, c.stagedFormat), c.sess
 	var ops []Op
