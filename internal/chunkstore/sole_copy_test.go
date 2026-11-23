@@ -58,7 +58,7 @@ func newSoleRun(t *testing.T, replicas, minLive, disks int) *soleRun {
 		}
 	}
 	var empty Table
-	tbl, _ := Next(&empty, &Inputs{Pools: a.pools()})
+	tbl, _, _ := Next(&empty, &Inputs{Pools: a.pools()})
 	c := newSoleCluster(t, tbl, disks)
 	r := &soleRun{c: c, a: a, isolated: map[uint32]bool{}, acked: map[core.ChunkID]uint64{}}
 	r.noteIntervals()
@@ -139,7 +139,7 @@ func (r *soleRun) members() []Member {
 // publish computes the next table from the marks, the reports and the clock, and hands it to the running replicas.
 func (r *soleRun) publish() {
 	c := r.c
-	next, _ := Next(&c.table, r.a.inputs(c))
+	next, _, _ := Next(&c.table, r.a.inputs(c))
 	if d := MakeDelta(&c.table, &next); len(d.Entries) == 0 {
 		return
 	}

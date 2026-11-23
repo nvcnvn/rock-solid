@@ -118,7 +118,12 @@ type Inputs struct {
 	Edits       []Edit
 	GiveUps     []PGGiveUp
 	Moves       int
-	plant       placementPlants
+	// Budget, above zero, bounds the bytes, as Cost counts them, of the PG changes a table holds;
+	// From is the PG the changes of pools that keep their head are taken from.
+	Budget int
+	Cost   func(pg core.PGID, old, e *PGEntry) int
+	From   core.PGID
+	plant  placementPlants
 }
 
 type placementPlants struct {
@@ -143,8 +148,63 @@ type placementPlants struct {
 	reportAcrossSplit bool
 }
 
-// Next computes the table after prev: live marks, settings, splits, asks and activations, leaving members removed on a recovered report for their PG's current interval while its other members stay up, reports and edits ignored in a pool it splits since they name the parent's PG numbers, every missing member refilled, then up to in.Moves balance moves, and each give-up of a PG's current interval whose members, marks and activation the rest leaves as they were. It reports the moves it made.
-func Next(prev *Table, in *Inputs) (Table, int) {
+// Next computes the table after prev: live marks, settings, splits, asks and activations, leaving members removed on a recovered report for their PG's current interval while its other members stay up, reports and edits ignored in a pool it splits since they name the parent's PG numbers, every missing member refilled, then up to in.Moves balance moves, and each give-up of a PG's current interval whose members, marks and activation the rest leaves as they were. It reports the moves it made. Past in.Budget it makes no moves and holds each pool whose head changes whole, then the other PGs' changes in pool and PG order from in.From, wrapping round, up to the first that would exceed it, which it returns for the next table to start from, leaving that PG and the rest as prev has them.
+func Next(prev *Table, in *Inputs) (Table, int, *core.PGID) {
+	next, moves := compute(prev, in)
+	if in.Budget <= 0 || next.cut(prev, in) == nil {
+		return next, moves, nil
+	}
+	held := *in
+	held.Moves = 0
+	next, _ = compute(prev, &held)
+	return next, 0, next.cut(prev, in)
+}
+
+// cut leaves out of t, computed from prev, the changes past in.Budget, as Next does, and returns the first it leaves out.
+func (t *Table) cut(prev *Table, in *Inputs) *core.PGID {
+	type at struct{ pool, pg int }
+	budget := in.Budget
+	var rest []at
+	for i := range t.Pools {
+		p := &t.Pools[i]
+		old := prev.pool(p.ID)
+		whole := old == nil || old.Head() != p.Head()
+		for j := range p.PGs {
+			var o *PGEntry
+			if old != nil && j < len(old.PGs) {
+				o = &old.PGs[j]
+			}
+			switch {
+			case whole && (o == nil || len(old.PGs) != len(p.PGs) || !o.equal(&p.PGs[j])):
+				budget -= in.Cost(core.PGID{Pool: p.ID, Index: uint32(j)}, o, &p.PGs[j])
+			case !whole && !o.equal(&p.PGs[j]):
+				rest = append(rest, at{i, j})
+			}
+		}
+	}
+	from := slices.IndexFunc(rest, func(a at) bool {
+		return cmp.Or(cmp.Compare(t.Pools[a.pool].ID, in.From.Pool), cmp.Compare(uint32(a.pg), in.From.Index)) >= 0
+	})
+	if from < 0 {
+		from = 0
+	}
+	order := slices.Concat(rest[from:], rest[:from])
+	for i, a := range order {
+		p := &t.Pools[a.pool]
+		old := prev.pool(p.ID)
+		pg := core.PGID{Pool: p.ID, Index: uint32(a.pg)}
+		if budget -= in.Cost(pg, &old.PGs[a.pg], &p.PGs[a.pg]); budget >= 0 {
+			continue
+		}
+		for _, b := range order[i:] {
+			t.Pools[b.pool].PGs[b.pg] = prev.pool(t.Pools[b.pool].ID).PGs[b.pg]
+		}
+		return &pg
+	}
+	return nil
+}
+
+func compute(prev *Table, in *Inputs) (Table, int) {
 	pools := slices.Clone(in.Pools)
 	slices.SortFunc(pools, func(a, b PoolInputs) int { return cmp.Compare(a.ID, b.ID) })
 	next := Table{Epoch: prev.Epoch + 1, Pools: make([]PoolTable, len(pools))}

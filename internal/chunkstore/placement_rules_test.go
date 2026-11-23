@@ -414,7 +414,7 @@ func TestMovesAddThenRemove(t *testing.T) {
 		if len(l.moving()) != 0 {
 			t.Fatalf("PGs %v still move", l.moving())
 		}
-		if _, n := Next(&prev, in); n != 0 {
+		if _, n, _ := Next(&prev, in); n != 0 {
 			t.Fatalf("the removals counted %d moves", n)
 		}
 	})

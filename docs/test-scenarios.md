@@ -5322,6 +5322,17 @@ these sizes; both are usually absent (`TestTableSize`).
   of whole tables. F2, one flap with refill staged one member per table: 1,202 tables. A delta costs
   a 38-byte header for one pool and 34 bytes per changed `rep3` entry, 20 more with its previous
   interval's members, 5 more during a move (`TestDeltaSize`).
+- A step past its byte budget, `max_ctl_txn_bytes` with each entry counted as its encoding and
+  16 bytes: the activations, down marks and refill after `refill_after` of a `rep3` pool at its
+  default `pg_count` on 246 disks losing every third node (the refill 1.43 MB), and those of a
+  4,096-PG `ec16-2` pool whose lost disks then leave the pool, each commit over tables within the
+  budget, the refills over at least two, and end at the table one unbounded `Next` gives
+  (`TestAStepOverItsBudgetSpreadsOverTables`). A pool that doubles, or changes `min_live`, beside
+  another pool's down marks, together past the budget, changes whole in the first table though the
+  order starts at the other pool, and the tables after change only the other pool
+  (`TestAPoolWhoseHeadChangesStaysInOneTable`). After a table that stopped at PG p, the next
+  one, given p, takes the down marks left before the activations of the PGs the first changed
+  (`TestTheNextTableResumesWhereTheLastStopped`).
 
 **[property] tests.** `TestPlacementKeepsItsRules`, 1,000 seeds in `scripts/seeds.sh`, about 40 ms
 each; 10,000 passed once in 227 s on 2 processes. Each seed draws a layout from the matrix in
@@ -7311,7 +7322,8 @@ on a node is chunkstore's (`table_test.go`).
 | `pg_count` changed on an existing pool | A doubling commits in one `Txn`, the pool record with a table whose every PG splits into halves that keep its members and past intervals and start its interval plus one, which the next leader reads back; any other change is refused (`TestAPoolChangeIsCheckedAgainstTheCommittedPool`) |
 | Two changes of a pool staged before a step; a pool set to the settings it has | The step commits the last; the second commits nothing (`TestAPoolChangeIsCheckedAgainstTheCommittedPool`) |
 | A pool change staged by a machine whose commit then lost a race | Checked again against the pool it reads back; refused there, it is dropped with an error and the next step commits the rest (`TestAStagedPoolIsCheckedAgainAfterAReload`) |
-| A `rep3` pool of 16,384 PGs, whose refill after a rack loss may be more than `max_ctl_txn_bytes`; one of 8,192; a third of 8,192 beside a down mark of two; a doubling of one of 8,192 | The first is refused with `ErrTooLarge`, the second accepted; the third is dropped with `ErrTooLarge`, and the next step commits the down marks, in a `Txn` over 256 KiB; the doubling is refused with `ErrTooLarge` (`TestAPoolTooLargeForAStepIsRefused`) |
+| A `rep3` pool of 32,768 PGs, whose creation is more than `max_ctl_txn_bytes`; two of 16,384 staged together; one of 8,192 doubled | The first is refused with `ErrTooLarge`; the two are each taken, then dropped together with `ErrTooLarge`, and the next step commits a pool of 8,192 alone; the doubling, whose halves each carry a past interval, is refused with `ErrTooLarge` (`TestAPoolTooLargeForATxnIsRefused`) |
+| A `min_live` or `replicas` change of a committed `rep3` pool of 16,384 PGs | Refused at `SetPool` with `ErrTooLarge`, since every PG would gain a past interval in one table (`TestASettingsChangeTooLargeForATxnIsRefused`) |
 
 **Placement table**
 
@@ -7324,6 +7336,9 @@ on a node is chunkstore's (`table_test.go`).
 | A primary reports activation of interval k on its heartbeat | A later table records k as the PG's last activated interval and drops the member lists of the intervals before it. That table starts no interval (`TestAnActivationIsRecordedWithoutANewInterval`) |
 | The primary and members of a PG resend their ask for a new interval every second while a commit is pending | The control plane keeps one ask per PG and interval (`TestResentAsksKeepOneAskPerInterval`) |
 | An ask for a new interval tagged with a table older than its pool's split, sent while the split's commit is pending or after it | Dropped; one sent under the split's table starts a new interval of the half (`TestAnAskFromBeforeASplitIsDropped`) |
+| A new pool of 8,192 PGs staged beside the down marks of a disk in two pools of 8,192, with an ask for a PG of the second the disk is not in | Commits over several `Txn`s, each within `max_ctl_txn_bytes`: the new pool whole in the first, then the marks left from where it stopped; every PG ends with the disk down, and the asked PG one interval on, the ask kept past the first `Txn` that left it out (`TestAStepOverOneTxnCommitsOverSeveral`) |
+| A disk's down marks in four pools of 8,192 PGs that take two `Txn`s, with the activations of every PG the first changed reported in between | The second `Txn` starts where the first stopped and marks the disk down in every PG left, the activations after (`TestTheNextTxnResumesWhereTheLastStopped`) |
+| The writes a table makes beside its entries: its head, a pool header, a dropped pool's range | Each fits the bytes the leader keeps back for it, with two to spare for the `Txn`'s op count (`TestHeadOpsBoundTheTableWritesBesideTheEntries`) |
 | A disk added, a recovered report, a down mark | Each table raises the table epoch and commits only the entries it changes. Only PGs whose members change start a new interval (`TestATableCommitsAsItsDelta`) |
 | The control-plane leader fails over | The new leader reads the pools, the table and the shard map back from the group's state, and its next table follows the last committed one (`TestANewLeaderAndASnapshotReadBackTheWholeState`) |
 | Two machines each think they lead | The second's commit fails its checks against what the first committed; it reads the state again and its next commit lands on top (`TestARacingCommitFailsItsChecks`) |
@@ -7408,6 +7423,8 @@ leader-side rules are its invariants; the storage side is
 | 100 heartbeats renewing those sessions | No Raft entry: renewals change only the leader's memory (same test) |
 | The sessions fall due | One commit fencing every session due at that moment, as one new session-table version (same test) |
 | Every storage node acknowledges version v, or is marked down in a committed table | v is committed as acknowledged, and the fenced sessions leave the table; while a node with its disk up is behind, it is not (same test, `TestANodeMarkedDownCountsAsAcknowledging`) |
+| A fence its node has not acknowledged when its disk fails in three pools of 8,192 PGs, whose down marks take several tables | The disk record marks the disk down only with the table that marks its last PG, and the fence is acknowledged only after it (`TestAFenceWaitsForTheTableThatMarksTheDisksLastPG`) |
+| The same failure with the leader's detector restarted after the first table, while the disk's down record is held | The restarted detector starts the disk down, so the PGs naming it live only fall, and the record marks it down with the last PG's table (`TestADetectorRestartMidSequenceKeepsAHeldDiskDown`) |
 | A new leader receives a heartbeat before its leader lease starts | It answers none and commits nothing; a follower runs no `meta.Control` (`TestANewLeaderGivesEverySessionAFullLease`) |
 | A new leader's leader lease starts | Every live session gets a full count from that start: `dead_wait` for one it has not measured, a session that sent it a single heartbeat included, and `session_lease` times its bound once two heartbeats measured it (same test) |
 | The control-plane leader crashes 1 s after its last renewal of C, and a new leader whose `CLOCK_BOOTTIME` runs 22.6% fast answers 8 s, or 5 s, after the crash | C renews with it and is never fenced; D, whose daemon died with the old leader, is fenced once `dead_wait` has passed on the new leader's raw clock as well, not sooner on its fast boot clock (`TestAFastBootClockFencesNoSessionEarly`). C's side, ending its lease about 7.1 s after the crash when its own boot clock runs that fast and holding its writes until a leader answers, is the client daemon's |

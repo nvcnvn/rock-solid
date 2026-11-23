@@ -308,6 +308,9 @@ func (c *Control) begin(now core.Tick) {
 		ds[i] = e.RecordedDisk
 		if !e.Up {
 			ds[i].DownSince = now - min(e.Age, now)
+		} else if markedDown(&c.table, e.ID) && names(&c.table, e.ID, false) {
+			// A step over several tables holds the record up until the last PG's mark.
+			ds[i].Up, ds[i].DownSince = false, now
 		}
 	}
 	c.rec = chunkstore.NewDiskRecord(ds)
@@ -421,22 +424,22 @@ func (c *Control) exit(x diskExit) error {
 		return nil
 	}
 	if x.remove {
-		if !c.disks[x.id-1].Drain || c.names(x.id, true) {
+		if !c.disks[x.id-1].Drain || names(&c.table, x.id, true) {
 			return ErrNotDrained
 		}
 		return c.rec.Remove(x.id)
 	}
-	if c.names(x.id, false) {
+	if names(&c.table, x.id, false) {
 		return chunkstore.ErrLostRefused
 	}
 	return c.rec.Lost(x.id)
 }
 
-// names reports whether a PG of the committed table names disk id: with past, as a member or in
+// names reports whether a PG of t names disk id: with past, as a member or in
 // an interval since its last activated one; without, as a member of its current interval not marked
 // down, which the epoch model's Lost needs.
-func (c *Control) names(id uint32, past bool) bool {
-	for _, pt := range c.table.Pools {
+func names(t *chunkstore.Table, id uint32, past bool) bool {
+	for _, pt := range t.Pools {
 		for _, e := range pt.PGs {
 			if slices.ContainsFunc(e.Members, func(m chunkstore.Member) bool { return m.Disk == id && (past || m.Mark != chunkstore.MarkDown) }) {
 				return true
@@ -616,6 +619,19 @@ func (c *Control) memberOps(ops []Op, n *ctlState) []Op {
 	return ops
 }
 
+// holdDown keeps up in v each disk committed up that a PG of v's table still names live, as a table
+// cut short of its last PG's mark leaves it, and reports whether it kept any: the session table's
+// acknowledgment counts a disk down in the record as holding every version.
+func (c *Control) holdDown(n *ctlState) bool {
+	held := false
+	for i := range min(len(n.disks), len(c.disks)) {
+		if d := &n.disks[i]; c.disks[i].Up && !d.Up && !d.Gone && names(&n.table, d.ID, false) {
+			d.Up, d.Age, held = true, 0, true
+		}
+	}
+	return held
+}
+
 func diskKey(id uint32) []byte { return ctlKey(CtlMembership, bigEndian.AppendUint32(nil, id)) }
 
 const (
@@ -653,4 +669,15 @@ func decodeDisk(id uint32, b []byte) (DiskEntry, error) {
 		return DiskEntry{}, ErrMalformed
 	}
 	return e, nil
+}
+
+func markedDown(t *chunkstore.Table, id uint32) bool {
+	for _, pt := range t.Pools {
+		for _, e := range pt.PGs {
+			if slices.ContainsFunc(e.Members, func(m chunkstore.Member) bool { return m.Disk == id && m.Mark == chunkstore.MarkDown }) {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -659,15 +659,104 @@ func TestAStagedPoolIsCheckedAgainAfterAReload(t *testing.T) {
 	}
 }
 
-// A pool whose refill after a rack loss may be more than one ctl/ Txn holds is refused: a rep3
-// pool of 16,384 PGs, though its first table fits, created or doubled, and not one of 8,192. A pool that fits alone
-// but not beside a step's other changes is dropped with ErrTooLarge, and the next step commits them.
-func TestAPoolTooLargeForAStepIsRefused(t *testing.T) {
+// A pool whose first table, which holds it whole, is more than one ctl/ Txn holds is refused: a
+// rep3 pool of 32,768 PGs, or a doubling of one of 8,192, whose halves each carry a past interval,
+// though one of 16,384 is taken, its refill after a rack loss to commit over several tables. Two
+// pools that fit alone but not together are dropped with ErrTooLarge, and the next step commits
+// the rest.
+func TestAPoolTooLargeForATxnIsRefused(t *testing.T) {
 	r := newCtlRun(t)
 	in := &ControlInputs{Disks: disks(0, 1, 2, 3)}
-	if err := r.ctl.SetPool(1, spec(3, 1<<14), in.Disks); !errors.Is(err, ErrTooLarge) {
-		t.Fatalf("a pool of 16,384 PGs answered %v", err)
+	if err := r.ctl.SetPool(1, spec(3, 1<<15), in.Disks); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("a pool of 32,768 PGs answered %v", err)
 	}
+	for id := range core.PoolID(2) {
+		if err := r.ctl.SetPool(id+1, spec(3, 1<<14), in.Disks); err != nil {
+			t.Fatalf("a pool of 16,384 PGs answered %v", err)
+		}
+	}
+	var out ControlOutput
+	if err := r.ctl.Step(in, 99, &out); !errors.Is(err, ErrTooLarge) || out.Propose {
+		t.Fatalf("two pools past the limit answered %v, proposed %v", err, out.Propose)
+	}
+	if err := r.ctl.SetPool(1, spec(3, 1<<13), in.Disks); err != nil {
+		t.Fatal(err)
+	}
+	r.step(in)
+	if len(r.ctl.Pools()) != 1 {
+		t.Fatalf("committed pools %+v", r.ctl.Pools())
+	}
+	if err := r.ctl.SetPool(1, spec(3, 1<<14), in.Disks); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("a doubling to 16,384 PGs answered %v", err)
+	}
+}
+
+// A settings change gives every PG of the pool a new interval in one table, so a rep3 pool of
+// 16,384 PGs, though taken, is refused a min_live or replicas change up front.
+func TestASettingsChangeTooLargeForATxnIsRefused(t *testing.T) {
+	r := newCtlRun(t)
+	in := &ControlInputs{Disks: disks(0, 1, 2, 3)}
+	if err := r.ctl.SetPool(1, spec(3, 1<<14), in.Disks); err != nil {
+		t.Fatal(err)
+	}
+	r.step(in)
+	for name, s := range map[string]chunkstore.PoolSpec{"min_live": {MinLive: new(1)}, "replicas": {Replicas: new(2)}} {
+		if err := r.ctl.SetPool(1, s, in.Disks); !errors.Is(err, ErrTooLarge) {
+			t.Fatalf("a %s change answered %v", name, err)
+		}
+	}
+}
+
+// The table after one cut short takes the changes from the PG it stopped at: four rep3 pools of
+// 8,192 PGs have a disk marked down in them over two Txns, though the activations of every PG the
+// first changed are reported in between, and wait behind the marks it left.
+func TestTheNextTxnResumesWhereTheLastStopped(t *testing.T) {
+	r := newCtlRun(t)
+	in := &ControlInputs{Disks: disks(0, 1, 2, 3)}
+	for id := range core.PoolID(4) {
+		if err := r.ctl.SetPool(id+1, spec(3, 1<<13), in.Disks); err != nil {
+			t.Fatal(err)
+		}
+		r.step(in)
+	}
+	prev := *r.ctl.Table()
+	r.fail(1)
+	r.step(in)
+	tbl := r.ctl.Table()
+	var acts []chunkstore.PGReport
+	for _, de := range chunkstore.MakeDelta(&prev, tbl).Entries {
+		acts = append(acts, chunkstore.PGReport{PGFields: chunkstore.PGFields{Epoch: tbl.Epoch, PG: de.PG, Interval: de.Entry.Interval}, PGCount: 1 << 13})
+	}
+	if !names(tbl, 1, false) {
+		t.Fatal("the first Txn marked disk 1 down in every PG")
+	}
+	r.ctl.Report(&chunkstore.Report{Activations: acts})
+	r.step(in)
+	if names(r.ctl.Table(), 1, false) {
+		t.Fatal("the second Txn left a PG with disk 1 live")
+	}
+	if n, _ := r.txn.Check(); n > MaxCtlTxnBytes {
+		t.Fatalf("the second Txn is %d bytes", n)
+	}
+}
+
+// headOps bounds each write tableOps makes beside the entries, with room for the Txn's op count to
+// grow by two bytes as the entries join it.
+func TestHeadOpsBoundTheTableWritesBesideTheEntries(t *testing.T) {
+	k := placementKey(^core.PoolID(0))
+	for _, op := range []Op{Put(ctlKey(CtlPlacement, nil), tableHead(^uint64(0), ^uint32(0))), Put(k, poolHead(&chunkstore.PoolTable{PGs: make([]chunkstore.PGEntry, 1<<20)})), DeleteRange(k, PrefixEnd(k))} {
+		if n, err := (&Txn{Ops: []Op{op}}).Check(); err != nil || n > headOps {
+			t.Fatalf("a write is %d bytes with its Txn's two of header, which stand for the growth: %v", n, err)
+		}
+	}
+}
+
+// A step more than one ctl/ Txn holds, a new pool of 8,192 PGs beside the down marks of a disk in
+// two others, commits over several Txns, each within max_ctl_txn_bytes: the new pool whole in the
+// first, the marks the rest leaves room for, and the rest after, with an ask the first left out.
+func TestAStepOverOneTxnCommitsOverSeveral(t *testing.T) {
+	r := newCtlRun(t)
+	in := &ControlInputs{Disks: disks(0, 1, 2, 3)}
 	for id := range core.PoolID(3) {
 		if err := r.ctl.SetPool(id+1, spec(3, 1<<13), in.Disks); err != nil {
 			t.Fatal(err)
@@ -676,17 +765,35 @@ func TestAPoolTooLargeForAStepIsRefused(t *testing.T) {
 			r.step(in)
 		}
 	}
+	pgs := r.ctl.Table().Pools[1].PGs
+	asked := len(pgs) - 1
+	for slices.ContainsFunc(pgs[asked].Members, func(m chunkstore.Member) bool { return m.Disk == 1 }) {
+		asked--
+	}
+	r.ctl.Ask(chunkstore.PGFields{Epoch: r.ctl.Table().Epoch, PG: core.PGID{Pool: 2, Index: uint32(asked)}, Interval: pgs[asked].Interval})
 	r.fail(1)
-	var out ControlOutput
-	if err := r.ctl.Step(in, 99, &out); !errors.Is(err, ErrTooLarge) || out.Propose {
-		t.Fatalf("a step past the limit answered %v, proposed %v", err, out.Propose)
+	txns := 0
+	for ; r.settle(in); txns++ {
+		if n, err := r.txn.Check(); err != nil || n > MaxCtlTxnBytes {
+			t.Fatalf("Txn %d of %d bytes: %v", txns, n, err)
+		}
+		if txns == 0 && len(r.ctl.Table().Pools) != 3 {
+			t.Fatal("the first Txn left out the new pool")
+		}
 	}
-	r.step(in)
-	if n, _ := r.txn.Check(); len(r.ctl.Pools()) != 2 || n <= MaxTxnBytes {
-		t.Fatalf("committed pools %+v in a Txn of %d bytes", r.ctl.Pools(), n)
+	if txns < 2 {
+		t.Fatalf("the step committed in %d Txns", txns)
 	}
-	if err := r.ctl.SetPool(1, spec(3, 1<<14), in.Disks); !errors.Is(err, ErrTooLarge) {
-		t.Fatalf("a doubling to 16,384 PGs answered %v", err)
+	tbl := r.ctl.Table()
+	for _, pt := range tbl.Pools[:2] {
+		for i, e := range pt.PGs {
+			if slices.ContainsFunc(e.Members, func(m chunkstore.Member) bool { return m.Disk == 1 && m.Mark != chunkstore.MarkDown }) {
+				t.Fatalf("PG %d.%d has disk 1 up", pt.ID, i)
+			}
+		}
+	}
+	if got := tbl.Pools[1].PGs[asked].Interval; got != pgs[asked].Interval+1 {
+		t.Fatalf("the asked PG is at interval %d after %d", got, pgs[asked].Interval)
 	}
 }
 

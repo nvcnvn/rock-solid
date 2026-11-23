@@ -180,7 +180,7 @@ func (r *primaryRun) fail(inv string, err error) {
 // publish computes the next table and hands it to every running replica, with the address of every disk ID, if it changes any entry.
 func (r *primaryRun) publish() {
 	c := r.c
-	next, _ := Next(&c.table, r.a.inputs(c))
+	next, _, _ := Next(&c.table, r.a.inputs(c))
 	if d := MakeDelta(&c.table, &next); len(d.Entries) == 0 {
 		return
 	}
@@ -635,7 +635,7 @@ func runPrimaryRunAt(t *testing.T, seed uint64, plant *peerPlant, crashLeaving b
 		}
 	}
 	var empty Table
-	tbl, _ := Next(&empty, &Inputs{Pools: a.pools()})
+	tbl, _, _ := Next(&empty, &Inputs{Pools: a.pools()})
 	c := newRClusterWith(t, tbl, s, func(cfg *Config) {
 		cfg.Log.MaxRecordBytes = 3 * core.BlockSize
 		// A quarter of the seeds keep two rounds in flight, so a crash can leave a gap in the log and a traced run reaches the gap half of the spec's LostAbove; none of them is a planted bug's seed.

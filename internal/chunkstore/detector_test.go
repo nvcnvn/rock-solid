@@ -32,7 +32,7 @@ func newDetector(t *testing.T, disks int, pool Pool, start core.Tick) *dharness 
 	}
 	h.d = NewDetector(&h.rec, start)
 	var empty Table
-	h.table, _ = Next(&empty, &Inputs{Now: start, Pools: h.pools()})
+	h.table, _, _ = Next(&empty, &Inputs{Now: start, Pools: h.pools()})
 	h.d.View(&h.table, h.pools())
 	return h
 }
@@ -54,7 +54,7 @@ func (h *dharness) pools() []PoolInputs {
 // publish computes the next table from the detector's marks, as the authority does when they change.
 func (h *dharness) publish() Table {
 	prev := h.table
-	h.table, _ = Next(&prev, &Inputs{Now: h.ctx.Now, Pools: h.pools()})
+	h.table, _, _ = Next(&prev, &Inputs{Now: h.ctx.Now, Pools: h.pools()})
 	h.d.View(&h.table, h.pools())
 	return prev
 }

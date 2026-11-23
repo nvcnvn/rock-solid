@@ -177,6 +177,97 @@ func TestANodeMarkedDownCountsAsAcknowledging(t *testing.T) {
 	}
 }
 
+// A disk's down mark that its PGs take several tables to commit, three rep3 pools of 8,192, commits
+// in the disk record only with the table that marks its last PG: a fence its node has not
+// acknowledged waits until then, since a PG still naming the disk live may order the fenced write.
+func TestAFenceWaitsForTheTableThatMarksTheDisksLastPG(t *testing.T) {
+	r := newCtlRun(t)
+	in := &ControlInputs{Disks: disks(0, 1, 2, 3)}
+	for id := range core.PoolID(3) {
+		if err := r.ctl.SetPool(id+1, spec(3, 1<<13), in.Disks); err != nil {
+			t.Fatal(err)
+		}
+		r.step(in)
+	}
+	r.startSessions(1)
+	in.Raw, in.Leased = r.raw, true
+	for r.ctl.SessionTable().Version == 0 {
+		r.tick(sec)
+		r.hearAll()
+		in.Raw = r.raw
+		r.settle(in)
+	}
+	for n := range uint32(5) {
+		nr := r.reports[n]
+		nr.Sessions = uint64(min(n, 1))
+		r.heartbeat(&nr)
+	}
+	r.fail(1)
+	tables := 0
+	for r.ctl.SessionTable().Acked == 0 {
+		epoch := r.ctl.Table().Epoch
+		if !r.settle(in) {
+			t.Fatalf("not acknowledged with disk 1 %+v", r.disk(1))
+		}
+		if r.ctl.Table().Epoch != epoch {
+			tables++
+		}
+		if r.ctl.SessionTable().Acked != 0 && names(r.ctl.Table(), 1, false) {
+			t.Fatalf("acknowledged at table %d while a PG names disk 1 live", tables)
+		}
+		if names(r.ctl.Table(), 1, false) && !r.disk(1).Up {
+			t.Fatalf("table %d commits disk 1 down while a PG names it live, acknowledged %d", tables, r.ctl.SessionTable().Acked)
+		}
+	}
+	if tables < 2 || names(r.ctl.Table(), 1, false) {
+		t.Fatalf("acknowledged after %d tables, disk 1 named live %v", tables, names(r.ctl.Table(), 1, false))
+	}
+}
+
+// A detector restarted while a disk's down record is held for its last PG starts the disk down,
+// so no later table marks the dead disk up again in a PG an earlier table marked it down in.
+func TestADetectorRestartMidSequenceKeepsAHeldDiskDown(t *testing.T) {
+	r := newCtlRun(t)
+	in := &ControlInputs{Disks: disks(0, 1, 2, 3)}
+	for id := range core.PoolID(3) {
+		if err := r.ctl.SetPool(id+1, spec(3, 1<<13), in.Disks); err != nil {
+			t.Fatal(err)
+		}
+		r.step(in)
+	}
+	live := func() (n int) {
+		for _, pt := range r.ctl.Table().Pools {
+			for _, e := range pt.PGs {
+				if slices.ContainsFunc(e.Members, func(m chunkstore.Member) bool { return m.Disk == 1 && m.Mark != chunkstore.MarkDown }) {
+					n++
+				}
+			}
+		}
+		return n
+	}
+	r.fail(1)
+	if !r.settle(in) {
+		t.Fatal("no table after disk 1 failed")
+	}
+	if !r.disk(1).Up || live() == 0 {
+		t.Fatalf("the first table was not cut: disk 1 up %v, live in %d PGs", r.disk(1).Up, live())
+	}
+	r.ctl.det = nil
+	for prev := live(); prev > 0; {
+		if !r.settle(in) {
+			t.Fatalf("stopped with disk 1 live in %d PGs", prev)
+		}
+		if n := live(); n > prev {
+			t.Fatalf("after the restart disk 1 went from live in %d PGs to %d", prev, n)
+		} else {
+			prev = n
+		}
+	}
+	if r.disk(1).Up {
+		t.Fatal("disk 1 still up in the record once no PG names it live")
+	}
+}
+
 // A disk marked down is marked up again only once its node's heartbeat reports the current
 // session-table version: a node holding an older one would order a fenced session's write it held.
 func TestADownDiskIsMarkedUpOnlyOnceItsNodeHoldsTheCurrentTable(t *testing.T) {

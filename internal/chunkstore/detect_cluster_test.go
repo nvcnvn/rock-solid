@@ -37,7 +37,7 @@ func newDCluster(t *testing.T, seed uint64, set sim.Settings) *dcluster {
 		}
 	}
 	var empty Table
-	tbl, _ := Next(&empty, &Inputs{Pools: a.pools()})
+	tbl, _, _ := Next(&empty, &Inputs{Pools: a.pools()})
 	c := newRClusterOn(t, tbl, s)
 	d := &dcluster{rcluster: c, a: a, det: c.detect(a), faulty: map[uint32]bool{}, downAt: map[uint32]core.Tick{}}
 	c.inv.Register(invMarkedFaulty, func() error {
@@ -81,7 +81,7 @@ func (d *dcluster) tend() {
 			d.downAt[r.ID] = c.s.Time()
 		}
 	}
-	next, _ := Next(&c.table, d.a.inputs(c))
+	next, _, _ := Next(&c.table, d.a.inputs(c))
 	if len(MakeDelta(&c.table, &next).Entries) > 0 {
 		c.table = next
 		for n := range c.reps {

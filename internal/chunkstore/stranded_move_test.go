@@ -48,7 +48,7 @@ func seededSoleRunOn(t *testing.T, seed uint64, replicas, disks int, set sim.Set
 		}
 	}
 	var empty Table
-	tbl, _ := Next(&empty, &Inputs{Pools: a.pools()})
+	tbl, _, _ := Next(&empty, &Inputs{Pools: a.pools()})
 	sized := cloneTable(tbl)
 	_, e := tbl.entry(pg0)
 	for d := uint32(1); d <= uint32(disks); d++ {

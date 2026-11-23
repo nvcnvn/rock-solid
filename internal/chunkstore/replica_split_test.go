@@ -534,7 +534,7 @@ func TestPlantedReportAcrossSplitRecordsAnActivationThatNeverCame(t *testing.T) 
 				t.Fatal(err)
 			}
 		}
-		next, _ = Next(&c.table, a.inputs(c))
+		next, _, _ = Next(&c.table, a.inputs(c))
 		c.publish(next, false)
 		c.step()
 		var v *sim.Violation

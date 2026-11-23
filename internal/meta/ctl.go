@@ -88,13 +88,15 @@ type Control struct {
 	asks         []chunkstore.PGInterval
 	acts, rcv    []chunkstore.PGReport
 	pending      *commit
-	rec          chunkstore.DiskRecord
-	det          *chunkstore.Detector
-	pin          []chunkstore.PoolInputs
-	drains       []uint32
-	exits        []diskExit
-	giveUps      []chunkstore.PGInterval
-	nodes        []nodeState
+	// from is the PG the last table over its budget stopped at, where the next takes its changes from.
+	from    core.PGID
+	rec     chunkstore.DiskRecord
+	det     *chunkstore.Detector
+	pin     []chunkstore.PoolInputs
+	drains  []uint32
+	exits   []diskExit
+	giveUps []chunkstore.PGInterval
+	nodes   []nodeState
 	// voters are the control-plane group's voters heard from, by node, each holding only its replicas.
 	voters []nodeState
 	// round counts failovers and error answers; resend is set while every committed shard-map
@@ -170,8 +172,8 @@ func (c *Control) ShardMap() *ShardMap { return &c.smap }
 // stages it for the next commit in place of any change of the pool staged before; an update keeps
 // each setting spec leaves out as the next commit gives it. disks are the cluster's, each at the
 // class the record gives it, for an unset pg_count and the layout check. A refused one stages
-// nothing, and one that changes nothing unstages the pool. A new or doubled pool whose worst step
-// may be more than one Txn holds is ErrTooLarge.
+// nothing, and one that changes nothing unstages the pool. A new pool, or a change of its
+// replicas, min_live or pg_count, whose first table is more than one Txn holds is ErrTooLarge.
 func (c *Control) SetPool(id core.PoolID, spec chunkstore.PoolSpec, disks []chunkstore.Disk) error {
 	i, ok := slices.BinarySearchFunc(c.pools, id, cmpPool)
 	if ok {
@@ -190,8 +192,8 @@ func (c *Control) SetPool(id core.PoolID, spec chunkstore.PoolSpec, disks []chun
 	if err == nil {
 		_, err = p.CheckLayout(disks)
 	}
-	if err == nil && (!ok || p.PGCount != c.pools[i].Pool.PGCount) {
-		err = fits(PoolRecord{id, p}, disks)
+	if err == nil && (!ok || p.PGCount != c.pools[i].Pool.PGCount || p.Replicas != c.pools[i].Pool.Replicas || p.MinLive != c.pools[i].Pool.MinLive) {
+		err = fits(PoolRecord{id, p}, disks, &c.table)
 	}
 	if err != nil {
 		return err
@@ -220,31 +222,29 @@ func keep(spec chunkstore.PoolSpec, p chunkstore.Pool) chunkstore.PoolSpec {
 	return spec
 }
 
-// fits reports ErrTooLarge when a step of pool cp alone may be more than one Txn holds: its
-// refill after losing every third node, the largest step measured, as design.md's "One step is at
-// most max_ctl_txn_bytes" states, beside a disk-record entry of every disk.
-func fits(cp PoolRecord, disks []chunkstore.Disk) error {
-	t, _ := chunkstore.Next(&chunkstore.Table{}, &chunkstore.Inputs{Pools: []chunkstore.PoolInputs{poolInputs(cp, disks)}})
-	var ops []Op
-	var err error
-	for i := range t.Pools[0].PGs {
-		pg := core.PGID{Pool: cp.ID, Index: uint32(i)}
-		if ops, err = putSplit(ops, entryKey(pg), chunkstore.AppendEntry(nil, &t.Pools[0].PGs[i]), 0); err != nil {
-			return err
-		}
+// fits reports ErrTooLarge when pool cp's first table from prev, its creation, split or settings
+// change, beside a disk-record entry of every disk, as when every down mark commits with it, is more
+// than one Txn holds, since a table holds a pool whose head changes whole.
+func fits(cp PoolRecord, disks []chunkstore.Disk, prev *chunkstore.Table) error {
+	t, _, _ := chunkstore.Next(prev, &chunkstore.Inputs{Pools: []chunkstore.PoolInputs{poolInputs(cp, disks)}})
+	var old []chunkstore.PGEntry
+	if i := slices.IndexFunc(prev.Pools, func(p chunkstore.PoolTable) bool { return p.ID == cp.ID }); i >= 0 {
+		old = prev.Pools[i].PGs
 	}
-	n, err := (&Txn{Ops: ops}).Check()
-	if err != nil {
-		return err
+	n := 0
+	for i := range t.Pools[0].PGs {
+		var o *chunkstore.PGEntry
+		if i < len(old) {
+			o = &old[i]
+		}
+		n += entryCost(core.PGID{Pool: cp.ID, Index: uint32(i)}, o, &t.Pools[0].PGs[i])
 	}
 	dops := []Op{Put(ctlKey(CtlMembership, nil), bigEndian.AppendUint64(nil, 0))}
 	for _, d := range disks {
 		dops = append(dops, Put(diskKey(d.ID), appendDisk(nil, &DiskEntry{RecordedDisk: chunkstore.RecordedDisk{ID: d.ID, Node: d.Node}, Age: ^core.Tick(0)})))
 	}
 	m, err := (&Txn{Ops: dops}).Check()
-	// ponytail: refill = 2.2 × creation, the most measured (rep3 2.175, rep2 up to 2.05); item 5
-	// lifts this limit by committing a step over several tables.
-	if err == nil && n*11/5+m > MaxCtlTxnBytes {
+	if err == nil && n+m > MaxCtlTxnBytes {
 		err = ErrTooLarge
 	}
 	return err
@@ -303,6 +303,9 @@ func splitOf(t *chunkstore.Table, pool core.PoolID) uint64 {
 
 // Step computes the next table and shard map and, with no commit in flight, proposes under token
 // whatever they and the staged pools change, or what the session table owes, the two taking turns.
+// A table holds the PG changes the rest of the Txn leaves room for, keeping every report and ask
+// for the next table, which takes the changes left from where this one stopped; a disk's down mark
+// commits in the record only with the table that marks its last PG.
 // A staged pool change the committed pool no longer takes, after a reload, is dropped with its
 // error, as are a staged format level SetFormat would now refuse and a staged declaration or
 // removal the committed state now refuses, and as are the staged pool changes of a step that is
@@ -339,19 +342,6 @@ func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) erro
 	}
 	c.pin = pin
 	c.det.View(&c.table, pin)
-	n.table, _ = chunkstore.Next(&c.table, &chunkstore.Inputs{Now: in.Now, Pools: pin, Asks: c.asks, Activations: c.table.Reported(nil, c.acts), Recovered: c.table.Reported(nil, c.rcv), Edits: in.Edits, GiveUps: giveUps, Moves: in.Moves})
-	p.delta = chunkstore.MakeDelta(&c.table, &n.table)
-	var moved []core.PoolID
-	for _, de := range p.delta.Entries {
-		moved = append(moved, de.PG.Pool)
-	}
-	c.grantStep(in.Now, in.Leased, ds, moved)
-	p.table = len(p.delta.Entries) > 0 || !slices.Equal(poolHeads(&c.table, nil), poolHeads(&n.table, nil))
-	if !p.table {
-		n.table, n.crc = c.table, c.crc
-	} else {
-		n.crc = p.delta.CRC
-	}
 	base := &c.smap
 	if c.stagedMap != nil {
 		base, p.mapStaged = c.stagedMap, true
@@ -379,7 +369,35 @@ func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) erro
 		n.smapV++
 		ops = append(ops, Put(ctlKey(CtlShardMap, nil), bigEndian.AppendUint64(nil, n.smapV)))
 	}
+	pre, diskV := len(ops), n.diskV
 	ops = c.memberOps(ops, n)
+	var staged []Op
+	for _, cp := range c.staged {
+		staged = append(staged, Put(poolKey(cp.ID), appendPool(nil, &cp.Pool)))
+	}
+	used, _ := (&Txn{Ops: slices.Concat(c.guards(n.pools), ops, staged)}).Check()
+	var left *core.PGID
+	n.table, _, left = chunkstore.Next(&c.table, &chunkstore.Inputs{Now: in.Now, Pools: pin, Asks: c.asks, Activations: c.table.Reported(nil, c.acts), Recovered: c.table.Reported(nil, c.rcv), Edits: in.Edits, GiveUps: giveUps, Moves: in.Moves,
+		Budget: MaxCtlTxnBytes - used - headOps*(len(pin)+len(c.table.Pools)+1), Cost: entryCost, From: c.from})
+	if left != nil {
+		c.from, p.asks, p.acts, p.rc = *left, 0, 0, 0
+	}
+	if c.holdDown(n) {
+		n.diskV = diskV
+		ops = c.memberOps(ops[:pre], n)
+	}
+	p.delta = chunkstore.MakeDelta(&c.table, &n.table)
+	var moved []core.PoolID
+	for _, de := range p.delta.Entries {
+		moved = append(moved, de.PG.Pool)
+	}
+	c.grantStep(in.Now, in.Leased, ds, moved)
+	p.table = len(p.delta.Entries) > 0 || !slices.Equal(poolHeads(&c.table, nil), poolHeads(&n.table, nil))
+	if !p.table {
+		n.table, n.crc = c.table, c.crc
+	} else {
+		n.crc = p.delta.CRC
+	}
 	if !p.table && len(ops) == 0 && len(c.staged) == 0 {
 		c.asks, c.acts, c.rcv, c.stagedMap = c.asks[:0], c.acts[:0], c.rcv[:0], nil
 		c.resendPlans(out)
@@ -392,10 +410,7 @@ func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) erro
 	if ops, err = c.tableOps(ops, p); err != nil {
 		return err
 	}
-	for _, cp := range c.staged {
-		ops = append(ops, Put(poolKey(cp.ID), appendPool(nil, &cp.Pool)))
-	}
-	t := Txn{Ops: append(c.guards(n.pools), ops...)}
+	t := Txn{Ops: slices.Concat(c.guards(n.pools), ops, staged)}
 	if _, err := t.Check(); err != nil {
 		if errors.Is(err, ErrTooLarge) && len(c.staged) > 0 {
 			ids := make([]core.PoolID, len(c.staged))
@@ -619,6 +634,25 @@ func tableHead(epoch uint64, crc uint32) []byte {
 
 func poolHead(p *chunkstore.PoolTable) []byte {
 	return bigEndian.AppendUint64(bigEndian.AppendUint32([]byte{p.Replicas, p.MinLive}, uint32(len(p.PGs))), p.Split)
+}
+
+// headOps bounds the bytes of each write tableOps makes beside the entries, the table head, a pool
+// header and a dropped pool's range, with two to spare for the Txn's op count, which grows as the
+// entries join it.
+const headOps = 32
+
+// entryCost is the bytes of the writes tableOps makes for PG pg's entry e in place of old.
+func entryCost(pg core.PGID, old, e *chunkstore.PGEntry) int {
+	n := 0
+	if old != nil {
+		n = len(chunkstore.AppendEntry(nil, old))
+	}
+	ops, err := putSplit(nil, entryKey(pg), chunkstore.AppendEntry(nil, e), n)
+	size, err2 := (&Txn{Ops: ops}).Check()
+	if err != nil || err2 != nil {
+		return MaxCtlTxnBytes + 1
+	}
+	return size - 1 - uvarintLen(uint64(len(ops)))
 }
 
 // putSplit appends the writes that store v under k as a head and pieces, and drop the pieces past

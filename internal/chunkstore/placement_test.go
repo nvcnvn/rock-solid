@@ -45,7 +45,7 @@ func (l *layout) inputs(moves int) *Inputs {
 // step computes and keeps the next table, checking its delta, and reports its moves.
 func (l *layout) step(t *testing.T, in *Inputs) int {
 	t.Helper()
-	next, moves := Next(&l.table, in)
+	next, moves, _ := Next(&l.table, in)
 	if err := checkDelta(&l.table, &next); err != nil {
 		t.Fatal(err)
 	}
