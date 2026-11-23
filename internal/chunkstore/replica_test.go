@@ -72,9 +72,11 @@ type rcluster struct {
 	// planted has step note the first broken invariant in found rather than fail the test.
 	planted bool
 	found   error
-	// auth, once reporting is set, is the authority every replica heartbeats, from each start.
+	// auth, once reporting is set, is the authority every replica heartbeats, from each start;
+	// forward, when set, sends it the asks, activations and recovered reports of a replica's output.
 	auth      core.NodeID
 	reporting bool
+	forward   func(d int, out *ReplicaOutput)
 	// hist, once set, records every client write, punch and read.
 	hist *chunkHist
 	// updated is the chunk of each write and punch the client sent.
@@ -279,6 +281,9 @@ func (c *rcluster) took(d int, out *ReplicaOutput, acts []core.Action) []core.Ac
 	c.asks = append(c.asks, out.Asks...)
 	c.activations = append(c.activations, out.Activations...)
 	c.recovered = append(c.recovered, out.Recovered...)
+	if c.forward != nil {
+		c.forward(d, out)
+	}
 	for i := 0; c.conforming && i < len(out.Trace); i++ {
 		c.s.Node(uint32(d)).Output(c.loops[d], out.Trace[i])
 	}
@@ -380,7 +385,7 @@ func (c *rcluster) settle() {
 // quiet reports whether every step pending is a periodic timer: a replica asking the control plane again.
 func (c *rcluster) quiet() bool {
 	return c.s.Idle(func(id core.TimerID) bool {
-		return id == RetryTimer || id == LeaseTimer || id == ReportTimer || id == DetectTimer
+		return id == RetryTimer || id == LeaseTimer || id == ReportTimer || id == DetectTimer || id == ControlTimer
 	})
 }
 

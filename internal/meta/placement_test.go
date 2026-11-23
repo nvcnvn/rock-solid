@@ -163,7 +163,7 @@ func TestAVoterWhoseDiskMovedNodesIsPlacedAgain(t *testing.T) {
 	m = PlaceVoters(&m, nodes[:3], r.Disks(), nil, 0)
 	moved := m.Groups[0].Voters[0]
 	r.Down(moved.Disk, 0)
-	if _, err := r.Report(m.Groups[0].Voters[1].Node, 9, r.Disks()[moved.Disk-1].Log, ""); err != nil {
+	if _, err := r.Report(m.Groups[0].Voters[1].Node, r.Disks()[moved.Disk-1].Device, r.Disks()[moved.Disk-1].Log, ""); err != nil {
 		t.Fatal(err)
 	}
 	m = PlaceVoters(&m, nodes, r.Disks(), nil, 1)
@@ -191,7 +191,7 @@ func TestAVoterWhoseDiskMovedIsNotPlacedAgainOnThatDisk(t *testing.T) {
 	}
 	m = PlaceVoters(&m, nodes, r.Disks(), nil, 0)
 	r.Down(1, 0)
-	if _, err := r.Report(3, 9, r.Disks()[0].Log, ""); err != nil {
+	if _, err := r.Report(3, r.Disks()[0].Device, r.Disks()[0].Log, ""); err != nil {
 		t.Fatal(err)
 	}
 	next := PlaceVoters(&m, nodes, r.Disks(), nil, 1)

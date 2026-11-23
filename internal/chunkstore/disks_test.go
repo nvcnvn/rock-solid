@@ -9,7 +9,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 )
 
-// Each disk is known by the log ID it reports: a disk back from a restart keeps its ID, a disk formatted again or replaced joins as a new disk under a new ID while the one it replaced stays down with its log gone, and a log ID already up on another device is refused.
+// Each disk is known by the log ID it reports: a disk back from a restart, or moved to another node, keeps its ID, a disk formatted again or replaced joins as a new disk under a new ID while the one it replaced stays down with its log gone, and a log ID on another device than its own, up or down, is a copy and refused.
 func TestDisksAreKnownByTheirLogIDs(t *testing.T) {
 	var r DiskRecord
 	report := func(node uint32, device, log uint64) uint32 {
@@ -41,8 +41,11 @@ func TestDisksAreKnownByTheirLogIDs(t *testing.T) {
 		t.Fatalf("the disk that reported first lost its place: %+v", d)
 	}
 	r.Down(a, 1)
-	if got := report(1, 1, 0xa); got != a {
-		t.Fatalf("a down disk moved to another device came back as %d", got)
+	if _, err := r.Report(1, 1, 0xa, ""); !errors.Is(err, ErrLogRefused) {
+		t.Fatalf("a cloned drive's log ID, its disk down: %v", err)
+	}
+	if got := report(3, 0, 0xa); got != a || r.Disks()[a-1].Node != 3 {
+		t.Fatalf("a down disk moved to another node came back as %d: %+v", got, r.Disks()[a-1])
 	}
 }
 

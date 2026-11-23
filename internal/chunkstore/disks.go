@@ -51,20 +51,27 @@ type RecordedDisk struct {
 	Class     string
 }
 
+// plantCloneJoins is a bug the clone run plants in every record, the control plane's own among them:
+// a log up on another device joins as a new disk.
+var plantCloneJoins bool
+
 // DiskRecord is the control plane's record of disks, each known by the log ID it reports: a disk ID never names another log, and is never reused.
 type DiskRecord struct {
 	disks []RecordedDisk
 }
 
-// Report takes a node's report that its device opened the log log, of class class, returning the disk's ID. A log ID the record knows is the disk it names, marked up, its class unchanged, unless it is up elsewhere or its log was replaced, which is refused. A log ID it does not know joins as a new disk of that class under the next disk ID, and a disk last reported on that device stays down with its log gone, so its members refill elsewhere at once.
+// Report takes a node's report that its device opened the log log, of class class, returning the disk's ID. A log ID the record knows is the disk it names, marked up on node, its class unchanged, unless its log was replaced, it is up on another node, or device is not its own, which is refused: a disk moved to another node keeps its device, so its log on another device is a copy, which may miss acknowledged writes. A log ID it does not know joins as a new disk of that class under the next disk ID, and a disk last reported on that device stays down with its log gone, so its members refill elsewhere at once.
 func (r *DiskRecord) Report(node uint32, device, log uint64, class string) (uint32, error) {
 	if i := slices.IndexFunc(r.disks, func(d RecordedDisk) bool { return d.Log == log }); i >= 0 {
 		d := &r.disks[i]
-		if d.Gone || d.Up && (d.Node != node || d.Device != device) {
+		elsewhere := d.Device != device || d.Up && d.Node != node
+		if d.Gone || elsewhere && !plantCloneJoins {
 			return 0, ErrLogRefused
 		}
-		d.Node, d.Device, d.Up = node, device, true
-		return d.ID, nil
+		if !elsewhere {
+			d.Node, d.Device, d.Up = node, device, true
+			return d.ID, nil
+		}
 	}
 	for i := range r.disks {
 		if d := &r.disks[i]; d.Node == node && d.Device == device && !d.Gone {

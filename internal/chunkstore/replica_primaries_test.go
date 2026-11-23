@@ -41,6 +41,19 @@ type authority struct {
 	det *Detector
 	// keepID plants the bug of a reformatted disk keeping its old disk ID.
 	keepID bool
+	// cp, when set, is the real control plane on c's node auth, which commits every table in place
+	// of Next (control_plane_test.go): cut is the nodes cut off from it, told the drains it took,
+	// rcv the recovered reports counted, reports the reports forwarded to it, opened the logs each
+	// node reports beside its replica's, and refused the heartbeats it refused.
+	t       *testing.T
+	c       *rcluster
+	cp      ControlPlane
+	cut     map[uint32]bool
+	told    map[uint32]bool
+	rcv     int
+	reports uint64
+	opened  map[uint32][]OpenedLog
+	refused []error
 }
 
 func (a *authority) inputs(c *rcluster) *Inputs {
@@ -180,7 +193,7 @@ func (r *primaryRun) fail(inv string, err error) {
 // publish computes the next table and hands it to every running replica, with the address of every disk ID, if it changes any entry.
 func (r *primaryRun) publish() {
 	c := r.c
-	next, _, _ := Next(&c.table, r.a.inputs(c))
+	next := r.a.next(c)
 	if d := MakeDelta(&c.table, &next); len(d.Entries) == 0 {
 		return
 	}
@@ -418,7 +431,7 @@ func (r *primaryRun) formatted(n int) uint32 {
 	if r.a.keepID {
 		return c.ids[n]
 	}
-	id, err := r.a.rec.Report(uint32(n), 0, c.logs[n], "")
+	id, err := r.a.report(n, c.logs[n])
 	if err != nil {
 		panic(err)
 	}
@@ -599,7 +612,7 @@ func (r *primaryRun) readEach(x *chunkHist) {
 // tend publishes a table for the asks and activations replicas reported, and for a disk formatted again.
 func (r *primaryRun) tend() {
 	c := r.c
-	if len(c.asks) > r.a.seen || len(c.activations) > r.a.acts {
+	if len(c.asks) > r.a.seen || len(c.activations) > r.a.acts || r.a.due() {
 		r.publish()
 	}
 }
@@ -626,16 +639,26 @@ func runPrimaryRun(t *testing.T, seed uint64, plant *peerPlant, crashLeaving boo
 
 // runPrimaryRunAt is runPrimaryRun on a pool with min_live minLive.
 func runPrimaryRunAt(t *testing.T, seed uint64, plant *peerPlant, crashLeaving bool, minLive int) (*primaryRun, error) {
+	return runPrimaryRunOn(t, seed, plant, crashLeaving, minLive, false)
+}
+
+// runPrimaryRunOn is runPrimaryRunAt, on the real control plane if real.
+func runPrimaryRunOn(t *testing.T, seed uint64, plant *peerPlant, crashLeaving bool, minLive int, real bool) (*primaryRun, error) {
 	s := sim.New(seed, sim.DefaultSettings())
 	a := &authority{pool: Pool{Replicas: 3, MinLive: minLive, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 4},
 		down: map[uint32]core.Tick{}, drain: map[uint32]bool{}, moves: true}
-	for n := range 4 {
-		if _, err := a.rec.Report(uint32(n), 0, 0x5eed+uint64(n), ""); err != nil {
-			t.Fatal(err)
+	var tbl Table
+	if real {
+		tbl = realControl(t, a, 4)
+	} else {
+		for n := range 4 {
+			if _, err := a.rec.Report(uint32(n), 0, 0x5eed+uint64(n), ""); err != nil {
+				t.Fatal(err)
+			}
 		}
+		var empty Table
+		tbl, _, _ = Next(&empty, &Inputs{Pools: a.pools()})
 	}
-	var empty Table
-	tbl, _, _ := Next(&empty, &Inputs{Pools: a.pools()})
 	c := newRClusterWith(t, tbl, s, func(cfg *Config) {
 		cfg.Log.MaxRecordBytes = 3 * core.BlockSize
 		// A quarter of the seeds keep two rounds in flight, so a crash can leave a gap in the log and a traced run reaches the gap half of the spec's LostAbove; none of them is a planted bug's seed.
@@ -643,6 +666,9 @@ func runPrimaryRunAt(t *testing.T, seed uint64, plant *peerPlant, crashLeaving b
 			cfg.Log.CommitDepth = 2
 		}
 	})
+	if real {
+		a.attach(c)
+	}
 	c.conformBegin()
 	r := &primaryRun{c: c, a: a, rng: core.NewRand(seed ^ 0x9e3), chunks: [2]core.ChunkID{chunkIn(pg0, 4, 0), chunkIn(pg0, 4, 1)}, ops: map[core.RequestID]faultOp{},
 		version: map[core.RequestID]uint64{}, kept: map[uint32][]keptChunk{}, tainted: map[uint32]bool{},
@@ -712,6 +738,7 @@ func runPrimaryRunAt(t *testing.T, seed uint64, plant *peerPlant, crashLeaving b
 		for !c.s.Node(uint32(n)).Up() && c.step() {
 		}
 	}
+	a.rejoin(c, r.tend)
 	clear(a.down)
 	_, e := c.table.entry(pg0)
 	a.asks = append(a.asks, PGInterval{pg0, e.Interval})
@@ -732,6 +759,9 @@ func runPrimaryRunAt(t *testing.T, seed uint64, plant *peerPlant, crashLeaving b
 		if crashLeaving {
 			name = "leftdown"
 		}
+		if real {
+			name = "real-" + name
+		}
 		conformWrite(t, fmt.Sprintf("%s-%d", name, seed), c)
 	}
 	if err := c.inv.Check(); err != nil {
@@ -747,6 +777,45 @@ func TestPeeringKeepsAcknowledgedWritesAcrossPrimaries(t *testing.T) {
 			t.Fatalf("seed %d: %v", seed, err)
 		}
 	})
+}
+
+// The same run with every table computed and committed by the real control plane, meta.Control at
+// the leader of a three-replica group, from the replicas' heartbeats, asks, activations and recovered
+// reports, the operator's edits and drains through its calls, and a disk marked down by cutting its
+// node off from the control plane, whose detector marks it down once silent and up once it heartbeats.
+// Seed 0 is the open bug TestAPrimaryMovedWhileUpLeavesAKeptChunkUnfound pins.
+func TestPeeringKeepsAcknowledgedWritesAcrossPrimariesOnTheRealGroup(t *testing.T) {
+	seeds.Run(t, 1, 10, func(seed uint64) {
+		if _, err := runPrimaryRunOn(t, seed, nil, false, 2, true); err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+	})
+}
+
+// Open bug, found by the real group's seed 0: PG 0's primary is moved by an edit while it stays up,
+// its down mark waiting on the detector, with old primary disk 1's versions 0x10000000c to 0x10000000f
+// of chunk {1 7 11} in flight. A replica asks interval 3 as interval 2's table lands, and interval 3's
+// peering keeps 0x10000000c, which every member lists: disks 2 and 3 logged 0x10000000d and
+// 0x10000000e over it, and disk 1, which ordered them, lists it too. So the primary calls the chunk
+// unfound though every disk is kept and each holds acknowledged 0x10000000a. The stand-in run with case 0's down mark left out breaks the same way at seed 49.
+// The fix makes this run pass; until then the test pins the failure.
+func TestAPrimaryMovedWhileUpLeavesAKeptChunkUnfound(t *testing.T) {
+	_, err := runPrimaryRunOn(t, 0, &peerPlant{invHasSource, func(*primaryRun) {}}, false, 2, true)
+	if err == nil || !strings.Contains(err.Error(), invHasSource) {
+		t.Fatalf("seed 0 on the real group: %v", err)
+	}
+}
+
+// Open bug, found by the real group's seeds 33 and 70 once its commits take the group's time, in both
+// variants of the run: disk 5, node 1's disk formatted again and refilled into PG 0 at once, later
+// lists nothing of chunk {1 7 11} yet maps zeros where the kept writes put data, after a stretch in
+// which every member of PG 0 is marked down together. Not diagnosed; the test pins the failure
+// until the fix.
+func TestARealGroupRunLeavesAMemberListingNothingWithoutTheKeptWrites(t *testing.T) {
+	_, err := runPrimaryRunOn(t, 33, &peerPlant{invKeptWritten, func(*primaryRun) {}}, false, 2, true)
+	if err == nil || !strings.Contains(err.Error(), invKeptWritten) {
+		t.Fatalf("seed 33 on the real group: %v", err)
+	}
 }
 
 // The same run with each leaving member crashed as the table removing it is published: restarted, its replay gates
@@ -768,6 +837,15 @@ func TestALeftMemberDownAtItsMovesEndKeepsAcknowledgedWrites(t *testing.T) {
 	if run > 1 && left == 0 {
 		t.Fatalf("none of %d seeds dropped a left PG's gated writes", run)
 	}
+}
+
+// The same run on the real control plane, from seed 1, as TestPeeringKeepsAcknowledgedWritesAcrossPrimariesOnTheRealGroup.
+func TestALeftMemberDownAtItsMovesEndKeepsAcknowledgedWritesOnTheRealGroup(t *testing.T) {
+	seeds.Run(t, 1, 10, func(seed uint64) {
+		if _, err := runPrimaryRunOn(t, seed, nil, true, 2, true); err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+	})
 }
 
 // A disk that never drops the gated writes of a PG it left keeps them past the table naming it in no interval of the PG

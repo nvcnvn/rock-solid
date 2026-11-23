@@ -5933,8 +5933,9 @@ it on its missing list.
   recovery read for disk 3, and disk 1 keeps the chunk listed rather than taking disk 4's empty
   image over 2.1 (`TestADiskFormattedAgainAnswersNoRecoveryReadForItsOldID`; the primary-change
   run's seed 34 found it).
-- A second device reporting a log ID that is already up (a cloned drive) is refused, and the disk
-  that reported it first keeps its ID.
+- A log ID reported on another device than its disk's, up or down (a cloned drive), is refused,
+  and the disk that reported it first keeps its ID; a down disk reported from another node on its
+  own device has moved, and keeps its ID (`TestDisksAreKnownByTheirLogIDs`).
 - Before the primary activates, each member persists its missing list: for each chunk it lacks or
   holds a dropped version of, the kept version it must get. With one member's acknowledgments of
   its list lost, the primary reports no activation and answers no held write until one arrives
@@ -6381,6 +6382,8 @@ the head of [Peering and read leases](#peering-and-read-leases).
   up to 4% slow and the run's steps of up to 10 ms allowed three times over: 138 ms against a 100 ms
   `rate_gap`. The lease clock counterexamples are planted here rather than in a cluster run: the run
   reaches every clock trace, 500 seeds in 0.3 s.
+- The cloned-disk run (`TestAClonedDiskIsRefused`, 300) on the real control-plane group, under
+  [Control-plane placement faults](#control-plane-placement-faults).
 - The placement run (`TestPlacementKeepsItsRules`, 1,000) under [Placement
   computation](#placement-computation) checks each pool's figures after every table whose member
   slots on the pool's disks sum to `pg_count` × width, by the rules of
@@ -7572,11 +7575,11 @@ A daemon crash in the middle of a reuse window, and a write that crosses from a 
 
 ## Control-plane placement faults
 
-Phase 3's placement seeds run unchanged against the real group in place of the stand-in, and pass the same invariants. With them, the [placement faults](#placement-faults-and-invariants) phase 3 leaves open, beside P7 and the split report rule, which its row covers:
+Phase 3's placement seeds run unchanged against the real group in place of the stand-in, and pass the same invariants. A run's authority (`internal/chunkstore`, `control_plane_test.go`) either computes each table with `Next`, the stand-in, or has `meta.Control` at the leader of a real three-replica group commit it (`ctlgroup_test.go`, in `chunkstore_test`, since `meta` imports `chunkstore`). The real one learns each disk from its node's heartbeat, which the replica's heartbeat to the control plane's node stands for; takes asks, activations and recovered reports through `Ask` and `Report`, edits and balance moves as step inputs, and drains through `Drain`; and marks disks only by its own detector, so the run's down mark becomes a cut between the disk's node and the control plane's node, marked down once silent for `node_down_after` and up at its first heartbeat after the heal. It steps on each ask or activation, each lever the run pulls, and each second of its clock.
 
-- P20 while [Space grants](#space-grants) are out and a refill after a disk failure moves members onto the fullest disks;
-- P23 end to end, from the leader's record of when each PG last copied;
-- a seeded run that clones a disk onto a second device, the one fault that reaches "no log ID is up under two disk IDs".
+- On the real group: the primary-change run (`TestPeeringKeepsAcknowledgedWritesAcrossPrimariesOnTheRealGroup`) and its leaving-member variant (`TestALeftMemberDownAtItsMovesEndKeepsAcknowledgedWritesOnTheRealGroup`), 10 seeds each in `go test` and 120 in `scripts/seeds.sh`, from seed 1, about 1.2 s a seed against the stand-in's 0.35 s. Seed 0 is an open bug, pinned by `TestAPrimaryMovedWhileUpLeavesAKeptChunkUnfound`, and the only one of the first 121 to break. A primary moved by an edit while it stays up, its down mark waiting on the detector, leaves a kept version every member lists, so the new primary calls the chunk unfound with every disk kept; the stand-in run reaches it too once its primary moves keep the old primary up (seed 49). The fault, read, write-limit, detector, give-up and P7 runs still use the stand-in.
+- The cloned disk (`TestAClonedDiskIsRefused`, 300 in `scripts/seeds.sh`): clients write to every PG of four disks on the real group while, at a random time 1 to 5 s in, a node's heartbeats name another node's member disk's log on its second device. The control plane refuses it each time (`ErrLogRefused`), the run fails unless it does, and it checks "no disk ID names two log IDs, and no log ID is up under two disk IDs" on the committed record after every step. A record that takes the clone as a new disk breaks it at seed 0 (`TestPlantedCloneJoinsBreaksTheDiskIDs`).
+- Open: P20 while [Space grants](#space-grants) are out and a refill after a disk failure moves members onto the fullest disks; P23 end to end, from the leader's record of when each PG last copied.
 
 ## Operator's disk exits
 
