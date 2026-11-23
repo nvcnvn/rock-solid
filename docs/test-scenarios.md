@@ -3390,6 +3390,7 @@ nodes without finishing.
 | `deep-image` | 3 | `ci-image` with the table after the format. Too large for `ci`, and not yet run |
 | `ci-image-restart` | 3 | `ci-image`'s move alone, then two faults, a restart of any node and a format, with a chunk counter of 1 to fit 5 minutes. A restart before the peering that drops Y needs replay to leave Y gated (`neg-map-on-replay`); one after it needs the entry's image flag (`neg-ignore-image-flag`), and replay to settle Y away at the decision's entry once the primary decides again (`neg-replay-forgets-drops`, which needs a spare table). With `Spare` 0 and no table after the move, this plan cannot reach that shape, so only `deep-image-restart`, whose plan has tables after it, checks the correct rule there |
 | `deep-image-restart-move` | 3 | `ci-image-restart` with a counter of 2. Too large for `ci`, and not yet run |
+| `ci-recovery-dropped` | 3 | PG 1 and its chunk alone, two whole writes to its one block, the second once the first is acknowledged, and node 2 restarted once: disk 2 down and back, the primary moved to it. Disk 2, recovered under Y, which disk 3 lacks, restarts and leads the next interval, whose peering drops Y and the copy with it; it takes no image and recovers X from disk 3, which `neg-image-over-dropped-recovery` breaks |
 | `deep-image-restart` | 3 | `ci-image`'s whole plan with two faults, a restart of the primary's node and the format of the other member's, and a seventh table. Too large for `ci` |
 | `deep-replay-drops` | 3 | `neg-replay-forgets-drops`' plan and constants with folds: the move, the primary's restart after the decision that dropped Y, its next interval in a spare table, then the other member's format. Too large for `ci`, and not yet run |
 | `ci-bounce` | 3 | PG 2 and its chunk alone, two partial writes, a format: a move that removes disk 3, then the primary's disk marked down and up with Y pending, so the other member is primary for an interval, then the other member's disk formatted, with no table after it and a chunk counter of 1 to fit 5 minutes. The bounced primary is X's source only if it left Y gated (`neg-map-on-demote`) |
@@ -3505,7 +3506,12 @@ run in `heavy-leases`; the variants that need one run on it alone.
 - **Writes.** A chunk's writes are each merged on the newest version the primary holds. Recovery
   copies a kept version's history to a member that lists it, under the old version numbers, and
   keeps the member's own writes of the current interval on top, as the real recovery write leaves
-  out the blocks they cover. The source is an up member that lists nothing, or the primary when it
+  out the blocks they cover. It records the version the real write is logged under, the newest the
+  primary ordered, which the member has logged, as it logs a chunk's versions in the order they were
+  ordered and refuses the recovery after a failed one. The copied history goes once a peering drops
+  that version or a later activated decision keeps a version below it, as the store's copy goes with
+  it, and a primary whose last recovery's version is above the kept one takes no image
+  (`neg-image-over-dropped-recovery`). The source is an up member that lists nothing, or the primary when it
   lists the chunk only from the current peering and holds the kept version, as the replica primary
   takes one whose index maps the kept image; the model tells no mapped version from a logged one
   and reads only the source's versions up to the kept one, so it also takes a primary that mapped a
@@ -3753,6 +3759,7 @@ under fairness, as `heavy-peering` does, on the restart plan alone, and those fo
 | A primary forgets its image when its disk goes down (`neg-forget-image-down`) | 18 | `deep-bounce`'s plan: listed for its dropped Y, the primary is down for the other member's interval, and back it calls X unfound once that member's disk goes |
 | Replay ignores the entry's image flag (`neg-ignore-image-flag`) | 18 | `ci-image-restart`'s plan: the primary restarts after the decision that dropped Y and forgets its image, and the other member's disk goes |
 | Replay maps what a decision entry dropped (`neg-replay-forgets-drops`) | 18 | `ci-image-restart`'s move with the restart aimed at the primary and the format at the other member, and a spare table: the primary restarts after the decision that dropped Y and maps Y, so the decision of its next interval keeps no image, and the other member's disk goes before recovery |
+| A primary takes its copy for its image though its last recovery's version is dropped (`neg-image-over-dropped-recovery`) | 14 | PG 1 and its chunk alone, `DownBackMoved` with node 2 restarted once: disk 2, back and listing the chunk, is recovered under Y, which disk 3 lacks; restarted and made primary, its peering keeps X, drops Y and the copied X with it, and takes its copy for its image, from which it recovers its own listing and serves no X. 92 s at 4 workers |
 | A give-up of a chunk that is not unfound, in any activated interval (`neg-give-up-found`) | 23 | 3 nodes: W1 acknowledged on disks 2 and 3, then the chunk given up, so both drop what they can serve. 1 s at 4 workers |
 | A give-up while a candidate can return (`neg-give-up-candidate`) | 23 | `ci-giveup-stopped`'s first table and one write: both members down and refilled in one table, peering reaches one of them, so W1 is unfound on nodes 1 and 4, and given up while disks 2 and 3, down, can serve it. 1 s at 4 workers |
 | A give-up of an interval that has not activated though its peering can reach every interval it needs (`neg-give-up-not-stopped`) | 23 | 3 nodes and one write: up disk 3 replaced by node 1, and the PG given up while disks 2 and 3 hold W1. 1 s at 4 workers |
@@ -4205,8 +4212,8 @@ change model's `ci` runs under the heavy-run lock, which keeps other TLC jobs of
 other 4-worker TLC jobs, but the voter replacement model's two-plans rows, which ran with 1 worker beside one
 4-worker TLC job, where the model's other `ci` configurations took about three times their 4-worker
 time. Constants are in each configuration's first line and in its model's section. The epoch change
-model's `ci` rows are one run on the spec with pool splits, but `ci-moves` and `ci-moves-faults`, from a
-run of the two alone. A configuration cut to fit keeps
+model's `ci` rows are one run on the spec whose recovery needs its target to have logged the version it
+is logged under. A configuration cut to fit keeps
 its full size in a `deep` twin, as the configuration table says. Its `deep` and `heavy` rows ran on the spec before the acknowledgement became a step of its own
 (`Answer`) and before the keep rule left out members torn above a version; they are stale until the
 next milestone's run, which is also the twins' first.
@@ -4226,57 +4233,58 @@ next milestone's run, which is also the twins' first.
 | Purge | `ci-write` | 1 inode of 7 bytes, 2 nodes, writes at 2 and 6, truncates to 1, 5 or 8, 2 crashes | 38 | 797,082 | 11 s |
 | Purge | `ci-extend` | 1 inode of 3 bytes, 2 nodes, writes at 4 and 6, truncates to 2 or 8, 2 crashes | 39 | 1,145,014 | 13 s |
 | Purge | `ci-orphan` | 1 inode of 3 bytes, 2 nodes, writes at 5, an unlink, a fence, an owner failover, a crash | 30 | 35,516 | 2 s |
-| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 32 | 1,130,517 | 208 s |
-| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 27 | 1,225,541 | 258 s |
-| Epoch change | `ci-restarts-moved` | [Epoch change model](#epoch-change-model) | 29 | 265,548 | 66 s |
-| Epoch change | `ci-edits` | [Epoch change model](#epoch-change-model) | 29 | 839,530 | 147 s |
+| Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 32 | 1,209,415 | 288 s |
+| Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 27 | 1,227,241 | 348 s |
+| Epoch change | `ci-restarts-moved` | [Epoch change model](#epoch-change-model) | 29 | 287,256 | 108 s |
+| Epoch change | `ci-edits` | [Epoch change model](#epoch-change-model) | 29 | 1,103,524 | 228 s |
 | Epoch change | `ci-tears` | [Epoch change model](#epoch-change-model) | 25 | 170,384 | 53 s |
-| Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 84 | 1,414,913 | 133 s |
-| Epoch change | `ci-hide` | [Epoch change model](#epoch-change-model) | 76 | 234,832 | 25 s |
-| Epoch change | `ci-hide-clocks` | [Epoch change model](#epoch-change-model) | 83 | 1,741,366 | 181 s |
-| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 32 | 850,973 | 171 s |
-| Epoch change | `ci-moves-faults` | [Epoch change model](#epoch-change-model) | 32 | 539,910 | 114 s |
-| Epoch change | `ci-stays` | [Epoch change model](#epoch-change-model) | 27 | 116,279 | 37 s |
-| Epoch change | `ci-stays-as-primary` | [Epoch change model](#epoch-change-model) | 27 | 365,012 | 122 s |
-| Epoch change | `ci-stays-new` | [Epoch change model](#epoch-change-model) | 27 | 485,798 | 142 s |
-| Epoch change | `ci-stays-stale` | [Epoch change model](#epoch-change-model) | 31 | 410,814 | 65 s |
-| Epoch change | `ci-stays-gone` | [Epoch change model](#epoch-change-model) | 28 | 63,948 | 7 s |
-| Epoch change | `ci-late-ask` | [Epoch change model](#epoch-change-model) | 27 | 572,342 | 90 s |
-| Epoch change | `ci-gates` | [Epoch change model](#epoch-change-model) | 26 | 6,030 | 165 s |
-| Epoch change | `ci-gates-left` | [Epoch change model](#epoch-change-model) | 25 | 46,551 | 164 s |
-| Epoch change | `ci-refills` | [Epoch change model](#epoch-change-model) | 29 | 411,973 | 58 s |
-| Epoch change | `ci-refills-down` | [Epoch change model](#epoch-change-model) | 38 | 1,551,495 | 176 s |
-| Epoch change | `ci-refills-down-restart` | [Epoch change model](#epoch-change-model) | 30 | 451,603 | 62 s |
-| Epoch change | `ci-refills-down-restart-second` | [Epoch change model](#epoch-change-model) | 30 | 451,603 | 61 s |
-| Epoch change | `ci-refills-stay` | [Epoch change model](#epoch-change-model) | 32 | 1,662,065 | 242 s |
-| Epoch change | `ci-refills-stay-node1` | [Epoch change model](#epoch-change-model) | 31 | 1,431,909 | 210 s |
-| Epoch change | `ci-refills-primary` | [Epoch change model](#epoch-change-model) | 31 | 654,747 | 94 s |
-| Epoch change | `ci-refills-back` | [Epoch change model](#epoch-change-model) | 34 | 1,116,045 | 154 s |
-| Epoch change | `ci-refills-two` | [Epoch change model](#epoch-change-model) | 30 | 153,394 | 26 s |
-| Epoch change | `ci-refills-two-second` | [Epoch change model](#epoch-change-model) | 30 | 153,394 | 24 s |
-| Epoch change | `ci-refills-together` | [Epoch change model](#epoch-change-model) | 26 | 58,123 | 11 s |
-| Epoch change | `ci-giveup-stopped` | [Epoch change model](#epoch-change-model) | 30 | 559,285 | 84 s |
-| Epoch change | `ci-giveup-two-chunks` | [Epoch change model](#epoch-change-model) | 30 | 612,816 | 108 s |
-| Epoch change | `ci-giveup-removed` | [Epoch change model](#epoch-change-model) | 28 | 1,074,987 | 126 s |
-| Epoch change | `ci-split` | [Epoch change model](#epoch-change-model) | 27 | 600,750 | 121 s |
-| Epoch change | `ci-split-report` | [Epoch change model](#epoch-change-model) | 24 | 320,578 | 50 s |
-| Epoch change | `ci-image` | [Epoch change model](#epoch-change-model) | 35 | 1,503,970 | 182 s |
-| Epoch change | `ci-image-restart` | [Epoch change model](#epoch-change-model) | 31 | 1,100,199 | 146 s |
-| Epoch change | `ci-bounce` | [Epoch change model](#epoch-change-model) | 35 | 1,128,808 | 139 s |
-| Epoch change | `ci-sources` | [Epoch change model](#epoch-change-model) | 26 | 433,782 | 71 s |
-| Epoch change | `ci-sources-move` | [Epoch change model](#epoch-change-model) | 28 | 161,037 | 29 s |
-| Epoch change | `ci-sources-lister` | [Epoch change model](#epoch-change-model) | 34 | 121,697 | 22 s |
-| Epoch change | `ci-sources-lister-one` | [Epoch change model](#epoch-change-model) | 34 | 121,975 | 23 s |
-| Epoch change | `ci-held` | [Epoch change model](#epoch-change-model) | 26 | 117,454 | 21 s |
-| Epoch change | `ci-held-live` | [Epoch change model](#epoch-change-model) | 19 | 1,990 | 15 s |
-| Epoch change | `ci-held-rotated` | [Epoch change model](#epoch-change-model) | 24 | 21,087 | 153 s |
-| Epoch change | `ci-faults` | [Epoch change model](#epoch-change-model) | 26 | 869,096 | 144 s |
-| Epoch change | `ci-faults-more` | [Epoch change model](#epoch-change-model) | 26 | 187,119 | 27 s |
-| Epoch change | `ci-asks` | [Epoch change model](#epoch-change-model) | 23 | 55,868 | 152 s |
-| Epoch change | `ci-answers` | [Epoch change model](#epoch-change-model) | 20 | 13,212 | 145 s |
-| Epoch change | `ci-answers-node2` | [Epoch change model](#epoch-change-model) | 20 | 11,588 | 145 s |
-| Epoch change | `ci-answers-node3` | [Epoch change model](#epoch-change-model) | 20 | 10,920 | 150 s |
-| Epoch change | `ci-answers-move` | [Epoch change model](#epoch-change-model) | 22 | 10,418 | 183 s |
+| Epoch change | `ci-leases` | [Epoch change model](#epoch-change-model) | 84 | 1,414,913 | 140 s |
+| Epoch change | `ci-hide` | [Epoch change model](#epoch-change-model) | 76 | 234,832 | 24 s |
+| Epoch change | `ci-hide-clocks` | [Epoch change model](#epoch-change-model) | 83 | 1,741,366 | 174 s |
+| Epoch change | `ci-moves` | [Epoch change model](#epoch-change-model) | 32 | 895,259 | 258 s |
+| Epoch change | `ci-moves-faults` | [Epoch change model](#epoch-change-model) | 32 | 541,618 | 182 s |
+| Epoch change | `ci-stays` | [Epoch change model](#epoch-change-model) | 27 | 119,751 | 65 s |
+| Epoch change | `ci-stays-as-primary` | [Epoch change model](#epoch-change-model) | 27 | 372,996 | 213 s |
+| Epoch change | `ci-stays-new` | [Epoch change model](#epoch-change-model) | 27 | 486,626 | 249 s |
+| Epoch change | `ci-stays-stale` | [Epoch change model](#epoch-change-model) | 31 | 429,678 | 88 s |
+| Epoch change | `ci-stays-gone` | [Epoch change model](#epoch-change-model) | 28 | 66,188 | 8 s |
+| Epoch change | `ci-late-ask` | [Epoch change model](#epoch-change-model) | 27 | 592,968 | 125 s |
+| Epoch change | `ci-gates` | [Epoch change model](#epoch-change-model) | 26 | 6,030 | 433 s |
+| Epoch change | `ci-gates-left` | [Epoch change model](#epoch-change-model) | 25 | 46,683 | 463 s |
+| Epoch change | `ci-refills` | [Epoch change model](#epoch-change-model) | 29 | 411,973 | 77 s |
+| Epoch change | `ci-refills-down` | [Epoch change model](#epoch-change-model) | 38 | 1,610,087 | 262 s |
+| Epoch change | `ci-refills-down-restart` | [Epoch change model](#epoch-change-model) | 30 | 460,721 | 86 s |
+| Epoch change | `ci-refills-down-restart-second` | [Epoch change model](#epoch-change-model) | 30 | 460,721 | 82 s |
+| Epoch change | `ci-refills-stay` | [Epoch change model](#epoch-change-model) | 32 | 1,678,673 | 326 s |
+| Epoch change | `ci-refills-stay-node1` | [Epoch change model](#epoch-change-model) | 31 | 1,445,205 | 284 s |
+| Epoch change | `ci-refills-primary` | [Epoch change model](#epoch-change-model) | 31 | 666,139 | 148 s |
+| Epoch change | `ci-refills-back` | [Epoch change model](#epoch-change-model) | 34 | 1,149,553 | 224 s |
+| Epoch change | `ci-refills-two` | [Epoch change model](#epoch-change-model) | 30 | 153,394 | 29 s |
+| Epoch change | `ci-refills-two-second` | [Epoch change model](#epoch-change-model) | 30 | 153,394 | 28 s |
+| Epoch change | `ci-refills-together` | [Epoch change model](#epoch-change-model) | 26 | 58,123 | 12 s |
+| Epoch change | `ci-giveup-stopped` | [Epoch change model](#epoch-change-model) | 30 | 559,285 | 83 s |
+| Epoch change | `ci-giveup-two-chunks` | [Epoch change model](#epoch-change-model) | 30 | 612,816 | 122 s |
+| Epoch change | `ci-giveup-removed` | [Epoch change model](#epoch-change-model) | 28 | 1,074,987 | 128 s |
+| Epoch change | `ci-split` | [Epoch change model](#epoch-change-model) | 27 | 600,750 | 175 s |
+| Epoch change | `ci-split-report` | [Epoch change model](#epoch-change-model) | 24 | 329,848 | 80 s |
+| Epoch change | `ci-image` | [Epoch change model](#epoch-change-model) | 35 | 1,555,746 | 235 s |
+| Epoch change | `ci-image-restart` | [Epoch change model](#epoch-change-model) | 31 | 1,211,791 | 247 s |
+| Epoch change | `ci-recovery-dropped` | [Epoch change model](#epoch-change-model) | 34 | 361,424 | 74 s |
+| Epoch change | `ci-bounce` | [Epoch change model](#epoch-change-model) | 35 | 1,252,216 | 197 s |
+| Epoch change | `ci-sources` | [Epoch change model](#epoch-change-model) | 26 | 448,560 | 95 s |
+| Epoch change | `ci-sources-move` | [Epoch change model](#epoch-change-model) | 28 | 167,709 | 49 s |
+| Epoch change | `ci-sources-lister` | [Epoch change model](#epoch-change-model) | 34 | 137,591 | 34 s |
+| Epoch change | `ci-sources-lister-one` | [Epoch change model](#epoch-change-model) | 34 | 138,267 | 36 s |
+| Epoch change | `ci-held` | [Epoch change model](#epoch-change-model) | 26 | 123,906 | 34 s |
+| Epoch change | `ci-held-live` | [Epoch change model](#epoch-change-model) | 19 | 2,017 | 36 s |
+| Epoch change | `ci-held-rotated` | [Epoch change model](#epoch-change-model) | 24 | 22,193 | 491 s |
+| Epoch change | `ci-faults` | [Epoch change model](#epoch-change-model) | 26 | 903,870 | 192 s |
+| Epoch change | `ci-faults-more` | [Epoch change model](#epoch-change-model) | 26 | 189,499 | 39 s |
+| Epoch change | `ci-asks` | [Epoch change model](#epoch-change-model) | 23 | 57,692 | 437 s |
+| Epoch change | `ci-answers` | [Epoch change model](#epoch-change-model) | 20 | 13,474 | 444 s |
+| Epoch change | `ci-answers-node2` | [Epoch change model](#epoch-change-model) | 20 | 11,687 | 382 s |
+| Epoch change | `ci-answers-node3` | [Epoch change model](#epoch-change-model) | 20 | 11,019 | 365 s |
+| Epoch change | `ci-answers-move` | [Epoch change model](#epoch-change-model) | 22 | 10,418 | 500 s |
 | Sessions and fencing | `deep-lease` | `ci-lease` with a 145-unit lease (about 8 ticks), `dead_wait` 182 | 71 | 803,978,256 | 4,904 s |
 | Sessions and fencing | `deep-terms` | `ci-lease` with 3 terms | 50 | 81,717,036 | 415 s |
 | Sessions and fencing | `deep-down` | `ci-fence` with 2 partitions, 1 write in flight per client, 2-tick lease, `node_down_after` 1 tick | 50 | 151,663,068 | 1,676 s |
@@ -4440,7 +4448,7 @@ since no line moves a lease, and so is `NoResurrectedWrite`, since no traced wri
 | `Format` | `Format` | |
 | `Recovered` | `Recover`, taken as `RecoverFrom` | The line binds the source the record names, which a member has from the recovery write, and 0 for no source must meet a listed version of 0. The version is the listed one or one the interval ordered. `tracedata` places a record from after the primary, the target or the source left the interval before the first of those steps, if the primary ordered the write before it, and leaves any other where the line fails. A primary's record of its own copy of a recovery write is a stutter while a member lists the chunk or once one recovered that version, and so is the record of a gated write settled by a later activation of the PG by the same primary, whose entry stays. Either stutter needs the line's node to have decided the record's interval, its version to be that decision's kept one or one of the interval, and its source an up member of the interval, none only at kept version 0. A primary's record of its own copy that lands after it took its own disk's reply for an interval later than the record's and than every one it decided that some primary activated, and before that interval activated, is `recoveredlate`, a stutter once the primary left the interval: the decision of that interval, made or to come, reads the reply and lists the chunk again (discrepancies 23 and 36). A line for a chunk no disk lists fails |
 | `RecoverOrder` | A stutter | The primary ordering a recovery write, target or not: it must lead the interval, activated, with some disk listing the chunk, and every `recovered` or `mayrecover` line needs its order earlier. A primary ordering after it left stays at its record and fails. An order naming a source formatted since goes before that `format` when the source's `RecoverRead` record, the member reading the image for the primary, came before it, as `Recover` takes the read with the write; otherwise it stays, and the `recovered` line after it fails on a source with no node |
-| `Recovering` | `Recover` or a stutter | A store taking a recovery write. A crash before its `Recovered` lets it land (`mayrecover`), as replay maps it |
+| `Recovering` | `Recover` or a stutter | A store taking a recovery write, with the version it is logged under. A crash before its `Recovered` lets it land under that version (`mayrecover`), as replay maps it |
 | `Reported`, `Ask` | `ReportRecovered`, `AskNext`, `CounterOut` or `RestartAsk` | The action's interval is compared to the line's. `tracedata` names an ask `restartask` if its node restarted and has not activated the PG since, which only `RestartAsk` takes |
 | `Lost` | `Lost` | The operator's declaration, recorded by the harness |
 | `MemberFail`, `Fail` | `MemberFail` | The run's plan gives it no fault budget, since no traced run injects a disk fault: a refusal of a version of the member's interval has no step. `tracedata` holds the line until the primary's `Fail` of the chunk, the step that ends the version there, or until the member moves on or the primary crashes |
@@ -6220,6 +6228,13 @@ own ([Testing strategy](design.md#testing-strategy)).
   read failed or its image proved rotten. A planted variant that chooses them at the read (the epoch change model's
   `neg-recovery-covers-at-read`) copies 1.1's block 0 over the acknowledged write
   (`TestRecoveryLeavesOutTheBlocksTheIntervalsWritesCover`).
+- A recovery goes with the version it was logged under. Disk 1, down while X was written, lists it
+  in interval 2 and logs W1 to block 0; W2, to block 0 too, reaches disk 1 but not disk 3, and the
+  recovery after it copies block 1 under W2. Disk 1 restarts and leads interval 3, whose peering
+  keeps W1 and drops W2: disk 1 takes no image of the chunk, recovers it from disk 3 and serves
+  X's block 1; with the image, as `imageOverDroppedRecovery` takes it, it serves zeros
+  (`TestARecoveryDroppedWithItsVersionLeavesTheCopyLacking`, the epoch change model's
+  `neg-image-over-dropped-recovery`).
 - A primary that lacks a chunk's kept version orders a punch of it although its own store holds
   nothing of the chunk, rather than answering it done unsent; a punch of a chunk absent everywhere
   still logs nothing (`TestAPrimaryOrdersAPunchOfAChunkItHoldsNothingOf`).
@@ -7584,7 +7599,7 @@ A daemon crash in the middle of a reuse window, and a write that crosses from a 
 
 Phase 3's placement seeds run unchanged against the real group in place of the stand-in, and pass the same invariants. A run's authority (`internal/chunkstore`, `control_plane_test.go`) either computes each table with `Next`, the stand-in, or has `meta.Control` at the leader of a real three-replica group commit it (`ctlgroup_test.go`, in `chunkstore_test`, since `meta` imports `chunkstore`). The real one learns each disk from its node's heartbeat, which the replica's heartbeat to the control plane's node stands for; takes asks, activations and recovered reports through `Ask` and `Report`, edits and balance moves as step inputs, and drains through `Drain`; and marks disks only by its own detector, so the run's down mark becomes a cut between the disk's node and the control plane's node, marked down once silent for `node_down_after` and up at its first heartbeat after the heal. It steps on each ask or activation, each lever the run pulls, and each second of its clock.
 
-- On the real group: the primary-change run (`TestPeeringKeepsAcknowledgedWritesAcrossPrimariesOnTheRealGroup`) and its leaving-member variant (`TestALeftMemberDownAtItsMovesEndKeepsAcknowledgedWritesOnTheRealGroup`), 10 seeds each in `go test` and 120 in `scripts/seeds.sh`, from seed 0, about 1.2 s a seed against the stand-in's 0.35 s. The real control plane's down mark waits on its detector, so an edit can move a primary while it stays up, and the old primary can restart holding part of a version its members hold whole, and has no veto over it (the keep rule's last row in [Peering and read leases](#peering-and-read-leases), `TestAMemberHoldingAVersionInPartDoesNotVetoIt`). The fault, read, write-limit, detector, give-up and P7 runs still use the stand-in.
+- On the real group: the primary-change run (`TestPeeringKeepsAcknowledgedWritesAcrossPrimariesOnTheRealGroup`) and its leaving-member variant (`TestALeftMemberDownAtItsMovesEndKeepsAcknowledgedWritesOnTheRealGroup`), 10 seeds each in `go test` and 120 in `scripts/seeds.sh`, from seed 0, about 1.2 s a seed against the stand-in's 0.35 s. The real control plane's down mark waits on its detector, so an edit can move a primary while it stays up, and the old primary can restart holding part of a version its members hold whole, and has no veto over it (the keep rule's last row in [Peering and read leases](#peering-and-read-leases), `TestAMemberHoldingAVersionInPartDoesNotVetoIt`). In seeds 33 and 70 of both runs a disk formatted again and refilled recovers a chunk under a version that every member's crash leaves unacknowledged, then leads the next interval, which drops that version: the disk takes no image of the chunk, which would serve zeros over acknowledged bytes (`TestARealGroupRecoveryDroppedWithItsVersion`). The fault, read, write-limit, detector, give-up and P7 runs still use the stand-in.
 - The cloned disk (`TestAClonedDiskIsRefused`, 300 in `scripts/seeds.sh`): clients write to every PG of four disks on the real group while, at a random time 1 to 5 s in, a node's heartbeats name another node's member disk's log on its second device. The control plane refuses it each time (`ErrLogRefused`), the run fails unless it does, and it checks "no disk ID names two log IDs, and no log ID is up under two disk IDs" on the committed record after every step. A record that takes the clone as a new disk breaks it at seed 0 (`TestPlantedCloneJoinsBreaksTheDiskIDs`).
 - Open: P20 while [Space grants](#space-grants) are out and a refill after a disk failure moves members onto the fullest disks; P23 end to end, from the leader's record of when each PG last copied.
 

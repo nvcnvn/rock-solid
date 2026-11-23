@@ -267,8 +267,8 @@ func TestMergeCheckRebuilds(t *testing.T) {
 	}
 }
 
-// A checkpoint holding a chunk entry one byte short, the size before the image flag, fails the
-// open that loads it as a malformed run does, before replay reads the entry.
+// A checkpoint holding a chunk entry one byte short fails the open that loads it as a malformed
+// run does, before replay reads the entry.
 func TestAShortChunkEntryInACheckpointFailsTheOpen(t *testing.T) {
 	cfg := testConfig()
 	cfg.Log.MaxReplayBytes = 16 * core.BlockSize

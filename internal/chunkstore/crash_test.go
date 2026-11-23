@@ -98,7 +98,7 @@ func (m *storeModel) Apply(r writtenRecord) {
 				}
 			}
 			ch := m.chunks[e.Chunk]
-			ch.Version, ch.Whole = e.Version, e.Version
+			ch.Version, ch.Whole, ch.Recovered = e.Version, e.Version, e.Version
 			if ch.ListedIn <= e.Interval {
 				ch.Listed, ch.ListedIn = 0, 0
 			}

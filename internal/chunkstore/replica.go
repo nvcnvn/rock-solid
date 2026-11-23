@@ -448,18 +448,20 @@ type replicaPlants struct {
 	// forgetImage has a decision forget that the lead's last one found the primary's image at the
 	// version both keep; forgetImageDown drops the image once an interval has the disk a member
 	// not up; ignoreImageFlag has a restarted disk carry no image until it decides again; mapOnDemote
-	// maps a demoted primary's gated versions as a member's.
+	// maps a demoted primary's gated versions as a member's; imageOverDroppedRecovery takes the
+	// primary's copy for its image though the version its last recovery was logged under is dropped.
 	listerVetoes   bool
 	tornVetoes     bool
 	keepPastMember bool
 	writeOnUnfound bool
 	neverUnfound   bool
 	// skipPastGiveUp has peering of a PG given up skip every past interval, not only those up to the give-up.
-	skipPastGiveUp  bool
-	forgetImage     bool
-	forgetImageDown bool
-	ignoreImageFlag bool
-	mapOnDemote     bool
+	skipPastGiveUp           bool
+	forgetImage              bool
+	forgetImageDown          bool
+	ignoreImageFlag          bool
+	mapOnDemote              bool
+	imageOverDroppedRecovery bool
 	// fenceOnArrival refuses an older incarnation's or fenced session's write when it reaches the
 	// primary, not when the store orders it; reorderAfterOther keeps a lead's term across intervals
 	// another primary led, so its held writes are ordered again; memberNoFence has a member take a
@@ -1337,7 +1339,7 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		return
 	}
 	if recover {
-		out.note(trace.OutRecovering, u.Chunk.Hash(), uint64(u.Source), uint64(u.PG.Interval), 0, 0)
+		out.note(trace.OutRecovering, u.Chunk.Hash(), uint64(u.Source), uint64(u.PG.Interval), u.Version, 0)
 	} else {
 		out.note(trace.OutAccepted, u.Chunk.Hash(), u.Version, 0, 0, 0)
 	}
@@ -1522,6 +1524,8 @@ func (r *Replica) ordered(ctx *core.Context, o Reply, out *ReplicaOutput) {
 	v.u.Version, v.buf, v.ordered = o.Version, o.Buf, true
 	if !v.recover {
 		out.note(trace.OutOrder, uint64(v.msgID), v.u.Chunk.Hash(), o.Version, 0, 0)
+	} else if r.recoveryTarget(v, r.cfg.Disk) {
+		out.note(trace.OutRecovering, v.u.Chunk.Hash(), uint64(v.u.Source), uint64(v.interval), o.Version, 0)
 	}
 	l := r.lead(v.u.PG.PG)
 	if l < 0 || r.leads[l].asking && !r.plant.orderPastFailed || r.leads[l].interval != v.interval {

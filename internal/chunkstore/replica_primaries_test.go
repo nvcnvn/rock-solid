@@ -793,15 +793,18 @@ func TestPeeringKeepsAcknowledgedWritesAcrossPrimariesOnTheRealGroup(t *testing.
 	})
 }
 
-// Open bug, found by the real group's seeds 33 and 70 once its commits take the group's time, in both
-// variants of the run: disk 5, node 1's disk formatted again and refilled into PG 0 at once, later
-// lists nothing of chunk {1 7 11} yet maps zeros where the kept writes put data, after a stretch in
-// which every member of PG 0 is marked down together. Not diagnosed; the test pins the failure
-// until the fix.
-func TestARealGroupRunLeavesAMemberListingNothingWithoutTheKeptWrites(t *testing.T) {
-	_, err := runPrimaryRunOn(t, 33, &peerPlant{invKeptWritten, func(*primaryRun) {}}, false, 2, true)
-	if err == nil || !strings.Contains(err.Error(), invKeptWritten) {
-		t.Fatalf("seed 33 on the real group: %v", err)
+// The real group's seeds 33 and 70, in both variants of the run: disk 5, node 1's disk formatted
+// again and refilled into PG 0, recovers chunk {1 7 11} under a version of its interval that every
+// member's crash leaves unacknowledged. The next peering, with disk 5 primary, drops that version and
+// the recovered blocks with it, and must not take what disk 5 still holds for its image
+// (TestARecoveryDroppedWithItsVersionLeavesTheCopyLacking).
+func TestARealGroupRecoveryDroppedWithItsVersion(t *testing.T) {
+	for _, seed := range []uint64{33, 70} {
+		for _, crashLeaving := range []bool{false, true} {
+			if _, err := runPrimaryRunOn(t, seed, nil, crashLeaving, 2, true); err != nil {
+				t.Fatalf("seed %d, crashLeaving %v: %v", seed, crashLeaving, err)
+			}
+		}
 	}
 }
 

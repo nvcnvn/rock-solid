@@ -66,6 +66,7 @@ MaxMembers == 8
 MaxDisk == Cardinality(Node) + MaxFormat
 Disk == 1..MaxDisk
 NoMiss == -1
+NoRcv == [v |-> 0, k |-> 0]
 NoWin == [w |-> FALSE, w1s |-> 0, w1r |-> 0, w1g |-> 0, B |-> 0,
           lg |-> FALSE, a |-> FALSE, as |-> 0, asB |-> 0, ag |-> 0, am |-> Drift,
           ep |-> 0, lastg |-> 0, has |-> FALSE, rn |-> 0]
@@ -98,6 +99,7 @@ VARIABLES
     run,      \* [Node -> Nat]: process incarnation
     rsIv,     \* [Node -> [PG -> Nat]]: the interval a restarted primary may not peer in
     dlog,     \* [Disk -> [Chunk -> SUBSET Nat]]: versions in each disk's log
+    rcv,      \* [Disk -> [Chunk -> [v, k]]]: the version a disk's last recovery of a chunk was logged under, and its interval
     miss,     \* [Disk -> [Chunk -> Int]]: persisted missing list
     persIv,   \* [Disk -> [PG -> Nat]]: the interval whose missing list a disk persisted
     drp,      \* [Disk -> SUBSET [c, v]]: versions a store dropped at a decision its disk persisted
@@ -140,7 +142,7 @@ VARIABLES
     rterm, rlead, fort, fby, xfer, xto
 
 ctlVars == <<tbl, ivs, reqIv, reports, recd, plan, step>>
-nodeVars == <<ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, dlog, miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat, failed>>
+nodeVars == <<ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, dlog, rcv, miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat, failed>>
 priVars == <<pr, pv, pin, known, dec, act>>
 dataVars == <<rm, vers, ackd, wst, sends, dmn, bad, pend, refd, ownw>>
 leaseVars == <<gr, hl, rw>>
@@ -317,6 +319,7 @@ Init ==
     /\ run = [n \in Node |-> 1]
     /\ rsIv = [n \in Node |-> [p \in PG |-> 0]]
     /\ dlog = [d \in Disk |-> [c \in Chunk |-> {}]]
+    /\ rcv = [d \in Disk |-> [c \in Chunk |-> NoRcv]]
     /\ miss = [d \in Disk |-> [c \in Chunk |-> NoMiss]]
     /\ persIv = [d \in Disk |-> [p \in PG |-> IF d \in Node THEN 1 ELSE 0]]
     /\ drp = [d \in Disk |-> {}]
@@ -619,7 +622,7 @@ Lost(d) ==
     /\ dnode[d] # 0
     /\ \A p \in PG : d \in Mem(p, Cur(p)) => St(p, Cur(p), d) = "down"
     /\ dnode' = [dnode EXCEPT ![d] = 0]
-    /\ UNCHANGED <<tbl, ivs, reqIv, reports, recd, plan, ep, ddisk, dhost, fmts, stale, run, rsIv, dlog,
+    /\ UNCHANGED <<tbl, ivs, reqIv, reports, recd, plan, ep, ddisk, dhost, fmts, stale, run, rsIv, dlog, rcv,
                    miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat, failed, priVars, dataVars, leaseVars, clockVars, raftVars>>
 
 LostPlanned ==
@@ -694,6 +697,7 @@ Adopt(n, e) ==
        IN /\ gat' = [gat EXCEPT ![d] = {g \in G \ LeftGated(G, e, d) : g.c \notin W}]
           /\ ldrp' = [ldrp EXCEPT ![d] = {g \in @ \cup LeftGated(G, e, d) : g.c \notin W}]
           /\ dlog' = [dlog EXCEPT ![d] = [c \in Chunk |-> IF c \in W THEN {} ELSE @[c]]]
+          /\ rcv' = [rcv EXCEPT ![d] = [c \in Chunk |-> IF c \in W THEN NoRcv ELSE @[c]]]
           /\ miss' = [miss EXCEPT ![d] = [c \in Chunk |-> IF c \in W THEN NoMiss ELSE @[c]]]
           /\ drp' = [drp EXCEPT ![d] = {g \in @ : g.c \notin W}]
           /\ rdrp' = [rdrp EXCEPT ![d] = {g \in @ : g.c \notin W}]
@@ -761,14 +765,26 @@ LapseFor(J, p, k) ==
 \* drops. Replay gates every version of an interval, mapped or not, so it can
 \* drop more than the live store did, but only on a chunk the disk lists at the
 \* decision, which recovery rewrites: conformance compares this with the
-\* store's map only on chunks the disk does not list.
-Held(d, c) ==
-    dlog[d][c] \ (UNION {y.gone[c] : y \in {x \in dec :
-                      /\ x.n = dnode[d]
-                      /\ x.p = ChunkPG[c]
-                      /\ x.r = run[x.n]
-                      /\ [p |-> x.p, k |-> x.k, r |-> x.r] \in act}}
-                  \cup {g.v : g \in {y \in drp[d] \cup ldrp[d] : y.c = c}})
+\* store's map only on chunks the disk does not list. The versions a recovery
+\* copied, those of intervals before its own, go with the version it was
+\* logged under when that drops, or when a later activated decision keeps a
+\* version below it (Uncopied).
+DropsOf(d, c) ==
+    UNION {y.gone[c] : y \in {x \in dec :
+              /\ x.n = dnode[d]
+              /\ x.p = ChunkPG[c]
+              /\ x.r = run[x.n]
+              /\ [p |-> x.p, k |-> x.k, r |-> x.r] \in act}}
+    \cup {g.v : g \in {y \in drp[d] \cup ldrp[d] : y.c = c}}
+
+RcvDropped(d, c) ==
+    LET r == rcv[d][c]
+    IN \/ r.v \in DropsOf(d, c)
+       \/ \E x \in ActDecs : x.p = ChunkPG[c] /\ x.k > r.k /\ x.kept[c] < r.v
+
+Uncopied(d, c) == IF RcvDropped(d, c) THEN {v \in dlog[d][c] : IvOfV(v) < rcv[d][c].k} ELSE {}
+
+Held(d, c) == dlog[d][c] \ (DropsOf(d, c) \cup Uncopied(d, c))
 
 \* A member's reply to peering, for one chunk: its newest whole version, the
 \* kept version it lists (NoMiss for none) and the newest interval whose
@@ -1014,12 +1030,14 @@ PeerOn(n, p, J, P, U) ==
         \* unless it lists it only for what its image from before settled away.
         \* A primary in T holds part of a version above its log's newest only
         \* after a crash, whose replay leaves that part gated for the decision to
-        \* drop, so T does not bar its image.
+        \* drop, so T does not bar its image. A chunk it recovered under a
+        \* version above K loses the copied versions with that version.
         img == {c \in ChunksOf(p) :
                   /\ \/ miss[own][c] = NoMiss
                      \/ ~Bug("ForgetImage") /\ [c |-> c, v |-> K[c]] \in Image(n, p)
                   /\ \/ Newest(Held(own, c) \ gone[c]) = K[c]
-                     \/ Bug("MergeOnDropped") /\ K[c] \in dlog[own][c] \cup {0}}
+                     \/ Bug("MergeOnDropped") /\ K[c] \in dlog[own][c] \cup {0}
+                  /\ rcv[own][c].v <= K[c] \/ Bug("ImageOverDroppedRecovery")}
         \* Unfound: nothing kept has no up member to recover from.
         unf == {c \in ChunksOf(p) :
                   K[c] # 0 /\ c \notin img /\ \A d \in UpIn(p, k) : lists[d][c] # NoMiss}
@@ -1046,7 +1064,7 @@ PeerOn(n, p, J, P, U) ==
                /\ Activated(n, p, k, K, lists)
                /\ UNCHANGED mrecv
        /\ UNCHANGED <<tbl, ivs, plan, step, reqIv, recd, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv,
-                      dlog, failed, pin, known, rm, vers, sends, dmn, rw, clockVars, raftVars>>
+                      dlog, rcv, failed, pin, known, rm, vers, sends, dmn, rw, clockVars, raftVars>>
 
 Peer(n, p) ==
     /\ PeerOpen(n, p)
@@ -1070,7 +1088,7 @@ Activate(n, p) ==
        /\ UNCHANGED ownw
        /\ Activated(n, p, k, K, lists)
        /\ UNCHANGED <<tbl, ivs, plan, step, reqIv, recd, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv,
-                      dlog, mrecv, failed, pv, pin, known, dec, rm, vers, sends, dmn, bad, leaseVars,
+                      dlog, rcv, mrecv, failed, pv, pin, known, dec, rm, vers, sends, dmn, bad, leaseVars,
                       clockVars, raftVars>>
 
 \* With ActivateBeforeDurable, a member persists its list after activation,
@@ -1089,7 +1107,7 @@ Persist(d) ==
                                    \cup {c \in x.img : d = PrimDisk(x.p, x.k) /\ x.ent[c] # NoMiss}]
        /\ gat' = [gat EXCEPT ![d] = {g \in @ : ChunkPG[g.c] # x.p}]
        /\ mrecv' = [mrecv EXCEPT ![d] = mrecv[d] \ {x}]
-       /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, dlog, failed, priVars,
+       /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, dlog, rcv, failed, priVars,
                       dataVars, leaseVars, clockVars, raftVars>>
 
 \* The disks to try bringing back: the members down or in maintenance whose
@@ -1146,10 +1164,13 @@ GiveUpPlanned ==
 \* interval ordered before it covers, so the member's own writes of the
 \* interval stay on top; the model keeps the source's versions up to the kept
 \* one under their own numbers, which Content reads the same way. Neither
-\* takes a version of its own: the real write is logged under the newest
+\* takes a version of its own: the real write is logged under rv, the newest
 \* version the interval ordered before it, or the kept one, and goes only to
-\* the members that list the chunk, so peering keeps or drops it with that
-\* version. What the read returns never changes, since the source lists
+\* the members that list the chunk, so peering keeps or drops it with rv: rcv
+\* records rv, and the copied versions go when rv drops (Uncopied). A target
+\* takes it only once it logged rv, as its primary sends it a chunk's versions
+\* in order and it refuses the recovery after any failed version of the
+\* interval. What the read returns never changes, since the source lists
 \* nothing and a new interval stops the write, so the model takes the read
 \* with the write and lets "at", the newest version the primary had ordered
 \* when it read, be any since it activated. With RecoveryCoversAtRead, the
@@ -1166,7 +1187,7 @@ GiveUpPlanned ==
 \* clears the list with no read. With RecoveryReadOldDisk, a read for a source
 \* formatted again is answered by its node's new, empty disk, and taken for the
 \* kept version.
-RecoverFrom(n, p, c, d, m) ==
+RecoverFrom(n, p, c, d, m, rv) ==
     LET k == IvAt(n, p)
         K == miss[d][c]
     IN /\ Running(n)
@@ -1178,6 +1199,7 @@ RecoverFrom(n, p, c, d, m) ==
        /\ Running(dnode[d])
        /\ IvAt(dnode[d], p) = k
        /\ K # NoMiss
+       /\ IvOfV(rv) # k \/ rv \in dlog[d][c]
        /\ m \in UpIn(p, k)
        /\ \E at \in {Ver(k, 0)} \cup {v \in Ver(k, 1)..pv[n][c] : IvOfV(v) = k} :
             LET old == Bug("RecoveryReadOldDisk") /\ dnode[m] = 0 /\ dhost[m] # 0
@@ -1191,9 +1213,10 @@ RecoverFrom(n, p, c, d, m) ==
                /\ K = 0 \/ K \in dlog[s][c] \/ old \/ Bug("RecoverNoSource")
                /\ at = Ver(k, 0) \/ Bug("RecoveryCoversAtRead")
                /\ dlog' = [dlog EXCEPT ![d][c] =
-                             {v \in dlog[s][c] : v <= K \/ Bug("RecoverFromListed")
+                             {v \in dlog[s][c] \ Uncopied(s, c) : v <= K \/ Bug("RecoverFromListed")
                                                   \/ (K # 0 /\ s = PrimDisk(p, k) /\ c \in TheDec(n, p, k).img /\ v \in Held(s, c) /\ IvOfV(v) < k)}
                              \cup {v \in dlog[d][c] : IvOfV(v) = k /\ (v <= at \/ ~Bug("RecoveryCoversAtRead"))}]
+       /\ rcv' = [rcv EXCEPT ![d][c] = [v |-> rv, k |-> k]]
        /\ miss' = [miss EXCEPT ![d][c] = NoMiss]
        /\ drp' = [drp EXCEPT ![d] = {g \in @ : g.c # c}]
        /\ rdrp' = [rdrp EXCEPT ![d] = {g \in @ : g.c # c}]
@@ -1205,7 +1228,7 @@ Recover(n, p, c, d) ==
     /\ Running(n)
     /\ Leads(n, p)
     /\ miss[d][c] # NoMiss
-    /\ \E m \in UpIn(p, IvAt(n, p)) : RecoverFrom(n, p, c, d, m)
+    /\ \E m \in UpIn(p, IvAt(n, p)) : RecoverFrom(n, p, c, d, m, pv[n][c])
 
 \* A primary that activated reports, on its next heartbeat, that every member
 \* of its interval but a leaving one is up and lists nothing. The model sends
@@ -1389,7 +1412,7 @@ Order(n, x) ==
                           d \in UpIn(p, k) \ {own}}
        /\ pend' = pend \cup {r}
        /\ ownw' = ownw \cup {r}
-       /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat, failed,
+       /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, rcv, miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat, failed,
                       pr, known, dec, act, ackd, wst, sends, dmn, bad, refd, leaseVars, clockVars, raftVars>>
 
 \* The primary refuses a write it may not order; the client retries.
@@ -1430,7 +1453,7 @@ Deliver(m) ==
                                  \/ Bug("LogPastFailed") /\ [c |-> m.c, v |-> m2.v] \in failed[d]
        /\ dlog' = logs
        /\ bad' = IF IvAt(dnode[d], m.p) > m.iv THEN bad \cup {"late"} ELSE bad
-       /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat, failed,
+       /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, rcv, miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat, failed,
                       priVars, rm, vers, ackd, wst, sends, dmn, pend, refd, ownw, leaseVars, clockVars, raftVars>>
 
 \* The primary's own record of a version it ordered becomes durable, in the run
@@ -1459,7 +1482,7 @@ Refused(m) ==
              /\ refd' = refd \cup out
        /\ pr' = IF r \in pend /\ pr[m.from][m.p].iv = m.iv
                 THEN [pr EXCEPT ![m.from][m.p].ask = TRUE] ELSE pr
-       /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, dlog, miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat,
+       /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, dlog, rcv, miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat,
                       pv, pin, known, dec, act, rm, vers, ackd, wst, sends, dmn, bad, ownw,
                       leaseVars, now, raw, boot, rawR, bootR, slew, runId, frz, suspAt, rstAt,
                       rq, gm, hbm, lastAsk, lastHb, net, arrived, dirty, hs, raftVars>>
@@ -1531,7 +1554,7 @@ OwnFail(n, r) ==
        /\ pend' = pend \ {r}
        /\ ownw' = ownw \ {r}
        /\ pr' = [pr EXCEPT ![n][p].ask = TRUE]
-       /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat, failed,
+       /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, rcv, miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat, failed,
                       pv, pin, known, dec, act, rm, vers, ackd, wst, sends, dmn, bad, refd,
                       leaseVars, now, raw, boot, rawR, bootR, slew, runId, frz, suspAt, rstAt,
                       rq, gm, hbm, lastAsk, lastHb, net, arrived, dirty, hs, raftVars>>
@@ -1845,7 +1868,7 @@ Isolate(n) ==
     /\ "isolate2" \in plan.f
     /\ stale = {}
     /\ stale' = {n}
-    /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, run, rsIv, dlog, miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat, failed,
+    /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, run, rsIv, dlog, rcv, miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat, failed,
                    priVars, dataVars, leaseVars, clockVars, raftVars>>
 
 Taint(n) ==[h \in Node |-> [g \in Node |-> dirty[h][g] \/ h = n \/ g = n]]
@@ -2007,7 +2030,7 @@ Restart(n) ==
                   ELSE [hl[h] EXCEPT ![n].has = @ /\ ~waited]]
     /\ rstAt' = [rstAt EXCEPT ![n] = [r |-> raw[n], b |-> boot[n]]]
     /\ dirty' = Taint(n)
-    /\ UNCHANGED <<tbl, ivs, plan, step, reports, recd, ep, dnode, ddisk, dhost, fmts, stale, dlog, miss, persIv, imf,
+    /\ UNCHANGED <<tbl, ivs, plan, step, reports, recd, ep, dnode, ddisk, dhost, fmts, stale, dlog, rcv, miss, persIv, imf,
                    pv, dec, act, rm, vers, ackd, wst, sends, dmn, bad,
                    now, raw, boot, rawR, bootR, slew, frz, suspAt, rq, gm, hbm,
                    lastAsk, lastHb, net, arrived, hs, rterm, xto>>
@@ -2034,7 +2057,7 @@ Reboot(n) ==
     /\ dirty' = Taint(n)
     /\ frz' = [frz EXCEPT ![n] = "boot"]
     /\ suspAt' = [suspAt EXCEPT ![n] = now]
-    /\ UNCHANGED <<tbl, ivs, plan, step, reports, recd, ep, dnode, ddisk, dhost, fmts, stale, dlog, miss, persIv, imf,
+    /\ UNCHANGED <<tbl, ivs, plan, step, reports, recd, ep, dnode, ddisk, dhost, fmts, stale, dlog, rcv, miss, persIv, imf,
                    pv, dec, act, rm, vers, ackd, wst, sends, dmn, bad,
                    now, slew, rq, gm, hbm, lastAsk, lastHb, net, arrived,
                    hs, rterm, xto>>
@@ -2060,6 +2083,7 @@ Format(n) ==
     /\ IF Bug("KeepDiskId")
        THEN LET d == ddisk[n] IN
             /\ dlog' = [dlog EXCEPT ![d] = [c \in Chunk |-> {}]]
+            /\ rcv' = [rcv EXCEPT ![d] = [c \in Chunk |-> NoRcv]]
             /\ miss' = [miss EXCEPT ![d] = [c \in Chunk |-> NoMiss]]
             /\ persIv' = [persIv EXCEPT ![d] = [p \in PG |-> 0]]
             /\ drp' = [drp EXCEPT ![d] = {}]
@@ -2072,7 +2096,7 @@ Format(n) ==
             /\ dnode' = [dnode EXCEPT ![x] = n, ![ddisk[n]] = 0]
             /\ ddisk' = [ddisk EXCEPT ![n] = x]
             /\ dhost' = [dhost EXCEPT ![x] = n]
-            /\ UNCHANGED <<dlog, miss, persIv, drp, rdrp, ldrp, imf, mrecv>>
+            /\ UNCHANGED <<dlog, rcv, miss, persIv, drp, rdrp, ldrp, imf, mrecv>>
     /\ UNCHANGED <<ctlVars, ep, stale, run, rsIv, gat, priVars, dataVars, leaseVars, now, raw, boot, rawR, bootR,
                    slew, runId, frz, suspAt, rstAt, rq, gm, hbm, lastAsk, lastHb, net, arrived,
                    dirty, hs, raftVars>>
@@ -2367,7 +2391,7 @@ RemovalKeepsCopies ==
 \* though a member holds them all.
 HoldsAcked(d, c) ==
     LET want == Content(c, UNION {Chain(c, v) : v \in AckedV(c)})
-        got == Content(c, dlog[d][c])
+        got == Content(c, dlog[d][c] \ Uncopied(d, c))
     IN /\ dnode[d] # 0
        /\ \A b \in 1..Blocks[c] : got[b] >= want[b]
 
@@ -2437,7 +2461,7 @@ Dropped(c) ==
 \* maps, never a version its store keeps gated. A read of a listed chunk is
 \* refused.
 Served(n, own, c) ==
-    dlog[own][c] \ {r.v : r \in {x \in pend \cup (IF Bug("ServeRefused") THEN {} ELSE refd) : x.n = n /\ x.c = c}}
+    (dlog[own][c] \ Uncopied(own, c)) \ {r.v : r \in {x \in pend \cup (IF Bug("ServeRefused") THEN {} ELSE refd) : x.n = n /\ x.c = c}}
 
 ReadsAcked ==
     \A n \in Node, p \in PG : Reading(n, p) =>
@@ -2796,6 +2820,14 @@ RestartPlans == {Reformatted, ReplicaThenMaint, Restarted, DownBackMoved}
 \* ci-restarts splits them, each under the 300 s budget.
 RestartPlansMoved == {DownBackMoved}
 RestartPlansStill == RestartPlans \ RestartPlansMoved
+\* DownBackMoved with node 2 restarted once and two whole writes to chunk 1's
+\* one block, the second once the first is acknowledged: disk 2, recovered
+\* under a version of its interval that disk 3 lacks, restarts and becomes
+\* primary, whose peering drops that version and the copy with it.
+DroppedRecoveryPlans ==
+    {[DownBackMoved EXCEPT !.f = {"restart", "aimed"},
+                           !.w = <<[c |-> 1, blk |-> 1, whole |-> TRUE, inc |-> 0, re |-> 0, after |-> 0],
+                                   [c |-> 1, blk |-> 1, whole |-> TRUE, inc |-> 0, re |-> 0, after |-> 1]>>]}
 \* The liveness variant that breaks renewals runs the restart plan alone.
 RestartedPlans == {Restarted}
 \* ci-gates-left: PG 2's replica 3 moved to node 1 and marked down in one table,

@@ -32,7 +32,7 @@ const (
 	KeySize        = frozenKeySize + 2
 	recordSize     = 4 + 8
 	extentSize     = 8 + 8 + 2 + 8
-	chunkValueSize = 8 + 8 + 8 + 8 + 4 + 1
+	chunkValueSize = 8 + 8 + 8 + 8 + 4 + 8 + 1
 	decisionSize   = 4 + 4 + 1 + 4
 	// RecordPool is the pool ID the index keeps record counts under; no chunk may use it.
 	RecordPool core.PoolID = math.MaxUint32
@@ -144,13 +144,16 @@ func reserved(pool core.PoolID) bool { return pool == RecordPool || pool == Deci
 // the peering of interval ListedIn put the chunk on the missing list for, ListedIn 0 when it is
 // not listed, and whether that listing carries the image flag: the disk, as the PG's primary,
 // holds Listed as its image and lists the chunk only for versions of its own the peering dropped.
+// Recovered is the version the chunk's last recovery was logged under: the disk holds the chunk
+// whole only from it up, since the blocks it copied go with that version if a peering drops it.
 type Chunk struct {
-	Version  uint64
-	Epoch    uint64
-	Whole    uint64
-	Listed   uint64
-	ListedIn uint32
-	Image    bool
+	Version   uint64
+	Epoch     uint64
+	Whole     uint64
+	Listed    uint64
+	ListedIn  uint32
+	Recovered uint64
+	Image     bool
 }
 
 // after reports whether ch holds or lists anything later than interval, which a give-up of interval leaves alone.
@@ -380,7 +383,7 @@ func (x *Index) decide(e *disklog.Entry) {
 // thing that removes one.
 func (x *Index) recovered(e *disklog.Entry) {
 	ch, _ := x.Chunk(e.Pool, e.Chunk)
-	ch.Version, ch.Whole = e.Version, e.Version
+	ch.Version, ch.Whole, ch.Recovered = e.Version, e.Version, e.Version
 	if ch.ListedIn <= e.Interval {
 		ch.Listed, ch.ListedIn, ch.Image = 0, 0, false
 	}
@@ -628,6 +631,7 @@ func appendChunk(dst []byte, ch Chunk) []byte {
 	dst = binary.LittleEndian.AppendUint64(dst, ch.Whole)
 	dst = binary.LittleEndian.AppendUint64(dst, ch.Listed)
 	dst = binary.LittleEndian.AppendUint32(dst, ch.ListedIn)
+	dst = binary.LittleEndian.AppendUint64(dst, ch.Recovered)
 	if ch.Image {
 		return append(dst, 1)
 	}
@@ -635,11 +639,11 @@ func appendChunk(dst []byte, ch Chunk) []byte {
 }
 
 func decodeChunk(v []byte) (Chunk, bool) {
-	if len(v) != chunkValueSize || v[36] > 1 {
+	if len(v) != chunkValueSize || v[44] > 1 {
 		return Chunk{}, false
 	}
 	return Chunk{Version: binary.LittleEndian.Uint64(v), Epoch: binary.LittleEndian.Uint64(v[8:]), Whole: binary.LittleEndian.Uint64(v[16:]),
-		Listed: binary.LittleEndian.Uint64(v[24:]), ListedIn: binary.LittleEndian.Uint32(v[32:]), Image: v[36] == 1}, true
+		Listed: binary.LittleEndian.Uint64(v[24:]), ListedIn: binary.LittleEndian.Uint32(v[32:]), Recovered: binary.LittleEndian.Uint64(v[36:]), Image: v[44] == 1}, true
 }
 
 func (x *Index) recordKey(header core.LBA) []byte {

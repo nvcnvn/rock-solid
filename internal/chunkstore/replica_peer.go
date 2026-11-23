@@ -349,8 +349,12 @@ func (r *Replica) findImage(l *lead, pr *peering) {
 	for j := range pr.kept {
 		k := &pr.kept[j]
 		v, ok := r.imaged(l.pg, k.chunk)
-		k.image = !slices.ContainsFunc(own, func(c ChunkPeer) bool { return c.Chunk == k.chunk && c.Listed }) ||
-			!r.plant.forgetImage && ok && v == k.kept
+		// Recovered compares by number though settling drops by interval: a recovery version dropped
+		// below a kept one of a later interval leaves the index at a version other than the kept one,
+		// which lacks() catches.
+		x, _ := r.st.Index().Chunk(r.st.cfg.Pool, k.chunk)
+		k.image = (!slices.ContainsFunc(own, func(c ChunkPeer) bool { return c.Chunk == k.chunk && c.Listed }) ||
+			!r.plant.forgetImage && ok && v == k.kept) && (x.Recovered <= k.kept || r.plant.imageOverDroppedRecovery)
 	}
 	unsettled := r.Unsettled(l.pg, nil)
 	m := r.image(l.pg, l.interval)

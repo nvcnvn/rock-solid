@@ -56,6 +56,8 @@ type gen struct {
 	blocks  []int
 	entries map[uint64]*entry
 	initial map[uint64]entry
+	// nodes counts the replicas' nodes: the client, which records the tables, is numbered after them,
+	// though a run may add a node of its own later, such as the real control plane's.
 	nodes   int
 	writes  []write
 	wid     map[uint64]int
@@ -96,8 +98,8 @@ type gen struct {
 	orderAt  map[[2]uint64]int
 	served   map[[3]uint64]bool
 	nodeDisk map[int]uint64
-	// recovering holds each node's recovery writes its store took and has not reported: chunk, spec source, interval.
-	recovering map[int][][3]uint64
+	// recovering holds each node's recovery writes its store took and has not reported: chunk, spec source, interval, version.
+	recovering map[int][][4]uint64
 }
 
 func ver(v uint64) string { return strconv.FormatUint((v>>32)*verBase+v&(1<<32-1), 10) }
@@ -161,7 +163,7 @@ func (g *gen) crash(n int) {
 	for _, x := range g.recovering[n] {
 		f := g.chunkField(x[0])
 		if x[2] == g.activated[f] {
-			g.lineAt(g.recoveredAt(f, x[0], x[2], n, x[1]), `k |-> "mayrecover", n |-> %d, l |-> %d, c |-> %d, s |-> %d, iv |-> %d`, n, g.primary[f], g.chunk(x[0]), x[1], x[2])
+			g.lineAt(g.recoveredAt(f, x[0], x[2], n, x[1]), `k |-> "mayrecover", n |-> %d, l |-> %d, c |-> %d, v |-> %s, s |-> %d, iv |-> %d`, n, g.primary[f], g.chunk(x[0]), ver(x[3]), x[1], x[2])
 		}
 	}
 	g.recovering[n] = nil
@@ -490,12 +492,11 @@ func (g *gen) load(path string) []trace.Record {
 		if err != nil {
 			fatal("%v", err)
 		}
-		started = started || r.Name == trace.OutTable
+		if !started && r.Name == trace.OutTable {
+			started, g.nodes = true, int(r.Node)
+		}
 		if started {
 			recs = append(recs, r)
-		}
-		if r.Sim && int(r.Node) > g.nodes {
-			g.nodes = int(r.Node)
 		}
 	}
 	if err := sc.Err(); err != nil {
@@ -609,7 +610,7 @@ func (g *gen) run(recs []trace.Record) {
 		case trace.OutAccepted:
 			g.memberOpen[n] = append(g.memberOpen[n], [2]uint64{r.Fields[0], r.Fields[1]})
 		case trace.OutMemberFail:
-			g.recovering[n] = slices.DeleteFunc(g.recovering[n], func(x [3]uint64) bool { return x[0] == r.Fields[0] })
+			g.recovering[n] = slices.DeleteFunc(g.recovering[n], func(x [4]uint64) bool { return x[0] == r.Fields[0] })
 			kind := "mfail"
 			if r.Fields[2] != 0 {
 				kind = "gone"
@@ -642,9 +643,9 @@ func (g *gen) run(recs []trace.Record) {
 			g.lineAt(at, `k |-> "recoverorder", n |-> %d, c |-> %d, s |-> %d, iv |-> %d`, n, g.chunk(r.Fields[0]), s, r.Fields[2])
 			g.orderAt[[2]uint64{r.Fields[0], r.Fields[2]}] = at
 		case trace.OutRecovering:
-			g.recovering[n] = append(g.recovering[n], [3]uint64{r.Fields[0], g.source(r.Fields[1]), r.Fields[2]})
+			g.recovering[n] = append(g.recovering[n], [4]uint64{r.Fields[0], g.source(r.Fields[1]), r.Fields[2], r.Fields[3]})
 		case trace.OutRecovered:
-			g.recovering[n] = slices.DeleteFunc(g.recovering[n], func(x [3]uint64) bool { return x[0] == r.Fields[0] && x[2] == r.Fields[3] })
+			g.recovering[n] = slices.DeleteFunc(g.recovering[n], func(x [4]uint64) bool { return x[0] == r.Fields[0] && x[2] == r.Fields[3] })
 			f, s := g.chunkField(r.Fields[0]), g.source(r.Fields[2])
 			at, kind := len(g.lines), "recovered"
 			if n == g.primary[f] && g.repliedLater(n, f, r.Fields[0], r.Fields[3]) {
@@ -785,7 +786,7 @@ func (g *gen) decide(n int, r *trace.Record, kept, listed []string) {
 func (g *gen) write(w *bufio.Writer, module string) {
 	fmt.Fprintf(w, "---- MODULE %s ----\n", module)
 	fmt.Fprintln(w, "EXTENDS Integers")
-	nodes := g.nodes // the highest sim node is the client, numbered from 0
+	nodes := g.nodes
 	fmt.Fprintf(w, "TNode == 1..%d\n", nodes)
 	fmt.Fprintf(w, "TPG == 1..%d\n", len(g.pgs))
 	fmt.Fprintf(w, "TChunk == 1..%d\n", max(len(g.chunks), 1))
@@ -837,7 +838,7 @@ func main() {
 	}
 	g := &gen{entries: map[uint64]*entry{}, initial: map[uint64]entry{}, wid: map[uint64]int{}, epochs: map[uint64]int{}, replies: map[[3]uint64]map[uint64]*reply{}, decisions: map[[3]uint64]bool{},
 		lists: map[[3]uint64]bool{}, operatorAsk: map[uint64]bool{}, restarted: map[[2]uint64]bool{}, diskIDs: map[uint64]uint64{}, primary: map[uint64]int{}, ownOpen: map[int][][2]uint64{}, memberOpen: map[int][][2]uint64{},
-		activated: map[uint64]uint64{}, tableIv: map[uint64]map[uint64]uint64{}, left: map[[2]uint64]int{}, formatAt: map[uint64]int{}, outOfPool: map[uint64]bool{}, nodeDisk: map[int]uint64{}, recovering: map[int][][3]uint64{}, orderAt: map[[2]uint64]int{}, served: map[[3]uint64]bool{}, landAt: map[[3]uint64]int{}, refused: map[uint64][]refusal{}}
+		activated: map[uint64]uint64{}, tableIv: map[uint64]map[uint64]uint64{}, left: map[[2]uint64]int{}, formatAt: map[uint64]int{}, outOfPool: map[uint64]bool{}, nodeDisk: map[int]uint64{}, recovering: map[int][][4]uint64{}, orderAt: map[[2]uint64]int{}, served: map[[3]uint64]bool{}, landAt: map[[3]uint64]int{}, refused: map[uint64][]refusal{}}
 	recs := g.load(flag.Arg(0))
 	if len(recs) == 0 {
 		fatal("no table in the trace")

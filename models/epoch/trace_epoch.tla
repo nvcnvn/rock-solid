@@ -144,7 +144,7 @@ LostAbove(l) ==
 
 RecoverLine(l) ==
     /\ (l.s = 0) = (miss[ddisk[l.n]][l.c] = 0)
-    /\ RecoverFrom(l.l, ChunkPG[l.c], l.c, ddisk[l.n], IF l.s = 0 THEN ddisk[l.n] ELSE l.s)
+    /\ RecoverFrom(l.l, ChunkPG[l.c], l.c, ddisk[l.n], IF l.s = 0 THEN ddisk[l.n] ELSE l.s, l.v)
 
 Line(l) ==
     \/ /\ l.k = "table"

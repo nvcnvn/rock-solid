@@ -276,6 +276,71 @@ func TestRecoveryLeavesOutTheBlocksTheIntervalsWritesCover(t *testing.T) {
 	}
 }
 
+// A recovery logged under a version that a later peering drops goes with it. Disk 1, down while X
+// was written, lists X in interval 2 and logs W1 to block 0 there; W2, to block 0 too, reaches it but
+// not disk 3, cut off from primary disk 2, and the recovery after it leaves block 0 out and copies
+// block 1 under W2. Disk 1 restarts and interval 3 makes it primary: its peering keeps W1 and drops
+// W2, which disk 3 lacks, and block 1 with it, so disk 1's copy at W1 is no image. It takes the
+// chunk from disk 3 and serves X's block 1, where with the image, as imageOverDroppedRecovery
+// takes it, it serves zeros, as the real group's seeds 33 and 70 did.
+func TestARecoveryDroppedWithItsVersionLeavesTheCopyLacking(t *testing.T) {
+	want := append(bytes.Repeat([]byte{0x33}, core.BlockSize), bytes.Repeat([]byte{0x11}, core.BlockSize)...)
+	for _, plant := range []bool{false, true} {
+		rp, got := readAfterDroppedRecovery(t, plant)
+		if ok := rp.Status == StatusOK && bytes.Equal(got, want); ok == plant {
+			t.Fatalf("imageOverDroppedRecovery %v: X read from disk 1: %+v, blocks %x", plant, rp, slices.Compact(slices.Clone(got)))
+		}
+	}
+}
+
+func readAfterDroppedRecovery(t *testing.T, imageOverDroppedRecovery bool) (Response, []byte) {
+	tbl := rtable(4, 1)
+	_, e := tbl.entry(pg0)
+	e.Members = []Member{{Disk: 2}, {Disk: 1, Mark: MarkDown}, {Disk: 3}}
+	c := newRCluster(t, tbl)
+	ch := chunkIn(pg0, 4, 0)
+	c.writeWhole(pg0, ch, 0, 2, 0x11)
+	c.reps[1].plant.noRecovery = true
+	c.publish(c.next(func(t *Table) {
+		setInterval(t, pg0, 2)
+		_, e := t.entry(pg0)
+		e.Members = []Member{{Disk: 2}, {Disk: 1}, {Disk: 3}}
+	}), true)
+	w1 := c.write(pg0, ch, 0, bytes.Repeat([]byte{0x33}, core.BlockSize))
+	c.until(w1)
+	c.s.Partition(1, 2, false)
+	c.write(pg0, ch, 0, bytes.Repeat([]byte{0x22}, core.BlockSize))
+	for range 100_000 {
+		if c.listed(0, ch).Version > c.reply(w1).Version || !c.step() {
+			break
+		}
+	}
+	c.reps[1].plant.noRecovery = false
+	for range 100_000 {
+		if c.listed(0, ch).ListedIn == 0 || !c.step() {
+			break
+		}
+	}
+	c.runFor(50_000)
+	c.replicaPlants.imageOverDroppedRecovery = imageOverDroppedRecovery
+	c.s.CrashRandom(0)
+	c.s.Restart(0)
+	c.runFor(RetryAfter)
+	if x, w := c.listed(0, ch), c.listed(2, ch); x.ListedIn != 0 || x.Recovered != x.Version || x.Version <= c.reply(w1).Version || w.Version != c.reply(w1).Version {
+		t.Fatalf("disk 1 %+v, disk 3 %+v: the shape needs disk 1 recovered under W2 and disk 3 lacking W2", x, w)
+	}
+	c.publish(c.next(func(t *Table) {
+		setInterval(t, pg0, 3)
+		_, e := t.entry(pg0)
+		e.Members = []Member{{Disk: 1}, {Disk: 2, Mark: MarkDown}, {Disk: 3}}
+	}), true)
+	c.runFor(RetryAfter)
+	c.settle()
+	id := c.read(pg0, ch, 0, 2*core.BlockSize, 0)
+	c.until(id)
+	return c.reply(id), c.cl.data[id]
+}
+
 // Recovery held off in interval 3 is cut short by interval 4: disk 3's entry survives, raised to
 // interval 4's decision, and interval 4's recovery brings it the kept version.
 func TestRecoveryCutShortByTheNextIntervalLeavesTheListsInPlace(t *testing.T) {

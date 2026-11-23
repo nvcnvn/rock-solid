@@ -134,6 +134,7 @@ epoch/neg-map-on-demote	chunkstore.mapOnDemote	TestReplayRollbackPlantsLoseX
 epoch/neg-forget-image-down	chunkstore.forgetImageDown	TestReplayRollbackPlantsLoseX
 epoch/neg-ignore-image-flag	chunkstore.ignoreImageFlag	TestReplayRollbackPlantsLoseX
 epoch/neg-replay-forgets-drops	chunkstore.replayForgetsDrops	TestReplayRollbackPlantsLoseX
+epoch/neg-image-over-dropped-recovery	chunkstore.imageOverDroppedRecovery	TestARecoveryDroppedWithItsVersionLeavesTheCopyLacking
 voters/neg-campaign-unapplied	raftshard.campaignUnapplied	TestACampaignWithAConfigurationChangeUnappliedElectsTwoLeaders
 voters/neg-voter-first	raftshard.voterFirst	TestAddingTheReplacementAsAVoterStallsProposals
 voters/neg-eager	raftshard.eager	TestPromotingALearnerBeforeItCaughtUpBreaksTheInvariant

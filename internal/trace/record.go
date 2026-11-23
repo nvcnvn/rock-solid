@@ -133,7 +133,7 @@ const (
 	OutAccepted
 	// OutMemberFail, a member refusing a version or failing to log it: chunk version gone recover, gone when the node's disk is no up member of the interval, so a formatted disk's successor, recover for a recovery write.
 	OutMemberFail
-	// OutRecovering, a disk's store taking a recovery write: chunk source interval. A crash can leave it durable with no OutRecovered.
+	// OutRecovering, a disk's store taking a recovery write: chunk source interval version, the version it is logged under. A crash can leave it durable with no OutRecovered.
 	OutRecovering
 	// OutPast is a past interval of the OutEntry before it: pg interval minlive. Its members follow as OutMember.
 	OutPast
@@ -289,7 +289,7 @@ var schemas = [numNames]schema{
 	OutLost:           {"Lost", KindOutput, []field{fDisk}},
 	OutAccepted:       {"Accepted", KindOutput, []field{fChunk, fVer}},
 	OutMemberFail:     {"MemberFail", KindOutput, []field{fChunk, fVer, {"gone", typeBool}, {"recover", typeBool}}},
-	OutRecovering:     {"Recovering", KindOutput, []field{fChunk, {"source", typeNum}, fIv}},
+	OutRecovering:     {"Recovering", KindOutput, []field{fChunk, {"source", typeNum}, fIv, fVer}},
 	OutPast:           {"PastInterval", KindOutput, []field{fPG, fIv, {"minlive", typeNum}}},
 	OutFail:           {"Fail", KindOutput, []field{fChunk, fVer}},
 	OutListed:         {"Listed", KindOutput, []field{fDisk, fChunk, fVer}},
