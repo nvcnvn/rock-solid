@@ -550,7 +550,7 @@ func TestMovesAddThenRemove(t *testing.T) {
 			t.Fatalf("PGs %v moving, converged %v:%s", l.moving(), ok, s)
 		}
 	})
-	t.Run("reports across a split", func(t *testing.T) {
+	t.Run("reports and edits across a split", func(t *testing.T) {
 		l := placed(t, nodesOf(rep(3, 64), 4, 2, 2))
 		l.grow(1, 2, 0)
 		l.step(t, l.inputs(allMoves))
@@ -562,14 +562,24 @@ func TestMovesAddThenRemove(t *testing.T) {
 		for i, e := range l.pools().PGs {
 			in.Activations = append(in.Activations, PGInterval{pg(i), e.Interval})
 			in.Recovered = append(in.Recovered, PGInterval{pg(i), e.Interval})
+			ed := Edit{PG: pg(i)}
+			for _, m := range slices.Backward(e.Members) {
+				if !m.Leaving {
+					ed.Disks = append(ed.Disks, m.Disk)
+				}
+			}
+			in.Edits = append(in.Edits, ed)
 		}
 		l.pool.PGCount = 128
 		in.Pools = l.inputs(0).Pools
 		l.step(t, in)
+		if s := l.pools().Split; prev.Pools[0].Split != 0 || s != l.table.Epoch {
+			t.Fatalf("pool split at table %d before the split, %d after it, in table %d", prev.Pools[0].Split, s, l.table.Epoch)
+		}
 		for i, e := range l.pools().PGs {
 			parent := prev.Pools[0].PGs[i/2]
 			if !slices.Equal(e.Members, parent.Members) || e.Activated != parent.Activated {
-				t.Fatalf("a report for PG %d before the split changed PG %d: %+v from %+v", i/2, i, e, parent)
+				t.Fatalf("a report or edit for PG %d before the split changed PG %d: %+v from %+v", i/2, i, e, parent)
 			}
 		}
 	})

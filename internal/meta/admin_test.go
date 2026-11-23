@@ -175,7 +175,7 @@ func TestAGiveUpIsAnsweredWithWhatItDropped(t *testing.T) {
 	}
 	lost := []core.ChunkID{{Volume: 1, Index: 4}, {Volume: 1, Index: 12}}
 	var m core.Msg
-	if err := chunkstore.Attach(nil, &m, chunkstore.AppendReport(nil, &chunkstore.Report{ID: 1, Leads: []chunkstore.LeadState{{PG: pg, Interval: k, Active: true, Unfound: 2, Chunks: lost}}}), core.NoBuf); err != nil {
+	if err := chunkstore.Attach(nil, &m, chunkstore.AppendReport(nil, &chunkstore.Report{ID: 1, Leads: []chunkstore.LeadState{{PG: pg, PGCount: uint32(len(r.h.Control().Table().Pools[0].PGs)), Interval: k, Active: true, Unfound: 2, Chunks: lost}}}), core.NoBuf); err != nil {
 		t.Fatal(err)
 	}
 	r.recv(core.NodeID{Node: 2, Loop: 1}, m)
@@ -195,7 +195,7 @@ func TestAGiveUpIsAnsweredWithWhatItDropped(t *testing.T) {
 	if e := r.h.Control().Table().Entry(pg); e.Interval != k+1 {
 		t.Fatalf("after the give-up: %+v", e)
 	}
-	if err := chunkstore.Attach(nil, &m, chunkstore.AppendReport(nil, &chunkstore.Report{ID: 2, Leads: []chunkstore.LeadState{{PG: pg, Interval: k + 1, Active: true, Unfound: 2, Chunks: lost}}}), core.NoBuf); err != nil {
+	if err := chunkstore.Attach(nil, &m, chunkstore.AppendReport(nil, &chunkstore.Report{ID: 2, Leads: []chunkstore.LeadState{{PG: pg, PGCount: uint32(len(r.h.Control().Table().Pools[0].PGs)), Interval: k + 1, Active: true, Unfound: 2, Chunks: lost}}}), core.NoBuf); err != nil {
 		t.Fatal(err)
 	}
 	r.recv(core.NodeID{Node: 2, Loop: 1}, m)

@@ -283,7 +283,7 @@ func (r *soleRun) giveUp() error {
 		return slices.ContainsFunc(r.a.rec.Disks(), func(x RecordedDisk) bool { return x.ID == d && x.Gone })
 	}
 	e := r.c.table.Entry(pg0)
-	g, err := checkGiveUp(pg0, e, gone, r.w.Lead(pg0), r.a.plant)
+	g, err := checkGiveUp(pg0, e, gone, r.w.Lead(&r.c.table, pg0), r.a.plant)
 	if err != nil {
 		return err
 	}

@@ -46,9 +46,7 @@ type authority struct {
 func (a *authority) inputs(c *rcluster) *Inputs {
 	in := &Inputs{Now: c.s.Time(), Pools: a.pools(), Edits: a.edits, Asks: a.asks, GiveUps: a.giveUps}
 	a.edits, a.asks, a.giveUps = nil, nil, nil
-	for _, x := range c.activations[a.acts:] {
-		in.Activations = append(in.Activations, PGInterval{x.PG, x.Interval})
-	}
+	in.Activations = c.table.reported(nil, c.activations[a.acts:], a.plant)
 	for _, x := range c.asks[a.seen:] {
 		in.Asks = append(in.Asks, PGInterval{x.PG, x.Interval})
 	}
@@ -56,9 +54,7 @@ func (a *authority) inputs(c *rcluster) *Inputs {
 	if a.moves {
 		in.Moves = 1
 	}
-	for _, x := range c.recovered {
-		in.Recovered = append(in.Recovered, PGInterval{x.PG, x.Interval})
-	}
+	in.Recovered = c.table.reported(nil, c.recovered, a.plant)
 	in.plant = a.plant
 	return in
 }

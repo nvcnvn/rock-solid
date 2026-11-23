@@ -155,4 +155,4 @@ epoch/neg-give-up-found	chunkstore.giveUpFound	TestPlantedGiveUpBugsLoseWrites
 epoch/neg-give-up-candidate	chunkstore.giveUpWithCandidate	TestPlantedGiveUpBugsLoseWrites
 epoch/neg-skip-past-give-up	chunkstore.skipPastGiveUp	TestPeeringPastAGiveUpKeepsLaterWrites
 epoch/neg-give-up-not-stopped	chunkstore.giveUpNotStopped	TestPlantedGiveUpBugsLoseWrites
-epoch/neg-report-across-split	open	Control-plane placement faults
+epoch/neg-report-across-split	chunkstore.reportAcrossSplit	TestPlantedReportAcrossSplitRecordsAnActivationThatNeverCame

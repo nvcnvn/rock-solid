@@ -66,11 +66,13 @@ func (e *PGEntry) givenUp() uint32 {
 	return e.GiveUps[len(e.GiveUps)-1].Interval
 }
 
-// PoolTable is a pool's part of the placement table: the settings its intervals depend on, and its PGs.
+// PoolTable is a pool's part of the placement table: the settings its intervals depend on, the
+// epoch of the table that last doubled its PGs, and its PGs.
 type PoolTable struct {
 	ID       core.PoolID
 	Replicas uint8
 	MinLive  uint8
+	Split    uint64
 	PGs      []PGEntry
 }
 
@@ -136,9 +138,12 @@ type placementPlants struct {
 	giveUpFound         bool
 	giveUpWithCandidate bool
 	giveUpNotStopped    bool
+	// reportAcrossSplit has Table.Reported keep a report sent under another pg_count of its pool,
+	// from before a split, as if it named a PG of the table's numbering.
+	reportAcrossSplit bool
 }
 
-// Next computes the table after prev: live marks, settings, splits, asks and activations, leaving members removed on a recovered report for their PG's current interval while its other members stay up, reports ignored in a pool it splits since they name the parent's PG numbers, every missing member refilled, then up to in.Moves balance moves, and each give-up of a PG's current interval whose members, marks and activation the rest leaves as they were. It reports the moves it made.
+// Next computes the table after prev: live marks, settings, splits, asks and activations, leaving members removed on a recovered report for their PG's current interval while its other members stay up, reports and edits ignored in a pool it splits since they name the parent's PG numbers, every missing member refilled, then up to in.Moves balance moves, and each give-up of a PG's current interval whose members, marks and activation the rest leaves as they were. It reports the moves it made.
 func Next(prev *Table, in *Inputs) (Table, int) {
 	pools := slices.Clone(in.Pools)
 	slices.SortFunc(pools, func(a, b PoolInputs) int { return cmp.Compare(a.ID, b.ID) })
@@ -152,6 +157,12 @@ func Next(prev *Table, in *Inputs) (Table, int) {
 		var n int
 		next.Pools[i], n = nextPool(old, &pools[i], in, moves)
 		moves += n
+		if old != nil {
+			next.Pools[i].Split = old.Split
+			if len(old.PGs) != len(next.Pools[i].PGs) {
+				next.Pools[i].Split = next.Epoch
+			}
+		}
 	}
 	return next, moves
 }
@@ -210,7 +221,7 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 	}
 	edits := make([]*Edit, n)
 	for i, ed := range all.Edits {
-		if ed.PG.Pool == in.ID && int(ed.PG.Index) < n && pl.accepts(&ed) {
+		if !split && ed.PG.Pool == in.ID && int(ed.PG.Index) < n && pl.accepts(&ed) {
 			edits[ed.PG.Index] = &all.Edits[i]
 		}
 	}

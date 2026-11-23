@@ -94,7 +94,7 @@ func TestAReturningMemberGetsOnlyTheChunksItMissed(t *testing.T) {
 	c.settle()
 	want := PGFields{Epoch: c.table.Epoch, PG: pg0, Interval: 3}
 	count := func() int {
-		return len(slices.DeleteFunc(slices.Clone(c.recovered), func(r PGFields) bool { return r != want }))
+		return len(slices.DeleteFunc(slices.Clone(c.recovered), func(r PGReport) bool { return r.PGFields != want }))
 	}
 	if x := c.listed(2, a); x.ListedIn != 3 || len(*sends) != 0 || count() != 0 {
 		t.Fatalf("before recovery disk 3 holds %+v, %d recovery writes, recovered %+v", x, len(*sends), c.recovered)

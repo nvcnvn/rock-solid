@@ -499,7 +499,7 @@ func (h *CtlHost) admin(ctx *core.Context, ev *core.Event, request uint64, out *
 		an := AdminAnswer{Refused: wrap(ErrUnknownPG, "PG %s", pgName(pg)).Error()}
 		if e := c.table.Entry(pg); e != nil {
 			an = AdminAnswer{GiveUp: chunkstore.GiveUp{Interval: e.Interval}}
-			if l := c.watch.Lead(pg); l != nil && l.Interval == e.Interval {
+			if l := c.watch.Lead(&c.table, pg); l != nil && l.Interval == e.Interval {
 				an.Unfound = l.Unfound
 			}
 		}

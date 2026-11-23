@@ -15,7 +15,7 @@ import (
 func (r *ctlRun) heal(recovered bool) {
 	var rp chunkstore.Report
 	for i, e := range r.ctl.Table().Pools[0].PGs {
-		f := chunkstore.PGFields{Epoch: r.ctl.Table().Epoch, PG: core.PGID{Pool: 1, Index: uint32(i)}, Interval: e.Interval}
+		f := chunkstore.PGReport{PGFields: chunkstore.PGFields{Epoch: r.ctl.Table().Epoch, PG: core.PGID{Pool: 1, Index: uint32(i)}, Interval: e.Interval}, PGCount: uint32(len(r.ctl.Table().Pools[0].PGs))}
 		rp.Activations = append(rp.Activations, f)
 		if recovered {
 			rp.Recovered = append(rp.Recovered, f)
@@ -267,7 +267,7 @@ func TestAGiveUpCommitsOnlyWhatIsLost(t *testing.T) {
 		t.Fatalf("a give-up with nothing unfound answered %v", err)
 	}
 	lost := []core.ChunkID{{Volume: 1, Index: 4}}
-	r.event(0, chunkstore.AppendReport(nil, &chunkstore.Report{ID: 2, Leads: []chunkstore.LeadState{{PG: pg, Interval: k, Active: true, Unfound: 1, Chunks: lost}}}))
+	r.event(0, chunkstore.AppendReport(nil, &chunkstore.Report{ID: 2, Leads: []chunkstore.LeadState{{PG: pg, PGCount: uint32(len(r.ctl.Table().Pools[0].PGs)), Interval: k, Active: true, Unfound: 1, Chunks: lost}}}))
 	if err := r.ctl.GiveUp(r.now, pg, k); err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +279,7 @@ func TestAGiveUpCommitsOnlyWhatIsLost(t *testing.T) {
 	if g, ok := r.ctl.GivenUp(chunkstore.PGInterval{PG: pg, Interval: k}); !ok || !reflect.DeepEqual(g, want[0]) {
 		t.Fatalf("the give-up of %d reads %+v, %v", k, g, ok)
 	}
-	r.event(0, chunkstore.AppendReport(nil, &chunkstore.Report{ID: 3, Leads: []chunkstore.LeadState{{PG: pg, Interval: k + 1, Active: true, Unfound: 1, Chunks: lost}}}))
+	r.event(0, chunkstore.AppendReport(nil, &chunkstore.Report{ID: 3, Leads: []chunkstore.LeadState{{PG: pg, PGCount: uint32(len(r.ctl.Table().Pools[0].PGs)), Interval: k + 1, Active: true, Unfound: 1, Chunks: lost}}}))
 	if err := r.ctl.GiveUp(r.now, pg, k); err != nil {
 		t.Fatalf("a give-up of %d sent again answered %v", k, err)
 	}

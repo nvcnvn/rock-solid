@@ -1180,7 +1180,7 @@ func TestAReplicasAskAndActivationReachTheControl(t *testing.T) {
 	if next.Interval <= pg.Interval || !delta {
 		t.Fatalf("the ask left the PG at interval %d, a delta sent to the node: %v", next.Interval, delta)
 	}
-	act := chunkstore.Report{ID: 1, Activations: []chunkstore.PGFields{{Epoch: r.h.Control().Table().Epoch, PG: core.PGID{Pool: 1}, Interval: next.Interval}}}
+	act := chunkstore.Report{ID: 1, Activations: []chunkstore.PGReport{{PGFields: chunkstore.PGFields{Epoch: r.h.Control().Table().Epoch, PG: core.PGID{Pool: 1}, Interval: next.Interval}, PGCount: uint32(len(r.h.Control().Table().Pools[0].PGs))}}}
 	send(replica, func(m *core.Msg) error {
 		return chunkstore.Attach(r.pool, m, chunkstore.AppendReport(nil, &act), core.NoBuf)
 	})

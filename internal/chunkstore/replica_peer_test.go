@@ -58,9 +58,9 @@ func TestARestartedMemberJoinsNoPeeringDuringItsWait(t *testing.T) {
 // A primary reports each activation on every heartbeat until a table records it, then stops.
 func TestAnActivationIsReportedUntilATableRecordsIt(t *testing.T) {
 	c := newRCluster(t, rtable(4, 2))
-	want := PGFields{Epoch: 1, PG: pg0, Interval: 1}
+	want := PGReport{PGFields: PGFields{Epoch: 1, PG: pg0, Interval: 1}, PGCount: 4}
 	count := func() int {
-		return len(slices.DeleteFunc(slices.Clone(c.activations), func(a PGFields) bool { return a != want }))
+		return len(slices.DeleteFunc(slices.Clone(c.activations), func(a PGReport) bool { return a != want }))
 	}
 	before := count()
 	c.runFor(2*RetryAfter + 100_000)
@@ -295,7 +295,7 @@ func TestNoActivationBeforeEveryMemberPersistedItsList(t *testing.T) {
 	if x := c.reps[2].Store().Index().Decided(testPool, 0, 4); x != 2 {
 		t.Fatalf("disk 3 persisted the decision of interval %d", x)
 	}
-	if l := c.reps[1].leads[c.reps[1].lead(pg0)]; l.active || len(c.activations) > acts && slices.ContainsFunc(c.activations[acts:], func(a PGFields) bool { return a.PG == pg0 }) {
+	if l := c.reps[1].leads[c.reps[1].lead(pg0)]; l.active || len(c.activations) > acts && slices.ContainsFunc(c.activations[acts:], func(a PGReport) bool { return a.PG == pg0 }) {
 		t.Fatal("disk 2 activated before disk 3 acknowledged its list")
 	}
 	if rp, ok := c.cl.replies[w]; ok {

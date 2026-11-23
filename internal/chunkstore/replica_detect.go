@@ -72,7 +72,8 @@ func (r *Replica) diskState(ctx *core.Context) DiskState {
 func (r *Replica) leadStates(dst []LeadState) []LeadState {
 	for i := range r.leads {
 		l := &r.leads[i]
-		s := LeadState{PG: l.pg, Interval: l.interval, Active: l.active}
+		p, _ := r.table.entry(l.pg)
+		s := LeadState{PG: l.pg, PGCount: uint32(len(p.PGs)), Interval: l.interval, Active: l.active}
 		if l.active {
 			// ponytail: counts the lead's decisions on every heartbeat; count once per decision if it shows in a profile.
 			s.Unfound, _ = r.Unfound(l.pg)

@@ -407,11 +407,11 @@ func (w *Watcher) find(pg core.PGID) (int, bool) {
 }
 
 // Hear keeps a copy of each PG's latest report from the primary of its newest interval, of the PGs Watch has
-// seen; a report of any other is dropped, and the next heartbeat repeats it.
-func (w *Watcher) Hear(ls []LeadState) {
+// seen, under the pg_count t gives their pool; a report of any other is dropped, and the next heartbeat repeats it.
+func (w *Watcher) Hear(t *Table, ls []LeadState) {
 	for _, l := range ls {
-		if i, ok := w.find(l.PG); ok {
-			if x := &w.pgs[i]; !x.heard || l.Interval >= x.lead.Interval {
+		if i, ok := w.find(l.PG); ok && l.PGCount == pgCount(t, l.PG.Pool) {
+			if x := &w.pgs[i]; !x.heard || x.lead.PGCount != l.PGCount || l.Interval >= x.lead.Interval {
 				cs := append(x.lead.Chunks[:0], l.Chunks...)
 				x.lead, x.heard = l, true
 				x.lead.Chunks = cs
@@ -431,7 +431,7 @@ func (w *Watcher) Watch(now core.Tick, pt *PoolTable, cond *Conditions) {
 			w.pgs = slices.Insert(w.pgs, i, pgWatch{pg: id})
 		}
 		x := &w.pgs[i]
-		active := x.heard && x.lead.Active && x.lead.Interval == e.Interval
+		active := x.heard && x.lead.PGCount == uint32(len(pt.PGs)) && x.lead.Active && x.lead.Interval == e.Interval
 		var lacking, unfound uint32
 		if active {
 			lacking, unfound = x.lead.Lacking, x.lead.Unfound
@@ -459,12 +459,19 @@ func (w *Watcher) Watch(now core.Tick, pt *PoolTable, cond *Conditions) {
 	cond.Watch(now, w.copying, pt)
 }
 
-// Lead is the latest report Hear kept of pg's primary, nil for none.
-func (w *Watcher) Lead(pg core.PGID) *LeadState {
-	if i, ok := w.find(pg); ok && w.pgs[i].heard {
+// Lead is the latest report Hear kept of pg's primary under the pg_count t gives its pool, nil for none.
+func (w *Watcher) Lead(t *Table, pg core.PGID) *LeadState {
+	if i, ok := w.find(pg); ok && w.pgs[i].heard && w.pgs[i].lead.PGCount == pgCount(t, pg.Pool) {
 		return &w.pgs[i].lead
 	}
 	return nil
+}
+
+func pgCount(t *Table, pool core.PoolID) uint32 {
+	if p := t.pool(pool); p != nil {
+		return uint32(len(p.PGs))
+	}
+	return 0
 }
 
 // Forget drops the PGs t does not have.

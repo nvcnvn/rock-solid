@@ -38,7 +38,7 @@ func (r *soleRun) watch() {
 			frame, data := Frame(ctx.Pool, &ev.Msg)
 			defer freeBuf(ctx, ev.Msg.Buf)
 			if k, err := Peek(frame); err == nil && k == KindReport && DecodeReport(frame, data, &rp) == nil {
-				r.w.Hear(rp.Leads)
+				r.w.Hear(&r.c.table, rp.Leads)
 			}
 			return out
 		}), nil)

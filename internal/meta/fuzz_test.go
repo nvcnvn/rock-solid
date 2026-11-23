@@ -246,7 +246,7 @@ func FuzzDecodeCtl(f *testing.F) {
 		}
 		return ms
 	}
-	tb := chunkstore.Table{Epoch: 1, Pools: []chunkstore.PoolTable{{ID: 1, Replicas: 3, MinLive: 2, PGs: []chunkstore.PGEntry{{Interval: 1, Members: m(1, 2, 3)}, {Interval: 1, Members: m(2, 3, 4)}}}}}
+	tb := chunkstore.Table{Epoch: 1, Pools: []chunkstore.PoolTable{{ID: 1, Replicas: 3, MinLive: 2, Split: 1, PGs: []chunkstore.PGEntry{{Interval: 1, Members: m(1, 2, 3)}, {Interval: 1, Members: m(2, 3, 4)}}}}}
 	add(poolKey(1), appendPool(nil, &p))
 	add(ctlKey(CtlPlacement, nil), tableHead(1, tb.CRC()))
 	add(placementKey(1), poolHead(&tb.Pools[0]))

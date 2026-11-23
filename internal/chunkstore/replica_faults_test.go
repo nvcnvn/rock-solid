@@ -688,7 +688,7 @@ func (f *faultRun) marked() bool {
 // recovered reports whether PG 0's primary reported its interval recovered.
 func (f *faultRun) recovered() bool {
 	_, e := f.c.table.entry(pg0)
-	return slices.ContainsFunc(f.c.recovered, func(r PGFields) bool { return r.PG == pg0 && r.Interval == e.Interval })
+	return slices.ContainsFunc(f.c.recovered, func(r PGReport) bool { return r.PG == pg0 && r.Interval == e.Interval })
 }
 
 // unreadable reports whether every source lead i could recover ch from failed a read of it on a disk whose bits the run rotted: a second fault, which leaves the chunk listed as unfound does.

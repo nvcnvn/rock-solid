@@ -23,6 +23,7 @@ type DeltaPool struct {
 	Replicas uint8
 	MinLive  uint8
 	PGCount  uint32
+	Split    uint64
 }
 
 // DeltaEntry is a PG entry a delta changes.
@@ -46,7 +47,7 @@ func (t *Table) CRC() uint32 { return core.CRC32C(AppendTable(nil, t)) }
 func MakeDelta(prev, next *Table) Delta {
 	d := Delta{Epoch: next.Epoch, CRC: next.CRC()}
 	for _, p := range next.Pools {
-		d.Pools = append(d.Pools, DeltaPool{p.ID, p.Replicas, p.MinLive, uint32(len(p.PGs))})
+		d.Pools = append(d.Pools, p.Head())
 		old := prev.pool(p.ID)
 		for i := range p.PGs {
 			if old == nil || len(old.PGs) != len(p.PGs) || !old.PGs[i].equal(&p.PGs[i]) {
@@ -77,6 +78,22 @@ func TableRecords(dst []trace.Record, prev, next *Table) []trace.Record {
 			for _, m := range past.Members {
 				dst = append(dst, trace.Record{Name: trace.OutMember, Fields: [trace.MaxFields]uint64{pgField(x.PG), uint64(m.Disk), uint64(m.Mark), 0}})
 			}
+		}
+	}
+	return dst
+}
+
+// Reported appends to dst the PG intervals of the reports rs that number their PG as t does: a
+// report sent under another pg_count of its pool names a PG of the numbering before a split, so the
+// leader drops it, from what the report carries alone.
+func (t *Table) Reported(dst []PGInterval, rs []PGReport) []PGInterval {
+	return t.reported(dst, rs, placementPlants{})
+}
+
+func (t *Table) reported(dst []PGInterval, rs []PGReport, plant placementPlants) []PGInterval {
+	for _, r := range rs {
+		if p := t.pool(r.PG.Pool); p != nil && (len(p.PGs) == int(r.PGCount) || plant.reportAcrossSplit) {
+			dst = append(dst, PGInterval{PG: r.PG, Interval: r.Interval})
 		}
 	}
 	return dst
@@ -113,7 +130,7 @@ func (t *Table) Apply(d *Delta) (Table, error) {
 		if old == nil && d.entries(dp.ID) != int(dp.PGCount) {
 			return Table{}, ErrMalformed
 		}
-		p := PoolTable{ID: dp.ID, Replicas: dp.Replicas, MinLive: dp.MinLive, PGs: make([]PGEntry, dp.PGCount)}
+		p := PoolTable{ID: dp.ID, Replicas: dp.Replicas, MinLive: dp.MinLive, Split: dp.Split, PGs: make([]PGEntry, dp.PGCount)}
 		if old != nil {
 			copy(p.PGs, old.PGs)
 		}
@@ -152,7 +169,7 @@ func AppendTable(dst []byte, t *Table) []byte {
 	dst = le.AppendUint32(le.AppendUint64(dst, t.Epoch), uint32(len(t.Pools)))
 	for i := range t.Pools {
 		p := &t.Pools[i]
-		dst = appendDeltaPool(dst, DeltaPool{p.ID, p.Replicas, p.MinLive, uint32(len(p.PGs))})
+		dst = appendDeltaPool(dst, p.Head())
 		for j := range p.PGs {
 			dst = appendEntry(dst, &p.PGs[j])
 		}
@@ -175,7 +192,12 @@ func AppendDelta(dst []byte, d *Delta) []byte {
 }
 
 func appendDeltaPool(dst []byte, p DeltaPool) []byte {
-	return le.AppendUint32(append(le.AppendUint32(dst, uint32(p.ID)), p.Replicas, p.MinLive), p.PGCount)
+	return le.AppendUint64(le.AppendUint32(append(le.AppendUint32(dst, uint32(p.ID)), p.Replicas, p.MinLive), p.PGCount), p.Split)
+}
+
+// Head is p's settings as a delta lists them.
+func (p *PoolTable) Head() DeltaPool {
+	return DeltaPool{ID: p.ID, Replicas: p.Replicas, MinLive: p.MinLive, PGCount: uint32(len(p.PGs)), Split: p.Split}
 }
 
 // AppendEntry appends e's encoding, as a table or a delta holds it.
@@ -249,13 +271,13 @@ func appendMembers(dst []byte, ms []Member) []byte {
 func DecodeTable(b []byte) (Table, error) {
 	r := reader{b: b, n: len(b)}
 	t := Table{Epoch: r.u64()}
-	n := r.count(10)
+	n := r.count(18)
 	for i := range n {
-		dp := r.deltaPool()
+		dp := r.deltaPool(t.Epoch)
 		if i > 0 && dp.ID <= t.Pools[i-1].ID {
 			r.bad = true
 		}
-		p := PoolTable{ID: dp.ID, Replicas: dp.Replicas, MinLive: dp.MinLive}
+		p := PoolTable{ID: dp.ID, Replicas: dp.Replicas, MinLive: dp.MinLive, Split: dp.Split}
 		if !r.bad && uint64(dp.PGCount)*11 > uint64(len(r.b)) {
 			r.bad = true
 		}
@@ -274,9 +296,9 @@ func DecodeTable(b []byte) (Table, error) {
 func DecodeDelta(b []byte) (Delta, error) {
 	r := reader{b: b, n: len(b)}
 	d := Delta{Epoch: r.u64(), CRC: r.u32()}
-	n := r.count(10)
+	n := r.count(18)
 	for i := range n {
-		d.Pools = append(d.Pools, r.deltaPool())
+		d.Pools = append(d.Pools, r.deltaPool(d.Epoch))
 		if i > 0 && d.Pools[i].ID <= d.Pools[i-1].ID {
 			r.bad = true
 		}
@@ -302,9 +324,9 @@ func DecodeDelta(b []byte) (Delta, error) {
 	return d, r.end()
 }
 
-func (r *reader) deltaPool() DeltaPool {
-	p := DeltaPool{ID: core.PoolID(r.u32()), Replicas: r.u8(), MinLive: r.u8(), PGCount: r.u32()}
-	if p.Replicas == 0 || p.MinLive == 0 || p.MinLive > p.Replicas || core.CheckPGCount(p.PGCount) != nil {
+func (r *reader) deltaPool(epoch uint64) DeltaPool {
+	p := DeltaPool{ID: core.PoolID(r.u32()), Replicas: r.u8(), MinLive: r.u8(), PGCount: r.u32(), Split: r.u64()}
+	if p.Replicas == 0 || p.MinLive == 0 || p.MinLive > p.Replicas || core.CheckPGCount(p.PGCount) != nil || p.Split > epoch {
 		r.bad = true
 	}
 	return p

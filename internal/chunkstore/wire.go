@@ -109,6 +109,13 @@ type PGFields struct {
 	Interval uint32
 }
 
+// PGReport is an activation or recovered report of a PG as its sender's table names it, with its
+// pool's pg_count in that table, since a split renumbers the pool's PGs.
+type PGReport struct {
+	PGFields
+	PGCount uint32
+}
+
 // Hello opens a client's connection with its session and incarnation.
 type Hello struct {
 	ID          core.RequestID
@@ -205,9 +212,10 @@ const MaxDiskPools = 256
 // MaxReportUnfound is the most unfound chunks a primary names in a report of a PG; an operator's give-up records those named, and another gives up the rest.
 const MaxReportUnfound = 64
 
-// LeadState is what a primary reports of a PG it leads: its interval, whether it leads it active and, when active, how many chunks its last peering left unfound, the first MaxReportUnfound of them in ascending order, and the copies its members still lack, which recovery counts down.
+// LeadState is what a primary reports of a PG it leads: its pool's pg_count, since a split renumbers the pool's PGs, its interval, whether it leads it active and, when active, how many chunks its last peering left unfound, the first MaxReportUnfound of them in ascending order, and the copies its members still lack, which recovery counts down.
 type LeadState struct {
 	PG       core.PGID
+	PGCount  uint32
 	Interval uint32
 	Active   bool
 	Unfound  uint32
@@ -218,8 +226,8 @@ type LeadState struct {
 // Report is a node's heartbeat to the authority: the PGs whose primary activated, the PGs whose activated primary has recovered every member but a leaving one, member latencies, its disks and the PGs it leads.
 type Report struct {
 	ID          core.RequestID
-	Activations []PGFields
-	Recovered   []PGFields
+	Activations []PGReport
+	Recovered   []PGReport
 	Latencies   []Latency
 	Disks       []DiskState
 	Leads       []LeadState
@@ -324,6 +332,10 @@ func appendPG(dst []byte, p *PGFields) []byte {
 	dst = le.AppendUint32(dst, uint32(p.PG.Pool))
 	dst = le.AppendUint32(dst, p.PG.Index)
 	return le.AppendUint32(dst, p.Interval)
+}
+
+func appendReported(dst []byte, p *PGReport) []byte {
+	return le.AppendUint32(appendPG(dst, &p.PGFields), p.PGCount)
 }
 
 func appendBool(dst []byte, v bool) []byte {
@@ -506,10 +518,11 @@ func DecodeHeartbeat(b []byte, data int, h *Heartbeat) error {
 
 const (
 	pgFieldsSize  = 20
+	pgReportSize  = pgFieldsSize + 4
 	latencySize   = 12
 	diskStateSize = 29
 	poolLiveSize  = 12
-	leadStateSize = 25
+	leadStateSize = 29
 	chunkVerSize  = core.ChunkIDSize + 8
 	chunkPeerSize = core.ChunkIDSize + 8 + 8 + 1 + 8
 )
@@ -518,11 +531,11 @@ const (
 func AppendReport(dst []byte, rp *Report) []byte {
 	dst = le.AppendUint32(appendHead(dst, KindReport, rp.ID), uint32(len(rp.Activations)))
 	for i := range rp.Activations {
-		dst = appendPG(dst, &rp.Activations[i])
+		dst = appendReported(dst, &rp.Activations[i])
 	}
 	dst = le.AppendUint32(dst, uint32(len(rp.Recovered)))
 	for i := range rp.Recovered {
-		dst = appendPG(dst, &rp.Recovered[i])
+		dst = appendReported(dst, &rp.Recovered[i])
 	}
 	dst = le.AppendUint32(dst, uint32(len(rp.Latencies)))
 	for _, l := range rp.Latencies {
@@ -538,7 +551,7 @@ func AppendReport(dst []byte, rp *Report) []byte {
 	}
 	dst = le.AppendUint32(dst, uint32(len(rp.Leads)))
 	for _, l := range rp.Leads {
-		dst = le.AppendUint32(le.AppendUint32(le.AppendUint32(dst, uint32(l.PG.Pool)), l.PG.Index), l.Interval)
+		dst = le.AppendUint32(le.AppendUint32(le.AppendUint32(le.AppendUint32(dst, uint32(l.PG.Pool)), l.PG.Index), l.PGCount), l.Interval)
 		dst = le.AppendUint32(le.AppendUint32(le.AppendUint32(appendBool(dst, l.Active), l.Unfound), l.Lacking), uint32(len(l.Chunks)))
 		for _, c := range l.Chunks {
 			dst = c.AppendTo(dst)
@@ -552,12 +565,12 @@ func DecodeReport(b []byte, data int, rp *Report) error {
 	r, err := open(b, data, KindReport)
 	rp.ID = r.id
 	rp.Activations = rp.Activations[:0]
-	for n := r.count(pgFieldsSize); n > 0; n-- {
-		rp.Activations = append(rp.Activations, r.pg())
+	for n := r.count(pgReportSize); n > 0; n-- {
+		rp.Activations = append(rp.Activations, r.reported())
 	}
 	rp.Recovered = rp.Recovered[:0]
-	for n := r.count(pgFieldsSize); n > 0; n-- {
-		rp.Recovered = append(rp.Recovered, r.pg())
+	for n := r.count(pgReportSize); n > 0; n-- {
+		rp.Recovered = append(rp.Recovered, r.reported())
 	}
 	rp.Latencies = rp.Latencies[:0]
 	for n := r.count(latencySize); n > 0; n-- {
@@ -579,9 +592,9 @@ func DecodeReport(b []byte, data int, rp *Report) error {
 		if len(rp.Leads) < cap(rp.Leads) {
 			chunks = rp.Leads[:len(rp.Leads)+1][len(rp.Leads)].Chunks[:0]
 		}
-		l := LeadState{PG: core.PGID{Pool: core.PoolID(r.u32()), Index: r.u32()}, Interval: r.u32(), Active: r.bool(), Unfound: r.u32(), Lacking: r.u32(), Chunks: chunks}
+		l := LeadState{PG: core.PGID{Pool: core.PoolID(r.u32()), Index: r.u32()}, PGCount: r.u32(), Interval: r.u32(), Active: r.bool(), Unfound: r.u32(), Lacking: r.u32(), Chunks: chunks}
 		cs := r.count(core.ChunkIDSize)
-		if l.Interval == 0 || !l.Active && (l.Unfound != 0 || l.Lacking != 0) || cs != min(int(l.Unfound), MaxReportUnfound) {
+		if core.CheckPGCount(l.PGCount) != nil || l.PG.Index >= l.PGCount || l.Interval == 0 || !l.Active && (l.Unfound != 0 || l.Lacking != 0) || cs != min(int(l.Unfound), MaxReportUnfound) {
 			r.bad = true
 		}
 		for j := range cs {
@@ -763,6 +776,14 @@ func (r *reader) bool() bool {
 
 func (r *reader) chunk() core.ChunkID {
 	return core.ChunkIDFromBytes([core.ChunkIDSize]byte(r.take(core.ChunkIDSize)))
+}
+
+func (r *reader) reported() PGReport {
+	p := PGReport{PGFields: r.pg(), PGCount: r.u32()}
+	if core.CheckPGCount(p.PGCount) != nil || p.PG.Index >= p.PGCount {
+		r.bad = true
+	}
+	return p
 }
 
 func (r *reader) pg() PGFields {

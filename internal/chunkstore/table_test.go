@@ -23,7 +23,7 @@ func fullTable(pgs, width int) Table {
 func TestTableSize(t *testing.T) {
 	for _, c := range []struct {
 		pgs, width, want int
-	}{{2048, 3, 53_270}, {4096, 18, 413_718}} {
+	}{{2048, 3, 53_278}, {4096, 18, 413_726}} {
 		tbl := fullTable(c.pgs, c.width)
 		if got := len(AppendTable(nil, &tbl)); got != c.want {
 			t.Errorf("%d PGs × %d members: %d bytes, want %d", c.pgs, c.width, got, c.want)
@@ -31,7 +31,7 @@ func TestTableSize(t *testing.T) {
 	}
 }
 
-// A delta costs a 30-byte header for one pool, 34 bytes per changed rep3 entry, 21 more with its previous interval's members, 5 more during a move for the member added.
+// A delta costs a 38-byte header for one pool, 34 bytes per changed rep3 entry, 21 more with its previous interval's members, 5 more during a move for the member added.
 func TestDeltaSize(t *testing.T) {
 	prev := fullTable(2048, 3)
 	next := fullTable(2048, 3)
@@ -41,14 +41,14 @@ func TestDeltaSize(t *testing.T) {
 	e.Interval, e.Members = 2, []Member{{Disk: 0}, {Disk: 1}, {Disk: 9}}
 	next.Pools[0].PGs[8].Pinned = true
 	d := MakeDelta(&prev, &next)
-	if got := len(AppendDelta(nil, &d)); got != 30+2*34+21 {
+	if got := len(AppendDelta(nil, &d)); got != 38+2*34+21 {
 		t.Fatalf("a delta of two entries, one with a past interval: %d bytes", got)
 	}
 	moving := &next.Pools[0].PGs[9]
 	moving.Members = append(moving.Members, Member{Disk: 9})
 	moving.Members[0].Leaving, moving.Interval = true, 2
 	d = MakeDelta(&prev, &next)
-	if got := len(AppendDelta(nil, &d)); got != 30+3*34+21+5 {
+	if got := len(AppendDelta(nil, &d)); got != 38+3*34+21+5 {
 		t.Fatalf("a delta of three entries, one moving: %d bytes", got)
 	}
 }
@@ -123,6 +123,12 @@ func TestMalformedDeltas(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
+	late := d
+	late.Pools = []DeltaPool{d.Pools[0]}
+	late.Pools[0].Split = late.Epoch + 1
+	if _, err := DecodeDelta(AppendDelta(nil, &late)); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("a split after the delta's epoch: %v", err)
+	}
 	flags := AppendDelta(nil, &d)
 	flags[len(flags)-len(appendEntry(nil, &d.Entries[0].Entry))+8] = 0x04
 	if _, err := DecodeDelta(flags); !errors.Is(err, ErrMalformed) {
@@ -178,7 +184,7 @@ func TestGiveUpEncoding(t *testing.T) {
 
 func hugeDelta(prev *Table) Delta {
 	e := prev.Pools[0].PGs[0]
-	return Delta{Epoch: prev.Epoch + 1, Pools: []DeltaPool{{1, 3, 1, 4}, {2, 3, 1, 1 << 31}}, Entries: []DeltaEntry{{core.PGID{Pool: 2, Index: 1<<31 - 1}, e}}}
+	return Delta{Epoch: prev.Epoch + 1, Pools: []DeltaPool{{1, 3, 1, 4, 0}, {2, 3, 1, 1 << 31, 0}}, Entries: []DeltaEntry{{core.PGID{Pool: 2, Index: 1<<31 - 1}, e}}}
 }
 
 func FuzzDecodeTable(f *testing.F) {
@@ -197,6 +203,8 @@ func FuzzDecodeTable(f *testing.F) {
 	f.Add(AppendTable(nil, &tbl))
 	tbl.Pools[0].PGs[1].GiveUps = givenUpTwice()
 	f.Add(AppendTable(nil, &tbl))
+	tbl.Epoch, tbl.Pools[0].Split = 3, 2
+	f.Add(AppendTable(nil, &tbl))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		got, err := DecodeTable(b)
 		if err != nil {
@@ -211,7 +219,7 @@ func FuzzDecodeTable(f *testing.F) {
 func FuzzDecodeDelta(f *testing.F) {
 	prev := fullTable(4, 3)
 	next := fullTable(8, 3)
-	next.Epoch = 2
+	next.Epoch, next.Pools[0].Split = 2, 2
 	d := MakeDelta(&prev, &next)
 	f.Add(AppendDelta(nil, &d))
 	next = fullTable(4, 3)

@@ -217,9 +217,10 @@ func TestStuck(t *testing.T) {
 		t.Fatalf("a PG past the table gave Stuck %v, Blocked %v", c.Stuck, c.Blocked)
 	}
 	var w Watcher
-	w.Hear([]LeadState{{PG: core.PGID{}, Interval: 1, Active: true, Unfound: 1}})
+	whole := &Table{Pools: []PoolTable{*tbl}}
+	w.Hear(whole, []LeadState{{PG: core.PGID{}, PGCount: 8, Interval: 1, Active: true, Unfound: 1}})
 	w.Watch(10*StuckAfter, tbl, &c)
-	w.Hear([]LeadState{{PG: core.PGID{Index: 8}, Active: true, Unfound: 1}, {PG: core.PGID{Pool: 7}, Active: true, Unfound: 1}})
+	w.Hear(whole, []LeadState{{PG: core.PGID{Index: 8}, PGCount: 16, Active: true, Unfound: 1}, {PG: core.PGID{Pool: 7}, PGCount: 8, Active: true, Unfound: 1}})
 	if len(w.pgs) != len(tbl.PGs) || w.pgs[0].heard {
 		t.Fatalf("the watcher kept %d PGs of a table of %d, PG 0 heard %v before the first Watch", len(w.pgs), len(tbl.PGs), w.pgs[0].heard)
 	}
@@ -235,17 +236,18 @@ func TestStuck(t *testing.T) {
 func TestStaleIntervalReports(t *testing.T) {
 	tbl := &PoolTable{ID: 1, PGs: []PGEntry{{Members: []Member{{Disk: 1}}, Interval: 2, Recovered: true}}}
 	pg := core.PGID{Pool: 1}
+	whole := &Table{Pools: []PoolTable{*tbl}}
 	var w, w2 Watcher
 	var c Conditions
 	w.Watch(0, tbl, &c)
-	w.Hear([]LeadState{{PG: pg, Interval: 2, Active: true, Unfound: 3, Lacking: 3}})
-	w.Hear([]LeadState{{PG: pg, Interval: 1, Active: true}})
+	w.Hear(whole, []LeadState{{PG: pg, PGCount: 1, Interval: 2, Active: true, Unfound: 3, Lacking: 3}})
+	w.Hear(whole, []LeadState{{PG: pg, PGCount: 1, Interval: 1, Active: true}})
 	w.Watch(StuckAfter, tbl, &c)
 	if len(c.Blocked) != 1 || c.Blocked[0].Unfound != 3 || c.Blocked[0].Stopped {
 		t.Fatalf("a stale interval's report replaced the newer: %+v", c.Blocked)
 	}
 	w2.Watch(0, tbl, &c)
-	w2.Hear([]LeadState{{PG: pg, Interval: 1, Active: true, Unfound: 3}})
+	w2.Hear(whole, []LeadState{{PG: pg, PGCount: 1, Interval: 1, Active: true, Unfound: 3}})
 	w2.Watch(StuckAfter, tbl, &c)
 	if len(c.Blocked) != 0 {
 		t.Fatalf("an old interval's active report counted: %+v", c.Blocked)
@@ -263,7 +265,7 @@ func TestMaintenanceIsNotStuckButDownIs(t *testing.T) {
 		var w Watcher
 		var cond Conditions
 		w.Watch(0, tbl, &cond)
-		w.Hear([]LeadState{{PG: core.PGID{Pool: 1}, Interval: 2, Active: true, Lacking: 4}})
+		w.Hear(&Table{Pools: []PoolTable{*tbl}}, []LeadState{{PG: core.PGID{Pool: 1}, PGCount: 1, Interval: 2, Active: true, Lacking: 4}})
 		w.Watch(StuckAfter, tbl, &cond)
 		if got := len(cond.Stuck) == 1; got != c.stuck {
 			t.Fatalf("a member marked %d: Stuck %v", c.mark, cond.Stuck)

@@ -191,7 +191,7 @@ func (c *Control) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) 
 			}
 			if chunkstore.DecodeReport(frame, data, &c.rep) == nil {
 				c.fill(ctx.Now, &c.rep)
-				c.watch.Hear(c.rep.Leads)
+				c.watch.Hear(&c.table, c.rep.Leads)
 				c.Report(&c.rep)
 			}
 		}
@@ -391,7 +391,7 @@ func (c *Control) giveUp(x chunkstore.PGInterval) (chunkstore.PGGiveUp, error) {
 	if e.Interval != x.Interval {
 		return chunkstore.PGGiveUp{}, ErrIntervalMoved
 	}
-	return chunkstore.CheckGiveUp(x.PG, e, func(d uint32) bool { return d != 0 && int(d) <= len(c.disks) && c.disks[d-1].Gone }, c.watch.Lead(x.PG))
+	return chunkstore.CheckGiveUp(x.PG, e, func(d uint32) bool { return d != 0 && int(d) <= len(c.disks) && c.disks[d-1].Gone }, c.watch.Lead(&c.table, x.PG))
 }
 
 // diskExit is a declaration or a removal staged until it commits.

@@ -126,7 +126,7 @@ func yPastTheLeaving(t *testing.T, r *soleRun, yOff uint32, plant func(*replicaP
 	c.untilActive()
 	c.settle()
 	_, e := c.table.entry(pg0)
-	if !slices.ContainsFunc(c.recovered, func(f PGFields) bool { return f.Interval == e.Interval }) {
+	if !slices.ContainsFunc(c.recovered, func(f PGReport) bool { return f.Interval == e.Interval }) {
 		t.Fatalf("interval %d not reported recovered: %+v", e.Interval, c.recovered)
 	}
 	c.s.Partition(uint32(c.node(s.primary)), uint32(c.node(s.leaving)), true)

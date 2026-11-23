@@ -82,18 +82,19 @@ type ctlState struct {
 // commit another leader raced fails its checks, and the machine reads the state again.
 type Control struct {
 	ctlState
-	staged          []PoolRecord
-	stagedMap       *ShardMap
-	stagedFormat    uint32
-	asks, acts, rcv []chunkstore.PGInterval
-	pending         *commit
-	rec             chunkstore.DiskRecord
-	det             *chunkstore.Detector
-	pin             []chunkstore.PoolInputs
-	drains          []uint32
-	exits           []diskExit
-	giveUps         []chunkstore.PGInterval
-	nodes           []nodeState
+	staged       []PoolRecord
+	stagedMap    *ShardMap
+	stagedFormat uint32
+	asks         []chunkstore.PGInterval
+	acts, rcv    []chunkstore.PGReport
+	pending      *commit
+	rec          chunkstore.DiskRecord
+	det          *chunkstore.Detector
+	pin          []chunkstore.PoolInputs
+	drains       []uint32
+	exits        []diskExit
+	giveUps      []chunkstore.PGInterval
+	nodes        []nodeState
 	// voters are the control-plane group's voters heard from, by node, each holding only its replicas.
 	voters []nodeState
 	// round counts failovers and error answers; resend is set while every committed shard-map
@@ -169,8 +170,8 @@ func (c *Control) ShardMap() *ShardMap { return &c.smap }
 // stages it for the next commit in place of any change of the pool staged before; an update keeps
 // each setting spec leaves out as the next commit gives it. disks are the cluster's, each at the
 // class the record gives it, for an unset pg_count and the layout check. A refused one stages
-// nothing, and one that changes nothing unstages the pool. A new pool whose worst step may be more
-// than one Txn holds is ErrTooLarge.
+// nothing, and one that changes nothing unstages the pool. A new or doubled pool whose worst step
+// may be more than one Txn holds is ErrTooLarge.
 func (c *Control) SetPool(id core.PoolID, spec chunkstore.PoolSpec, disks []chunkstore.Disk) error {
 	i, ok := slices.BinarySearchFunc(c.pools, id, cmpPool)
 	if ok {
@@ -184,12 +185,12 @@ func (c *Control) SetPool(id core.PoolID, spec chunkstore.PoolSpec, disks []chun
 	}
 	p, err := chunkstore.NewPool(spec, len(disks))
 	if err == nil && ok {
-		err = changePool(c.pools[i].Pool, p)
+		err = c.pools[i].Pool.Change(p)
 	}
 	if err == nil {
 		_, err = p.CheckLayout(disks)
 	}
-	if err == nil && !ok {
+	if err == nil && (!ok || p.PGCount != c.pools[i].Pool.PGCount) {
 		err = fits(PoolRecord{id, p}, disks)
 	}
 	if err != nil {
@@ -217,14 +218,6 @@ func keep(spec chunkstore.PoolSpec, p chunkstore.Pool) chunkstore.PoolSpec {
 	spec.Locality = cmp.Or(spec.Locality, p.Locality)
 	spec.DiskClass = cmp.Or(spec.DiskClass, p.DiskClass)
 	return spec
-}
-
-// changePool checks next as the settings that replace committed ones.
-func changePool(old, next chunkstore.Pool) error {
-	if next.PGCount != old.PGCount {
-		return &chunkstore.SettingError{Setting: "pg_count", Reason: "is fixed until pool splits are built"}
-	}
-	return old.Change(next)
 }
 
 // fits reports ErrTooLarge when a step of pool cp alone may be more than one Txn holds: its
@@ -284,22 +277,28 @@ func (c *Control) SetShardMap(m *ShardMap) error {
 
 // Report folds a heartbeat's activation and recovered reports into the next table.
 func (c *Control) Report(rp *chunkstore.Report) {
-	c.acts = c.fold(c.acts, rp.Activations)
-	c.rcv = c.fold(c.rcv, rp.Recovered)
+	c.acts = append(c.acts, rp.Activations...)
+	c.rcv = append(c.rcv, rp.Recovered...)
 }
 
-// Ask takes a primary's or member's ask for a new interval of its PG, keeping one of each until a commit takes it.
+// Ask takes a primary's or member's ask for a new interval of its PG, keeping one of each until a commit takes it;
+// an ask tagged with a table older than its pool's split names a PG of the numbering before it, and is dropped, as
+// are those taken while the split's commit was pending.
 func (c *Control) Ask(f chunkstore.PGFields) {
+	if f.Epoch < splitOf(&c.table, f.PG.Pool) {
+		return
+	}
 	if a := (chunkstore.PGInterval{PG: f.PG, Interval: f.Interval}); !slices.Contains(c.asks, a) {
 		c.asks = append(c.asks, a)
 	}
 }
 
-func (c *Control) fold(dst []chunkstore.PGInterval, fs []chunkstore.PGFields) []chunkstore.PGInterval {
-	for _, f := range fs {
-		dst = append(dst, chunkstore.PGInterval{PG: f.PG, Interval: f.Interval})
+// splitOf is the epoch of the table that last split pool in t, 0 for none.
+func splitOf(t *chunkstore.Table, pool core.PoolID) uint64 {
+	if i := slices.IndexFunc(t.Pools, func(p chunkstore.PoolTable) bool { return p.ID == pool }); i >= 0 {
+		return t.Pools[i].Split
 	}
-	return dst
+	return 0
 }
 
 // Step computes the next table and shard map and, with no commit in flight, proposes under token
@@ -340,7 +339,7 @@ func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) erro
 	}
 	c.pin = pin
 	c.det.View(&c.table, pin)
-	n.table, _ = chunkstore.Next(&c.table, &chunkstore.Inputs{Now: in.Now, Pools: pin, Asks: c.asks, Activations: c.acts, Recovered: c.rcv, Edits: in.Edits, GiveUps: giveUps, Moves: in.Moves})
+	n.table, _ = chunkstore.Next(&c.table, &chunkstore.Inputs{Now: in.Now, Pools: pin, Asks: c.asks, Activations: c.table.Reported(nil, c.acts), Recovered: c.table.Reported(nil, c.rcv), Edits: in.Edits, GiveUps: giveUps, Moves: in.Moves})
 	p.delta = chunkstore.MakeDelta(&c.table, &n.table)
 	var moved []core.PoolID
 	for _, de := range p.delta.Entries {
@@ -447,7 +446,7 @@ func (c *Control) recheck() error {
 		if !ok {
 			return false
 		}
-		if err := changePool(c.pools[i].Pool, s.Pool); err != nil {
+		if err := c.pools[i].Pool.Change(s.Pool); err != nil {
 			errs = append(errs, fmt.Errorf("meta: pool %d: %w", s.ID, err))
 			return true
 		}
@@ -518,6 +517,9 @@ func (c *Control) Answer(st *State, a *Answer, out *ControlOutput) error {
 	c.ctlState, c.current = p.next, c.current || p.session
 	c.exits = slices.DeleteFunc(c.exits, func(x diskExit) bool { return c.disks[x.id-1].Gone })
 	c.asks, c.acts, c.rcv = c.asks[p.asks:], c.acts[p.acts:], c.rcv[p.rc:]
+	if p.table {
+		c.asks = slices.DeleteFunc(c.asks, func(a chunkstore.PGInterval) bool { return splitOf(&c.table, a.PG.Pool) == c.table.Epoch })
+	}
 	if p.mapStaged {
 		c.stagedMap = nil
 	}
@@ -586,8 +588,8 @@ func (s *ctlState) group(id uint64) (*Group, bool) {
 
 // poolHeads appends each pool's settings as a table carries them.
 func poolHeads(t *chunkstore.Table, dst []chunkstore.DeltaPool) []chunkstore.DeltaPool {
-	for _, p := range t.Pools {
-		dst = append(dst, chunkstore.DeltaPool{ID: p.ID, Replicas: p.Replicas, MinLive: p.MinLive, PGCount: uint32(len(p.PGs))})
+	for i := range t.Pools {
+		dst = append(dst, t.Pools[i].Head())
 	}
 	return dst
 }
@@ -616,7 +618,7 @@ func tableHead(epoch uint64, crc uint32) []byte {
 }
 
 func poolHead(p *chunkstore.PoolTable) []byte {
-	return bigEndian.AppendUint32([]byte{p.Replicas, p.MinLive}, uint32(len(p.PGs)))
+	return bigEndian.AppendUint64(bigEndian.AppendUint32([]byte{p.Replicas, p.MinLive}, uint32(len(p.PGs))), p.Split)
 }
 
 // putSplit appends the writes that store v under k as a head and pieces, and drop the pieces past
@@ -704,10 +706,10 @@ func decodeCtl(kvs []KV) (ctlState, error) {
 			case len(name) == 0 && len(v) == 12:
 				s.table.Epoch, crc = bigEndian.Uint64(v), bigEndian.Uint32(v[8:])
 				bad = s.table.Epoch == 0
-			case len(name) == 4 && len(v) == 6:
-				dp := chunkstore.DeltaPool{ID: core.PoolID(bigEndian.Uint32(name)), Replicas: v[0], MinLive: v[1], PGCount: bigEndian.Uint32(v[2:])}
-				bad = dp.Replicas == 0 || dp.MinLive == 0 || dp.MinLive > dp.Replicas || core.CheckPGCount(dp.PGCount) != nil
-				s.table.Pools = append(s.table.Pools, chunkstore.PoolTable{ID: dp.ID, Replicas: dp.Replicas, MinLive: dp.MinLive})
+			case len(name) == 4 && len(v) == 14:
+				dp := chunkstore.DeltaPool{ID: core.PoolID(bigEndian.Uint32(name)), Replicas: v[0], MinLive: v[1], PGCount: bigEndian.Uint32(v[2:]), Split: bigEndian.Uint64(v[6:])}
+				bad = dp.Replicas == 0 || dp.MinLive == 0 || dp.MinLive > dp.Replicas || core.CheckPGCount(dp.PGCount) != nil || dp.Split > s.table.Epoch
+				s.table.Pools = append(s.table.Pools, chunkstore.PoolTable{ID: dp.ID, Replicas: dp.Replicas, MinLive: dp.MinLive, Split: dp.Split})
 				count = append(count, dp.PGCount)
 			case len(name) == 8:
 				j := len(s.table.Pools) - 1

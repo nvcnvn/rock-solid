@@ -3607,7 +3607,9 @@ Not modelled: more than one split, a split of a pool whose PGs hold chunks in bo
 halves inherit the parent's state on every member as the modelled half does, and the reports
 placement ignores in the table that splits a pool, a table the model's folds never share. A node's
 per-PG state is not modelled either: the model follows a PG across the split, where a node matches its
-lead, asks and failed versions by PG number, so the code half re-keys them at a split. Nor is a change of `replicas`, so
+messages, leads, asks, failed versions and peering images by PG number: it refuses a message tagged with a table
+older than its pool's split epoch, waits for a newer table on a message whose chunk its own `pg_count` puts
+in another PG or a peering message tagged with a newer table, a sender's retry replacing the copy that waits, and drops that state of a pool that splits, so no half takes another PG's. The leader keys its watch of each PG's primary by number too, and drops a lead state whose `pg_count` is not the pool's (`TestAGiveUpAfterASplitDropsNoChunkOfAnotherPG`). Nor is a change of `replicas`, so
 neither is the leaving mark that narrows a PG when `replicas` goes down, or a leaving member kept
 because a raised `replicas` needs it; a leaving member that takes a missing member's place is
 modelled, as `Stay`. Of moves, no plan makes a table that
@@ -4566,6 +4568,7 @@ changes nothing on its lines (discrepancy 33). The actions of `Next` no trace to
 | `AskNext` | Each of its 13 `ask` lines finds the PG's ask already made |
 | `Refuse` | A fenced client write. No record maps it |
 | `SetMinLive`, `Die`, `Isolate` | No run of the test changes `min_live`, ends a daemon or cuts a node from the control plane |
+| `Split` | No traced run doubles a pool's `pg_count`, so the `reported` line matches a report by PG number and interval and leaves out the model's split count; a traced split would map the report's `pg_count` to it |
 | `OpenGrant`, `OpenLapse`, `Ask`, `Grant`, `GrantRefused`, `SendHb`, `RecvGrant`, `RecvHb`, `RoundTrip`, `Beat`, `EndWait` | The lease half, not traced |
 | `Fortify`, `Elect`, `Transfer`, `StepDown` | Raft, not traced: `MaxTerm` is 0 |
 | `Tick`, `Suspend`, `Wake`, `Freeze`, `Thaw`, `RateStep`, `Reboot`, `BootUp`, `NetFault` | Clock and network faults, not traced: `Clocks` is off |
@@ -5296,8 +5299,8 @@ spike](../spikes/capacity-model/README.md)). Here they check only placement
 
 | Table | Size |
 | --- | --- |
-| 2,048 `rep3` PGs, each 3 × (4-byte disk ID + mark byte) + 11 bytes of intervals, flags and counts | 52 KiB (53,270 bytes) |
-| 4,096 PGs × 18 members, `ec16-2` | About 404 KiB (413,718 bytes) |
+| 2,048 `rep3` PGs, each 3 × (4-byte disk ID + mark byte) + 11 bytes of intervals, flags and counts | 52 KiB (53,278 bytes) |
+| 4,096 PGs × 18 members, `ec16-2` | About 404 KiB (413,726 bytes) |
 
 Past intervals' member lists and, a PG's leaving members come on top of
 these sizes; both are usually absent (`TestTableSize`).
@@ -5311,13 +5314,13 @@ these sizes; both are usually absent (`TestTableSize`).
   interval numbers goes backwards (`TestDeltaBases`).
 - [fuzz] Delta and whole-table decoders (`FuzzDecodeTable`, `FuzzDecodeDelta`): what they accept
   encodes back to the same bytes. A truncated delta, an entry for a PG past `pg_count`, a
-  decreasing interval number, a leaving member in a recovered interval or an
-  unknown entry flag is Malformed (`TestMalformedDeltas`), as is a new or resized pool
+  decreasing interval number, a leaving member in a recovered interval, a pool's split after the
+  delta's epoch or an unknown entry flag is Malformed (`TestMalformedDeltas`), as is a new or resized pool
   without exactly `pg_count` entries, refused before the table is allocated: a 50-byte delta naming
   2³¹ PGs costs nothing (`TestDeltaCarriesEveryNewPG`).
 - PG epochs spike B1, a homelab year on 10 nodes: 104 to 105 MB of deltas against 399 MB to 2.25 GB
   of whole tables. F2, one flap with refill staged one member per table: 1,202 tables. A delta costs
-  a 30-byte header for one pool and 34 bytes per changed `rep3` entry, 20 more with its previous
+  a 38-byte header for one pool and 34 bytes per changed `rep3` entry, 20 more with its previous
   interval's members, 5 more during a move (`TestDeltaSize`).
 
 **[property] tests.** `TestPlacementKeepsItsRules`, 1,000 seeds in `scripts/seeds.sh`, about 40 ms
@@ -6499,7 +6502,7 @@ strategy](design.md#testing-strategy) names what is left and the item that will 
 | P4 | A disk marked down `flap_count` (5) times within `flap_window`; a 5 s hiccup in `rep2`, `min_live` 2 | The flapping disk stays down until its heartbeats are normal for a whole `flap_window` and is not refilled before `refill_after`, in `rep3` or `rep2`. The hiccup raises one interval at the down mark and one at the return, and moves no member (F1) | `TestAFlappingDiskIsHeldDown`, `TestHiccupMovesNoMember` |
 | P5 | Primary A of PG 0 restarts with a replicated write it sent still on its way to a member | A asks for a new interval and serves nothing until it has peered there. The member refuses the old interval's write once it holds the new one, and refuses a version sent again after its copy is done; no two contents share one version | `TestARestartedPrimaryTakesANewIntervalBeforeItServes`, `TestAMemberAcceptsOnlyThePGsCurrentInterval`, `TestAVersionSentAgainAfterItsCopyIsDoneIsRefused`; the primary-change run's primary crashes, whose stale writes trip "no member logs a write tagged with an earlier interval" under `neg-compare-member-lists` |
 | P6 | The counter case under [Replica primary](#replica-primary) | As stated there; other PGs see no refusal | `TestASpentCounterAsksForTheNextInterval` |
-| P7 | `pg_count` 1,024 → 2,048 with writes in flight to PG 567 | Open: PGs 1,134 and 1,135 start one interval above 567, and every chunk's versions keep growing. The replica path splits no PG yet; the row runs in [Control-plane placement faults](#control-plane-placement-faults), under its split report rule | Placement's split cases only |
+| P7 | `pg_count` 64 → 128 with writes in flight to PG 37, which sits on PG 18's members one interval above it, so new PG 37, a half of PG 18, starts old PG 37's interval under its primary; the split table moves PGs 74 and 75 to a fourth disk | PGs 74 and 75 start one interval above 37 and activate it; a write the split catches is refused and sent again, never taken by new PG 37, every chunk's acknowledged versions keep growing, each reads back through its half's primary as its last acknowledged write, and every activation a table records happened. 8 seeds in the package (2 s), 400 in `scripts/seeds.sh` (0.28 s a seed, 112 s on one process); with the split epoch check off, seed 0 acknowledges writes after the split under new PG 37's interval. A disk leading two PGs drops its lead of each at the split and peers the halves. Where new PG 1, a half of PG 0, starts the interval old PG 1 was in, a client's write or read one table behind, a cut-off old primary's resend and a peering ask, each naming old PG 1 at that interval, are refused under the split epoch, not taken by new PG 1; a member or primary still on the table before the split waits for the split table on a write, read or peering ask naming new PG 1 at that interval, rather than take it as old PG 1's, and takes it as new PG 1's once it has that table; and a write a primary held at the split is refused under the split's table; with the split report rule off, a report from before the split records an activation that never came (`neg-report-across-split`) | `TestP7SplitsAPoolWithWritesInFlight` (seeded), `TestAHalfDoesNotKeepALeadOfItsNumberFromBeforeTheSplit`, `TestAClientOneTableBehindIsRefusedAtAHalf`, `TestAReadOneTableBehindIsRefusedAtAHalf`, `TestAStalePrimarysResendIsRefusedAtAHalf`, `TestAPeeringAskFromBeforeTheSplitIsNotAnswered`, `TestAMemberBehindASplitWaitsForItWithAWrite`, `TestAPrimaryBehindASplitWaitsForItWithARead`, `TestAMemberBehindASplitWaitsForItWithAPeeringAsk`, `TestAWriteHeldAcrossASplitIsRefusedUnderTheSplitTable`, `TestPlantedReportAcrossSplitRecordsAnActivationThatNeverCame`, `TestAReportFromBeforeASplitIsDropped` (`internal/meta`) |
 | P8 | A disk's acknowledgment latency above `slow_disk_factor` times its pool's median for a whole `slow_disk_window`, then normal; a second disk slow at once | Marked down after the window and back after a whole normal window; two slow figures a window apart with none between leave it up; the second slow disk stays up where marking both would leave a PG below `min_live`. A cluster run with one disk 100× slow waits on the simulator's one clock ([tech debt](tech-debts.md#workaround-fail-slow-judged-on-reported-latencies-not-in-a-simulated-cluster)) | `TestAFailSlowDiskIsMarkedDown`, `TestFailSlowNeedsAWholeSlowWindow`, `TestTwoSlowDisksKeepMinLive`; the simulated disk's latency in `TestDiskLatencyAndFailSlow` |
 | P9 | Holder `BOOTTIME` −22.6%, grantor `BOOTTIME` +22.6%; or holder clocks −100 ppm, grantor +100 ppm | No overlap: the holder ends by 2.96 s, the grantor at 4.0 s or later | `TestLeaseTime` "opposite slews", "oscillators" |
 | P9b | Per seed: `BOOTTIME` slewed up to ±22.6% with raw within 100 ppm, or raw within 4% with `BOOTTIME` slewed or at the raw rate; cuts, VM stops, reboots, suspends | No lease outlasts its grant from the first lease, over 10,000 seeds | `TestNoLeaseOutlastsItsGrant` |
@@ -7305,10 +7308,10 @@ on a node is chunkstore's (`table_test.go`).
 | --- | --- |
 | A `Pool` create or update | Checked against the [Pools](#pools) creation rules, then committed under `ctl/pool/`. A refused one commits nothing (`TestPoolsAreCheckedThenCommittedUnderCtl`) |
 | `replicas` changed | The next table starts a new interval of every PG of the pool (`TestRaisingReplicasStartsAnIntervalOfEveryPG`) |
-| `pg_count` changed on an existing pool | Refused until [Control-plane placement faults](#control-plane-placement-faults) builds splits (`TestAPoolChangeIsCheckedAgainstTheCommittedPool`) |
+| `pg_count` changed on an existing pool | A doubling commits in one `Txn`, the pool record with a table whose every PG splits into halves that keep its members and past intervals and start its interval plus one, which the next leader reads back; any other change is refused (`TestAPoolChangeIsCheckedAgainstTheCommittedPool`) |
 | Two changes of a pool staged before a step; a pool set to the settings it has | The step commits the last; the second commits nothing (`TestAPoolChangeIsCheckedAgainstTheCommittedPool`) |
 | A pool change staged by a machine whose commit then lost a race | Checked again against the pool it reads back; refused there, it is dropped with an error and the next step commits the rest (`TestAStagedPoolIsCheckedAgainAfterAReload`) |
-| A `rep3` pool of 16,384 PGs, whose refill after a rack loss may be more than `max_ctl_txn_bytes`; one of 8,192; a third of 8,192 beside a down mark of two | The first is refused with `ErrTooLarge`, the second accepted; the third is dropped with `ErrTooLarge`, and the next step commits the down marks, in a `Txn` over 256 KiB (`TestAPoolTooLargeForAStepIsRefused`) |
+| A `rep3` pool of 16,384 PGs, whose refill after a rack loss may be more than `max_ctl_txn_bytes`; one of 8,192; a third of 8,192 beside a down mark of two; a doubling of one of 8,192 | The first is refused with `ErrTooLarge`, the second accepted; the third is dropped with `ErrTooLarge`, and the next step commits the down marks, in a `Txn` over 256 KiB; the doubling is refused with `ErrTooLarge` (`TestAPoolTooLargeForAStepIsRefused`) |
 
 **Placement table**
 
@@ -7320,6 +7323,7 @@ on a node is chunkstore's (`table_test.go`).
 | A Raft snapshot of the group | Holds the whole table (`TestANewLeaderAndASnapshotReadBackTheWholeState`) |
 | A primary reports activation of interval k on its heartbeat | A later table records k as the PG's last activated interval and drops the member lists of the intervals before it. That table starts no interval (`TestAnActivationIsRecordedWithoutANewInterval`) |
 | The primary and members of a PG resend their ask for a new interval every second while a commit is pending | The control plane keeps one ask per PG and interval (`TestResentAsksKeepOneAskPerInterval`) |
+| An ask for a new interval tagged with a table older than its pool's split, sent while the split's commit is pending or after it | Dropped; one sent under the split's table starts a new interval of the half (`TestAnAskFromBeforeASplitIsDropped`) |
 | A disk added, a recovered report, a down mark | Each table raises the table epoch and commits only the entries it changes. Only PGs whose members change start a new interval (`TestATableCommitsAsItsDelta`) |
 | The control-plane leader fails over | The new leader reads the pools, the table and the shard map back from the group's state, and its next table follows the last committed one (`TestANewLeaderAndASnapshotReadBackTheWholeState`) |
 | Two machines each think they lead | The second's commit fails its checks against what the first committed; it reads the state again and its next commit lands on top (`TestARacingCommitFailsItsChecks`) |
@@ -7328,6 +7332,7 @@ on a node is chunkstore's (`table_test.go`).
 | The `ctl/` keys of a pool, its table header, a PG entry, a group and their pieces | Encode as `testdata/key_golden.txt` freezes them (`TestCtlKeysAreTheGoldenOnes`) |
 | A pool's settings or a group's entry as bytes | Decodes without a panic, and one that decodes encodes back to the same bytes (`FuzzDecodePool`, `FuzzDecodeGroup`) |
 | Any set of `ctl/` keys and values | Decodes without a panic; a state that decodes has the CRC32C its head names and a shard map `CheckRanges` accepts (`FuzzDecodeCtl`) |
+| A pool's `ctl/placement/{pool}` value with a split epoch above the table's, under a CRC32C that covers it, or of 6 bytes, with no split epoch | Malformed (`TestAPlacementPoolValueOfAnotherFormIsMalformed`) |
 
 **Shard map**
 
@@ -7547,12 +7552,8 @@ A daemon crash in the middle of a reuse window, and a write that crosses from a 
 
 ## Control-plane placement faults
 
-Phase 3's placement seeds run unchanged against the real group in place of the stand-in, and pass the same invariants. With them, the [placement faults](#placement-faults-and-invariants) phase 3 leaves open:
+Phase 3's placement seeds run unchanged against the real group in place of the stand-in, and pass the same invariants. With them, the [placement faults](#placement-faults-and-invariants) phase 3 leaves open, beside P7 and the split report rule, which its row covers:
 
-- the split report rule: a heartbeat that reports an activation or a recovered report under a table
-  epoch older than its pool's last split is dropped, since it names its PG in the numbering before
-  the split, by this leader and by the next, from the pool's `pg_count` the report carries; one sent under the split's table is recorded;
-- P7 under that rule;
 - P20 while [Space grants](#space-grants) are out and a refill after a disk failure moves members onto the fullest disks;
 - P23 end to end, from the leader's record of when each PG last copied;
 - a seeded run that clones a disk onto a second device, the one fault that reaches "no log ID is up under two disk IDs".

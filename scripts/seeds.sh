@@ -33,6 +33,7 @@ internal/disklog TestOracleCatchesReplayPastATornRound 1000
 internal/disklog TestQuarantinedSegmentsAreNeverReused 500
 internal/disklog TestSlotRoundsKeepTheTraceRules 300
 internal/chunkstore TestReplayPastPendingWrites 2000
+internal/chunkstore TestP7SplitsAPoolWithWritesInFlight 400
 internal/lsm TestMetamorphic 1000
 internal/chunkstore TestMetamorphic 1000
 internal/chunkstore TestCleanerSurvivesCrashes 500

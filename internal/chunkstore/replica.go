@@ -52,8 +52,8 @@ type ReplicaOutput struct {
 	// replica naming this number.
 	FetchSessions uint64
 	Asks          []PGFields
-	Activations   []PGFields
-	Recovered     []PGFields
+	Activations   []PGReport
+	Recovered     []PGReport
 	Trace         []trace.Record
 }
 
@@ -146,11 +146,13 @@ type heldMsg struct {
 	hold uint32
 }
 
-// parkedMsg is a message waiting for a table: epoch is the placement table's it waits for, or ask
-// the FetchSessions it first waited on for a session table; chunk and version name a member's
-// write, whose resend replaces its copy.
+// parkedMsg is a message waiting for a table: epoch is the placement table's it waits for, kind and
+// id the request's, or ask the FetchSessions it first waited on for a session table; chunk and
+// version name a member's write, whose resend replaces its copy.
 type parkedMsg struct {
 	epoch   uint64
+	kind    Kind
+	id      core.RequestID
 	ask     uint64
 	chunk   core.ChunkID
 	version uint64
@@ -567,6 +569,27 @@ func (t *Table) entry(pg core.PGID) (*PoolTable, *PGEntry) {
 	return p, &p.PGs[pg.Index]
 }
 
+// named is the pool and entry of the PG f names, or nils when f is of a table older than the pool's
+// last split: its number then names a PG of the numbering before the split, which a half of another
+// PG may now hold at the same interval.
+func (t *Table) named(f PGFields) (*PoolTable, *PGEntry) {
+	if p, e := t.entry(f.PG); p == nil || f.Epoch >= p.Split {
+		return p, e
+	}
+	return nil, nil
+}
+
+// namedFor is named for a message about chunk c, with no entry when c is not in the PG f names under
+// the table's pg_count: f is then of a table that numbers the pool otherwise, and wait reports one
+// newer than the replica's, of a split it has not adopted.
+func (r *Replica) namedFor(f PGFields, c core.ChunkID) (p *PoolTable, e *PGEntry, wait bool) {
+	if pt := r.table.pool(f.PG.Pool); pt != nil && core.PGIndexOf(c.Hash(), uint32(len(pt.PGs))) != f.PG.Index {
+		return nil, nil, f.Epoch > r.table.Epoch
+	}
+	p, e = r.table.named(f)
+	return p, e, false
+}
+
 // primary is the PG's first up member, which orders its writes; an interval whose live members are all in maintenance has none.
 func (e *PGEntry) primary() (uint32, bool) {
 	for _, m := range e.Members {
@@ -604,7 +627,9 @@ func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 	out.note(trace.OutAdopt, t.Epoch, 0, 0, 0, 0)
 	first := r.table.Epoch == 0
 	r.noteDrops(&r.table, &t)
+	prev := r.table
 	r.table = t
+	r.splitOff(ctx, &prev, &r.table, out)
 	if t.Epoch >= r.want {
 		r.want, r.wantWhole = 0, false
 	}
@@ -665,6 +690,32 @@ func (r *Replica) adopt(ctx *core.Context, t Table, out *ReplicaOutput) {
 	r.leftDue = true
 	r.unpark(ctx, out)
 	r.drain(ctx, out)
+}
+
+// splitOff drops this disk's leads, asks, failed versions and peering images of each pool t, the
+// replica's table now, splits from prev, refusing the leads' held writes under t: they name their PG by number, and
+// a split gives each number to a half of another PG, so no half may take its parent's state by number.
+func (r *Replica) splitOff(ctx *core.Context, prev, t *Table, out *ReplicaOutput) {
+	split := func(id core.PoolID) bool {
+		p, n := prev.pool(id), t.pool(id)
+		return p != nil && n != nil && len(p.PGs) != len(n.PGs)
+	}
+	r.failed = slices.DeleteFunc(r.failed, func(f failedVer) bool { return split(f.pg.Pool) })
+	r.asks = slices.DeleteFunc(r.asks, func(a PGFields) bool { return split(a.PG.Pool) })
+	r.images = slices.DeleteFunc(r.images, func(m pgImage) bool { return split(m.pg.Pool) })
+	if !slices.ContainsFunc(r.leads, func(l lead) bool { return split(l.pg.Pool) }) {
+		return
+	}
+	old := r.leads
+	r.leads = slices.DeleteFunc(slices.Clone(old), func(l lead) bool { return split(l.pg.Pool) })
+	for _, l := range old {
+		if split(l.pg.Pool) {
+			for _, h := range l.held {
+				r.refuseHeld(ctx, h, out)
+			}
+		}
+	}
+	r.dropRecoveries(old)
 }
 
 // unpark takes again each parked message the replica's tables are now new enough for; one that
@@ -868,6 +919,12 @@ func (r *Replica) demote(ctx *core.Context, out *ReplicaOutput) {
 	}
 }
 
+// reportOf names interval k of pg, a PG of the replica's table, for an activation or recovered report.
+func (r *Replica) reportOf(pg core.PGID, k uint32) PGReport {
+	p, _ := r.table.entry(pg)
+	return PGReport{PGFields: PGFields{Epoch: r.table.Epoch, PG: pg, Interval: k}, PGCount: uint32(len(p.PGs))}
+}
+
 // pgOf is the PG chunk c belongs to in the replica's table.
 func (r *Replica) pgOf(c core.ChunkID) (core.PGID, bool) {
 	p := r.table.pool(r.st.cfg.Pool)
@@ -1035,8 +1092,8 @@ func (r *Replica) recv(ctx *core.Context, ev *core.Event, out *ReplicaOutput) {
 		return
 	case KindRead, KindRecoverRead:
 		var rd Read
-		if DecodeRead(frame, data, &rd) == nil {
-			r.read(ctx, ev, &rd, out)
+		if DecodeRead(frame, data, &rd) == nil && r.read(ctx, ev, &rd, out) {
+			return
 		}
 	case KindAck:
 		var rp Response
@@ -1141,9 +1198,17 @@ func (r *Replica) refusal(pg core.PGID) Response {
 	return rp
 }
 
-// park keeps a message tagged with a newer table than the replica holds until it has one at least as new as the sender's.
-func (r *Replica) park(ev *core.Event, epoch uint64, out *ReplicaOutput) {
-	r.parked = append(r.parked, parkedMsg{epoch: epoch, peer: ev.Peer, msg: ev.Msg})
+// park keeps a message tagged with a newer table than the replica holds until it has one at least as new as the
+// sender's; a retry of a request parked from the same peer replaces its copy, so retries hold one buffer.
+func (r *Replica) park(ctx *core.Context, ev *core.Event, epoch uint64, out *ReplicaOutput) {
+	frame, _ := Frame(ctx.Pool, &ev.Msg)
+	p := parkedMsg{epoch: epoch, kind: Kind(frame[1]), id: core.RequestID(le.Uint64(frame[2:])), peer: ev.Peer, msg: ev.Msg}
+	if i := slices.IndexFunc(r.parked, func(q parkedMsg) bool { return q.ask == 0 && q.peer == p.peer && q.kind == p.kind && q.id == p.id }); i >= 0 {
+		freeBuf(ctx, r.parked[i].msg.Buf)
+		r.parked[i] = p
+	} else {
+		r.parked = append(r.parked, p)
+	}
 	r.fetch(epoch, false, out)
 }
 
@@ -1162,16 +1227,16 @@ func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		return
 	}
 	r.st.SeeIncarnation(u.Session, u.Incarnation)
-	p, e := r.table.entry(u.PG.PG)
+	p, e, wait := r.namedFor(u.PG, u.Chunk)
 	i := r.lead(u.PG.PG)
 	switch {
-	case e != nil && i < 0 && u.PG.Interval > e.Interval && u.PG.Epoch > r.table.Epoch:
-		r.park(ev, u.PG.Epoch, out)
+	case wait || e != nil && i < 0 && u.PG.Interval > e.Interval && u.PG.Epoch > r.table.Epoch:
+		r.park(ctx, ev, u.PG.Epoch, out)
 		return
-	case i < 0 || u.PG.Interval < r.leads[i].since || e.live() < int(p.MinLive) || r.st.Err() != nil:
+	case e == nil || i < 0 || u.PG.Interval < r.leads[i].since || e.live() < int(p.MinLive) || r.st.Err() != nil:
 	case u.PG.Interval > r.leads[i].interval:
 		if u.PG.Epoch > r.table.Epoch {
-			r.park(ev, u.PG.Epoch, out)
+			r.park(ctx, ev, u.PG.Epoch, out)
 			return
 		}
 	case !r.leads[i].active || r.leads[i].asking && !r.plant.orderPastFailed || r.leads[i].isUnfound(u.Chunk) && !r.plant.writeOnUnfound || r.leads[i].short(e, int(p.MinLive), u.Chunk) && !r.plant.noDegradedHold ||
@@ -1223,9 +1288,9 @@ func (r *Replica) order(ctx *core.Context, ev *core.Event, u *Update, interval u
 
 // memberUpdate takes a write or punch the PG's primary ordered: accepted only in the PG's current interval, by an up member, and refused once an earlier version of its chunk in the interval failed here, so the member logs a chunk's versions without a gap. A version sent again while its first copy is in flight is answered with that copy's outcome; one whose copy is done is refused, since after a failure or a restart the member may hold only some of its records.
 func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out *ReplicaOutput) {
-	_, e := r.table.entry(u.PG.PG)
-	if e != nil && u.PG.Interval > e.Interval && u.PG.Epoch > r.table.Epoch {
-		r.park(ev, u.PG.Epoch, out)
+	_, e, wait := r.namedFor(u.PG, u.Chunk)
+	if wait || e != nil && u.PG.Interval > e.Interval && u.PG.Epoch > r.table.Epoch {
+		r.park(ctx, ev, u.PG.Epoch, out)
 		return
 	}
 	newer := r.st.Sessions().Newer(u.Session)
@@ -1327,15 +1392,18 @@ func (r *Replica) noteFailed(f failedVer) {
 	}
 }
 
-// read serves a client's read at the PG's primary while it may serve reads, a read of a frozen version at any member, and at a member a base its primary fetches, the blocks at the version the primary's index names.
-func (r *Replica) read(ctx *core.Context, ev *core.Event, rd *Read, out *ReplicaOutput) {
+// read serves a client's read at the PG's primary while it may serve reads, a read of a frozen version at any member, and at a member a base its primary fetches, the blocks at the version the primary's index names; it reports whether it parked the read for a newer table.
+func (r *Replica) read(ctx *core.Context, ev *core.Event, rd *Read, out *ReplicaOutput) (parked bool) {
 	if rd.Recover {
-		r.recoveryAsked(ctx, ev, rd, out)
-		return
+		return r.recoveryAsked(ctx, ev, rd, out)
 	}
-	p, e := r.table.entry(rd.PG.PG)
+	p, e, wait := r.namedFor(rd.PG, rd.Chunk)
+	if wait {
+		r.park(ctx, ev, rd.PG.Epoch, out)
+		return true
+	}
 	i := r.lead(rd.PG.PG)
-	primary := i >= 0 && r.leads[i].serving && rd.PG.Interval >= r.leads[i].since && rd.PG.Interval <= r.leads[i].interval && r.readable(ctx, p, e)
+	primary := e != nil && i >= 0 && r.leads[i].serving && rd.PG.Interval >= r.leads[i].since && rd.PG.Interval <= r.leads[i].interval && r.readable(ctx, p, e)
 	base := false
 	if e != nil && i < 0 && rd.HasAt && rd.PG.Interval == e.Interval {
 		d, ok := e.primary()
@@ -1345,15 +1413,16 @@ func (r *Replica) read(ctx *core.Context, ev *core.Event, rd *Read, out *Replica
 		rp := r.refusal(rd.PG.PG)
 		rp.Kind = KindReadReply
 		r.answer(ctx, ev.Peer, rd.ID, &rp, core.NoBuf, out)
-		return
+		return false
 	}
 	if primary && r.leads[i].isUnfound(rd.Chunk) {
 		rp := Response{Kind: KindReadReply, Status: StatusUnfound}
 		r.answer(ctx, ev.Peer, rd.ID, &rp, core.NoBuf, out)
-		return
+		return false
 	}
 	id := r.newReq(storeReq{kind: reqRead, peer: ev.Peer, msgID: rd.ID, pg: rd.PG.PG, chunk: rd.Chunk})
 	r.st.Read(ctx, Request{ID: id, Chunk: rd.Chunk, Off: rd.Off, Len: rd.Len, HasVer: rd.HasAt, Ver: rd.At, FrozenOnly: !primary && !base, Base: base}, &r.sout)
+	return false
 }
 
 func (r *Replica) newReq(q storeReq) uint64 {
@@ -1837,7 +1906,7 @@ func (r *Replica) resend(out *ReplicaOutput) {
 			i = len(r.vers) - 1 - n
 		}
 		v := &r.vers[i]
-		_, e := r.table.entry(v.u.PG.PG)
+		_, e := r.table.named(PGFields{Epoch: v.epoch, PG: v.u.PG.PG, Interval: v.interval})
 		if v.done || !v.ordered || e == nil || v.interval != e.Interval {
 			continue
 		}

@@ -332,9 +332,13 @@ func (r *Replica) retryReads() {
 // recoveryAsked serves a recovery read from the PG's primary in the PG's current interval, if this
 // disk is a member of it: the chunk's live image as a recovery buffer, StatusMissing while the
 // chunk is on this disk's missing list, or StatusUnfound if the image fails its checksum. A disk formatted again at a member's loop answers no read
-// for the member's old disk ID.
-func (r *Replica) recoveryAsked(ctx *core.Context, ev *core.Event, rd *Read, out *ReplicaOutput) {
-	_, e := r.table.entry(rd.PG.PG)
+// for the member's old disk ID. It reports whether it parked the read for a newer table.
+func (r *Replica) recoveryAsked(ctx *core.Context, ev *core.Event, rd *Read, out *ReplicaOutput) (parked bool) {
+	_, e, wait := r.namedFor(rd.PG, rd.Chunk)
+	if wait {
+		r.park(ctx, ev, rd.PG.Epoch, out)
+		return true
+	}
 	ok := e != nil && r.lead(rd.PG.PG) < 0 && rd.PG.Interval == e.Interval && (r.plant.readOldDisk || slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk }))
 	if ok {
 		d, has := e.primary()
@@ -344,16 +348,17 @@ func (r *Replica) recoveryAsked(ctx *core.Context, ev *core.Event, rd *Read, out
 		rp := r.refusal(rd.PG.PG)
 		rp.Kind = KindReadReply
 		r.answer(ctx, ev.Peer, rd.ID, &rp, core.NoBuf, out)
-		return
+		return false
 	}
 	if ix := r.st.Index(); ix == nil || listedIn(ix, r.st.cfg.Pool, rd.Chunk) != 0 {
 		rp := Response{Kind: KindReadReply, Status: StatusMissing}
 		r.answer(ctx, ev.Peer, rd.ID, &rp, core.NoBuf, out)
-		return
+		return false
 	}
 	out.note(trace.OutRecoverRead, rd.Chunk.Hash(), uint64(rd.PG.Interval), 0, 0, 0)
 	id := r.newReq(storeReq{kind: reqRead, peer: ev.Peer, msgID: rd.ID, pg: rd.PG.PG, chunk: rd.Chunk, recover: true})
 	r.st.Read(ctx, Request{ID: id, Chunk: rd.Chunk, Len: core.ChunkSize, Recover: true}, &r.sout)
+	return false
 }
 
 func listedIn(ix *Index, pool core.PoolID, c core.ChunkID) uint32 {
@@ -571,7 +576,7 @@ func (r *Replica) reportRecovered(again bool, out *ReplicaOutput) {
 				out.note(trace.OutReported, pgField(l.pg), uint64(l.interval), 0, 0, 0)
 			}
 			l.reported = true
-			out.Recovered = append(out.Recovered, PGFields{Epoch: r.table.Epoch, PG: l.pg, Interval: l.interval})
+			out.Recovered = append(out.Recovered, r.reportOf(l.pg, l.interval))
 		}
 	}
 }

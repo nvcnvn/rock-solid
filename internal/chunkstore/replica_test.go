@@ -39,8 +39,8 @@ type rcluster struct {
 	asks        []PGFields
 	// activations is every activation a primary reported, which next records in its table, and
 	// recovered every recovered interval.
-	activations []PGFields
-	recovered   []PGFields
+	activations []PGReport
+	recovered   []PGReport
 	inv         sim.Invariants
 	// sentVer is the newest version of each chunk a primary sent each member on its current connection, boots counting each node's starts and lost the connections each lost; orderErr is the first send out of order.
 	sentVer map[sendKey]uint64

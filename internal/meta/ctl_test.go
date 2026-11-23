@@ -253,7 +253,7 @@ func TestATableCommitsAsItsDelta(t *testing.T) {
 	}
 	r.step(in)
 	for i, e := range r.ctl.Table().Pools[0].PGs[:3] {
-		r.ctl.Report(&chunkstore.Report{Recovered: []chunkstore.PGFields{{Epoch: 1, PG: core.PGID{Pool: 1, Index: uint32(i)}, Interval: e.Interval}}})
+		r.ctl.Report(&chunkstore.Report{Recovered: []chunkstore.PGReport{{PGFields: chunkstore.PGFields{Epoch: 1, PG: core.PGID{Pool: 1, Index: uint32(i)}, Interval: e.Interval}, PGCount: 8}}})
 	}
 	for step := range 3 {
 		prev := *r.ctl.Table()
@@ -299,7 +299,7 @@ func TestAnActivationIsRecordedWithoutANewInterval(t *testing.T) {
 		t.Fatal("no PG has past intervals")
 	}
 	e := r.ctl.Table().Pools[0].PGs[pg]
-	r.ctl.Report(&chunkstore.Report{Activations: []chunkstore.PGFields{{Epoch: 2, PG: core.PGID{Pool: 1, Index: uint32(pg)}, Interval: e.Interval}}})
+	r.ctl.Report(&chunkstore.Report{Activations: []chunkstore.PGReport{{PGFields: chunkstore.PGFields{Epoch: 2, PG: core.PGID{Pool: 1, Index: uint32(pg)}, Interval: e.Interval}, PGCount: uint32(len(r.ctl.Table().Pools[0].PGs))}}})
 	r.step(in)
 	got := r.ctl.Table().Pools[0].PGs[pg]
 	if got.Activated != e.Interval || got.Interval != e.Interval || len(got.Past) != 0 {
@@ -463,8 +463,10 @@ func TestALongValueIsStoredInPieces(t *testing.T) {
 	}
 }
 
-// A pool keeps its pg_count until splits are built: a change of it is refused, as is a pool
-// change the operator stages twice before a step, which stages only the last.
+// A pool's pg_count only doubles: anything else is refused, as is a pool change the operator
+// stages twice before a step, which stages only the last. A doubling commits as one Txn whose table
+// splits every PG into halves that keep its members and past intervals and start its interval plus
+// one, and a leader after a failover reads the split table back.
 func TestAPoolChangeIsCheckedAgainstTheCommittedPool(t *testing.T) {
 	r := newCtlRun(t)
 	in := &ControlInputs{Disks: disks(0, 1, 2, 3)}
@@ -472,11 +474,30 @@ func TestAPoolChangeIsCheckedAgainstTheCommittedPool(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.step(in)
-	if err := r.ctl.SetPool(1, spec(2, 16), in.Disks); err == nil {
-		t.Fatal("a pg_count doubling was accepted")
+	if err := r.ctl.SetPool(1, spec(2, 32), in.Disks); err == nil {
+		t.Fatal("a pg_count quadrupling was accepted")
+	}
+	parent := slices.Clone(r.ctl.Table().Pools[0].PGs)
+	if err := r.ctl.SetPool(1, spec(2, 16), in.Disks); err != nil {
+		t.Fatal(err)
+	}
+	if out := r.step(in); len(out.Delta.Entries) != 16 || out.Delta.Pools[0].PGCount != 16 {
+		t.Fatalf("the split pushed %d entries, pools %+v", len(out.Delta.Entries), out.Delta.Pools)
+	}
+	for _, ctl := range []*Control{r.ctl, r.load(r.l)} {
+		for i, e := range ctl.Table().Pools[0].PGs {
+			p := parent[i/2]
+			if !slices.Equal(e.Members, p.Members) || e.Interval != p.Interval+1 || e.Activated != p.Activated ||
+				len(e.Past) != 1 || e.Past[0].Interval != p.Interval || !slices.Equal(e.Past[0].Members, p.Members) {
+				t.Fatalf("PG %d after the split is %+v, of parent %+v", i, e, p)
+			}
+		}
+		if p := ctl.Pools(); p[0].Pool.PGCount != 16 {
+			t.Fatalf("committed pool %+v", p)
+		}
 	}
 	for _, n := range []int{3, 1} {
-		s := spec(n, 8)
+		s := spec(n, 16)
 		s.MinLive = new(1)
 		if err := r.ctl.SetPool(1, s, in.Disks); err != nil {
 			t.Fatal(err)
@@ -486,8 +507,123 @@ func TestAPoolChangeIsCheckedAgainstTheCommittedPool(t *testing.T) {
 	if p := r.ctl.Pools(); len(p) != 1 || p[0].Pool.Replicas != 1 || r.ctl.Table().Pools[0].Replicas != 1 {
 		t.Fatalf("committed %+v", p)
 	}
-	if err := r.ctl.SetPool(1, spec(1, 8), in.Disks); err != nil || r.propose(in) {
+	if err := r.ctl.SetPool(1, spec(1, 16), in.Disks); err != nil || r.propose(in) {
 		t.Fatalf("a pool set to the settings it has answered %v or proposed", err)
+	}
+}
+
+// An activation or recovered report sent under the pool's pg_count before a split names its PG in
+// the numbering before it, so the leader drops it, as does a leader after a failover, from what the
+// report carries, and one that arrives while the split's commit is pending; one sent under the
+// split's table is recorded. The pool keeps the split's table epoch, a reloaded leader too.
+func TestAReportFromBeforeASplitIsDropped(t *testing.T) {
+	r := newCtlRun(t)
+	in := &ControlInputs{Disks: disks(0, 1, 2, 3)}
+	report := func(n uint32) {
+		e := r.ctl.Table().Pools[0].PGs[1]
+		f := chunkstore.PGReport{PGFields: chunkstore.PGFields{Epoch: r.ctl.Table().Epoch, PG: core.PGID{Pool: 1, Index: 1}, Interval: e.Interval}, PGCount: n}
+		r.ctl.Report(&chunkstore.Report{Activations: []chunkstore.PGReport{f}, Recovered: []chunkstore.PGReport{f}})
+	}
+	for _, n := range []uint32{8, 16} {
+		if err := r.ctl.SetPool(1, spec(2, n), in.Disks); err != nil {
+			t.Fatal(err)
+		}
+		if !r.propose(in) {
+			t.Fatal("nothing proposed")
+		}
+		if n == 16 {
+			report(8)
+		}
+		if a := r.answer(); a.Err != nil || a.Result.FailedCheck >= 0 {
+			t.Fatalf("the commit answered %+v", a)
+		}
+	}
+	split := r.ctl.Table().Epoch
+	for _, ctl := range []*Control{r.ctl, r.load(r.l)} {
+		r.ctl = ctl
+		if got := ctl.Table().Pools[0].Split; got != split {
+			t.Fatalf("pool 1's split is table %d, want %d", got, split)
+		}
+		report(8)
+		if r.propose(in) {
+			t.Fatalf("a report from before the split proposed %+v", r.txn)
+		}
+	}
+	report(16)
+	r.step(in)
+	if e := r.ctl.Table().Pools[0].PGs[1]; e.Activated != e.Interval || !e.Recovered {
+		t.Fatalf("a report from the split's table left %+v", e)
+	}
+}
+
+// An ask tagged with a table older than its pool's split names a PG of the numbering before it,
+// which a half may now hold at the same interval: the leader drops it, one that arrives while the
+// split's commit is pending too, rather than move the half. One sent under the split's table moves it.
+func TestAnAskFromBeforeASplitIsDropped(t *testing.T) {
+	r := newCtlRun(t)
+	in := &ControlInputs{Disks: disks(0, 1, 2, 3)}
+	pg := core.PGID{Pool: 1, Index: 1}
+	var ask chunkstore.PGFields
+	for _, n := range []uint32{8, 16} {
+		if err := r.ctl.SetPool(1, spec(2, n), in.Disks); err != nil {
+			t.Fatal(err)
+		}
+		if !r.propose(in) {
+			t.Fatal("nothing proposed")
+		}
+		if n == 16 {
+			ask = chunkstore.PGFields{Epoch: r.ctl.Table().Epoch, PG: pg, Interval: r.ctl.Table().Pools[0].PGs[0].Interval + 1}
+			r.ctl.Ask(ask)
+		}
+		if a := r.answer(); a.Err != nil || a.Result.FailedCheck >= 0 {
+			t.Fatalf("the commit answered %+v", a)
+		}
+	}
+	if e := r.ctl.Table().Entry(pg); e.Interval != ask.Interval {
+		t.Fatalf("new PG 1 at interval %d, want %d", e.Interval, ask.Interval)
+	}
+	for range 2 {
+		if r.propose(in) {
+			t.Fatalf("an ask from before the split proposed %+v", r.txn)
+		}
+		r.ctl.Ask(ask)
+	}
+	ask.Epoch = r.ctl.Table().Epoch
+	r.ctl.Ask(ask)
+	r.step(in)
+	if e := r.ctl.Table().Entry(pg); e.Interval != ask.Interval+1 {
+		t.Fatalf("an ask from the split's table left %+v", e)
+	}
+}
+
+// A pool's ctl/placement/{pool} value whose split epoch is above the table's, though the table's
+// CRC32C covers it, or of the 6 bytes before the split epoch joined it, does not decode.
+func TestAPlacementPoolValueOfAnotherFormIsMalformed(t *testing.T) {
+	p, err := chunkstore.NewPool(spec(3, 1), 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	table := func(split uint64) *chunkstore.Table {
+		return &chunkstore.Table{Epoch: 2, Pools: []chunkstore.PoolTable{{ID: 1, Replicas: 3, MinLive: 2, Split: split, PGs: []chunkstore.PGEntry{{Interval: 1, Members: []chunkstore.Member{{Disk: 1}, {Disk: 2}, {Disk: 3}}}}}}}
+	}
+	entry, err := AppendHead(nil, chunkstore.AppendEntry(nil, &table(0).Pools[0].PGs[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	kvs := func(tb *chunkstore.Table, head []byte) []KV {
+		return []KV{{poolKey(1), appendPool(nil, &p)}, {ctlKey(CtlPlacement, nil), tableHead(tb.Epoch, tb.CRC())}, {placementKey(1), head}, {entryKey(core.PGID{Pool: 1}), entry}}
+	}
+	if _, err := decodeCtl(kvs(table(2), poolHead(&table(2).Pools[0]))); err != nil {
+		t.Fatalf("the pool's value: %v", err)
+	}
+	above := table(3)
+	for _, c := range []struct {
+		what string
+		kvs  []KV
+	}{{"a split above the table's epoch", kvs(above, poolHead(&above.Pools[0]))}, {"a 6-byte value", kvs(table(0), poolHead(&table(0).Pools[0])[:6])}} {
+		if _, err := decodeCtl(c.kvs); !errors.Is(err, ErrMalformed) {
+			t.Errorf("%s decoded with %v", c.what, err)
+		}
 	}
 }
 
@@ -503,7 +639,7 @@ func TestAStagedPoolIsCheckedAgainAfterAReload(t *testing.T) {
 	}
 	r.step(in)
 	r.ctl = other
-	if err := r.ctl.SetPool(1, spec(3, 16), in.Disks); err != nil {
+	if err := r.ctl.SetPool(1, spec(3, 32), in.Disks); err != nil {
 		t.Fatal(err)
 	}
 	if !r.propose(in) {
@@ -524,7 +660,7 @@ func TestAStagedPoolIsCheckedAgainAfterAReload(t *testing.T) {
 }
 
 // A pool whose refill after a rack loss may be more than one ctl/ Txn holds is refused: a rep3
-// pool of 16,384 PGs, though its first table fits, and not one of 8,192. A pool that fits alone
+// pool of 16,384 PGs, though its first table fits, created or doubled, and not one of 8,192. A pool that fits alone
 // but not beside a step's other changes is dropped with ErrTooLarge, and the next step commits them.
 func TestAPoolTooLargeForAStepIsRefused(t *testing.T) {
 	r := newCtlRun(t)
@@ -548,6 +684,9 @@ func TestAPoolTooLargeForAStepIsRefused(t *testing.T) {
 	r.step(in)
 	if n, _ := r.txn.Check(); len(r.ctl.Pools()) != 2 || n <= MaxTxnBytes {
 		t.Fatalf("committed pools %+v in a Txn of %d bytes", r.ctl.Pools(), n)
+	}
+	if err := r.ctl.SetPool(1, spec(3, 1<<14), in.Disks); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("a doubling to 16,384 PGs answered %v", err)
 	}
 }
 

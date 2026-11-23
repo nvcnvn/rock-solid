@@ -83,7 +83,7 @@ func TestALeavingMemberGoesStuckAndClearsWhenItCopies(t *testing.T) {
 	if !slices.Contains(c.Stuck, pg) || b < 0 || !c.Blocked[b].Stopped {
 		t.Fatalf("PG %d not Stuck and Blocked, Stopped, after StuckAfter: %+v", pg, c)
 	}
-	lead := chunkstore.LeadState{PG: core.PGID{Pool: 1, Index: pg}, Interval: iv, Active: true, Lacking: 5}
+	lead := chunkstore.LeadState{PG: core.PGID{Pool: 1, Index: pg}, PGCount: uint32(len(pgs)), Interval: iv, Active: true, Lacking: 5}
 	r.leads(1, lead)
 	c = r.conditions()
 	b = slices.IndexFunc(c.Blocked, func(b chunkstore.BlockedPG) bool { return b.PG == pg })
@@ -102,15 +102,16 @@ func TestALeavingMemberGoesStuckAndClearsWhenItCopies(t *testing.T) {
 func TestAReportOfUnfoundChunksBlocksItsPG(t *testing.T) {
 	r := reportRun(t, "", "", "", "")
 	iv := r.ctl.Table().Pools[0].PGs[2].Interval
+	n := uint32(len(r.ctl.Table().Pools[0].PGs))
 	r.leads(0,
-		chunkstore.LeadState{PG: core.PGID{Pool: 1, Index: 2}, Interval: iv, Active: true, Unfound: 2, Chunks: []core.ChunkID{{Index: 1}, {Index: 2}}},
-		chunkstore.LeadState{PG: core.PGID{Pool: 1, Index: 99}, Interval: 1, Active: true, Unfound: 1, Chunks: []core.ChunkID{{}}},
-		chunkstore.LeadState{PG: core.PGID{Pool: 7}, Interval: 1, Active: true, Unfound: 1, Chunks: []core.ChunkID{{}}})
+		chunkstore.LeadState{PG: core.PGID{Pool: 1, Index: 2}, PGCount: n, Interval: iv, Active: true, Unfound: 2, Chunks: []core.ChunkID{{Index: 1}, {Index: 2}}},
+		chunkstore.LeadState{PG: core.PGID{Pool: 1, Index: 99}, PGCount: 128, Interval: 1, Active: true, Unfound: 1, Chunks: []core.ChunkID{{}}},
+		chunkstore.LeadState{PG: core.PGID{Pool: 7}, PGCount: 1, Interval: 1, Active: true, Unfound: 1, Chunks: []core.ChunkID{{}}})
 	c := r.conditions()
 	if len(c.Stuck) != 0 || len(c.Blocked) != 1 || c.Blocked[0].PG != 2 || c.Blocked[0].Unfound != 2 || c.Blocked[0].Stopped {
 		t.Fatalf("conditions %+v, want PG 2 Blocked with 2 unfound", c)
 	}
-	r.leads(0, chunkstore.LeadState{PG: core.PGID{Pool: 1, Index: 2}, Interval: iv, Active: true})
+	r.leads(0, chunkstore.LeadState{PG: core.PGID{Pool: 1, Index: 2}, PGCount: n, Interval: iv, Active: true})
 	if c := r.conditions(); len(c.Blocked) != 0 {
 		t.Fatalf("conditions %+v once the chunks are found", c)
 	}

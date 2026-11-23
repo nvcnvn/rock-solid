@@ -46,7 +46,7 @@ func newLeftRunWith(t *testing.T, seed uint64, plant func(*replicaPlants), edit 
 	c.untilActive()
 	c.settle()
 	_, e := c.table.entry(pg0)
-	if !slices.ContainsFunc(c.recovered, func(f PGFields) bool { return f.Interval == e.Interval }) {
+	if !slices.ContainsFunc(c.recovered, func(f PGReport) bool { return f.Interval == e.Interval }) {
 		t.Fatalf("seed %d: interval %d not reported recovered: %+v", seed, e.Interval, c.recovered)
 	}
 	id := c.write(pg0, l.ch, 0, bytes.Repeat([]byte{0x33}, core.ChunkSize))
