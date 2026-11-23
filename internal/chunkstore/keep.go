@@ -129,12 +129,12 @@ func keepChunk(e *PGEntry, replies []peerReply, g []replyChunk, ls uint32, plant
 	return k
 }
 
-// keeps reports whether peering keeps v: every reached member up in its interval holds v or later, whole or listed. A member lacking it gives way, since dropping v would have its holders list the chunk too, when it lists the chunk, so is no source of what it holds, or when every up member of e's interval holds v, so it is a disk recovery cannot read.
+// keeps reports whether peering keeps v: every reached member up in its interval holds v or later, whole or listed. A member lacking it gives way when dropping v would leave a source listing the chunk: when an up member of e's interval holds v clean and the one lacking it lists the chunk or, up in e's interval, logged part of a version above its newest whole one, so is no source of what it holds, or when every up member of e's interval holds v, so the one lacking it is a disk recovery cannot read.
 func keeps(e *PGEntry, replies []peerReply, g []replyChunk, v uint64, plant replicaPlants) bool {
 	lister, other := false, false
 	for i, r := range replies {
 		if upIn(e, r.disk, intervalOf(v)) && !holds(g, i, v) {
-			if lists(g, i) {
+			if lists(g, i) || !plant.tornVetoes && upIn(e, r.disk, e.Interval) && torn(g, i) {
 				lister = true
 			} else {
 				other = true
@@ -144,7 +144,7 @@ func keeps(e *PGEntry, replies []peerReply, g []replyChunk, v uint64, plant repl
 	if !lister && !other {
 		return true
 	}
-	if !other && !plant.listerVetoes {
+	if !other && !plant.listerVetoes && hasSource(e, replies, g, v) {
 		return true
 	}
 	if plant.keepPastMember {
@@ -167,6 +167,11 @@ func holds(g []replyChunk, i int, v uint64) bool {
 // lists reports whether reply i of the chunk's group lists it.
 func lists(g []replyChunk, i int) bool {
 	return slices.ContainsFunc(g, func(c replyChunk) bool { return c.reply == i && c.Listed })
+}
+
+// torn reports whether reply i of the chunk's group logged part of a version above its newest whole one and lists nothing.
+func torn(g []replyChunk, i int) bool {
+	return slices.ContainsFunc(g, func(c replyChunk) bool { return c.reply == i && !c.Listed && c.Logged > c.Whole })
 }
 
 func intervalOf(v uint64) uint32 { return uint32(v >> 32) }

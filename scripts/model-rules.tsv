@@ -28,6 +28,7 @@ epoch/neg-keep-past-member	chunkstore.keepPastMember	TestKeepPastMemberLeavesAMo
 epoch/neg-lease-before-bound	lease.beforeBound	TestPlantedLeaseBugsBreakThePair
 epoch/neg-lease-before-bound-half-drift	lease.beforeBound,halfStep	TestPlantedLeaseBugsBreakThePair
 epoch/neg-lister-vetoes	chunkstore.listerVetoes	TestListerVetoesLeavesNoMemberASource
+epoch/neg-torn-vetoes	chunkstore.tornVetoes	TestTornVetoesLeavesNoMemberASource
 epoch/neg-lister-orders	chunkstore.listerOrders	TestListerOrdersLeavesAChunkUnfoundWithEveryDiskUp
 epoch/neg-log-out-of-order	chunkstore.resendNewestFirst	TestPlantedPeeringBugsBreakTheFaultRun
 epoch/neg-margin-exact	lease.marginExact	TestPlantedLeaseBugsBreakThePair

@@ -783,11 +783,13 @@ Reply(d, c) ==
 \* nothing, holds that version as its newest below LS. A version of LS or later
 \* is kept unless a reached member live in its interval reports neither it nor
 \* a later version, and every version a kept one rests on is kept. Two cases keep
-\* a version such a member lacks, as dropping it would leave its holders listing
-\* the chunk too: the member lacking it lists the chunk, so is no source of what
-\* it holds, or every up member of k holds the version, so the one lacking it is
-\* a disk recovery cannot read. ListerVetoes and KeepPastMember remove them.
-Kept(p, L, J, c, k) ==
+\* a version such a member lacks, as dropping it would leave a source listing the
+\* chunk: a reached member up in k holds the version clean, its newest, listing
+\* nothing and not in U, and the member lacking it lists the chunk, or is in U,
+\* holding part of a later version, so is no source of what it holds; or every
+\* up member of k holds the version, so the one lacking it is a disk recovery
+\* cannot read. ListerVetoes, TornVetoes and KeepPastMember remove them.
+Kept(p, L, J, c, k, U) ==
     LET r == [d \in J |-> Reply(d, c)]
         LS == Max({r[d].decided : d \in J} \cup {L})
         RS == {d \in J : r[d].decided = LS}
@@ -797,7 +799,13 @@ Kept(p, L, J, c, k) ==
         listed == {r[d].list : d \in J} \ {NoMiss, 0}
         holds(d, v) == r[d].whole >= v \/ r[d].list >= v
         keep(v) == \/ \A d \in J \cap UpIn(p, IvOfV(v)) : holds(d, v)
-                   \/ ~Bug("ListerVetoes") /\ \A d \in J \cap UpIn(p, IvOfV(v)) : holds(d, v) \/ r[d].list # NoMiss
+                   \/ /\ ~Bug("ListerVetoes")
+                      /\ \E d \in J \cap UpIn(p, k) :
+                           r[d].whole = v /\ r[d].list = NoMiss /\ [d |-> d, c |-> c] \notin U
+                      /\ \A d \in J \cap UpIn(p, IvOfV(v)) :
+                           \/ holds(d, v)
+                           \/ r[d].list # NoMiss
+                           \/ ~Bug("TornVetoes") /\ [d |-> d, c |-> c] \in U
                    \/ ~Bug("KeepPastMember") /\ \A d \in UpIn(p, k) : holds(d, v)
     IN IF Bug("DecideByOwnInterval")
        THEN Newest({v \in wholes \cup listed : keep(v)})
@@ -988,7 +996,7 @@ TornSets(n, p) ==
 PeerOn(n, p, J, P, U) ==
     LET k == IvAt(n, p)
         L == LaAt(n, p)
-        K == [c \in Chunk |-> IF c \in ChunksOf(p) THEN Kept(p, L, J, c, k) ELSE 0]
+        K == [c \in Chunk |-> IF c \in ChunksOf(p) THEN Kept(p, L, J, c, k, U) ELSE 0]
         T == {x \in U : Entry(x.d, x.c, K[x.c]) = NoMiss}
         \* The members the decision counts as holding the kept version:
         \* the recovery sources it reached, and the live members it
@@ -2388,19 +2396,19 @@ NoStranded ==
                                     /\ y.c = c
                                     /\ \A b \in 1..Blocks[c] : Content(c, Chain(c, y.v))[b] >= want[b]
 
-\* 19. An activated primary has a source: for a chunk with an acknowledged write,
-\* a member of its interval can serve them all, or its own image is what peering
-\* kept. A holder that truly dies leaves none, so it is claimed only while no
-\* disk has gone; ci-tears, where every copy can be torn, does not check it. A
-\* write of a primary that lists the chunk would leave none, landing on members
-\* that list it alone while its clean copies are down, but for the hold: such a
-\* write waits until recovery clears the primary's list. Nor is a source claimed
-\* for a version no client heard OK for: one whose record fails on its primary's
-\* own log after it reached members that list the chunk alone is kept while the
-\* primary is down, since those replies cannot show it unacknowledged, and the
-\* primary, back, lists the chunk for it though it holds every acknowledged write:
-\* it counts as the source. A primary that lists the chunk and logs the version
-\* does not: its write is what the hold stops.
+\* 19. An activated primary has a source: for a chunk with an acknowledged
+\* write, a member of its interval can serve them all, or its own image is what
+\* peering kept. A holder that truly dies leaves none, so it is claimed only
+\* while no disk has gone. A write of a primary that lists the chunk would leave
+\* none, landing on members that list it alone while its clean copies are down,
+\* but for the hold: such a write waits until recovery clears the primary's
+\* list. Nor is a source claimed for a version no client heard OK for: one whose
+\* record fails on its primary's own log after it reached members that list the
+\* chunk alone is kept while the primary is down, since those replies cannot
+\* show it unacknowledged, and the primary, back, lists the chunk for it though
+\* it holds every acknowledged write: it counts as the source. A primary that
+\* lists the chunk and logs the version does not: its write is what the hold
+\* stops.
 PrimarySource ==
     \A p \in PG, n \in Node, c \in Chunk :
        (/\ \A d \in Node : dnode[d] # 0

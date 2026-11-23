@@ -137,7 +137,7 @@ type epochChecks struct {
 	clean map[diskChunk]uint64
 	// prims is the primary disk of each PG interval the cluster's table recorded.
 	prims map[pgInterval]uint32
-	// tears is set for a run whose crashes leave versions in part, where, as in ci-tears, every copy can be torn and property 19 is not claimed.
+	// tears is set for a run whose crashes leave versions in part, where every copy can be torn and property 19 is not claimed.
 	tears bool
 }
 

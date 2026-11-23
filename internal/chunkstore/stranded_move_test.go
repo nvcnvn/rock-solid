@@ -472,3 +472,58 @@ func TestUnlistTornMapsADroppedVersion(t *testing.T) {
 		}
 	}
 }
+
+// tornMemberMoved has a member of a rep3 PG crash with part of Y, a whole-chunk write the other two hold whole, and,
+// while it restarts, an edit move the primary to the third member: the new primary's peering hears the member report X
+// whole and Y logged, as the primary-change runs did once the primary they moved stayed up. It returns the run, the
+// chunk, the torn member's disk and the new primary's.
+func tornMemberMoved(t *testing.T, seed uint64, plant func(*replicaPlants)) (*soleRun, core.ChunkID, uint32, uint32) {
+	r := seededSoleRun(t, seed, 3, 3)
+	c := r.c
+	plantAll(c, plant)
+	ch := chunkIn(pg0, 1, 0)
+	c.until(c.write(pg0, ch, 0, bytes.Repeat([]byte{0x11}, 128*core.BlockSize)))
+	c.settle()
+	ms := r.members()
+	a, b, d := ms[0].Disk, ms[1].Disk, ms[2].Disk
+	m := c.node(b)
+	x := c.listed(m, ch).Whole
+	c.write(pg0, ch, 0, bytes.Repeat([]byte{0x22}, 128*core.BlockSize))
+	for !holdsInPart(c.reps[m].Store(), ch, x) {
+		if !c.step() {
+			t.Fatal("the member never held Y in part")
+		}
+	}
+	c.s.Crash(uint32(m), func(int, int, core.LBA) bool { return false })
+	r.isolated[b] = true
+	r.a.edits = append(r.a.edits, Edit{PG: pg0, Disks: []uint32{d, a, b}})
+	r.publish()
+	for !c.s.Node(uint32(m)).Up() && c.step() {
+	}
+	delete(r.isolated, b)
+	tbl := c.table
+	c.call(m, func(ctx *core.Context, rep *Replica, out *ReplicaOutput) { rep.SetTable(ctx, tbl, out) })
+	r.tick(20_000_000)
+	return r, ch, b, d
+}
+
+// A member holding a version in part is no source of what it holds, so it has no say: the new primary keeps Y, which it
+// holds clean, reads it, and recovery rewrites the torn member. Vetoing Y left every member listing and X unfound.
+func TestAMemberHoldingAVersionInPartDoesNotVetoIt(t *testing.T) {
+	r, ch, torn, b := tornMemberMoved(t, 1, func(*replicaPlants) {})
+	c := r.c
+	if rp, got := r.read(ch); rp.Status != StatusOK || got[0] != 0x22 {
+		t.Fatalf("read %+v, %v", rp, got)
+	}
+	if got, want := c.listed(c.node(torn), ch), c.listed(c.node(b), ch); got.ListedIn != 0 || got.Whole != want.Whole {
+		t.Fatalf("the torn member holds %+v, the new primary %+v", got, want)
+	}
+}
+
+// With tornVetoes the member holding Y in part drops it, which leaves every member listing: unfound with every disk up.
+func TestTornVetoesLeavesNoMemberASource(t *testing.T) {
+	r, ch, _, _ := tornMemberMoved(t, 1, func(p *replicaPlants) { p.tornVetoes = true })
+	if rp, _ := r.read(ch); rp.Status != StatusUnfound {
+		t.Fatalf("read %+v", rp)
+	}
+}

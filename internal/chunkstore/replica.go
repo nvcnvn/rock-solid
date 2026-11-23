@@ -441,7 +441,8 @@ type replicaPlants struct {
 	reportDecided     bool
 	relistNever       bool
 	unlistTorn        bool
-	// listerVetoes has a member that lists a chunk veto a version it lacks; keepPastMember has a
+	// listerVetoes has a member that lists a chunk veto a version it lacks; tornVetoes has a member
+	// up in the interval holding a later version in part veto it; keepPastMember has a
 	// reached member outside the interval veto a version every up member holds; writeOnUnfound
 	// orders a write to an unfound chunk; neverUnfound leaves a chunk with no source neither recovering nor unfound;
 	// forgetImage has a decision forget that the lead's last one found the primary's image at the
@@ -449,6 +450,7 @@ type replicaPlants struct {
 	// not up; ignoreImageFlag has a restarted disk carry no image until it decides again; mapOnDemote
 	// maps a demoted primary's gated versions as a member's.
 	listerVetoes   bool
+	tornVetoes     bool
 	keepPastMember bool
 	writeOnUnfound bool
 	neverUnfound   bool

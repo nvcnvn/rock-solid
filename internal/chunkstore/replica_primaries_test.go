@@ -783,27 +783,14 @@ func TestPeeringKeepsAcknowledgedWritesAcrossPrimaries(t *testing.T) {
 // the leader of a three-replica group, from the replicas' heartbeats, asks, activations and recovered
 // reports, the operator's edits and drains through its calls, and a disk marked down by cutting its
 // node off from the control plane, whose detector marks it down once silent and up once it heartbeats.
-// Seed 0 is the open bug TestAPrimaryMovedWhileUpLeavesAKeptChunkUnfound pins.
+// That delay lets an edit move a primary while it stays up, so it can restart holding in part a
+// version the other members hold whole, as TestAMemberHoldingAVersionInPartDoesNotVetoIt scripts.
 func TestPeeringKeepsAcknowledgedWritesAcrossPrimariesOnTheRealGroup(t *testing.T) {
-	seeds.Run(t, 1, 10, func(seed uint64) {
+	seeds.Run(t, 0, 10, func(seed uint64) {
 		if _, err := runPrimaryRunOn(t, seed, nil, false, 2, true); err != nil {
 			t.Fatalf("seed %d: %v", seed, err)
 		}
 	})
-}
-
-// Open bug, found by the real group's seed 0: PG 0's primary is moved by an edit while it stays up,
-// its down mark waiting on the detector, with old primary disk 1's versions 0x10000000c to 0x10000000f
-// of chunk {1 7 11} in flight. A replica asks interval 3 as interval 2's table lands, and interval 3's
-// peering keeps 0x10000000c, which every member lists: disks 2 and 3 logged 0x10000000d and
-// 0x10000000e over it, and disk 1, which ordered them, lists it too. So the primary calls the chunk
-// unfound though every disk is kept and each holds acknowledged 0x10000000a. The stand-in run with case 0's down mark left out breaks the same way at seed 49.
-// The fix makes this run pass; until then the test pins the failure.
-func TestAPrimaryMovedWhileUpLeavesAKeptChunkUnfound(t *testing.T) {
-	_, err := runPrimaryRunOn(t, 0, &peerPlant{invHasSource, func(*primaryRun) {}}, false, 2, true)
-	if err == nil || !strings.Contains(err.Error(), invHasSource) {
-		t.Fatalf("seed 0 on the real group: %v", err)
-	}
 }
 
 // Open bug, found by the real group's seeds 33 and 70 once its commits take the group's time, in both
@@ -839,9 +826,9 @@ func TestALeftMemberDownAtItsMovesEndKeepsAcknowledgedWrites(t *testing.T) {
 	}
 }
 
-// The same run on the real control plane, from seed 1, as TestPeeringKeepsAcknowledgedWritesAcrossPrimariesOnTheRealGroup.
+// The same run on the real control plane, as TestPeeringKeepsAcknowledgedWritesAcrossPrimariesOnTheRealGroup.
 func TestALeftMemberDownAtItsMovesEndKeepsAcknowledgedWritesOnTheRealGroup(t *testing.T) {
-	seeds.Run(t, 1, 10, func(seed uint64) {
+	seeds.Run(t, 0, 10, func(seed uint64) {
 		if _, err := runPrimaryRunOn(t, seed, nil, true, 2, true); err != nil {
 			t.Fatalf("seed %d: %v", seed, err)
 		}
@@ -872,7 +859,7 @@ func TestAnOKAnsweredWhileThePrimaryPeersCountsItsOwnLoggedCopy(t *testing.T) {
 	}
 }
 
-// Each planted bug breaks its invariant, checked alone, at a seed of the first 500: peering dropping any subset of a chunk's pending versions rather than a suffix (sub-block spike M7, 21 of 500), a partial-block write merged before the primary holds the versions peering kept (M8, 11 of 500), the epoch change model's neg-merge-on-dropped, a partial-block write merged on a version the primary mapped and peering dropped (12 of 500), and neg-edit-keeps-interval, a table that reorders a PG's disks and keeps its interval (3 of 500), a restarted primary peering in its old interval (16 of 500 at min_live 1; none at 2, where the write that reuses a version goes to a chunk with too few clean copies and waits for recovery), a disk formatted again keeping its old disk ID (212 of 500), the epoch change model's neg-compare-table-epochs (441 of 500) and neg-compare-member-lists (310 of 500), which breaks property 3 first: a member that compares member lists logs the old primary's write tagged with an interval its table left; and the model's neg-remove-before-recovered (120 of 500), here a leaving member removed once its PG's interval activates, and neg-accept-old-report (136 of 500), each removing a moved member while its replacement lacks acknowledged writes; and neg-report-before-activate (500 of 500), a primary that reports its interval activated once it decides, before it activates; a primary that recovers only its own copies (462 of 500), whose members, those a drain refilled among them, never reach the copy count; and neg-no-degraded-hold, a write ordered at once on a chunk with fewer than min_live clean copies (143 of 500); and neg-lister-orders, a write ordered by a primary that lists its chunk, which leaves the chunk unfound with every disk kept (7 of 500 at min_live 1; none at 2, where the count of clean copies holds the write too).
+// Each planted bug breaks its invariant, checked alone, at a seed of the first 500: peering dropping any subset of a chunk's pending versions rather than a suffix (sub-block spike M7, 26 of 500), a partial-block write merged before the primary holds the versions peering kept (M8, 11 of 500), the epoch change model's neg-merge-on-dropped, a partial-block write merged on a version the primary mapped and peering dropped (12 of 500), and neg-edit-keeps-interval, a table that reorders a PG's disks and keeps its interval (3 of 500), a restarted primary peering in its old interval (16 of 500 at min_live 1; none at 2, where the write that reuses a version goes to a chunk with too few clean copies and waits for recovery), a disk formatted again keeping its old disk ID (212 of 500), the epoch change model's neg-compare-table-epochs (441 of 500) and neg-compare-member-lists (310 of 500), which breaks property 3 first: a member that compares member lists logs the old primary's write tagged with an interval its table left; and the model's neg-remove-before-recovered (120 of 500), here a leaving member removed once its PG's interval activates, and neg-accept-old-report (136 of 500), each removing a moved member while its replacement lacks acknowledged writes; and neg-report-before-activate (500 of 500), a primary that reports its interval activated once it decides, before it activates; a primary that recovers only its own copies (462 of 500), whose members, those a drain refilled among them, never reach the copy count; and neg-no-degraded-hold, a write ordered at once on a chunk with fewer than min_live clean copies (143 of 500); and neg-lister-orders, a write ordered by a primary that lists its chunk, which leaves the chunk unfound with every disk kept (7 of 500 at min_live 1; none at 2, where the count of clean copies holds the write too).
 func TestPlantedPeeringBugsBreakTheOracle(t *testing.T) {
 	for _, p := range []struct {
 		name string

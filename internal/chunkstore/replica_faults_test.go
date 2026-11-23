@@ -924,7 +924,7 @@ func TestPlantedRecoveryBugBreaksTheFaultRun(t *testing.T) {
 // leaves a member mapping other bytes once recovery settles (18 of 500); a version decided by its
 // own interval's members after a later interval kept it (neg-decide-by-own-interval, 10 of 500) and
 // a primary activating before every member persisted its missing list
-// (neg-activate-before-durable, 37 of 500) each drop a write the primary answered; and a later
+// (neg-activate-before-durable, 43 of 500) each drop a write the primary answered; and a later
 // peering that clears a missing-list entry recovery has not done (neg-peering-clears-missing)
 // leaves a member mapping other bytes once recovery settles (56 of 500); and a primary that holds a
 // write to a chunk it called unfound rather than answering it (neg-write-on-unfound) still holds it
@@ -940,7 +940,7 @@ func TestPlantedPeeringBugsBreakTheFaultRun(t *testing.T) {
 		{"no ask after a member's restart", 410, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.memberNoAsk = true }}},
 		{"logged out of order", 13, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.resendNewestFirst = true }}},
 		{"decided by its own interval", 73, faultPlant{invMappedAnswers, func(c *rcluster) { c.replicaPlants.ownInterval = true }}},
-		{"activated before lists are durable", 7, faultPlant{invMappedAnswers, func(c *rcluster) { c.replicaPlants.activateEarly = true }}},
+		{"activated before lists are durable", 38, faultPlant{invMappedAnswers, func(c *rcluster) { c.replicaPlants.activateEarly = true }}},
 		{"missing entry cleared", 7, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.relistNever, c.storePlants.clearListed = true, true }}},
 		{"a write held on an unfound chunk", 3, faultPlant{invHeldOrdered, func(c *rcluster) { c.replicaPlants.writeOnUnfound = true }}},
 		{"no ask after a failed version", 0, faultPlant{invAsks, func(c *rcluster) { c.replicaPlants.neverAskOnFail = true }}},
