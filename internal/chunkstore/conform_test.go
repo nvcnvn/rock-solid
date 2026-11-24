@@ -259,10 +259,11 @@ func TestConformScriptedSecondFailure(t *testing.T) {
 }
 
 // Sweep seeds the check once stopped at: 387423's primary records its own copy of a recovery write after it decided the
-// next interval, whose decision lists the chunk again (discrepancy 36), and at 333 a member holds 8 versions in flight at
-// two tables, each of which once landed in any subset.
+// next interval, whose decision lists the chunk again (discrepancy 36), at 333 a member holds 8 versions in flight at
+// two tables, each of which once landed in any subset, and at 1 the primary answers two peerings with its own recovery
+// copy gated above what its map holds (discrepancy 39).
 func TestConformSweepSeeds(t *testing.T) {
-	for _, seed := range []uint64{333, 387423} {
+	for _, seed := range []uint64{1, 333, 387423} {
 		if err := runPrimaries(t, seed, nil); err != nil {
 			t.Fatalf("seed %d: %v", seed, err)
 		}

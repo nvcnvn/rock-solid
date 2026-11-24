@@ -1427,10 +1427,10 @@ func (s *Store) clearListed(d disklog.Entry) {
 // PeerState appends to dst what a member reports to peering of PG pg of the pool's pgs PGs: each
 // chunk of the PG it logged or lists, and the newest interval whose decision it persisted for the
 // PG, 0 for none. A primary's gated writes and punches that wait for peering's decision count as
-// logged, and as held whole up to the first whose records failed. Until every write and punch of
-// the PG's chunks has its records durable or failed, those of a member mapped too, and every
-// missing list being persisted is resolved, it returns ErrUnresolved, since what it reports would
-// change after the member answered.
+// logged, and as held whole up to the first whose records failed; its own recovery copy counts
+// once it maps. Until every write and punch of the PG's chunks has its records durable or failed,
+// those of a member mapped too, and every missing list being persisted is resolved, it returns
+// ErrUnresolved, since what it reports would change after the member answered.
 func (s *Store) PeerState(pg, pgs uint32, dst []ChunkPeer) ([]ChunkPeer, uint32, error) {
 	if err := s.unavailable(); err != nil {
 		return dst, 0, err
@@ -1480,8 +1480,11 @@ func (s *Store) peerGated(dst []ChunkPeer, from int, cs *chunkState) []ChunkPeer
 			continue
 		}
 		whole = whole && o.err == nil && !o.torn
+		if o.req.Recover {
+			// A primary's own recovery copy changes nothing it reports until it maps: the chunk stays listed until then.
+			continue
+		}
 		if whole {
-			// A primary's own recovery copy of a kept version below what its map holds lowers nothing until it maps.
 			c.Whole = max(c.Whole, o.version)
 		}
 		if o.holdsVersion() {
