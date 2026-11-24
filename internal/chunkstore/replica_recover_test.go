@@ -461,16 +461,17 @@ func formattedSourceRun(t *testing.T, readOldDisk bool, name string) error {
 // data is refused, while recovery still copies disk 3 what it missed.
 func TestRecoveryWritesPassWriteLimit(t *testing.T) {
 	c := admitCluster(t, 90)
+	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.SetDisk(3, 100*core.BlocksPerChunk, 0) })
 	ch, other := chunkIn(pg0, 4, 0), chunkIn(pg0, 4, 1)
 	c.publish(c.next(func(t *Table) { mark(t, pg0, 3, MarkDown) }), true)
 	c.writeWhole(pg0, ch, 0, 2, 3)
 	c.reps[0].plant.noRecovery = true
 	c.publish(c.next(func(t *Table) { mark(t, pg0, 3, MarkUp) }), true)
-	c.xFills(910)
+	c.xFills(91 * core.BlocksPerChunk)
 	if st := c.status(c.write(pg0, other, 0, []byte{1})); st != StatusNoSpace {
 		t.Fatalf("a write adding data with disk 3 at 91%%: %v", st)
 	}
-	c.xFills(910)
+	c.xFills(91 * core.BlocksPerChunk)
 	c.reps[0].plant.noRecovery = false
 	c.runFor(RetryAfter / 2)
 	c.settle()
@@ -478,6 +479,95 @@ func TestRecoveryWritesPassWriteLimit(t *testing.T) {
 		t.Fatalf("disk 3 holds %+v", x)
 	}
 	c.blockIs(2, ch, 1, 3)
+}
+
+// A plain write that admission refuses for space is refused before a degraded chunk would hold it,
+// so it urges no copy, which would take a whole chunk of the room the grants were promised.
+func TestAPlainWritePastTheLimitUrgesNoCopy(t *testing.T) {
+	c := admitCluster(t, 90)
+	ch := chunkIn(pg0, 4, 0)
+	c.publish(c.next(func(t *Table) { mark(t, pg0, 3, MarkDown) }), true)
+	c.writeWhole(pg0, ch, 0, 2, 3)
+	c.publish(c.next(func(t *Table) { mark(t, pg0, 3, MarkUp); t.Pools[0].MinLive = 3 }), true)
+	c.xFills(910)
+	if st := c.status(c.write(pg0, ch, 5*core.BlockSize, []byte{1})); st != StatusNoSpace {
+		t.Fatalf("a write adding data with disk 3 at 91%%: %v", st)
+	}
+	c.runFor(2 * RetryAfter)
+	c.settle()
+	if x := c.listed(2, ch); x.ListedIn == 0 {
+		t.Fatalf("disk 3 took a copy of the chunk for a write refused for space")
+	}
+}
+
+// Recovery counts a member at the fresh sum of its last recovery acknowledgment for fillEvery, though
+// a client write's acknowledgment after it carries an older, lower sum.
+func TestRecoveryCountsAMemberAtItsFreshRecoveryFill(t *testing.T) {
+	c := admitCluster(t, 90)
+	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
+		r.noteFill(ctx, 3, 900, true)
+		r.noteFill(ctx, 3, 100, false)
+		if got := r.copyFill(ctx, 3); got != 900 {
+			t.Errorf("recovery counts disk 3 at %d after a stale client acknowledgment, not 900", got)
+		}
+	})
+	c.runFor(fillEvery)
+	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
+		if got := r.copyFill(ctx, 3); got != 100 {
+			t.Errorf("recovery counts disk 3 at %d fillEvery after its recovery acknowledgment, not 100", got)
+		}
+	})
+}
+
+// A member acknowledges a recovery write with its live blocks summed afresh, not with its sum from
+// up to fillEvery before, which misses the copies it took since.
+func TestARecoveryAckCarriesAFreshFill(t *testing.T) {
+	c := admitCluster(t, 90)
+	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.SetDisk(3, 100*core.BlocksPerChunk, 0) })
+	ch := chunkIn(pg0, 4, 0)
+	c.publish(c.next(func(t *Table) { mark(t, pg0, 3, MarkDown) }), true)
+	c.writeWhole(pg0, ch, 0, 2, 3)
+	c.reps[0].plant.noRecovery = true
+	c.publish(c.next(func(t *Table) { mark(t, pg0, 3, MarkUp) }), true)
+	c.settle()
+	c.reps[0].plant.noRecovery = false
+	m := c.node(3)
+	for i := 0; c.listed(m, ch).ListedIn != 0; i++ {
+		if i == 300 {
+			t.Fatalf("disk 3 holds %+v", c.listed(m, ch))
+		}
+		c.call(m, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.liveAt = 0; r.fill(ctx) })
+		c.runFor(fillEvery / 10)
+	}
+	if held, live := c.reps[0].disks[3].copied, c.reps[m].Store().Log().LiveBlocks(); held != live {
+		t.Fatalf("disk 3 acknowledged its recovery write with %d live blocks, holding %d", held, live)
+	}
+}
+
+// A primary whose copy found a target without room copies none of the PG's chunks again until room
+// may have come free, and then at once: here when the target reports a lower fill.
+func TestACopyStoppedForRoomStartsOnceTheTargetsFillFalls(t *testing.T) {
+	c := admitCluster(t, 90)
+	ch := chunkIn(pg0, 4, 0)
+	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.SetDisk(3, 100*core.BlocksPerChunk, 0) })
+	c.publish(c.next(func(t *Table) { mark(t, pg0, 3, MarkDown) }), true)
+	c.writeWhole(pg0, ch, 0, 2, 3)
+	c.reps[0].plant.noRecovery = true
+	c.publish(c.next(func(t *Table) { mark(t, pg0, 3, MarkUp) }), true)
+	c.settle()
+	c.xFills(99*core.BlocksPerChunk + 1)
+	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
+		r.plant.noRecovery = false
+		r.recoverWork(ctx, out)
+		if l := &r.leads[r.lead(pg0)]; !l.roomless || len(r.recs) != 0 {
+			t.Fatalf("copying onto disk 3 a block short of a chunk's room: roomless %v, %d copies", l.roomless, len(r.recs))
+		}
+		r.MemberFill(3, 0)
+		r.recoverWork(ctx, out)
+		if len(r.recs) != 1 {
+			t.Fatalf("%d copies once disk 3 reported a fill of 0", len(r.recs))
+		}
+	})
 }
 
 // PG 12, led by disk 1 like PGs 4 and 9, misses two members and they one each: recovery's first

@@ -19,7 +19,7 @@ func admitCluster(t *testing.T, limit uint8) *rcluster {
 	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
 		r.SetPool(testPool, Pool{WriteLimit: limit})
 		for d := range uint32(3) {
-			r.SetDisk(d+1, 1000)
+			r.SetDisk(d+1, 1000, 0)
 		}
 	})
 	return c
@@ -97,7 +97,7 @@ func TestEachPoolChecksItsOwnLimit(t *testing.T) {
 		r.SetPool(testPool, Pool{WriteLimit: 95})
 		r.SetPool(testPool+1, Pool{WriteLimit: 90})
 		for d := range uint32(3) {
-			r.SetDisk(d+1, 1000)
+			r.SetDisk(d+1, 1000, 0)
 		}
 		r.MemberFill(3, 920)
 	})
@@ -134,11 +134,14 @@ type blockAt struct {
 
 // limitRun is a detector cluster whose disks each reach their pool's write_limit limitRoom blocks above their fill at the start, while a client writes new blocks, overwrites, punches and granted flushes to the chunks of every PG, so that every PG's primary fills each disk at once, and its disk nodes reboot or slow on a path one at a time. A primary decides from the fills its members last reported, so a disk may pass its limit by the plain writes its primaries ordered before they heard: what must never raise a disk past its limit is a plain write ordered while a member's fill its primary held had reached its limit.
 type limitRun struct {
-	d      *dcluster
-	rng    *core.Rand
-	blocks []uint64
-	boots  []int
-	chunks []core.ChunkID
+	c   *rcluster
+	rng *core.Rand
+	// blocks and reserve are each disk's size and log reserve as its replicas hold them, and pct the pool's write_limit.
+	pct     uint64
+	reserve uint64
+	blocks  []uint64
+	boots   []int
+	chunks  []core.ChunkID
 	// seen is each version a primary ordered, by node, boot and store request; past those of them that are plain writes ordered while a member's held fill had reached its limit, and over their versions once their stores numbered them.
 	seen map[[3]uint64]bool
 	past map[[3]uint64]bool
@@ -152,23 +155,30 @@ type limitRun struct {
 	noSpace int
 }
 
-func (r *limitRun) limit(n int) uint64 { return r.blocks[n] * 90 / 100 }
+func (r *limitRun) limit(n int) uint64 { return r.blocks[n] * r.pct / 100 }
 
 func (r *limitRun) setLimits(n int) {
-	rep := r.d.reps[n]
-	rep.SetPool(testPool, Pool{WriteLimit: 90})
+	rep := r.c.reps[n]
+	rep.SetPool(testPool, Pool{WriteLimit: uint8(r.pct)})
 	for k, b := range r.blocks {
-		rep.SetDisk(r.d.ids[k], b)
+		rep.SetDisk(r.c.ids[k], b, r.reserve)
 	}
-	r.boots[n] = r.d.boots[n]
+	r.boots[n] = r.c.boots[n]
 }
 
-// heldFull reports whether node n's replica holds a fill at or past its limit for a member of pg.
+// heldFull reports whether node n's replica holds a fill at or past its limit for a member of pg,
+// the grants outstanding on its pool counted at the member's share.
 func (r *limitRun) heldFull(n int, pg core.PGID) bool {
-	rep := r.d.reps[n]
-	_, e := rep.table.entry(pg)
+	rep := r.c.reps[n]
+	p, e := rep.table.entry(pg)
 	if e == nil {
 		return false
+	}
+	var grants uint64
+	for _, pi := range rep.pools {
+		if pi.id == pg.Pool {
+			grants = pi.grants
+		}
 	}
 	for _, m := range e.Members {
 		var live uint64
@@ -178,7 +188,15 @@ func (r *limitRun) heldFull(n int, pg core.PGID) bool {
 		if m.Disk == rep.cfg.Disk {
 			live = rep.live
 		}
-		if k := r.d.node(m.Disk); k >= 0 && live >= r.limit(k) {
+		var slots uint64
+		for i := range p.PGs {
+			for _, x := range p.PGs[i].Members {
+				if x.Disk == m.Disk {
+					slots++
+				}
+			}
+		}
+		if k := r.c.node(m.Disk); k >= 0 && live+mulDivUp(grants, slots, uint64(len(p.PGs))) >= r.limit(k) {
 			return true
 		}
 	}
@@ -187,16 +205,16 @@ func (r *limitRun) heldFull(n int, pg core.PGID) bool {
 
 // number records the version of each write in past that node n's store has numbered.
 func (r *limitRun) number(n int) {
-	for i := range r.d.reps[n].vers {
-		v := &r.d.reps[n].vers[i]
-		if v.ordered && r.past[[3]uint64{uint64(n), uint64(r.d.boots[n]), v.req}] {
+	for i := range r.c.reps[n].vers {
+		v := &r.c.reps[n].vers[i]
+		if v.ordered && r.past[[3]uint64{uint64(n), uint64(r.c.boots[n]), v.req}] {
 			r.over[verKey{v.u.Chunk, v.u.Version}] = true
 		}
 	}
 }
 
 func (r *limitRun) maps(n int, i int) uint64 {
-	ix := r.d.reps[n].Store().Index()
+	ix := r.c.reps[n].Store().Index()
 	if ix == nil {
 		return 0
 	}
@@ -205,8 +223,8 @@ func (r *limitRun) maps(n int, i int) uint64 {
 }
 
 func (r *limitRun) onEvent(n int, ev *core.Event, done bool) {
-	rep := r.d.reps[n]
-	if r.boots[n] != r.d.boots[n] {
+	rep := r.c.reps[n]
+	if r.boots[n] != r.c.boots[n] {
 		r.setLimits(n)
 	}
 	if !rep.Store().Serving() {
@@ -223,7 +241,7 @@ func (r *limitRun) onEvent(n int, ev *core.Event, done bool) {
 	}
 	for i := range rep.vers {
 		v := &rep.vers[i]
-		key := [3]uint64{uint64(n), uint64(r.d.boots[n]), v.req}
+		key := [3]uint64{uint64(n), uint64(r.c.boots[n]), v.req}
 		if r.seen[key] {
 			continue
 		}
@@ -235,14 +253,14 @@ func (r *limitRun) onEvent(n int, ev *core.Event, done bool) {
 	r.number(n)
 	live := rep.Store().Log().LiveBlocks()
 	if live > r.limit(n)+limitRoom && r.roomErr == nil {
-		r.roomErr = fmt.Errorf("disk %d holds %d live blocks, past its limit of %d by more than %d", r.d.ids[n], live, r.limit(n), limitRoom)
+		r.roomErr = fmt.Errorf("disk %d holds %d live blocks, past its limit of %d by more than %d", r.c.ids[n], live, r.limit(n), limitRoom)
 	}
 	if live <= r.limit(n) || live <= r.live[n] || r.err != nil {
 		return
 	}
 	for i, ch := range r.chunks {
 		if v := r.maps(n, i); v != r.mapped[n][i] && r.over[verKey{ch, v}] {
-			r.err = fmt.Errorf("disk %d mapped %#x of %v, a plain write ordered while a member's held fill had reached its limit, at %d live blocks, past its limit of %d", r.d.ids[n], v, ch, live, r.limit(n))
+			r.err = fmt.Errorf("disk %d mapped %#x of %v, a plain write ordered while a member's held fill had reached its limit, at %d live blocks, past its limit of %d", r.c.ids[n], v, ch, live, r.limit(n))
 		}
 	}
 }
@@ -256,7 +274,7 @@ type limitClient struct {
 }
 
 func (lc *limitClient) Ready() bool {
-	c := lc.r.d.rcluster
+	c := lc.r.c
 	out := 0
 	for _, id := range slices.Sorted(maps.Keys(lc.at)) {
 		at := lc.at[id]
@@ -278,7 +296,7 @@ func (lc *limitClient) Ready() bool {
 }
 
 func (lc *limitClient) Next(ctx *core.Context, acts []core.Action) []core.Action {
-	r, c := lc.r, lc.r.d.rcluster
+	r, c := lc.r, lc.r.c
 	b := blockAt{chunk: r.chunks[lc.rng.Below(uint64(len(r.chunks)))], block: uint32(lc.rng.Below(limitSpan))}
 	k := lc.rng.Below(10)
 	if k >= 1 && k < 4 && len(r.acked) > 0 {
@@ -318,7 +336,7 @@ func runLimit(t *testing.T, seed uint64, plant string) error {
 	for _, x := range d.a.rec.Disks() {
 		d.faulty[x.ID] = true
 	}
-	r := &limitRun{d: d, rng: core.NewRand(seed ^ 0x11417), blocks: make([]uint64, len(c.reps)), boots: make([]int, len(c.reps)),
+	r := &limitRun{c: c, pct: 90, rng: core.NewRand(seed ^ 0x11417), blocks: make([]uint64, len(c.reps)), boots: make([]int, len(c.reps)),
 		seen: map[[3]uint64]bool{}, past: map[[3]uint64]bool{}, over: map[verKey]bool{}, live: make([]uint64, len(c.reps)), mapped: make([][]uint64, len(c.reps))}
 	for i := range uint32(4) {
 		for k := range uint32(4) {

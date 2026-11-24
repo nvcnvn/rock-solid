@@ -125,6 +125,9 @@ func (l *lead) next() (j int, urgent bool) {
 		}
 		k++
 	}
+	if l.roomless {
+		return -1, false
+	}
 	for j := max(l.cursor, l.scan); j < len(l.todo); j++ {
 		switch t := &l.todo[j]; {
 		case t.targets == 0:
@@ -226,6 +229,10 @@ func (r *Replica) startRecovery(ctx *core.Context, i, j int, out *ReplicaOutput)
 	l := &r.leads[i]
 	_, e := r.table.entry(l.pg)
 	t := &l.todo[j]
+	if !t.urgent && !r.plant.copyPastGrants && !r.roomFor(ctx, e, t.targets) {
+		l.roomless = true
+		return
+	}
 	rc := recovery{pg: l.pg, interval: l.interval, todo: j}
 	if t.kept == 0 {
 		r.recoverEmpty(ctx, t, rc, out)
@@ -280,6 +287,77 @@ func (r *Replica) startRecovery(ctx *core.Context, i, j int, out *ReplicaOutput)
 	}
 }
 
+// roomFor reports whether each disk in targets, by place in e's members, would still hold its log
+// reserve plus (1 + k) × the grants outstanding on its pools free after one more chunk, counting the
+// copies in flight to it at a chunk each and its live blocks as last reported, which a member sums
+// afresh for each recovery write it acknowledges: copying stops short of the room the grants
+// promised, whatever the leader saw when it granted them. A chunk a client write waits on is copied
+// regardless, since stopping it would hold that write.
+func (r *Replica) roomFor(ctx *core.Context, e *PGEntry, targets uint8) bool {
+	for s, m := range e.Members {
+		d := r.disk(m.Disk)
+		if s >= maxMembers || targets&(1<<s) == 0 || d.blocks == 0 {
+			continue
+		}
+		live := r.copyFill(ctx, m.Disk)
+		if live+d.reserve+(r.copyingTo(m.Disk)+1)*core.BlocksPerChunk+(1+ReuseBudget)*r.grantsOn(m.Disk) > d.blocks {
+			return false
+		}
+	}
+	return true
+}
+
+// copyFill is the live blocks recovery counts disk at: this disk's summed now, a member's as it last
+// reported them but no lower than the fresh sum of its last recovery acknowledgment within fillEvery,
+// since a client write's acknowledgment after it can carry a sum up to fillEvery old.
+func (r *Replica) copyFill(ctx *core.Context, disk uint32) uint64 {
+	if disk == r.cfg.Disk {
+		return r.freshFill(ctx)
+	}
+	d := r.disk(disk)
+	if d.copiedAt != 0 && ctx.Now-d.copiedAt < fillEvery {
+		return max(d.live, d.copied)
+	}
+	return d.live
+}
+
+// roomFreed lets the leads a target without room stopped look for copies again.
+func (r *Replica) roomFreed() {
+	for i := range r.leads {
+		r.leads[i].roomless = false
+	}
+}
+
+// copyingTo is how many recoveries under way write to disk.
+func (r *Replica) copyingTo(disk uint32) uint64 {
+	var n uint64
+	for _, rc := range r.recs {
+		i := r.lead(rc.pg)
+		if i < 0 || r.leads[i].interval != rc.interval {
+			continue
+		}
+		_, e := r.table.entry(rc.pg)
+		if e == nil {
+			continue
+		}
+		if s := slices.IndexFunc(e.Members, func(m Member) bool { return m.Disk == disk }); s >= 0 && s < maxMembers && r.leads[i].todo[rc.todo].targets&(1<<s) != 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// grantsOn is the grants outstanding on the pools with a member slot on disk.
+func (r *Replica) grantsOn(disk uint32) uint64 {
+	var g uint64
+	for _, p := range r.pools {
+		if _, ok := slices.BinarySearchFunc(r.slots, diskSlots{pool: p.id, disk: disk}, compareSlots); ok {
+			g += p.grants
+		}
+	}
+	return g
+}
+
 // recoverEmpty orders a recovery write of an image with every block a hole, which needs no source.
 func (r *Replica) recoverEmpty(ctx *core.Context, t *recoverChunk, rc recovery, out *ReplicaOutput) {
 	buf, err := ctx.Pool.Alloc(core.BlockSize)
@@ -316,8 +394,9 @@ func (r *Replica) recoveryRead(ctx *core.Context, k int, buf core.IOBuf, ok, rot
 	r.orderRecovery(ctx, k, buf, out)
 }
 
-// retryReads lets the chunks whose reads failed be tried again.
+// retryReads lets the chunks whose reads failed, and the leads a target without room stopped, be tried again.
 func (r *Replica) retryReads() {
+	r.roomFreed()
 	if !r.waits {
 		return
 	}
@@ -456,6 +535,7 @@ func (r *Replica) recoveryDone(ctx *core.Context, req uint64, ok bool, out *Repl
 // no longer tracks what the interval covered in the chunk, so the chunk stays listed until the next
 // interval peers.
 func (r *Replica) endRecovery(k int, ok bool) {
+	r.roomFreed()
 	rc := r.recs[k]
 	r.recs = slices.Delete(r.recs, k, k+1)
 	i := r.lead(rc.pg)

@@ -15,7 +15,7 @@ import (
 const WritebackBuffer = uint64(256<<20) / core.BlockSize
 
 // ReuseBudget is k, the grants' worth of flushes a daemon reuses its grant for between answered heartbeats.
-const ReuseBudget = 2
+const ReuseBudget = chunkstore.ReuseBudget
 
 // FillCover is how long after the leader hears a flush reported a disk's fill it receives must
 // arrive to include it: a fill is summed at most 100 ms before its heartbeat is sent.

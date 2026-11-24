@@ -138,6 +138,9 @@ type lead struct {
 	listed   [maxMembers]int
 	reported bool
 	urgent   []int
+	// roomless is set once a chunk's copy found a target without room for it, and holds the lead's
+	// chunks no client write waits on until something that can free room happens.
+	roomless bool
 }
 
 type heldMsg struct {
@@ -297,13 +300,21 @@ type Replica struct {
 	waitAt    core.Tick
 }
 
-// diskInfo is what a replica knows of a disk: its size and live blocks as it last reported them and, as a member of PGs this disk leads, its acknowledgment latencies since the last heartbeat and when it was last reported for a wait past member_timeout.
+// diskInfo is what a replica knows of a disk: its size and log reserve, its live blocks as it last reported them and, as a member of PGs this disk leads, its acknowledgment latencies since the last heartbeat and when it was last reported for a wait past member_timeout.
 type diskInfo struct {
-	blocks uint64
-	live   uint64
-	lat    latHist
-	waited core.Tick
+	blocks  uint64
+	reserve uint64
+	live    uint64
+	// copied is the live blocks the disk summed afresh for the last recovery write it acknowledged, at copiedAt.
+	copied   uint64
+	copiedAt core.Tick
+	lat      latHist
+	waited   core.Tick
 }
+
+// ReuseBudget is k, the grants' worth of flushes a daemon reuses its grant for between answered
+// heartbeats, so that a disk must keep room for (1 + k) × the grants outstanding.
+const ReuseBudget = 2
 
 type poolInfo struct {
 	id     core.PoolID
@@ -337,17 +348,45 @@ func (r *Replica) pool(id core.PoolID) *poolInfo {
 	return &r.pools[len(r.pools)-1]
 }
 
-// SetDisk records a disk's size in blocks, as the membership record publishes it.
-func (r *Replica) SetDisk(disk uint32, blocks uint64) { r.disk(disk).blocks = blocks }
+// SetDisk records a disk's size and its log's reserve in blocks, as the membership record publishes them.
+func (r *Replica) SetDisk(disk uint32, blocks, reserve uint64) {
+	d := r.disk(disk)
+	d.blocks, d.reserve = blocks, reserve
+	r.roomFreed()
+}
+
+// noteFill records the live blocks a member acknowledged a write with, and when, for a recovery write, which the member sums afresh.
+func (r *Replica) noteFill(ctx *core.Context, disk uint32, fill uint64, recover bool) {
+	d := r.disk(disk)
+	if fill < d.live {
+		r.roomFreed()
+	}
+	d.live = fill
+	if recover {
+		d.copied, d.copiedAt = fill, max(ctx.Now, 1)
+	}
+}
 
 // MemberFill records the live blocks a member disk reported on its heartbeat.
-func (r *Replica) MemberFill(disk uint32, live uint64) { r.disk(disk).live = live }
+func (r *Replica) MemberFill(disk uint32, live uint64) {
+	d := r.disk(disk)
+	if live < d.live {
+		r.roomFreed()
+	}
+	d.live = live
+}
 
 // SetPool records a pool's settings; a pool never set takes each disk's default write_limit.
 func (r *Replica) SetPool(id core.PoolID, p Pool) { r.pool(id).pool = p }
 
 // SetGrants records the space grants outstanding on a pool, in blocks, as the leader's heartbeat reply carries them.
-func (r *Replica) SetGrants(id core.PoolID, blocks uint64) { r.pool(id).grants = blocks }
+func (r *Replica) SetGrants(id core.PoolID, blocks uint64) {
+	p := r.pool(id)
+	if blocks < p.grants {
+		r.roomFreed()
+	}
+	p.grants = blocks
+}
 
 // fill is this disk's live blocks, summed again, with each pool's, once fillEvery has passed while the store serves.
 func (r *Replica) fill(ctx *core.Context) uint64 {
@@ -356,6 +395,15 @@ func (r *Replica) fill(ctx *core.Context) uint64 {
 		r.poolLive = r.st.Index().PoolsLive(r.poolLive[:0])
 	}
 	return r.live
+}
+
+// freshFill is this disk's live blocks summed now. It leaves admission's 100 ms sum as it is, which
+// the write-limit run's invariant reads after each event as the fill the event's writes were admitted on.
+func (r *Replica) freshFill(ctx *core.Context) uint64 {
+	if !r.st.Serving() {
+		return r.fill(ctx)
+	}
+	return r.st.Log().LiveBlocks()
 }
 
 // full reports whether a disk holding one of the PG's members has reached its pool's write_limit: its live blocks plus the pool's outstanding grants times the disk's share, rounded up, against ⌊its size in blocks × write_limit⌋.
@@ -374,7 +422,10 @@ func (r *Replica) full(ctx *core.Context, pg core.PGID, p *PoolTable, e *PGEntry
 		if j, ok := slices.BinarySearchFunc(r.slots, diskSlots{pool: pg.Pool, disk: m.Disk}, compareSlots); ok {
 			slots = r.slots[j].n
 		}
-		if live+mulDivUp(pi.grants, slots, uint64(len(p.PGs))) >= d.blocks*uint64(pi.pool.limitPercent(d.blocks))/100 {
+		if !r.plant.grantsUncounted {
+			live += mulDivUp(pi.grants, slots, uint64(len(p.PGs)))
+		}
+		if live >= d.blocks*uint64(pi.pool.limitPercent(d.blocks))/100 {
 			return true
 		}
 	}
@@ -415,6 +466,10 @@ type replicaPlants struct {
 	// (the epoch change model's RecoveryCoversAtRead).
 	noRecovery  bool
 	coverAtRead bool
+	// copyPastGrants copies onto a disk into the room the grants outstanding on it were promised;
+	// grantsUncounted admits a plain write against a member's fill alone, its pool's grants left out.
+	copyPastGrants  bool
+	grantsUncounted bool
 	// neverAsk has a restarted primary ask for no new interval, memberNoAsk a restarted member; sendEpoch has a member accept a
 	// write only under the table epoch it was sent in; sameMembers has a member accept a write
 	// tagged with an earlier interval whose members' disks are those of its current one;
@@ -1243,6 +1298,10 @@ func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 			r.park(ctx, ev, u.PG.Epoch, out)
 			return
 		}
+	case u.Kind == KindWrite && !u.Granted && !r.plant.admitPastLimit && r.full(ctx, u.PG.PG, p, e) && !r.st.Overwrites(u.Chunk, u.Off, u.Len, u.Snapshot):
+		freeBuf(ctx, ev.Msg.Buf)
+		r.reply(ctx, ev.Peer, u.ID, Response{Status: StatusNoSpace}, out)
+		return
 	case !r.leads[i].active || r.leads[i].asking && !r.plant.orderPastFailed || r.leads[i].isUnfound(u.Chunk) && !r.plant.writeOnUnfound || r.leads[i].short(e, int(p.MinLive), u.Chunk) && !r.plant.noDegradedHold ||
 		r.leads[i].listsOwn(e, r.cfg.Disk, u.Chunk) && !(r.plant.listerOrders && (edgeBytes(u.Off, u.Len) == 0 || !r.leads[i].lacks(u.Chunk) || r.plant.mergeWhileLacking)):
 		l := &r.leads[i]
@@ -1258,10 +1317,6 @@ func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 			l.urge(u.Chunk)
 		}
 		l.held = append(l.held, heldMsg{peer: ev.Peer, msg: ev.Msg, hold: l.interval})
-		return
-	case u.Kind == KindWrite && !u.Granted && !r.plant.admitPastLimit && r.full(ctx, u.PG.PG, p, e) && !r.st.Overwrites(u.Chunk, u.Off, u.Len, u.Snapshot):
-		freeBuf(ctx, ev.Msg.Buf)
-		r.reply(ctx, ev.Peer, u.ID, Response{Status: StatusNoSpace}, out)
 		return
 	default:
 		r.order(ctx, ev, u, r.leads[i].interval)
@@ -1646,7 +1701,7 @@ func (r *Replica) ack(ctx *core.Context, peer core.NodeID, rp *Response, out *Re
 	if uint8(rp.ID>>sendShift) == v.sends[k] {
 		v.out &^= 1 << k
 	}
-	r.disk(v.members[k]).live = rp.Fill
+	r.noteFill(ctx, v.members[k], rp.Fill, v.recover)
 	switch {
 	case rp.Status == StatusOK && rp.Version == v.u.Version:
 		if v.acked&(1<<k) == 0 && v.timed&(1<<k) != 0 && uint8(rp.ID>>sendShift) == 1 {
@@ -1790,7 +1845,11 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 		}
 		r.answer(ctx, q.peer, q.msgID, &resp, core.NoBuf, out)
 	case reqMember:
-		resp := Response{Kind: KindAck, Status: statusOf(rp.Err), Version: rp.Version, Fill: r.fill(ctx)}
+		fill := r.fill(ctx)
+		if q.recover {
+			fill = r.freshFill(ctx)
+		}
+		resp := Response{Kind: KindAck, Status: statusOf(rp.Err), Version: rp.Version, Fill: fill}
 		if resp.Status == StatusMismatch {
 			resp.Status = StatusRefused
 		}
