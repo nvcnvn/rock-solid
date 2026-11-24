@@ -59,7 +59,7 @@ epoch/neg-settle-left-early	chunkstore.settleLeftEarly	TestALeftMemberSettledEar
 epoch/neg-restart-same-interval	chunkstore.peerInOldInterval	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-step-half-drift	lease.halfStep	TestPlantedLeaseBugsBreakThePair
 epoch/neg-step-on-grants-only	lease.stepOnGrantsOnly	TestPlantedLeaseBugsBreakThePair
-epoch/neg-stay-keeps-interval	open	Spec conformance check
+epoch/neg-stay-keeps-interval	open	Spec conformance of the untraced protocols
 epoch/neg-stay-sole-holder	chunkstore.refillSoleHolder	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-park-unpaired	chunkstore.parkUnpaired	TestPlantedPeeringBugsBreakTheOracle
 epoch/neg-swap-full	chunkstore.swapFull	TestPlantedPeeringBugsBreakTheOracle

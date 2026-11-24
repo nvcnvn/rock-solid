@@ -63,7 +63,7 @@ jobs:
       - id: seeds
         env:
           INPUT_FIRST: ${{ inputs.first }}
-        # A pull request runs the 40 seeds of a local run, scripted traces too; a nightly run sweeps new ones.
+        # A pull request runs seeds 0 to 39 with the scripted traces; a nightly run sweeps new ones.
         run: |
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
             printf 'first=0\ncount=40\nrun=TestConform|^%s$\n' "$RUN" >>"$GITHUB_OUTPUT"

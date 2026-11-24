@@ -10,10 +10,13 @@
 #   scripts/conform.sh plants           traces can fail: on each of COUNT seeds (default 10) from FIRST
 #                                       (default 0) whose unplanted trace passes, each plant of PLANTS
 #                                       (default all of conformPlants), one row each; a run stops at its
-#                                       first broken invariant, or goes on with CONFORM_RUNON=1; then
-#                                       each voter plant's trace and its unplanted baseline, failing when
-#                                       a baseline fails, a trace gives no data or verdict, or a plant
-#                                       whose rule the check catches passes
+#                                       first broken invariant, or goes on with CONFORM_RUNON=1, failing
+#                                       when a seed's baseline fails or a plant the check catches fires
+#                                       on some seed and is rejected on none, or over seeds 0 to 39 fires
+#                                       on none; then each voter plant's
+#                                       trace and its unplanted baseline, failing when a baseline fails,
+#                                       a trace gives no data or verdict, or a plant whose rule the check
+#                                       catches passes
 # Each trace is one light TLC process with its own directory: one worker, HEAP (default 2g), TLC_SECONDS
 # (default 400). JOBS (default 1) of them run at once, and the lines print in order when all are done.
 # KEEP=dir keeps the traces and data, and skips a check whose spec and data have not changed.
@@ -161,7 +164,7 @@ coverage() {
 			if (!("epoch" in m)) exit
 			never = ""
 			n = split("Fold Renew Adopt Peer Activate CounterOut AskNext RestartAsk ReportRecovered Persist Recover Send Order Refuse Deliver OwnLogged Answer " \
-				"Fortify BootUp MarkDisk Replace Rotate Add Remove Drop Stay Refill Lost SetMinLive Edit Die Isolate MemberFail GoneRefuses GoneRefusesRecovery OwnFail " \
+				"Fortify BootUp MarkDisk Replace Rotate Add Remove Drop Stay Refill Lost GiveUp SetMinLive Split Edit Die Isolate MemberFail GoneRefuses GoneRefusesRecovery OwnFail " \
 				"OpenGrant OpenLapse Suspend Wake Freeze Thaw RateStep Restart Reboot Format NetFault Elect Transfer StepDown " \
 				"Ask Grant GrantRefused SendHb RecvGrant RecvHb RoundTrip Beat EndWait Tick", a)
 			for (i = 1; i <= n; i++) if (!(a[i] in done)) never = never " " a[i]
@@ -251,10 +254,12 @@ if [ "${1:-}" = plants ]; then
 		done
 	done
 	each planted ${rows[@]+"${rows[@]}"}
+	failed=0
 	for seed in $seeds; do
 		dir=$tmp/check/primaries-$seed
 		if ! grep -q '^ok' "$dir/verdict"; then
-			echo "seed $seed: baseline fails, no evidence: $(head -1 "$dir/verdict")"
+			echo "FAIL seed $seed: baseline fails, no evidence: $(head -1 "$dir/verdict")"
+			failed=1
 			continue
 		fi
 		echo "seed $seed: baseline passes, $(cat "$dir/verdict")"
@@ -263,13 +268,40 @@ if [ "${1:-}" = plants ]; then
 			[ "$name" = "primaries-$seed" ] || cat "$tmp/check/$name/line"
 		done
 	done
+	# The epoch plants whose trace TLC rejects on some seed they fire on, each firing on some of seeds 0 to 39; most fire
+	# on a few seeds in 40, so another window may have none, and some pass on a seed they fire on.
+	ecaught="ackOnLoneCopy activateEarly mergeWhileLacking mergeOnDropped editKeepsInterval relistNever peerInOldInterval oldReport
+		recoverFromListed listerVetoes listerOrders noDegradedHold ownInterval reportDecided removeOnActivation sendEpoch goneWhileUp"
+	for plant in $ecaught; do
+		[ -z "${PLANTS:-}" ] || case " $PLANTS " in *" $plant "*) ;; *) continue ;; esac
+		fired=0 rejected=0
+		for seed in $seeds; do
+			line=$tmp/check/$plant-$seed/line
+			grep -q '^ok' "$tmp/check/primaries-$seed/verdict" && [ -f "$line" ] || continue
+			case $(head -1 "$line") in
+			*": not fired,"* | *": NO DATA,"*) ;;
+			*": rejected,"*) fired=$((fired + 1)) rejected=$((rejected + 1)) ;;
+			*) fired=$((fired + 1)) ;;
+			esac
+		done
+		if [ $fired -eq 0 ] && [ "${FIRST:-0}" -eq 0 ] && [ "${COUNT:-10}" -ge 40 ]; then
+			echo "FAIL $plant: fired on none of seeds 0 to 39, where the record has it fire"
+			failed=1
+		elif [ $fired -eq 0 ]; then
+			echo "$plant: no evidence, fired on none of these seeds"
+		elif [ $rejected -eq 0 ]; then
+			echo "FAIL $plant: fired on $fired seeds and rejected on none, a plant expected rejected"
+			failed=1
+		else
+			echo "$plant: caught, rejected on $rejected of the $fired seeds it fired on"
+		fi
+	done
 	rm -f "$tmp"/traces/*
 	CONFORM_DIR=$tmp/traces GOMEMLIMIT=4GiB go test -count=1 ./internal/raftshard -run '^TestVoterPlantsKeepTraces$'
 	go build -o "$tmp/votersdata" ./tools/votersdata
 	each plain "$tmp"/traces/voters-*.trace
 	# The voter plants whose trace TLC rejects at the planted step; the others may pass.
 	caught=" campaign-unapplied restart-commit-at-base hard-state-old voter-first eager joint-one-half one-at-a-time delete-on-plan notice-any-index notice-non-member disloyal "
-	failed=0
 	for f in "$tmp"/traces/voters-*.trace; do
 		name=$(basename "$f" .trace)
 		dir=$tmp/check/$name

@@ -4486,15 +4486,15 @@ Results, seeds 0 to 39 of `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries`, t
 | `scripted-move-primary` | 39 | passes: a move to a new primary that holds Y, peering keeping Y, which every up member holds, over the removed disk | 2 |
 | `scripted-lister-restarted` | 54 | passes: a restart during recovery, the restarted primary's replay gating Y until its next decision | 1 |
 | `scripted-lister-rotated` | 51 | passes: a rotation during recovery, the new primary holding Y logged and peering keeping it over the member that lists the chunk | 1 |
-| 36 seeds | 582 to 836 | pass, across restarts and formats | 3 to 25 |
-| `primaries-0` | 686 | passes: a demoted primary's gated recovery write landing at its disk's persist of a later primary's decision, discrepancy 30 | 8 |
-| `primaries-1` | 589 | passes: the primary's own recovery copy gated above what its map holds through two peerings, discrepancy 39 | 12 |
-| `primaries-18` | 648 | passes: 43 `mayfail` lines | 76 |
-| `primaries-33` | 637 | passes: 49 `mayfail` lines | 171 |
-| `primaries-333` | 697 | passes: a member with 8 versions open at two tables, discrepancy 4 | 30 |
+| 36 seeds | 582 to 836 | pass, across restarts and formats | 4 to 32 |
+| `primaries-0` | 686 | passes: a demoted primary's gated recovery write landing at its disk's persist of a later primary's decision, discrepancy 30 | 9 |
+| `primaries-1` | 589 | passes: the primary's own recovery copy gated above what its map holds through two peerings, discrepancy 39 | 13 |
+| `primaries-18` | 648 | passes: 43 `mayfail` lines | 95 |
+| `primaries-33` | 637 | passes: 49 `mayfail` lines | 207 |
+| `primaries-333` | 697 | passes: a member with 8 versions open at two tables, discrepancy 4 | 41 |
 | `primaries-387423` | 737 | passes: the primary's own recovery copy landing after it decided the next interval, discrepancy 36, and a member's recovery logged after the primary left its interval, discrepancy 38 | 7 |
 
-The depth-2 seeds are 4, 7, 12, 15 and every eighth after each, off every planted bug's seed; seed 7 leaves a gap. All 40 seeds, the 14 scripted traces and the 3 sweep seeds pass TLC. The holds on a write's clean copies reschedule seeds 0, 7, 18 and 24, which pass once discrepancies 33 to 35 are settled. A member's open versions landing at their first `maydeliver` line once it logs them (discrepancy 4) let seed 0 pass in 8 s and seed 18 in 76 s. None broke a safety invariant,
+The depth-2 seeds are 4, 7, 12, 15 and every eighth after each, off every planted bug's seed; seed 7 leaves a gap. All 40 seeds, the 14 scripted traces and the 3 sweep seeds pass TLC. The holds on a write's clean copies reschedule seeds 0, 7, 18 and 24, which pass once discrepancies 33 to 35 are settled. A member's open versions landing at their first `maydeliver` line once it logs them (discrepancy 4) let seeds 0 and 18 pass. None broke a safety invariant,
 and each that passes ran the four invariants checked at its end. A trace's time follows how many `maydeliver`
 and `mayfail` branches stay alive, not its length.
 
@@ -4515,7 +4515,7 @@ a reply still carrying a dropped version would fail its `peer` line. In seeds 3,
 fills at an `adopt` line, shown by checking their traces again with `ldrp` held empty as an invariant; the
 other six pass with it empty, as the Go run counts a drop in 4 of these 10 seeds.
 
-Not yet run: `TestReplicatedWritesSurviveFaults` and the lease half.
+Not yet run, and owed by the [checklist](build-checklist.md): `TestReplicatedWritesSurviveFaults`, the lease half and the give-up.
 
 The `conform` workflow runs this check nightly on a window of 500 seeds that moves each day, from seed
 40 up, of the primary-change run and of the voter model's replacement run, with 20 minutes per trace
@@ -4525,7 +4525,7 @@ COUNT=1 scripts/conform.sh` replays it. On a pull request that changes the epoch
 `internal/chunkstore`, `internal/lease`, `internal/raftshard`, `internal/trace`, `tools/tracedata`,
 `tools/votersdata` or the script, it runs 40 seeds of each model with the scripted traces, and the plants,
 and a failure there is a discrepancy to settle before the change merges. `scripts/gate-branch.sh` runs
-the local default on a branch that touches those paths.
+the local default, the epoch model's scripted and sweep traces and 50 seeds of the voter model's, on a branch that touches those paths. A plant run fails as each model's [traces can fail](#traces-can-fail-in-the-epoch-models-check) section says.
 
 `refillSoleHolder` is not in `conformPlants`: the primary-change run is too short for a member merely down to go missing, so a refill of one appears only in `scripted-refill`, and a `Stay` only in `scripted-stay`, and `TestPlantedPeeringBugsBreakTheOracle` breaks the rule through the simulator's invariant.
 
@@ -4542,17 +4542,17 @@ Over the 56 traces of that run, which pass. `RestartAsk` takes 59 `restartask` l
 
 | Action | Line | Took it | Stuttered | Traces |
 | --- | --- | --- | --- | --- |
-| `Deliver` | `logged` | 5,106 | 648 | 56 |
+| `Deliver` | `logged` | 5,103 | 642 | 56 |
 | `Send` | `send` | 4,060 | 0 | 56 |
-| `Order` | `order` | 3,653 | 0 | 56 |
+| `Order` | `order` | 3,633 | 0 | 56 |
 | `Adopt` | `adopt` | 3,523 | 257 | 55 |
-| `OwnLogged` | `ownlogged` | 3,382 | 0 | 56 |
-| `Answer` | `committed` | 2,708 | 0 | 56 |
+| `OwnLogged` | `ownlogged` | 3,362 | 0 | 56 |
+| `Answer` | `committed` | 2,701 | 0 | 56 |
 | `Peer` | `peer` | 584 | 0 | 55 |
 | `Activate` | `activate` | 572 | 0 | 55 |
 | `Fold` | `fold` | 570 | 0 | 54 |
 | `OwnFail` | `mayfail` | 271 | 0 | 20 |
-| `Recover` | `recovered` | 252 | 96 | 50 |
+| `Recover` | `recovered` | 249 | 97 | 50 |
 | `Renew` | `renew` | 165 | 0 | 32 |
 | `MarkDisk` | `plan` | 106 | 0 | 39 |
 | `GoneRefuses` | `gone` | 102 | 0 | 13 |
@@ -4569,11 +4569,11 @@ Over the 56 traces of that run, which pass. `RestartAsk` takes 59 `restartask` l
 | `Drop` | `plan` | 2 | 0 | 2 |
 | `Lost` | `lost` | 2 | 0 | 2 |
 | `Stay` | `plan` | 1 | 0 | 1 |
-| `Deliver` | `maydeliver` | 0 | 217 | 0 |
+| `Deliver` | `maydeliver` | 0 | 215 | 0 |
 | `AskNext` | `ask` | 0 | 13 | 0 |
 | `GoneRefusesRecovery` | `gonerecover` | 0 | 5 | 0 |
 | `Recover` | `recoveredlate` | 0 | 3 | 0 |
-| `Recover` | `mayrecover` | 0 | 1 | 0 |
+| `Recover` | `mayrecover` | 0 | 2 | 0 |
 
 `table`, `persisted` and `recoverorder` lines check a state and take no action, as their
 mapping says. Each `gonerecover` refusal lands after the interval already ended, so `GoneRefusesRecovery`
@@ -4589,7 +4589,8 @@ changes nothing on its lines (discrepancy 33). The actions of `Next` no trace to
 | `Refuse` | A fenced client write. No record maps it |
 | `SetMinLive`, `Die`, `Isolate` | No run of the test changes `min_live`, ends a daemon or cuts a node from the control plane |
 | `Split` | No traced run doubles a pool's `pg_count`, so the `reported` line matches a report by PG number and interval and leaves out the model's split count; a traced split would map the report's `pg_count` to it |
-| `OpenGrant`, `OpenLapse`, `Ask`, `Grant`, `GrantRefused`, `SendHb`, `RecvGrant`, `RecvHb`, `RoundTrip`, `Beat`, `EndWait` | The lease half, not traced |
+| `OpenGrant`, `OpenLapse`, `Ask`, `Grant`, `GrantRefused`, `SendHb`, `RecvGrant`, `RecvHb`, `RoundTrip`, `Beat`, `EndWait` | The lease half, not traced: the spec's time moves by `Tick` only when no protocol step is enabled, where a run works while time passes, so a lease record has no mapping yet |
+| `GiveUp` | No traced run gives up a chunk or a PG, and the leader's give-up has no record |
 | `Fortify`, `Elect`, `Transfer`, `StepDown` | Raft, not traced: `MaxTerm` is 0 |
 | `Tick`, `Suspend`, `Wake`, `Freeze`, `Thaw`, `RateStep`, `Reboot`, `BootUp`, `NetFault` | Clock and network faults, not traced: `Clocks` is off |
 
@@ -4667,7 +4668,11 @@ broken invariant, keeping the trace up to there and saying which broke in a `.st
 `CONFORM_RUNON=1` runs on past the break, needed when the invariant sees a step before its record:
 `sameMembers` and `keepID` pass every trace cut at the break. Over all 40 seeds run-on passes Go's
 10-minute test limit, so it runs a seed at a time. A rejection counts once the failing line has been
-read to be the planted behaviour.
+read to be the planted behaviour. The run fails when a seed's baseline fails, or when one of the 17
+plants of the rules the check catches below fires on some seed and TLC rejects it on none. Each fires
+on some of seeds 0 to 39, so over those seeds, a pull request's, one that fires on none fails too, as a
+plant that no longer does anything; on another window, where most fire on a few seeds in 40 or none, that
+is no evidence.
 
 Results over the 39 seeds that passed, all but 2, in one run at one commit, and for `memberNoAsk` over the 37 that passed later. The rows of `mergeWhileLacking`, `mergeOnDropped`, `noDegradedHold`, `listerOrders`, `coverAtRead`, `fenceOnArrival` and `writeOnUnfound` are from a run at the holds on a write's clean copies, over all 40 seeds, whose baselines pass there; seed 18's were checked alone at 1,200 s. Those of `neverAsk` and `peerInOldInterval` are from a run over all 40 seeds once discrepancy 13 was settled. Fired counts the seeds whose trace differs from the baseline's;
 passed, a trace TLC took to its end. A plant's rejected line is listed by kind, with the seeds where it held
@@ -4696,7 +4701,7 @@ over the 30 seeds that passed before discrepancy 12, they were rejected at 21 of
 | `resendNewestFirst` | `neg-log-out-of-order` | 10 | 0 | 10 | 0, 0 | No member logs out of order, so the rule is not reached | |
 | `stopPreviousOnly` | `neg-stop-previous-only` | 2 | 0 | 2 | 0, 0 | `J` shrinks, and still meets `Peer` | |
 | `recoverFromListed` | `neg-recover-from-listed` | 14 | 14 | 0 | 13, 10 | `recovered` 13, the line naming a primary that lacks the chunk as its source; `peer` 1, its consequence | `Recover`: the source lists nothing, or is a primary with the chunk in `img` |
-| `clearNoSource` | `neg-recover-no-source` | 6 | 6 | 0 | 6, 0 | `recovered`, source 0 at a listed version above 0 | `Recover`: a source, unless the kept version is 0 |
+| `clearNoSource` | `neg-recover-no-source` | 0 | 0 | 0 | 0, 0 | Fires on none of seeds 0 to 39, where no recovery lacks a source. Seed 387 of `TestPlantedPeeringBugsBreakTheOracle` reaches it | `Recover`: a source, unless the kept version is 0 |
 | `goneWhileUp` | `neg-gone-while-up` | 38 | 38 | 0 | 38, 0 | `gone`, the planted refusal. Not clean, since the oracle's "no write is refused for its interval" breaks at the same step | `GoneRefuses`: the disk has no node |
 | `readOldDisk` | `neg-recovery-read-old-disk` | 0 | 0 | 0 | 0, 0 | Fires on none of seeds 0 to 59: the run replaces a formatted disk at once, so no read reaches a node for its old disk. Its scripted test, `TestADiskFormattedAgainAnswersNoRecoveryReadForItsOldID`, keeps `scripted-format-source`, which passes, and `planted-format-source`, which TLC rejects at its `recovered` line, source 3 after its `format`. Without the `RecoverRead` record the order moved before the format and the planted trace passed | `Recover`: the source's disk has a node |
 | `lastActivatedOnly` | `neg-reach-last-activated-only` | 1 | 0 | 1 | 0, 0 | The code's own `J` is what `Peer` judges | |
@@ -4716,14 +4721,18 @@ over the 30 seeds that passed before discrepancy 12, they were rejected at 21 of
 | `mapOnDemote` | `neg-map-on-demote` | 2 | 0 | 2 | 0, 0 | Passes at seeds 25 and 38. Only its scripted test shows the rule (`TestReplayRollbackPlantsLoseX`) | |
 | `forgetImageDown`, `ignoreImageFlag`, `replayForgetsDrops` | `neg-forget-image-down`, `neg-ignore-image-flag`, `neg-replay-forgets-drops` | 0 | 0 | 0 | 0, 0 | Fire on none of the seeds. Only their scripted test shows the rules (`TestReplayRollbackPlantsLoseX`) | |
 
-Traces can fail is shown on these seeds for 18 of the 39 rules, 12 of them clean: `ackOnLoneCopy`, `activateEarly`, `mergeWhileLacking`,
+Traces can fail is shown on these seeds for 17 of the 39 rules, 12 of them clean: `ackOnLoneCopy`, `activateEarly`, `mergeWhileLacking`,
 `mergeOnDropped`, `editKeepsInterval`, `relistNever`, `peerInOldInterval`, `oldReport`, `recoverFromListed`,
 `listerVetoes`, `listerOrders` and `noDegradedHold`, the last once, the oracle breaking first on its other seeds, and for 2 more, `sameMembers` and `keepID`, running on over 30.
+At a8c61104, over seeds 0 to 39, the 17 plants `conform.sh` expects caught are rejected on these counts of the seeds they fire on:
+`activateEarly`, `editKeepsInterval`, `reportDecided` and `goneWhileUp` 40 of 40, `sendEpoch` 34 of 34, `oldReport` 17 of 40,
+`peerInOldInterval` 14 of 18, `noDegradedHold` and `removeOnActivation` 14 of 14, `mergeWhileLacking` and `listerOrders` 11 of 11,
+`recoverFromListed` 9 of 9, `mergeOnDropped`, `relistNever`, `listerVetoes` and `ownInterval` 4 of 4, `ackOnLoneCopy` 3 of 3.
 `readOldDisk`, the 40th rule, is shown cleanly by its scripted trace rather than a seed.
 `settleByNumber` and `mapOnReplay` are rejected at lines not yet read to their rules. Open: `coverAtRead`,
 which needs a record of the blocks a recovery write leaves out; `neverAsk`, `memberNoAsk` and `writeOnUnfound`, omissions no line can name;
 `freshGrantNoCheck`, with the lease half; `resendNewestFirst`, `stopPreviousOnly`, `lastActivatedOnly`, `forgetImage`
-and `mapOnDemote`, which need a seed that reaches them; and the seven that never fire. Of the oracle plants with no rule,
+`mapOnDemote` and `clearNoSource`, which need a seed that reaches them; and the seven that never fire. Of the oracle plants with no rule,
 `settleSubset` needs a record of what `Settle` answered.
 
 Every relaxed path has a plant: `img` in `Order`, which the hold on a primary that lists the chunk leaves only to `ListerOrders`, by `mergeWhileLacking` with `listerOrders`, `img` as a
