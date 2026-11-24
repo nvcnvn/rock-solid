@@ -173,3 +173,55 @@ func TestRefillWithNoEligibleDisk(t *testing.T) {
 		t.Fatal("a failed disk's PGs were not refilled onto its node's other disk")
 	}
 }
+
+// A Stuck PG's member that its primary reports short, on a disk at its log reserve, is parked beside a member on the eligible disk furthest below its target, in one table and with no recovered report; with no eligible disk, the only one at its reserve though under write_limit, or not short, or the report from an earlier interval, it stays, and a leaving member never takes its place. The recovered report of the parking interval removes it.
+func TestAFullMemberOfAStuckPGIsParked(t *testing.T) {
+	l := placed(t, nodesOf(rep(3, 2), 3, 1, 2))
+	e := l.pools().PGs[0]
+	f := e.Members[1].Disk
+	l.disk(f).Live = l.disk(f).Blocks - core.BlocksPerChunk + 1
+	stuck := func(short uint8, iv uint32) *Inputs {
+		in := l.inputs(0)
+		in.Pools[0].Stuck = []StuckPG{{PG: 0, Interval: iv, Short: short}}
+		return in
+	}
+	l.step(t, stuck(1<<1, e.Interval))
+	if got := l.pools().PGs[0].Members; !slices.Equal(got, e.Members) {
+		t.Fatalf("with no eligible disk PG 0 went from %v to %v", e.Members, got)
+	}
+	added := l.grow(3, 2, 0)
+	for _, in := range []*Inputs{stuck(1<<0|1<<2, e.Interval), stuck(1<<1, e.Interval-1), l.inputs(0)} {
+		l.step(t, in)
+		if got := l.pools().PGs[0].Members; !slices.Equal(got, e.Members) {
+			t.Fatalf("PG 0 went from %v to %v", e.Members, got)
+		}
+	}
+	withLeaving := append(slices.Clone(e.Members), Member{Disk: added, Leaving: true})
+	l.pools().PGs[0].Members = slices.Clone(withLeaving)
+	l.step(t, stuck(1<<1, e.Interval))
+	if got := l.pools().PGs[0]; !slices.Equal(got.Members, withLeaving) || got.Interval != e.Interval {
+		t.Fatalf("with disk %d leaving, PG 0 went from %v to %v in interval %d: a leaving member took the full member's place", added, withLeaving, got.Members, got.Interval)
+	}
+	l.pools().PGs[0].Members = slices.Clone(e.Members)
+	l.disk(added).Reserve = l.disk(added).Blocks
+	l.step(t, stuck(1<<1, e.Interval))
+	if got := l.pools().PGs[0].Members; !slices.Equal(got, e.Members) {
+		t.Fatalf("with the added disk at its reserve PG 0 went from %v to %v", e.Members, got)
+	}
+	l.disk(added).Reserve = 0
+	other := l.pools().PGs[1]
+	l.step(t, stuck(1<<1, e.Interval))
+	want := []Member{e.Members[0], e.Members[2], {Disk: added}, {Disk: f, Leaving: true}}
+	if got := l.pools().PGs[0]; !slices.Equal(got.Members, want) || got.Interval != e.Interval+1 {
+		t.Fatalf("PG 0 went from %v to %v in interval %d, not %v", e.Members, got.Members, got.Interval, want)
+	}
+	if got := l.pools().PGs[1].Members; !slices.Equal(got, other.Members) {
+		t.Fatalf("PG 1, not Stuck, went from %v to %v", other.Members, got)
+	}
+	in := stuck(1<<1, e.Interval+1)
+	in.Recovered = []PGInterval{{PG: core.PGID{Pool: 1}, Interval: e.Interval + 1}}
+	l.step(t, in)
+	if got := l.pools().PGs[0].Members; !slices.Equal(got, want[:3]) {
+		t.Fatalf("the recovered report left PG 0 %v", got)
+	}
+}

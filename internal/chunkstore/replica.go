@@ -139,8 +139,11 @@ type lead struct {
 	reported bool
 	urgent   []int
 	// roomless is set once a chunk's copy found a target without room for it, and holds the lead's
-	// chunks no client write waits on until something that can free room happens.
+	// chunks no client write waits on until something that can free room happens; full is the
+	// places of the leaving members such a copy found without room, which those copies leave out
+	// meanwhile rather than wait for, since the recovered report waits for no leaving member.
 	roomless bool
+	full     uint8
 }
 
 type heldMsg struct {

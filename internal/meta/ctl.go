@@ -341,6 +341,7 @@ func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) erro
 	ds := c.poolDisks(in.Disks)
 	for i, cp := range n.pools {
 		pin[i] = poolInputs(cp, ds)
+		pin[i].Stuck = c.stuckPGs(cp.ID)
 	}
 	c.pin = pin
 	c.det.View(&c.table, pin)

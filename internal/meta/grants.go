@@ -116,6 +116,21 @@ func (c *Control) poolGrant(id core.PoolID) *poolGrants {
 	return &c.pgrants[i]
 }
 
+// stuckPGs is pool id's Stuck PGs as of the last Step whose primary's latest report, active, has a member short.
+func (c *Control) stuckPGs(id core.PoolID) []chunkstore.StuckPG {
+	pg := c.poolGrant(id)
+	if pg == nil {
+		return nil
+	}
+	var out []chunkstore.StuckPG
+	for _, i := range pg.cond.Stuck {
+		if l := c.watch.Lead(&c.table, core.PGID{Pool: id, Index: i}); l != nil && l.Active && l.Short != 0 {
+			out = append(out, chunkstore.StuckPG{PG: i, Interval: l.Interval, Short: l.Short})
+		}
+	}
+	return out
+}
+
 func cmpGrant(e grantEntry, k grantEntry) int {
 	return cmp.Or(cmp.Compare(e.session, k.session), cmp.Compare(e.pool, k.pool))
 }
@@ -324,13 +339,13 @@ func (c *Control) fill(now core.Tick, rp *chunkstore.Report) {
 	}
 }
 
-// AppendDisks appends to dst every recorded disk not gone, as Step takes its disks: at the size and
-// fill its node last reported, or at size 0 until it reports.
+// AppendDisks appends to dst every recorded disk not gone, as Step takes its disks: at the size, log
+// reserve and fill its node last reported, or at size 0 until it reports.
 func (c *Control) AppendDisks(dst []chunkstore.Disk) []chunkstore.Disk {
 	for _, d := range c.rec.Disks() {
 		if !d.Gone {
 			f := c.diskFill(d.ID)
-			dst = append(dst, chunkstore.Disk{ID: d.ID, Blocks: f.blocks, Live: f.live})
+			dst = append(dst, chunkstore.Disk{ID: d.ID, Blocks: f.blocks, Reserve: f.reserve, Live: f.live})
 		}
 	}
 	return dst

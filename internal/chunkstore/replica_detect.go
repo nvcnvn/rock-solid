@@ -83,8 +83,11 @@ func (r *Replica) leadStates(dst []LeadState) []LeadState {
 				}
 			}
 			s.Chunks = s.Chunks[:min(len(s.Chunks), MaxReportUnfound)]
-			for _, n := range l.listed {
+			for p, n := range l.listed {
 				s.Lacking += uint32(n)
+				if n > 0 {
+					s.Short |= 1 << p
+				}
 			}
 		}
 		dst = append(dst, s)

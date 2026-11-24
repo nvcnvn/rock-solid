@@ -36,14 +36,15 @@ type recoverChunk struct {
 	urgent bool
 }
 
-// recovery is a chunk being recovered: its image read from disk from at slot src of the members,
-// by store request read or by network request rid from the loop at source, then its recovery write,
-// store request req, ordered and sent like any write. A from of 0 is a recovery that needs no
-// source.
+// recovery is a chunk being recovered onto the members at places targets: its image read from disk
+// from at slot src of the members, by store request read or by network request rid from the loop at
+// source, then its recovery write, store request req, ordered and sent like any write. A from of 0
+// is a recovery that needs no source.
 type recovery struct {
 	pg       core.PGID
 	interval uint32
 	todo     int
+	targets  uint8
 	src      int
 	from     uint32
 	read     uint64
@@ -134,7 +135,7 @@ func (l *lead) next() (j int, urgent bool) {
 			if j == l.cursor {
 				l.cursor++
 			}
-		case !t.busy && !t.wait:
+		case !t.busy && !t.wait && t.targets&^l.full != 0:
 			return j, false
 		}
 	}
@@ -229,11 +230,19 @@ func (r *Replica) startRecovery(ctx *core.Context, i, j int, out *ReplicaOutput)
 	l := &r.leads[i]
 	_, e := r.table.entry(l.pg)
 	t := &l.todo[j]
-	if !t.urgent && !r.plant.copyPastGrants && !r.roomFor(ctx, e, t.targets) {
-		l.roomless = true
-		return
+	copies := t.targets
+	if !t.urgent && !r.plant.copyPastGrants {
+		no := r.noRoom(ctx, e, t.targets)
+		l.full |= no & leavingAt(e)
+		if no&^l.full != 0 {
+			l.roomless = true
+			return
+		}
+		if copies &^= l.full; copies == 0 {
+			return
+		}
 	}
-	rc := recovery{pg: l.pg, interval: l.interval, todo: j}
+	rc := recovery{pg: l.pg, interval: l.interval, todo: j, targets: copies}
 	if t.kept == 0 {
 		r.recoverEmpty(ctx, t, rc, out)
 		return
@@ -287,13 +296,14 @@ func (r *Replica) startRecovery(ctx *core.Context, i, j int, out *ReplicaOutput)
 	}
 }
 
-// roomFor reports whether each disk in targets, by place in e's members, would still hold its log
-// reserve plus (1 + k) × the grants outstanding on its pools free after one more chunk, counting the
-// copies in flight to it at a chunk each and its live blocks as last reported, which a member sums
-// afresh for each recovery write it acknowledges: copying stops short of the room the grants
+// noRoom is the disks in targets, by place in e's members, that would not still hold their log
+// reserve plus (1 + k) × the grants outstanding on their pools free after one more chunk, counting
+// the copies in flight to each at a chunk each and its live blocks as last reported, which a member
+// sums afresh for each recovery write it acknowledges: copying stops short of the room the grants
 // promised, whatever the leader saw when it granted them. A chunk a client write waits on is copied
 // regardless, since stopping it would hold that write.
-func (r *Replica) roomFor(ctx *core.Context, e *PGEntry, targets uint8) bool {
+func (r *Replica) noRoom(ctx *core.Context, e *PGEntry, targets uint8) uint8 {
+	var no uint8
 	for s, m := range e.Members {
 		d := r.disk(m.Disk)
 		if s >= maxMembers || targets&(1<<s) == 0 || d.blocks == 0 {
@@ -301,10 +311,21 @@ func (r *Replica) roomFor(ctx *core.Context, e *PGEntry, targets uint8) bool {
 		}
 		live := r.copyFill(ctx, m.Disk)
 		if live+d.reserve+(r.copyingTo(m.Disk)+1)*core.BlocksPerChunk+(1+ReuseBudget)*r.grantsOn(m.Disk) > d.blocks {
-			return false
+			no |= 1 << s
 		}
 	}
-	return true
+	return no
+}
+
+// leavingAt is the places of e's leaving members.
+func leavingAt(e *PGEntry) uint8 {
+	var lv uint8
+	for s, m := range e.Members {
+		if s < maxMembers && m.Leaving {
+			lv |= 1 << s
+		}
+	}
+	return lv
 }
 
 // copyFill is the live blocks recovery counts disk at: this disk's summed now, a member's as it last
@@ -324,7 +345,7 @@ func (r *Replica) copyFill(ctx *core.Context, disk uint32) uint64 {
 // roomFreed lets the leads a target without room stopped look for copies again.
 func (r *Replica) roomFreed() {
 	for i := range r.leads {
-		r.leads[i].roomless = false
+		r.leads[i].roomless, r.leads[i].full = false, 0
 	}
 }
 
@@ -340,7 +361,7 @@ func (r *Replica) copyingTo(disk uint32) uint64 {
 		if e == nil {
 			continue
 		}
-		if s := slices.IndexFunc(e.Members, func(m Member) bool { return m.Disk == disk }); s >= 0 && s < maxMembers && r.leads[i].todo[rc.todo].targets&(1<<s) != 0 {
+		if s := slices.IndexFunc(e.Members, func(m Member) bool { return m.Disk == disk }); s >= 0 && s < maxMembers && rc.targets&(1<<s) != 0 {
 			n++
 		}
 	}
@@ -489,7 +510,7 @@ func (r *Replica) orderRecovery(ctx *core.Context, k int, buf core.IOBuf, out *R
 	r.vers = append(r.vers, version{req: rc.req, epoch: r.table.Epoch, interval: rc.interval, u: u, recover: true})
 	out.note(trace.OutRecoverOrder, t.chunk.Hash(), uint64(rc.from), uint64(rc.interval), 0, 0)
 	r.st.Write(ctx, Request{ID: rc.req, Chunk: t.chunk, Len: core.ChunkSize, Buf: buf, Interval: rc.interval, Gated: true, Recover: true, Ver: t.kept,
-		Relay: self < 0 || t.targets&(1<<self) == 0}, &r.sout)
+		Relay: self < 0 || rc.targets&(1<<self) == 0}, &r.sout)
 }
 
 // recoveryTarget reports whether recovery write v goes to disk: a member that lacks its chunk.
@@ -505,7 +526,7 @@ func (r *Replica) recoveryTarget(v *version, disk uint32) bool {
 	}
 	_, e := r.table.entry(rc.pg)
 	s := slices.IndexFunc(e.Members, func(m Member) bool { return m.Disk == disk })
-	return s >= 0 && s < maxMembers && r.leads[i].todo[rc.todo].targets&(1<<s) != 0
+	return s >= 0 && s < maxMembers && rc.targets&(1<<s) != 0
 }
 
 // listedIn is the interval whose peering listed chunk c on this disk, 0 for none.
@@ -554,11 +575,13 @@ func (r *Replica) endRecovery(k int, ok bool) {
 		return
 	}
 	for s := range maxMembers {
-		if t.targets&(1<<s) != 0 {
+		if rc.targets&(1<<s) != 0 {
 			l.listed[s]--
 		}
 	}
-	t.targets = 0
+	if t.targets &^= rc.targets; t.targets != 0 {
+		return
+	}
 	if j, found := slices.BinarySearchFunc(l.kept, t.chunk, func(k keptChunk, c core.ChunkID) int { return compareChunk(k.chunk, c) }); found {
 		l.kept[j].lacking = false
 	}

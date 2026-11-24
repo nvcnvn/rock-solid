@@ -95,7 +95,11 @@ func (a *authority) attach(c *rcluster) {
 				if k, err := Peek(frame); err == nil && k == KindReport && DecodeReport(frame, data, &rp) == nil && len(rp.Disks) > 0 {
 					a.latencies += len(rp.Latencies)
 					node := ev.Peer.Node
-					if err := a.cp.Heartbeat(ctx.Now, node, append([]OpenedLog{{Log: rp.Disks[0].Log, Blocks: a.size.Blocks, Reserve: a.size.Reserve}}, a.opened[node]...)); err != nil {
+					size, ok := a.sizes[node]
+					if !ok {
+						size = a.size
+					}
+					if err := a.cp.Heartbeat(ctx.Now, node, append([]OpenedLog{{Log: rp.Disks[0].Log, Blocks: size.Blocks, Reserve: size.Reserve}}, a.opened[node]...)); err != nil {
 						a.refused = append(a.refused, err)
 					}
 				}

@@ -39,6 +39,8 @@ type authority struct {
 	plant      placementPlants
 	// det, when set, gives the disks' marks in place of down.
 	det *Detector
+	// full is the disks at their log reserve whose members of PG 0, Stuck, its primary reports short.
+	full []uint32
 	// keepID plants the bug of a reformatted disk keeping its old disk ID.
 	keepID bool
 	// cp, when set, is the real control plane on c's node auth, which commits every table in place
@@ -46,7 +48,8 @@ type authority struct {
 	// rcv the recovered reports counted, reports the reports forwarded to it, opened the logs each
 	// node reports beside its replica's, refused the heartbeats it refused, and latencies the member
 	// latencies its heartbeats carried; late is the nodes attach leaves to join later, and size
-	// the size and log reserve each replica's log reports, diskBlocks and none if unset.
+	// the size and log reserve each replica's log reports, diskBlocks and none if unset, or sizes
+	// a node's.
 	t         *testing.T
 	c         *rcluster
 	cp        ControlPlane
@@ -59,6 +62,7 @@ type authority struct {
 	latencies int
 	late      map[int]bool
 	size      OpenedLog
+	sizes     map[uint32]OpenedLog
 }
 
 func (a *authority) inputs(c *rcluster) *Inputs {
@@ -74,6 +78,16 @@ func (a *authority) inputs(c *rcluster) *Inputs {
 	}
 	in.Recovered = c.table.reported(nil, c.recovered, a.plant)
 	in.plant = a.plant
+	if len(a.full) > 0 {
+		_, e := c.table.entry(pg0)
+		s := StuckPG{PG: pg0.Index, Interval: e.Interval}
+		for p, m := range e.Members {
+			if slices.Contains(a.full, m.Disk) {
+				s.Short |= 1 << p
+			}
+		}
+		in.Pools[0].Stuck = []StuckPG{s}
+	}
 	return in
 }
 
@@ -85,6 +99,9 @@ func (a *authority) pools() []PoolInputs {
 			continue
 		}
 		dk := Disk{ID: d.ID, Node: d.Node, Blocks: tb(1), Drain: a.drain[d.ID]}
+		if slices.Contains(a.full, d.ID) {
+			dk.Live = dk.Blocks
+		}
 		if since, ok := a.down[d.ID]; ok {
 			dk.Mark, dk.DownSince = MarkDown, since
 		}
@@ -894,6 +911,12 @@ func TestPlantedPeeringBugsBreakTheOracle(t *testing.T) {
 	}
 	if _, err := runPrimaryRunAt(t, 236, &peerPlant{invHasSource, func(r *primaryRun) { r.c.replicaPlants.listerOrders = true }}, false, 1); err == nil || !strings.Contains(err.Error(), invHasSource) {
 		t.Errorf("a write ordered by a primary that lists its chunk at min_live 1, seed 236: %v", err)
+	}
+	if err := fullParkRun(t, func(a *authority) { a.plant.swapFull = true }, false); err == nil || !strings.Contains(err.Error(), invStranded) {
+		t.Errorf("a full member swapped out: %v", err)
+	}
+	if err := fullUnpairedRun(t, func(a *authority) { a.plant.parkUnpaired = true }); err == nil || !strings.Contains(err.Error(), invRemoval) {
+		t.Errorf("full members parked with no member added: %v", err)
 	}
 	soleHolder := func(a *authority) { a.plant.refillSoleHolder = true }
 	if err := lastSourceRun(t, soleHolder, false, ""); err == nil || !strings.Contains(err.Error(), invStranded) {

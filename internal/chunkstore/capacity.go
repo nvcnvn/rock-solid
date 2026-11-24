@@ -17,6 +17,7 @@ type Disk struct {
 	Node      uint32
 	Class     string
 	Blocks    uint64
+	Reserve   uint64
 	Live      uint64
 	Own       uint64
 	Slots     uint32

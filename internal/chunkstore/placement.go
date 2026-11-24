@@ -82,11 +82,19 @@ type Table struct {
 	Pools []PoolTable
 }
 
-// PoolInputs is a pool as placement reads it: its settings and its disks, a member on any other disk having left the pool.
+// PoolInputs is a pool as placement reads it: its settings, its disks, a member on any other disk having left the pool, and its Stuck PGs.
 type PoolInputs struct {
 	ID    core.PoolID
 	Pool  Pool
 	Disks []Disk
+	Stuck []StuckPG
+}
+
+// StuckPG is a Stuck PG of a pool, with the interval and Short of its primary's latest report (LeadState).
+type StuckPG struct {
+	PG       uint32
+	Interval uint32
+	Short    uint8
 }
 
 // PGInterval names one interval of a PG.
@@ -137,6 +145,10 @@ type placementPlants struct {
 	editKeepsInterval  bool
 	refillSoleHolder   bool
 	dropAllLeaving     bool
+	// swapFull has refill delete a member on a full disk in the table that adds its replacement;
+	// parkUnpaired has it park one with no disk eligible to replace it.
+	swapFull     bool
+	parkUnpaired bool
 	// giveUpFound has a give-up take an activated interval with no chunk unfound and drop every chunk of the PG;
 	// giveUpWithCandidate ignores a member down whose disk may return; giveUpNotStopped takes an interval that never
 	// activated though its peering still reaches every interval it needs.
@@ -331,8 +343,14 @@ func nextPool(old *PoolTable, in *PoolInputs, all *Inputs, moved int) (PoolTable
 			}
 		}
 	}
+	short := make([]uint8, n)
+	for _, s := range in.Stuck {
+		if !split && int(s.PG) < n && s.Interval == base[s.PG].Interval {
+			short[s.PG] = s.Short
+		}
+	}
 	for i := range pl.entries {
-		pl.refill(&pl.entries[i], &base[i])
+		pl.refill(&pl.entries[i], &base[i], short[i])
 	}
 	moves := pl.balance(max(0, all.Moves-moved))
 	for i := range pl.entries {
@@ -488,8 +506,8 @@ func (pl *placer) find(id uint32) int {
 	return k
 }
 
-// refill drops the leaving members whose disks left the pool, narrows e, keeps a leaving member in place of a missing member or where the width needs it, replaces a member whose disk left the pool, marks another missing member leaving beside its replacement while e is under maxMembers, and adds members until all but the leaving ones fill the width, each on the eligible disk furthest below its target; a member with no eligible disk stays.
-func (pl *placer) refill(e *PGEntry, base *PGEntry) {
+// refill drops the leaving members whose disks left the pool, narrows e, keeps a leaving member in place of a missing member or where the width needs it, replaces a member whose disk left the pool, marks another missing member, or a full one (placer.full) at a place of base's members in short, leaving beside its replacement while e is under maxMembers, and adds members until all but the leaving ones fill the width, each on the eligible disk furthest below its target; a member with no eligible disk stays.
+func (pl *placer) refill(e *PGEntry, base *PGEntry, short uint8) {
 	// A member merely down stays however long, leaving: the member that replaces it is no copy
 	// until the recovered report, and may never become one if the old member holds the only copy,
 	// while activations with the new member live drop the past intervals that would have made
@@ -499,13 +517,17 @@ func (pl *placer) refill(e *PGEntry, base *PGEntry) {
 	}
 	pl.narrow(e, base)
 	for j := 0; j < len(e.Members); j++ {
-		if e.Members[j].Leaving || !pl.missing(e, base, j) {
+		if e.Members[j].Leaving {
 			continue
 		}
-		gone := pl.gone(e, base, j)
+		full := pl.full(e, base, j, short)
+		if !full && !pl.missing(e, base, j) {
+			continue
+		}
+		gone := pl.gone(e, base, j) || full && pl.plant.swapFull
 		o := pl.find(e.Members[j].Disk)
 		switch {
-		case pl.stay(e, j):
+		case !full && pl.stay(e, j):
 			if o >= 0 {
 				pl.load[o]--
 			}
@@ -525,6 +547,10 @@ func (pl *placer) refill(e *PGEntry, base *PGEntry) {
 				e.park(j)
 				pl.load[o]--
 				pl.load[k]++
+				j--
+			} else if full && pl.plant.parkUnpaired {
+				e.park(j)
+				pl.load[o]--
 				j--
 			}
 		}
@@ -548,11 +574,11 @@ func (e *PGEntry) park(j int) {
 	e.Members = append(slices.Delete(e.Members, j, j+1), m)
 }
 
-// stay makes e's first leaving member whose disk is up and not draining and whose domain has room an ordinary member in place of member out (-1 for none), and reports whether there was one.
+// stay makes e's first leaving member whose disk is up, not draining and not at its log reserve and whose domain has room an ordinary member in place of member out (-1 for none), and reports whether there was one.
 func (pl *placer) stay(e *PGEntry, out int) bool {
 	for j := range e.Members {
 		k := pl.find(e.Members[j].Disk)
-		if e.Members[j].Leaving && k >= 0 && pl.disks[k].Mark == MarkUp && !pl.disks[k].Drain && pl.room(e, k, out) {
+		if e.Members[j].Leaving && k >= 0 && pl.disks[k].Mark == MarkUp && !pl.disks[k].Drain && !pl.disks[k].atReserve() && pl.room(e, k, out) {
 			e.Members[j].Leaving = false
 			pl.load[k]++
 			return true
@@ -581,6 +607,19 @@ func (pl *placer) missing(e, base *PGEntry, j int) bool {
 		return false
 	}
 	return !pl.waits(m.Disk, e, base)
+}
+
+// full reports whether e's member j is up on a disk at its log reserve, at a place of base's members whose bit is set in short: its PG is Stuck, and its primary reports it lacking copies, which it takes no more of.
+func (pl *placer) full(e, base *PGEntry, j int, short uint8) bool {
+	m := e.Members[j]
+	k := pl.find(m.Disk)
+	p := slices.IndexFunc(base.Members, func(b Member) bool { return b.Disk == m.Disk })
+	return k >= 0 && m.Mark == MarkUp && pl.disks[k].atReserve() && p >= 0 && p < maxMembers && short&(1<<p) != 0
+}
+
+// atReserve reports whether d's log takes no chunk's copy above its reserve, as a primary's recovery gate counts it with no grant out.
+func (d *Disk) atReserve() bool {
+	return d.Blocks > 0 && d.Live+d.Reserve+core.BlocksPerChunk > d.Blocks
 }
 
 // waits reports whether peering waits for disk in e, whose interval before this table is base's: it was the only live member of an interval since the last activated one that accepted writes.
@@ -633,10 +672,10 @@ func refills(in *PoolInputs, minLive uint8, e *PGEntry, j int, now core.Tick) (w
 	return false, len(e.Members) < maxMembers && pl.pick(e, j) >= 0
 }
 
-// eligible reports whether disk k may take a member of e in place of member out: it is up with a target, not in e, and its domain holds fewer than perDomain of e's other members but the leaving ones.
+// eligible reports whether disk k may take a member of e in place of member out: it is up with a target, not at its log reserve, not in e, and its domain holds fewer than perDomain of e's other members but the leaving ones.
 func (pl *placer) eligible(e *PGEntry, k, out int) bool {
 	d := &pl.disks[k]
-	if d.Mark != MarkUp || pl.target[k] == 0 || slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == d.ID }) {
+	if d.Mark != MarkUp || pl.target[k] == 0 || d.atReserve() || slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == d.ID }) {
 		return false
 	}
 	return pl.room(e, k, out)

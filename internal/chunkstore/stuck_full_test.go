@@ -10,10 +10,11 @@ import (
 )
 
 // P23 on the real control plane: a rep3 PG on three of four disks loses a member, declared lost, and
-// its refill copies onto the fourth, whose log fills to its reserve before the copy ends. The leader
-// raises Stuck on the PG from its own record of when the PG last copied. A fifth disk joining does
-// not move the PG, since a move waits for the recovered report; an operator's edit onto it does,
-// and Stuck clears once the new disk copies.
+// its refill copies onto the fourth until the copies would pass its log reserve, which its node
+// reports and the primary's recovery gate keeps, before the copy ends. The leader raises Stuck on
+// the PG from its own record of when the PG last copied. A fifth disk joining takes the full
+// member's place with no edit: placement parks the full member beside it before any recovered
+// report, and Stuck clears once the new disk copies.
 func TestARefillStoppedAtALogReserveGoesStuck(t *testing.T) {
 	a := &authority{pool: Pool{Replicas: 3, MinLive: 2, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 1},
 		down: map[uint32]core.Tick{}, drain: map[uint32]bool{}, opened: map[uint32][]OpenedLog{}}
@@ -39,6 +40,11 @@ func TestARefillStoppedAtALogReserveGoesStuck(t *testing.T) {
 	})
 	added := 4
 	a.late = map[int]bool{added: true, added + 1: true}
+	size := OpenedLog{Blocks: uint64(geo.SegmentCount) * uint64(geo.SegmentBlocks), Reserve: uint64(geo.SegmentCount-24) * uint64(geo.SegmentBlocks)}
+	a.sizes = map[uint32]OpenedLog{full - 1: size}
+	for k := range c.reps {
+		c.call(k, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.SetDisk(full, size.Blocks, size.Reserve) })
+	}
 	a.attach(c)
 	r := &soleRun{c: c, a: a, isolated: map[uint32]bool{}, acked: map[core.ChunkID]uint64{}}
 	stuck := func() bool {
@@ -87,7 +93,7 @@ func TestARefillStoppedAtALogReserveGoesStuck(t *testing.T) {
 			break
 		}
 	}
-	if c.reps[n].Store().Log().FreeOutsideReserve() > 0 || lacking(n) == 0 {
+	if c.reps[n].Store().Log().FreeOutsideReserve() == 0 || lacking(n) == 0 {
 		t.Fatalf("disk %d stopped copying with %d segments free outside its reserve and %d chunks lacking", full, c.reps[n].Store().Log().FreeOutsideReserve(), lacking(n))
 	}
 	for !stuck() {
@@ -98,28 +104,14 @@ func TestARefillStoppedAtALogReserveGoesStuck(t *testing.T) {
 	}
 
 	a.join(added)
-	for _, rec := a.cp.Table(); len(rec) < 5; _, rec = a.cp.Table() {
-		r.tick(1_000_000)
-	}
-	r.tick(StuckAfter)
-	if !stuck() || slices.ContainsFunc(r.members(), func(m Member) bool { return m.Disk == 5 }) {
-		t.Fatalf("with disk 5 added, PG 0 is %v, Stuck %v", r.members(), stuck())
-	}
-
-	var ds []uint32
-	for _, m := range r.members() {
-		if m.Disk != full && !m.Leaving {
-			ds = append(ds, m.Disk)
-		}
-	}
-	a.edits = append(a.edits, Edit{PG: pg0, Disks: append(ds, 5)})
+	joined := c.s.Time()
 	for stuck() {
-		if c.s.Time() > at+4*StuckAfter {
-			t.Fatalf("PG 0 still Stuck after an edit onto disk 5: %v", r.members())
+		if c.s.Time() > joined+StuckAfter {
+			t.Fatalf("PG 0 still Stuck %d s after disk 5 joined: %v", (c.s.Time()-joined)/1_000_000, r.members())
 		}
 		r.tick(1_000_000)
 	}
-	if !slices.ContainsFunc(r.members(), func(m Member) bool { return m.Disk == 5 && !m.Leaving }) || lacking(added) == len(chunks) {
-		t.Fatalf("PG 0 cleared Stuck as %v with disk 5 lacking %d chunks", r.members(), lacking(added))
+	if ms := r.members(); !slices.ContainsFunc(ms, func(m Member) bool { return m.Disk == 5 && !m.Leaving }) || slices.ContainsFunc(ms, func(m Member) bool { return m.Disk == full }) || lacking(added) != 0 {
+		t.Fatalf("PG 0 cleared Stuck as %v with disk 5 lacking %d chunks", ms, lacking(added))
 	}
 }

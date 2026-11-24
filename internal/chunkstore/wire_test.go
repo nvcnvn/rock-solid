@@ -62,7 +62,7 @@ func wireCases() []wireCase {
 		{"report_empty", &Report{ID: 9}, 0},
 		{"report", &Report{ID: 9, Activations: []PGReport{wireReport}, Recovered: []PGReport{wireReport}, Latencies: []Latency{{Disk: 3, Latency: 250}},
 			Disks: []DiskState{{Log: 0x0123456789abcdef, Fill: 1000, Oldest: 40, Pools: []PoolLive{{Pool: 1, Live: 600}}}, {Log: 2, Fill: 5, Oldest: 1_500_000, Failed: true}},
-			Leads: []LeadState{{PG: wirePG.PG, PGCount: 64, Interval: 41, Active: true, Unfound: 2, Lacking: 7, Chunks: []core.ChunkID{{Volume: 1, Index: 2}, {Volume: 1, Index: 5}}}, {PG: core.PGID{Pool: 1, Index: 18}, PGCount: 64, Interval: 3}}}, 0},
+			Leads: []LeadState{{PG: wirePG.PG, PGCount: 64, Interval: 41, Active: true, Unfound: 2, Lacking: 7, Short: 5, Chunks: []core.ChunkID{{Volume: 1, Index: 2}, {Volume: 1, Index: 5}}}, {PG: core.PGID{Pool: 1, Index: 18}, PGCount: 64, Interval: 3}}}, 0},
 		{"member_timeout", &MemberTimeout{ID: 10, PG: wirePG, Disk: 3}, 0},
 		{"probe", &Probe{ID: 11, Disk: 3}, 0},
 		{"probe_reply", &ProbeReply{ID: 11, Log: 0x0123456789abcdef, Oldest: 1_500_000, Failed: true}, 0},
@@ -639,11 +639,13 @@ func TestWireReportLeads(t *testing.T) {
 	mustMalformed(t, "a lead with no pg_count", AppendReport(nil, &Report{Leads: []LeadState{{PG: wirePG.PG, Interval: 1}}}), 0)
 	mustMalformed(t, "a lead past its pg_count", AppendReport(nil, &Report{Leads: []LeadState{{PG: wirePG.PG, PGCount: 16, Interval: 1}}}), 0)
 	mustMalformed(t, "an inactive lead with a count", AppendReport(nil, &Report{Leads: []LeadState{{PG: wirePG.PG, PGCount: 64, Interval: 1, Unfound: 1}}}), 0)
+	mustMalformed(t, "a lead lacking copies with no member short", AppendReport(nil, &Report{Leads: []LeadState{{PG: wirePG.PG, PGCount: 64, Interval: 1, Active: true, Lacking: 1}}}), 0)
+	mustMalformed(t, "a lead with a member short and no copy lacking", AppendReport(nil, &Report{Leads: []LeadState{{PG: wirePG.PG, PGCount: 64, Interval: 1, Active: true, Short: 1}}}), 0)
 	two := []core.ChunkID{{Volume: 1, Index: 2}, {Volume: 1, Index: 5}}
 	mustMalformed(t, "a lead naming fewer unfound chunks than it counts", AppendReport(nil, &Report{Leads: []LeadState{{PG: wirePG.PG, PGCount: 64, Interval: 1, Active: true, Unfound: 3, Chunks: two}}}), 0)
 	mustMalformed(t, "a lead naming its unfound chunks out of order", AppendReport(nil, &Report{Leads: []LeadState{{PG: wirePG.PG, PGCount: 64, Interval: 1, Active: true, Unfound: 2, Chunks: []core.ChunkID{two[1], two[0]}}}}), 0)
 
-	rp := Report{Leads: []LeadState{{PG: wirePG.PG, PGCount: 64, Interval: 41, Active: true, Unfound: 2, Lacking: 9, Chunks: two}}}
+	rp := Report{Leads: []LeadState{{PG: wirePG.PG, PGCount: 64, Interval: 41, Active: true, Unfound: 2, Lacking: 9, Short: 1, Chunks: two}}}
 	frame := AppendReport(nil, &rp)
 	var got Report
 	if a := testing.AllocsPerRun(100, func() {

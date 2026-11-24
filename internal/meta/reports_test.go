@@ -83,7 +83,7 @@ func TestALeavingMemberGoesStuckAndClearsWhenItCopies(t *testing.T) {
 	if !slices.Contains(c.Stuck, pg) || b < 0 || !c.Blocked[b].Stopped {
 		t.Fatalf("PG %d not Stuck and Blocked, Stopped, after StuckAfter: %+v", pg, c)
 	}
-	lead := chunkstore.LeadState{PG: core.PGID{Pool: 1, Index: pg}, PGCount: uint32(len(pgs)), Interval: iv, Active: true, Lacking: 5}
+	lead := chunkstore.LeadState{PG: core.PGID{Pool: 1, Index: pg}, PGCount: uint32(len(pgs)), Interval: iv, Active: true, Lacking: 5, Short: 1}
 	r.leads(1, lead)
 	c = r.conditions()
 	b = slices.IndexFunc(c.Blocked, func(b chunkstore.BlockedPG) bool { return b.PG == pg })

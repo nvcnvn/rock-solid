@@ -212,7 +212,7 @@ const MaxDiskPools = 256
 // MaxReportUnfound is the most unfound chunks a primary names in a report of a PG; an operator's give-up records those named, and another gives up the rest.
 const MaxReportUnfound = 64
 
-// LeadState is what a primary reports of a PG it leads: its pool's pg_count, since a split renumbers the pool's PGs, its interval, whether it leads it active and, when active, how many chunks its last peering left unfound, the first MaxReportUnfound of them in ascending order, and the copies its members still lack, which recovery counts down.
+// LeadState is what a primary reports of a PG it leads: its pool's pg_count, since a split renumbers the pool's PGs, its interval, whether it leads it active and, when active, how many chunks its last peering left unfound, the first MaxReportUnfound of them in ascending order, and the copies its members still lack, which recovery counts down, with Short's bit p set for the member at place p of the interval's members while it lacks any.
 type LeadState struct {
 	PG       core.PGID
 	PGCount  uint32
@@ -220,6 +220,7 @@ type LeadState struct {
 	Active   bool
 	Unfound  uint32
 	Lacking  uint32
+	Short    uint8
 	Chunks   []core.ChunkID
 }
 
@@ -522,7 +523,7 @@ const (
 	latencySize   = 12
 	diskStateSize = 29
 	poolLiveSize  = 12
-	leadStateSize = 29
+	leadStateSize = 30
 	chunkVerSize  = core.ChunkIDSize + 8
 	chunkPeerSize = core.ChunkIDSize + 8 + 8 + 1 + 8
 )
@@ -552,7 +553,7 @@ func AppendReport(dst []byte, rp *Report) []byte {
 	dst = le.AppendUint32(dst, uint32(len(rp.Leads)))
 	for _, l := range rp.Leads {
 		dst = le.AppendUint32(le.AppendUint32(le.AppendUint32(le.AppendUint32(dst, uint32(l.PG.Pool)), l.PG.Index), l.PGCount), l.Interval)
-		dst = le.AppendUint32(le.AppendUint32(le.AppendUint32(appendBool(dst, l.Active), l.Unfound), l.Lacking), uint32(len(l.Chunks)))
+		dst = le.AppendUint32(append(le.AppendUint32(le.AppendUint32(appendBool(dst, l.Active), l.Unfound), l.Lacking), l.Short), uint32(len(l.Chunks)))
 		for _, c := range l.Chunks {
 			dst = c.AppendTo(dst)
 		}
@@ -592,9 +593,9 @@ func DecodeReport(b []byte, data int, rp *Report) error {
 		if len(rp.Leads) < cap(rp.Leads) {
 			chunks = rp.Leads[:len(rp.Leads)+1][len(rp.Leads)].Chunks[:0]
 		}
-		l := LeadState{PG: core.PGID{Pool: core.PoolID(r.u32()), Index: r.u32()}, PGCount: r.u32(), Interval: r.u32(), Active: r.bool(), Unfound: r.u32(), Lacking: r.u32(), Chunks: chunks}
+		l := LeadState{PG: core.PGID{Pool: core.PoolID(r.u32()), Index: r.u32()}, PGCount: r.u32(), Interval: r.u32(), Active: r.bool(), Unfound: r.u32(), Lacking: r.u32(), Short: r.u8(), Chunks: chunks}
 		cs := r.count(core.ChunkIDSize)
-		if core.CheckPGCount(l.PGCount) != nil || l.PG.Index >= l.PGCount || l.Interval == 0 || !l.Active && (l.Unfound != 0 || l.Lacking != 0) || cs != min(int(l.Unfound), MaxReportUnfound) {
+		if core.CheckPGCount(l.PGCount) != nil || l.PG.Index >= l.PGCount || l.Interval == 0 || !l.Active && (l.Unfound != 0 || l.Lacking != 0) || (l.Lacking == 0) != (l.Short == 0) || cs != min(int(l.Unfound), MaxReportUnfound) {
 			r.bad = true
 		}
 		for j := range cs {

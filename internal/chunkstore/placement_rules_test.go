@@ -248,7 +248,7 @@ func TestConvergenceOnCapacityLayouts(t *testing.T) {
 		}
 		pl.load = make([]int, len(pl.disks))
 		for i := range pl.entries {
-			pl.refill(&pl.entries[i], &PGEntry{})
+			pl.refill(&pl.entries[i], &PGEntry{}, 0)
 		}
 		pl.balance(allMoves)
 		worst := 0.0

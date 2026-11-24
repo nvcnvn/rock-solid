@@ -85,7 +85,22 @@ func newSoleRunOn(t *testing.T, replicas, minLive, disks int, real bool) *soleRu
 		return nil
 	})
 	c.inv.Register(invOnlyLost, func() error { return r.lostErr })
+	c.inv.Register(invRemoval, r.removalLeavesAMember)
 	return r
+}
+
+// removalLeavesAMember reports an interval of PG 0 that removed a leaving member, its disk not declared lost, from one with no member not leaving.
+func (r *soleRun) removalLeavesAMember() error {
+	for iv, ms := range r.ivs {
+		next, ok := r.ivs[iv+1]
+		gone := func(m Member) bool {
+			return !r.c.declared[m.Disk] && !slices.ContainsFunc(next, func(n Member) bool { return n.Disk == m.Disk })
+		}
+		if ok && !slices.ContainsFunc(ms, func(m Member) bool { return !m.Leaving }) && slices.ContainsFunc(ms, gone) {
+			return fmt.Errorf("interval %d removes members of %v, all leaving", iv+1, ms)
+		}
+	}
+	return nil
 }
 
 // stranded reports a disk that can serve version v of ch, holding it and listing nothing of it, in a PG none of whose members in e can, up or down, nor carries, running, an image of ch at v or above; a member crashed or replaying says nothing, and a disk declared lost or, if removed is set, one it reports removed is not counted.
