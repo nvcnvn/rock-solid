@@ -41,11 +41,15 @@ type ctlGroup struct {
 	// waiting is the token of the commit in flight, 0 for none, and sent the edits its step took.
 	waiting uint64
 	sent    []chunkstore.Edit
-	edits   []chunkstore.Edit
-	moves   int
-	leaseID uint64
-	out     meta.ControlOutput
-	asks    []chunkstore.PGFields
+	// session is the daemon session Renew started, req its last request, and issuer the leader
+	// lease of its last answer.
+	session, req uint64
+	issuer       meta.Issuer
+	edits        []chunkstore.Edit
+	moves        int
+	leaseID      uint64
+	out          meta.ControlOutput
+	asks         []chunkstore.PGFields
 }
 
 type ctlReplica struct {
@@ -324,7 +328,11 @@ func (g *ctlGroup) EncodeAsks(pool core.BufPool, fs []chunkstore.PGFields, msg *
 func (g *ctlGroup) Heartbeat(now core.Tick, node uint32, opened []chunkstore.OpenedLog) error {
 	nr := meta.NodeReport{Node: node}
 	for _, o := range opened {
-		nr.Opened = append(nr.Opened, meta.OpenedDisk{Device: o.Device, Log: o.Log, Blocks: diskBlocks})
+		blocks := o.Blocks
+		if blocks == 0 {
+			blocks = diskBlocks
+		}
+		nr.Opened = append(nr.Opened, meta.OpenedDisk{Device: o.Device, Log: o.Log, Blocks: blocks, Reserve: o.Reserve})
 	}
 	var out meta.ControlOutput
 	return g.ctl.Heartbeat(now, &nr, &out)
@@ -385,3 +393,31 @@ func (g *ctlGroup) Table() (*chunkstore.Table, []chunkstore.RecordedDisk) {
 	}
 	return g.ctl.Table(), rec
 }
+
+func (g *ctlGroup) Conditions(id core.PoolID) (*chunkstore.Conditions, bool) {
+	_, c, ok := g.ctl.Capacity(id)
+	return c, ok
+}
+
+func (g *ctlGroup) Renew(now, raw core.Tick, pool core.PoolID, ask, held, buffered, flushed uint64) (uint64, bool) {
+	if g.session == 0 {
+		g.ctl.StartSession(0, 1)
+		g.Commit(now, raw)
+		ss := g.ctl.SessionTable().Sessions
+		if len(ss) == 0 {
+			g.t.Fatal("the control plane started no session")
+		}
+		g.session = ss[len(ss)-1].ID
+	}
+	g.req++
+	b := meta.SessionBeat{Session: g.session, Request: g.req, Sent: now, Issuer: g.issuer,
+		Pools: []meta.PoolBeat{{Pool: pool, Ask: ask, Buffered: buffered, Held: held, Flushed: flushed}}}
+	var a meta.SessionAnswer
+	if !g.ctl.Renew(lease.Time{Boot: now, Raw: raw}, g.leased(), &b, &a) || len(a.Grants) == 0 {
+		return 0, false
+	}
+	g.issuer = a.Issuer
+	return a.Grants[0].Grant, true
+}
+
+func (g *ctlGroup) Granted(pool core.PoolID) uint64 { return g.ctl.Granted(pool) }

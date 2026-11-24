@@ -45,7 +45,8 @@ type authority struct {
 	// of Next (control_plane_test.go): cut is the nodes cut off from it, told the drains it took,
 	// rcv the recovered reports counted, reports the reports forwarded to it, opened the logs each
 	// node reports beside its replica's, refused the heartbeats it refused, and latencies the member
-	// latencies its heartbeats carried.
+	// latencies its heartbeats carried; late is the nodes attach leaves to join later, and size
+	// the size and log reserve each replica's log reports, diskBlocks and none if unset.
 	t         *testing.T
 	c         *rcluster
 	cp        ControlPlane
@@ -56,6 +57,8 @@ type authority struct {
 	opened    map[uint32][]OpenedLog
 	refused   []error
 	latencies int
+	late      map[int]bool
+	size      OpenedLog
 }
 
 func (a *authority) inputs(c *rcluster) *Inputs {

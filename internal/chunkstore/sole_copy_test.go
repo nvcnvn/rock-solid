@@ -69,7 +69,7 @@ func newSoleRunOn(t *testing.T, replicas, minLive, disks int, real bool) *soleRu
 		var empty Table
 		tbl, _, _ = Next(&empty, &Inputs{Pools: a.pools()})
 	}
-	c := newSoleCluster(t, tbl, disks)
+	c := newSoleCluster(t, tbl, disks, nil)
 	if real {
 		a.attach(c)
 	}
@@ -128,7 +128,8 @@ func (c *rcluster) stranded(e *PGEntry, ch core.ChunkID, v uint64, removed func(
 
 // newSoleCluster starts a node per disk under tbl, the disks tbl leaves out as sole members of extra PGs below min_live,
 // which the next table drops: tbl itself past epoch 1, as the real control plane commits it, and otherwise tbl one epoch on.
-func newSoleCluster(t *testing.T, tbl Table, disks int) *rcluster {
+// Each store's settings are edited by edit, if set.
+func newSoleCluster(t *testing.T, tbl Table, disks int, edit func(*Config)) *rcluster {
 	sized := cloneTable(tbl)
 	_, e := tbl.entry(pg0)
 	for d := uint32(1); d <= uint32(disks); d++ {
@@ -137,7 +138,7 @@ func newSoleCluster(t *testing.T, tbl Table, disks int) *rcluster {
 		}
 	}
 	if len(sized.Pools[0].PGs) == len(tbl.Pools[0].PGs) {
-		return newRClusterWith(t, tbl, sim.New(1, sim.DefaultSettings()), nil)
+		return newRClusterWith(t, tbl, sim.New(1, sim.DefaultSettings()), edit)
 	}
 	next := cloneTable(tbl)
 	if tbl.Epoch > 1 {
@@ -145,7 +146,7 @@ func newSoleCluster(t *testing.T, tbl Table, disks int) *rcluster {
 	} else {
 		next.Epoch++
 	}
-	c := newRClusterWith(t, sized, sim.New(1, sim.DefaultSettings()), nil)
+	c := newRClusterWith(t, sized, sim.New(1, sim.DefaultSettings()), edit)
 	c.publish(next, true)
 	return c
 }

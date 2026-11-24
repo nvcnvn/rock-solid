@@ -39,13 +39,23 @@ type ControlPlane interface {
 	Commit(now, raw core.Tick)
 	// Table is the committed table, which the caller must not change, and disk record.
 	Table() (*Table, []RecordedDisk)
+	// Conditions is pool id's conditions as of the last step, false before the leader holds a fill
+	// of every disk holding a member of it.
+	Conditions(id core.PoolID) (*Conditions, bool)
+	// Renew is a daemon's session heartbeat at now and raw, starting its session the first time,
+	// naming pool with what it asks, holds, has buffered and has flushed in all, in blocks; it
+	// returns the grant the answer carries, false if unanswered.
+	Renew(now, raw core.Tick, pool core.PoolID, ask, held, buffered, flushed uint64) (uint64, bool)
+	// Granted is the grants the leader counts outstanding on pool, which its heartbeat replies carry.
+	Granted(pool core.PoolID) uint64
 }
 
 // ControlTimer is the timer the real control plane steps on.
 const ControlTimer core.TimerID = 0x63747270
 
-// OpenedLog is a log a node's device opened, as its heartbeat names it.
-type OpenedLog struct{ Device, Log uint64 }
+// OpenedLog is a log a node's device opened, as its heartbeat names it, with its size and log
+// reserve in blocks; a size of 0 reports diskBlocks.
+type OpenedLog struct{ Device, Log, Blocks, Reserve uint64 }
 
 // NewControlPlane starts a real control plane.
 var NewControlPlane func(t *testing.T) ControlPlane
@@ -56,7 +66,7 @@ var NewControlPlane func(t *testing.T) ControlPlane
 func realControl(t *testing.T, a *authority, nodes int) Table {
 	a.t, a.cp, a.cut, a.told = t, NewControlPlane(t), map[uint32]bool{}, map[uint32]bool{}
 	for n := range uint32(nodes) {
-		if err := a.cp.Heartbeat(0, n, []OpenedLog{{0, 0x5eed + uint64(n)}}); err != nil {
+		if err := a.cp.Heartbeat(0, n, []OpenedLog{{Log: 0x5eed + uint64(n), Blocks: a.size.Blocks, Reserve: a.size.Reserve}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -71,7 +81,7 @@ func realControl(t *testing.T, a *authority, nodes int) Table {
 	return a.committed()
 }
 
-// attach starts the control plane's node, which every replica heartbeats from each start. A
+// attach starts the control plane's node, which every replica but a.late's heartbeats from each start. A
 // heartbeat stands for its node's report too, naming the log the replica runs and any other a's
 // opened gives the node. A replica's asks, activations and recovered reports go to it over the
 // network, as its node sends them.
@@ -85,7 +95,7 @@ func (a *authority) attach(c *rcluster) {
 				if k, err := Peek(frame); err == nil && k == KindReport && DecodeReport(frame, data, &rp) == nil && len(rp.Disks) > 0 {
 					a.latencies += len(rp.Latencies)
 					node := ev.Peer.Node
-					if err := a.cp.Heartbeat(ctx.Now, node, append([]OpenedLog{{0, rp.Disks[0].Log}}, a.opened[node]...)); err != nil {
+					if err := a.cp.Heartbeat(ctx.Now, node, append([]OpenedLog{{Log: rp.Disks[0].Log, Blocks: a.size.Blocks, Reserve: a.size.Reserve}}, a.opened[node]...)); err != nil {
 						a.refused = append(a.refused, err)
 					}
 				}
@@ -96,8 +106,16 @@ func (a *authority) attach(c *rcluster) {
 	c.s.Node(c.auth.Node).Call(c.auth, func(ctx *core.Context, out []core.Action) []core.Action { return a.cp.Start(ctx, out) })
 	c.reporting, c.forward = true, a.forward
 	for k := range c.reps {
-		c.call(k, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.SetAuthority(ctx, c.auth, out) })
+		if !a.late[k] {
+			a.join(k)
+		}
 	}
+}
+
+// join has node k's replica heartbeat the control plane from now on, as a node added to the cluster does.
+func (a *authority) join(k int) {
+	c := a.c
+	c.call(k, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.SetAuthority(ctx, c.auth, out) })
 }
 
 // forward sends the control plane disk d's asks, and its activations and recovered reports in a report.
@@ -214,7 +232,7 @@ func (a *authority) report(n int, log uint64) (uint32, error) {
 		return a.rec.Report(uint32(n), 0, log, "")
 	}
 	now, raw := a.now()
-	if err := a.cp.Heartbeat(now, uint32(n), []OpenedLog{{0, log}}); err != nil {
+	if err := a.cp.Heartbeat(now, uint32(n), []OpenedLog{{Log: log}}); err != nil {
 		return 0, err
 	}
 	a.cp.Commit(now, raw)
@@ -304,7 +322,7 @@ func cloneRun(t *testing.T, seed uint64, plant bool) (bool, error) {
 		}
 		if d != 0 && clone == 0 && (!down || !a.rec.Disks()[d-1].Up) {
 			clone = a.rec.Disks()[d-1].Log
-			a.opened[uint32(n)] = []OpenedLog{{1, clone}}
+			a.opened[uint32(n)] = []OpenedLog{{Device: 1, Log: clone}}
 		}
 		if len(c.asks) > a.seen || len(c.activations) > a.acts || a.due() {
 			a.publish(c)
