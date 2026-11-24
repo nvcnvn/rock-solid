@@ -163,7 +163,7 @@ func (g *gen) crash(n int) {
 	for _, x := range g.recovering[n] {
 		f := g.chunkField(x[0])
 		if x[2] == g.activated[f] {
-			g.lineAt(g.recoveredAt(f, x[0], x[2], n, x[1]), `k |-> "mayrecover", n |-> %d, l |-> %d, c |-> %d, v |-> %s, s |-> %d, iv |-> %d`, n, g.primary[f], g.chunk(x[0]), ver(x[3]), x[1], x[2])
+			g.lineAt(g.recoveredAt(f, x[0], x[2], n, x[1], x[3]), `k |-> "mayrecover", n |-> %d, l |-> %d, c |-> %d, v |-> %s, s |-> %d, iv |-> %d`, n, g.primary[f], g.chunk(x[0]), ver(x[3]), x[1], x[2])
 		}
 	}
 	g.recovering[n] = nil
@@ -246,8 +246,8 @@ func (g *gen) leave(n int, f uint64) {
 	}
 }
 
-// recoveredAt is where a recovery write of chunk c in interval iv of PG f to node n read from spec disk s lands: the spec takes its read and its write as one step while its primary leads, so a record from after the primary, the target or the source left the interval goes before the first of those steps, across lines that keep what Recover reads. The store took the write in time, as maydeliver lets an open version land, but only one the primary ordered before that step moves; any other stays where the check refuses it.
-func (g *gen) recoveredAt(f, c, iv uint64, n int, s uint64) int {
+// recoveredAt is where a recovery write of chunk c in interval iv of PG f to node n read from spec disk s, logged under version rv, lands: the spec takes its read and its write as one step while its primary leads, so a record from after the primary, the target or the source left the interval goes before the first of those steps, across lines that keep what Recover reads. The store took the write in time, as maydeliver lets an open version land, but only one the primary ordered before that step moves; any other stays where the check refuses it. The target's store logged the versions of iv up to rv before the recovery, so their lines after that step are copied before it, and the originals stutter.
+func (g *gen) recoveredAt(f, c, iv uint64, n int, s, rv uint64) int {
 	at := len(g.lines)
 	for _, x := range []int{g.primary[f], n} {
 		if p, ok := g.left[[2]uint64{uint64(x), f}]; ok {
@@ -259,6 +259,19 @@ func (g *gen) recoveredAt(f, c, iv uint64, n int, s uint64) int {
 	}
 	if p, ok := g.orderAt[[2]uint64{c, iv}]; !ok || p >= at {
 		return len(g.lines)
+	}
+	var landed []string
+	for _, l := range g.lines[at:] {
+		for _, kind := range []string{"logged", "maydeliver"} {
+			v, ok := strings.CutPrefix(l, fmt.Sprintf(`[k |-> "%s", n |-> %d, c |-> %d, v |-> `, kind, n, g.chunk(c)))
+			if x, err := strconv.ParseUint(strings.TrimSuffix(v, "]"), 10, 64); ok && err == nil && !slices.Contains(landed, l) && x/verBase == iv && x <= (rv>>32)*verBase+rv&(1<<32-1) {
+				landed = append(landed, l)
+			}
+		}
+	}
+	for _, l := range landed {
+		g.lineAt(at, "%s", strings.TrimSuffix(strings.TrimPrefix(l, "["), "]"))
+		at++
 	}
 	return at
 }
@@ -651,7 +664,7 @@ func (g *gen) run(recs []trace.Record) {
 			if n == g.primary[f] && g.repliedLater(n, f, r.Fields[0], r.Fields[3]) {
 				kind = "recoveredlate"
 			} else if r.Fields[3] == g.activated[f] {
-				at = g.recoveredAt(f, r.Fields[0], r.Fields[3], n, s)
+				at = g.recoveredAt(f, r.Fields[0], r.Fields[3], n, s, r.Fields[1])
 			}
 			g.lineAt(at, `k |-> "%s", n |-> %d, l |-> %d, c |-> %d, v |-> %s, s |-> %d, iv |-> %d`, kind, n, g.primary[f], g.chunk(r.Fields[0]), ver(r.Fields[1]), s, r.Fields[3])
 		case trace.OutReported:
