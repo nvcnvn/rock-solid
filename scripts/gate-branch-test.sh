@@ -20,6 +20,10 @@ expect() {
 
 expect 60bb08f "a docs-only commit" "lint" "MODEL_GATE_BASE=$(git rev-parse 60bb08f^) "
 expect 1c029ed "a voters-only model commit" "models-voters lint"
-expect d5792d8 "a test of internal/meta" "go-test seeds lint" "go-test: .*/internal/meta( |$)" "seeds: .*TestTxnsMatchTheOracle"
-expect 579776c "the voter model with internal/meta" "models-sessions models-voters go-test seeds lint" "go-test: .*/internal/meta( |$)"
+expect d5792d8 "a test of internal/meta" "go-test seeds linux-test lint" "go-test: .*/internal/meta( |$)" "seeds: .*TestTxnsMatchTheOracle" \
+	"linux-test: .* go test -p 1 -count=1 -timeout 30m [^ ]*/cmd/rock-solid [^ ]*/internal/driver/tcp$"
+expect 579776c "the voter model with internal/meta" "models-sessions models-voters go-test seeds linux-test lint" "go-test: .*/internal/meta( |$)"
+expect bc531d7 "a Linux-only test of internal/driver/uring" "go-test seeds linux-test lint" \
+	"linux-test: .*--security-opt seccomp=unconfined .*golang:$(sed -n 's/^toolchain go//p' go.mod) go test -p 1 -count=1 -timeout 30m [^ ]*/internal/driver/uring$"
+RS_GATE_NO_LINUX=1 expect bc531d7 "the same with RS_GATE_NO_LINUX=1" "go-test seeds lint" "^skip linux-test: by operator"
 echo "gate-branch-test: ok"

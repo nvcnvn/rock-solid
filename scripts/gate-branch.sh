@@ -1,7 +1,8 @@
 #!/bin/bash
 # Gates a branch or commit in a fresh worktree at its tip: the TLC ci runs of the models it touches,
 # go test and seeds.sh over the packages it changes and every package that imports them (everything
-# with --full or --merge), conform.sh when it touches a path the conform workflow watches, and lint.sh.
+# with --full or --merge), the same go test of the packages with Linux-only tests in Docker (skipped
+# with RS_GATE_NO_LINUX=1), conform.sh when it touches a path the conform workflow watches, and lint.sh.
 #   scripts/gate-branch.sh [--plan] [--full] [--merge] <branch-or-commit>
 # The change is the diff from the tip's merge base with main, or from its parent for a commit already
 # on main. --plan prints the steps and runs none. --merge fast-forwards the clean main checkout to the
@@ -62,14 +63,22 @@ direct=$(for f in $changed; do
 	d=${d%%/testdata*}
 	grep -qxF "$d" <<<"$pkgdirs" && echo "$mod/$d"
 done | sort -u || true)
-pkgs=
-if [ -n "$direct" ]; then
-	pkgs=$({
-		echo "$direct"
-		go list -test -f '{{.ImportPath}} {{join .Deps " "}}' ./... | awk -v want="$(echo $direct)" '
-			BEGIN { n = split(want, w, " "); for (i = 1; i <= n; i++) W[w[i]] = 1 }
-			$1 ~ /\.test$/ { for (i = 2; i <= NF; i++) if ($i in W) { print substr($1, 1, length($1) - 5); next } }'
-	} | sort -u)
+# affected [VAR=value...]: the changed packages and every package whose tests import one, built with
+# the environment given.
+affected() {
+	echo "$direct"
+	env "$@" go list -test -f '{{.ImportPath}} {{join .Deps " "}}' ./... | awk -v want="$(echo $direct)" '
+		BEGIN { n = split(want, w, " "); for (i = 1; i <= n; i++) W[w[i]] = 1 }
+		$1 ~ /\.test$/ { for (i = 2; i <= NF; i++) if ($i in W) { print substr($1, 1, length($1) - 5); next } }'
+}
+tests='{{.ImportPath}} {{.TestGoFiles}} {{.XTestGoFiles}}'
+linuxonly=$(comm -13 <(go list -f "$tests" ./... | sort) <(GOOS=linux go list -f "$tests" ./... | sort) | cut -d' ' -f1)
+pkgs= linux=
+if [ -n "$full" ]; then
+	linux=$linuxonly
+elif [ -n "$direct" ]; then
+	pkgs=$(affected | sort -u)
+	linux=$(affected GOOS=linux | sort -u | grep -xF "$linuxonly" || true)
 fi
 seeded=$(awk -v mod="$mod/" -v want="$(echo $pkgs)" '
 	BEGIN { n = split(want, w, " "); for (i = 1; i <= n; i++) W[w[i]] = 1 }
@@ -97,6 +106,15 @@ if [ -n "$full" ]; then
 elif [ -n "$pkgs" ]; then
 	steps+=("go-test|go test -p 1 -count=1 -timeout 30m $(paste -s -d ' ' - <<<"$pkgs")")
 	[ -z "$seeded" ] || steps+=("seeds|scripts/seeds.sh $seeded")
+fi
+if [ -n "$linux" ] && [ "${RS_GATE_NO_LINUX:-}" = 1 ]; then
+	skips+=("linux-test|by operator (RS_GATE_NO_LINUX=1)")
+elif [ -n "$linux" ]; then
+	steps+=("linux-test|docker info >/dev/null 2>&1 || { echo 'Error: the Docker daemon is not reachable; start it, or set RS_GATE_NO_LINUX=1 to skip this step'; exit 1; }; \
+docker run --rm --name rs-gate-$short-$$ --cpus 4 --memory 6g --security-opt seccomp=unconfined \
+-v \"\$PWD\":/src:ro -v $(go env GOMODCACHE):/go/pkg/mod:ro -w /src -e GOTOOLCHAIN=local -e GOMEMLIMIT \
+-e GOFLAGS='-mod=mod -buildvcs=false' -e GOCACHE=/tmp/gocache golang:${GOTOOLCHAIN#go} \
+go test -p 1 -count=1 -timeout 30m $(paste -s -d ' ' - <<<"$linux")")
 fi
 [ -z "$conform" ] || steps+=("conform|scripts/conform.sh")
 steps+=("lint|MODEL_GATE_BASE=$base scripts/lint.sh")
