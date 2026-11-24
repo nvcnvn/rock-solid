@@ -8325,7 +8325,7 @@ mounted loop device, the benchmark and every device test fail and the loop's fil
 `by-id` path, its partitions and its md array are refused with `EBUSY`. A partition or disk that
 nothing holds, mounted nowhere and in no array, passes the check. The file-backed measurement needs
 `RS_URING_DIR` on a file system on that drive. All rows ran on a WDC SN720 512 GB (client NVMe,
-volatile write cache, DLFEAT 1: deallocated blocks read as zeros), Linux 7.0, Xeon-D, 12 threads:
+volatile write cache, DLFEAT 1: deallocated blocks read as zeros), Linux 7.0, Xeon E-2236 (6 cores, 12 threads):
 
 ```sh
 go test -c -o uring.test ./internal/driver/uring/
@@ -8383,8 +8383,9 @@ RS_URING_DIR=/mnt/rs/u ./uring.test -test.run TestDurableWritesIntoAFileCommitNo
   104 µs and 6.4 µs of CPU against 35 µs, in the same cycles (`perf stat`: 1.26 GHz against
   3.7 GHz); a QD 1 write 10.5 µs against 12.0 µs and 4.5 µs of CPU against 6.1 µs. `GOMAXPROCS`
   12, 2 or 1 changes a QD 1 read's CPU little (35, 36, 48 µs), so it is not the Go runtime's other
-  threads. So `cpu-ns/op` at QD 1 compares clock speeds, not work; the
-  [durable write benchmark](#durable-write-benchmark) measures the difference. Open: tolerance.
+  threads. Under the `performance` governor the same QD 1 read, still waiting in `poll`, took 71 µs
+  and 8.3 µs of CPU, and a write 11.7 µs and 5.8 µs (3 reps of 3 s): the governor alone makes the
+  difference. So `cpu-ns/op` at QD 1 compares clock speeds, not work. Open: tolerance.
   Open: polled completions (`IORING_SETUP_IOPOLL`) are an open question, not built.
 - Many reads in flight: recovery's segment-header reads (4,096 to 262,144 per disk) go out at the read
   depth recovery asks for and the ring defers what does not fit, never drops it. Open: ring depth.
@@ -8893,35 +8894,79 @@ Over TCP and io_uring on files, in Docker, `TestTheOperatorsCommandLineOverTCP` 
 
 ## Durable write benchmark
 
-- 4 KiB writes at queue depth 1, each durable (write plus flush) before the next, through the full
-  path: event loop, disk log, io_uring, on a raw device or a file-backed disk whose segments were
-  written in full.
-- Targets on the NVMe flush spike's drive (UMIS RPEYJ512MML1QWQ, no power-loss protection):
+`TestDurableWriteBenchmark` in `internal/driver/uring` (Linux, root, a spare drive; it skips
+without `RS_RAW_DEVICE`, and its file case without `RS_URING_DIR`, as in
+[io_uring on a raw device and NVMe](#io_uring-on-a-raw-device-and-nvme)):
 
-  | Case | Target |
-  | --- | --- |
-  | Back to back | p50 about 0.95 ms, p99 about 2.4 ms, about 1,090 durable writes/s |
-  | After 10 ms idle | about 1.2 ms |
-  | After 100 ms to 3 s idle | 1.9 to 2.1 ms |
-  | Software share | about 20 µs above the device's time (0.9 ms of 0.95 ms is the device) |
+```sh
+sudo RS_RAW_DEVICE=$D ./uring.test -test.v -test.run 'TestDurableWriteBenchmark|TestRecoveryReadsAFullDisksSegmentHeaders'
+mkfs.ext4 $D; mount $D /mnt/rs
+sudo RS_URING_DIR=/mnt/rs/u ./uring.test -test.v -test.run TestDurableWriteBenchmark
+```
 
-  Open: tolerance.
-- Cross-check with fio on the same drive and the same file or device: `fio --rw=randwrite --bs=4k
-  --direct=1 --iodepth=1 --fdatasync=1` gave 1,038 IOPS (write p50 338 µs + sync p50 221 µs) in the
-  spike. On another drive, the benchmark is compared with fio on that drive, not with the numbers
-  above. Open: tolerance against fio.
-- Idle gaps are part of every run, since a drive idle for 100 ms adds about 1 ms to the next durable
-  write.
-- Reports CPU per write, in cycles as well as time, and the CPU frequency governor and idle states
-  of the run: under `powersave` a wait in `epoll_wait` lets the core slow down where a wait in
-  `io_uring_enter` does not (a QD 1 read on the raw-device benchmark: 104 µs and 35 µs of CPU in
-  `poll`, 69.5 µs and 6.4 µs in `io_uring_enter`, the same cycles). It runs both ways, the loop's
-  event mode and a wait in `io_uring_enter`, under the governor it names, which answers the
-  [open question](design.md#roadmap-and-open-questions) on waiting at queue depth 1. Open: no
-  target is given.
-- Reports the recovery time of a full disk's segment headers (4,096 headers at 256 GiB, 262,144 at
-  16 TiB), with many reads in flight. Open: no target is given.
-- Runs nightly; a 20% regression is a bug. The hot path reports zero allocations per operation.
+- Durable writes at queue depth 1 through the full path: an event loop, a disk log formatted on the
+  disk and io_uring. A shard proposes 128 bytes; the round writes one record, 8 KiB with its header,
+  and its linked flush; once the shard hears it is durable it proposes the next, at once or after an
+  idle gap the loop's timer counts: 1,000 back to back, 200 after 10 ms, 50 after 100 ms, 15 after
+  1 s. It runs on the raw device (64 MiB segments) and on a 4 GiB disk file written in full on
+  ext4 on the same drive.
+- Each runs twice: the loop as built, waiting in `epoll_wait` for the ring's eventfd, and with a
+  kernel wrapper that waits in `io_uring_enter` (`min_complete` 1) whenever the loop would block
+  with I/O in flight, the alternative [Runtime in Go](design.md#runtime-in-go) weighs.
+- Reports latency from proposal to durable (p50, p90, p99, max), and per write the loop thread's
+  CPU time (`RUSAGE_THREAD`) and cycles (a `perf_event_open` counter on the thread, to which the
+  test locks the loop's goroutine; the run fails if the kernel multiplexed the counter), and the
+  process's CPU; and the CPU frequency driver, governor, energy preference and idle states. It
+  asserts no timing.
+- Cross-checked with fio on the same drive: `fio --rw=randwrite --direct=1 --iodepth=1
+  --fdatasync=1`, 4 and 8 KiB, back to back and with `--thinktime` of 10 ms, 100 ms and 1 s, on
+  the raw device's first GiB and on a 64 MiB file written before.
+- Results, WDC SN720 512 GB (client NVMe, volatile write cache), Linux 7.0, Xeon E-2236 (6 cores,
+  12 threads), `intel_pstate` with C-states down to C10. Each cell gives the event mode, then the
+  wait mode, but for cycles, one range over both; latency is p50, and the CPU rows after idle give
+  the 10 ms, 100 ms and 1 s gaps in turn:
+
+  | Case | Device, `powersave` | Device, `performance` | File, `powersave` | File, `performance` | fio 8 KiB, device, `powersave` |
+  | --- | --- | --- | --- | --- | --- |
+  | Back to back | 0.37, 0.37 ms | 0.36, 0.36 ms | 0.36, 0.36 ms | 0.37, 0.36 ms | 0.48 ms (0.02 + 0.46) |
+  | After 10 ms | 0.74, 0.64 ms | 0.58, 0.57 ms | 0.72, 0.72 ms | 0.60, 0.60 ms | 0.50 ms |
+  | After 100 ms | 0.80, 0.85 ms | 0.58, 0.46 ms | 0.71, 0.77 ms | 0.58, 0.58 ms | 0.52 ms |
+  | After 1 s | 0.99, 1.18 ms | 0.81, 0.67 ms | 1.29, 1.19 ms | 0.59, 0.59 ms | 0.53 ms |
+  | Loop thread CPU, back to back | 29, 30 µs | 31, 32 µs | 29, 33 µs | 31, 31 µs | |
+  | Loop thread CPU, after idle | 327, 424, 414; 245, 376, 378 µs | 140, 149, 143; 139, 132, 140 µs | 306, 443, 419; 274, 370, 393 µs | 147, 158, 149; 139, 158, 157 µs | |
+  | Loop thread cycles, back to back | 111,000 | 114,000 to 123,000 | 115,000 to 117,000 | 113,000 to 122,000 | |
+  | Loop thread cycles, after idle | 281,000 to 315,000 | 434,000 to 449,000 | 305,000 to 355,000 | 457,000 to 491,000 | |
+  | Process CPU, back to back | 46, 46 µs | 48, 50 µs | 45, 51 µs | 49, 49 µs | |
+  | Process CPU, after idle | 776, 1,573, 1,380; 419, 865, 693 µs | 288, 398, 424; 295, 374, 356 µs | 750, 1,461, 1,153; 557, 924, 676 µs | 299, 433, 410; 269, 427, 442 µs | |
+
+  Back to back, p99 is 0.55 to 0.65 ms, but for the new file system below. The idle-gap rows have
+  15 to 200 writes, so their p50 moves by about 0.1 ms between runs; the file under `performance`
+  ran on a new ext4 still initializing its tables, and its p99 reached 1.45 to 47 ms.
+- Against the [NVMe flush spike](design.md#appendix-nvme-flush-spike)'s drive (0.95 ms back to
+  back, 1.2 ms after 10 ms, 1.9 to 2.1 ms after 100 ms to 3 s): this drive flushes in about half the
+  time and, unlike that one, not slower after idling, so fio stays at 0.5 ms whatever the gap. Back
+  to back the full path takes 0.11 ms less than fio, though fio's `fdatasync` alone takes 0.46 ms;
+  why is not established. After an idle gap the path is up to 0.3 ms over fio under `performance`
+  and up to 0.8 ms under `powersave`, and the loop thread's CPU per write grows 4 to 15 times and
+  its cycles 2.5 to 4.3 times. Under `performance` the extra CPU, about 110 µs, is smaller than the
+  extra latency, 0.1 to 0.45 ms, so most of that latency is not CPU on the loop thread; its cause
+  is an [open question](design.md#roadmap-and-open-questions).
+- Waiting in `io_uring_enter` gives no consistent latency gain: p50 within ±0.2 ms either way, the
+  faster mode changing between gaps, and back to back the same. It saves CPU only after idle under
+  `powersave`: 6 to 25% of the loop thread's and 26 to 50% of the process's in every cell; under
+  `performance` the two modes match. The QD 1 read gain the raw-device benchmark saw is the
+  governor's ([QD 1 reads](#io_uring-on-a-raw-device-and-nvme)). The loop keeps its event mode, for
+  the reasons [Runtime in Go](design.md#runtime-in-go) gives.
+- Recovery of a full disk's segment headers: `TestRecoveryReadsAFullDisksSegmentHeaders` formats
+  a log over the whole device, writes a valid segment header into each of its 7,630 segments of
+  64 MiB, and times recovery over io_uring from its first read to the last header read (two blocks
+  each), at read depths 1, 8, 64 (the default) and 256: 0.63 to 0.99 s, 130 to 139 ms, 33 ms and
+  33 ms, 4.3 to 4.4 µs a header from depth 64 on, under either governor. A 256 GiB disk's 4,096
+  headers would take about 18 ms and a 16 TiB disk's 262,144 about 1.1 s, if the drive keeps that
+  rate. Open: no target is given.
+- Open: tolerances against fio and between runs; a nightly run, where a 20% regression is a bug.
+  The hot path's zero allocations per operation are checked by the round driver's and the
+  io_uring driver's benchmarks, not here.
 
 ## Crash tests on real disks
 

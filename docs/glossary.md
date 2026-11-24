@@ -406,6 +406,8 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **CPU limit, CFS quota, throttling.** A Kubernetes CPU limit becomes a CFS bandwidth quota on the container's cgroup: so much CPU time per 100 ms period across all its threads. A process that uses its quota early in a period is throttled, with every thread stopped, until the next period. This is why the daemon never runs more Go Ps than its limit ([Runtime in Go](design.md#runtime-in-go)).
 
+**Frequency governor, C-states, iowait.** Linux sets each core's clock through a governor: `performance` keeps it high, `powersave` (with `intel_pstate`, the usual default) lowers it when the core is mostly idle. An idle core sleeps in a C-state; the deeper ones (C6 and deeper) save more power but flush the core's caches and take longer to wake. A thread sleeping in a disk wait counts as iowait, which can keep the clock up; a thread sleeping in `epoll_wait` does not. At queue depth 1 these, not the code, set much of the latency ([Runtime in Go](design.md#runtime-in-go)).
+
 **cgo.** Go's mechanism for calling C libraries, used only for SPDK and RDMA.
 
 ## Testing
