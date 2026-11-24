@@ -27,15 +27,30 @@ type raftRounds struct {
 	done  uint64
 	left  int
 	err   error
-	// refs are the places of every blob told durable, dead those reported dead.
+	// refs are the places of every blob told durable, dead those reported dead; recovered says
+	// a restart's replay ended.
 	refs, dead []disklog.BlobRef
+	recovered  bool
 }
 
 func newRaftRounds(l *loop.Loop, pool core.BufPool, lg *loop.Log, log *disklog.Log, rounds int) *raftRounds {
+	return addRaftRounds(l, pool, lg, 7, log.MaxBlobBytes(), rounds, raftpb.SnapshotMetadata{})
+}
+
+// addRaftRounds puts on l a shard whose blobs carry owner, its storage on base, as its runs would
+// restore it, and makes its first of rounds rounds.
+func addRaftRounds(l *loop.Loop, pool core.BufPool, lg *loop.Log, owner uint32, maxBlob uint64, rounds int, base raftpb.SnapshotMetadata) *raftRounds {
 	st := raftshard.NewStorage()
-	rr := &raftRounds{l: l, pool: pool, st: st, rs: raftshard.NewRounds(7, st, log.MaxBlobBytes()), left: rounds}
+	if base.Index > 0 {
+		if err := st.ApplySnapshot(raftpb.Snapshot{Metadata: base}); err != nil {
+			panic(err)
+		}
+	}
+	rr := &raftRounds{l: l, pool: pool, st: st, rs: raftshard.NewRounds(owner, st, maxBlob), left: rounds}
 	rr.id = l.AddShard(rr, lg)
-	rr.next()
+	if rounds > 0 {
+		rr.next()
+	}
 	return rr
 }
 
@@ -79,17 +94,31 @@ func (rr *raftRounds) Durable(ctx *core.Context, err error, refs []disklog.BlobR
 			rr.err = err
 		}
 	}
-	n := len(rr.dead)
-	if rr.dead = rr.rs.Dead(rr.dead); len(rr.dead) > n {
-		rr.l.Dead(rr.id, rr.dead[n:])
-	}
+	rr.bury()
 	if rr.left > 0 {
 		rr.next()
 	}
 	return out
 }
 
-func (rr *raftRounds) Mail(_ *core.Context, _ *loop.Mail, out []core.Action) []core.Action {
+func (rr *raftRounds) bury() {
+	n := len(rr.dead)
+	if rr.dead = rr.rs.Dead(rr.dead); len(rr.dead) > n {
+		rr.l.Dead(rr.id, rr.dead[n:])
+	}
+}
+
+func (rr *raftRounds) Mail(_ *core.Context, m *loop.Mail, out []core.Action) []core.Action {
+	switch m.Kind {
+	case loop.MailReplayed:
+		if err := rr.rs.Replay(m.Ref, m.Blob, m.Data); err != nil && rr.err == nil {
+			rr.err = err
+		}
+	case loop.MailRecovered:
+		rr.rs.Replayed()
+		rr.recovered = true
+	}
+	rr.bury()
 	return out
 }
 

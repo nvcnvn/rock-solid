@@ -115,7 +115,7 @@ func (p *storageNode) add(dm *deviceMachine, path string) error {
 		if err := nl.l.AttachDisk(nl.ring); err != nil {
 			return err
 		}
-		dm.lg = nl.l.AttachLog(nil, chunkstore.FirstLogIO, chunkstore.EndLogIO, len(p.cfg.Devices)+1)
+		dm.lg = nl.l.AttachLog(nil, dm.cfg.Store.Log, chunkstore.FirstLogIO, chunkstore.EndLogIO, len(p.cfg.Devices)+1)
 	}
 	lfd, _, err := tcp.ListenTCP(netip.AddrPortFrom(p.cfg.Listen.Addr(), p.cfg.Listen.Port()+uint16(id)))
 	if err != nil {

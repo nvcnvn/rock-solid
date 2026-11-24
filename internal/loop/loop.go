@@ -448,6 +448,11 @@ func (l *Loop) Pass() {
 	l.pass++
 	l.hot = 0
 	l.syscall(trace.SysEpollWait, uint64(len(l.ready)), 0, 0)
+	for _, lg := range l.logs {
+		if lg.log != nil {
+			lg.log.Hold()
+		}
+	}
 	if resumed {
 		l.ev = core.Event{Kind: core.EvResumed}
 		l.Deliver(&l.ev)

@@ -17,7 +17,9 @@ import (
 // newer hard state, else the shard's term and vote would be lost. A round whose blobs the pool has
 // no buffers for waits until a later Durable event or the driver's Retry. A log that fails takes
 // its shards with it. The disk's checkpoint names each shard with the LSN its replay starts after,
-// and no shard is given the owner of a removed one while that one's blobs can still replay.
+// and no shard is given the owner of a removed one while that one's blobs can still replay. A
+// shard on the round driver writes its own rounds through its loop; the host knows it only to
+// mail it a restart's replay.
 type Host struct {
 	// Log is the disk's log: set before any Write, and by Recovered after a restart's replay.
 	Log     *disklog.Log
@@ -32,6 +34,32 @@ type Host struct {
 	// retired is the owners of removed shards with the LSN of each one's newest blob, kept until
 	// the log's replay floor reaches it.
 	retired []retiredOwner
+	// remote is the shards on the round driver, remoteAt each one's place by owner, and mail
+	// what a restart's replay sends them.
+	remote   []remoteShard
+	remoteAt map[uint32]int
+	mail     []Mail
+}
+
+// remoteShard is a shard on the round driver: its owner, its loop and ShardID there, and the LSN
+// at or before which a restart's replay skips its blobs.
+type remoteShard struct {
+	owner uint32
+	loop  int
+	id    uint32
+	from  uint64
+}
+
+// Mail is what a restart's replay sends a shard on the round driver, at Shard on the loop of ID
+// Loop: a blob of it past its replay LSN, at Ref, of kind Kind and bytes Data, or, with End, the
+// end of the replay.
+type Mail struct {
+	Loop  int
+	Shard uint32
+	End   bool
+	Ref   disklog.BlobRef
+	Kind  disklog.BlobKind
+	Data  []byte
 }
 
 type retiredOwner struct {
@@ -155,7 +183,9 @@ type Done struct {
 }
 
 // NewHost is a host writing to log, nil until a restart's replay ends.
-func NewHost(log *disklog.Log) *Host { return &Host{Log: log, at: map[uint32]int{}} }
+func NewHost(log *disklog.Log) *Host {
+	return &Host{Log: log, at: map[uint32]int{}, remoteAt: map[uint32]int{}}
+}
 
 // Add hosts the shard whose blobs carry owner and whose storage is st; an owner Reusable does not
 // allow is a broken invariant of the caller.
@@ -165,6 +195,25 @@ func (h *Host) Add(owner uint32, st *Storage) {
 	}
 	h.at[owner] = len(h.shards)
 	h.shards = append(h.shards, hosted{owner: owner, st: st, newest: -1})
+}
+
+// AddRemote knows the shard whose blobs carry owner as shard id on the round driver of loop, so a
+// restart's replay mails it its blobs, as Add does for a hosted shard.
+func (h *Host) AddRemote(owner uint32, loop int, id uint32) {
+	if !h.Reusable(owner) {
+		panic(fmt.Sprintf("raftshard: owner %d hosted, in flight or with blobs that can replay", owner))
+	}
+	h.remoteAt[owner] = len(h.remote)
+	h.remote = append(h.remote, remoteShard{owner: owner, loop: loop, id: id})
+}
+
+// Mail appends to dst what the replay sent the shards on the round driver since the last call, in
+// the order sent, and forgets it.
+func (h *Host) Mail(dst []Mail) []Mail {
+	dst = append(dst, h.mail...)
+	clear(h.mail)
+	h.mail = h.mail[:0]
+	return dst
 }
 
 func (h *Host) shard(owner uint32) *hosted {
@@ -469,8 +518,10 @@ func (h *Host) Remove(owner uint32) {
 }
 
 // Replayed takes a Replayed event of a restart's recovery, before Recovered: each hosted shard's
-// rounds after its replay LSN go to its storage, and its blobs at or before it, the blobs of an
-// owner not hosted, and those of a round a later one's first blob shows was torn, are dead.
+// rounds after its replay LSN go to its storage, each blob of a shard on the round driver after
+// its replay LSN to Mail, and the blobs at or before a shard's replay LSN, the blobs of an owner
+// neither hosted nor on the round driver, and those of a round a later one's first blob shows was
+// torn, are dead.
 func (h *Host) Replayed(ev *disklog.Event) error {
 	for i := range ev.Entries {
 		e := &ev.Entries[i]
@@ -478,6 +529,14 @@ func (h *Host) Replayed(ev *disklog.Event) error {
 			continue
 		}
 		ref := disklog.BlobRef{Segment: ev.Segment, Block: ev.Block, LSN: ev.LSN, Entry: uint16(i)}
+		if r, ok := h.remoteAt[e.Owner]; ok {
+			if rs := &h.remote[r]; ev.LSN > rs.from {
+				h.mail = append(h.mail, Mail{Loop: rs.loop, Shard: rs.id, Ref: ref, Kind: e.BlobKind, Data: append([]byte(nil), ev.Blob(i)...)})
+			} else {
+				h.dead = append(h.dead, ref)
+			}
+			continue
+		}
 		k, ok := h.at[e.Owner]
 		if !ok {
 			h.retire(e.Owner, ref.LSN)
@@ -513,11 +572,15 @@ func (hd *hosted) replay(ref disklog.BlobRef, kind disklog.BlobKind, b []byte, d
 
 // Recovered ends a restart's replay with the log recovery handed over: a round torn at the log's
 // tail, missing its last blob, is dropped and its blobs are dead, as are those of the rounds the
-// base covers whose hard state a later round replaced.
+// base covers whose hard state a later round replaced; each shard on the round driver is mailed
+// the end of the replay, to do the same.
 func (h *Host) Recovered(log *disklog.Log) {
 	h.Log = log
 	for k := range h.shards {
 		h.dead = h.shards[k].recovered(h.dead)
+	}
+	for _, rs := range h.remote {
+		h.mail = append(h.mail, Mail{Loop: rs.loop, Shard: rs.id, End: true})
 	}
 	h.bury()
 }
@@ -536,6 +599,9 @@ func (hd *hosted) recovered(dead []disklog.BlobRef) []disklog.BlobRef {
 // skips its blobs at or before its replay LSN, which earlier compactions and hard states made dead.
 func (h *Host) Loaded(m *disklog.Manifest) {
 	for _, ix := range m.Indexes {
+		if r, ok := h.remoteAt[ix.Owner]; ok {
+			h.remote[r].from = ix.ReplayLSN
+		}
 		if k, ok := h.at[ix.Owner]; ok {
 			hd := &h.shards[k]
 			hd.from, hd.compacted = ix.ReplayLSN, hd.st.base.Index
@@ -603,10 +669,14 @@ func (h *Host) Rewrite(ctx *core.Context, lsn uint64, out *disklog.Output) error
 	return nil
 }
 
-// Reusable reports whether owner may be given to a new shard: no shard holds it, no blob of it is
-// in flight, and no blob of a removed shard of it lies past the log's replay floor.
+// Reusable reports whether owner may be given to a new shard: no shard holds it, hosted or on the
+// round driver, no blob of it is in flight, and no blob of a removed shard of it lies past the
+// log's replay floor.
 func (h *Host) Reusable(owner uint32) bool {
 	if _, ok := h.at[owner]; ok {
+		return false
+	}
+	if _, ok := h.remoteAt[owner]; ok {
 		return false
 	}
 	for _, f := range h.flights[h.head:] {

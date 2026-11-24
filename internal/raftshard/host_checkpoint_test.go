@@ -531,3 +531,54 @@ func TestARoundHeldBehindAFullRewriteSurvivesACrashAtEveryPoint(t *testing.T) {
 		}
 	}
 }
+
+// TestARestartMailsAShardOnTheRoundDriverItsLiveRounds restarts a disk whose shard 6 moved to the
+// round driver: its blobs past its replay LSN reach it as mail, in order, then the end of the
+// replay, and a Rounds taking them rebuilds its storage; its blobs a compaction and a newer hard
+// state made dead, which another shard's older round keeps in the replay, are not mailed.
+func TestARestartMailsAShardOnTheRoundDriverItsLiveRounds(t *testing.T) {
+	r := newRig(t)
+	st5, st6 := NewStorage(), NewStorage()
+	r.host.Add(5, st5)
+	r.host.Add(6, st6)
+	cs := raftpb.ConfState{Voters: []uint64{1}}
+	r.commit(st5, 5, 1, Round{Entries: entries(1, 1, 1, 100), HardState: raftpb.HardState{Term: 1, Vote: 1, Commit: 1}})
+	r.commit(st6, 6, 1, Round{Entries: entries(1, 2, 1, 100)})
+	r.commit(st6, 6, 2, Round{Entries: entries(3, 1, 1, 100), HardState: raftpb.HardState{Term: 1, Vote: 1, Commit: 3}})
+	if err := r.host.Compact(6, 3, cs); err != nil {
+		t.Fatal(err)
+	}
+	r.commit(st6, 6, 3, Round{Entries: entries(4, 2, 1, 100), HardState: raftpb.HardState{Term: 1, Vote: 1, Commit: 5}})
+	from := r.replayLSN(6)
+	if floor := r.checkpoint(); floor >= from {
+		t.Fatalf("the floor %d is not behind shard 6's replay LSN %d", floor, from)
+	}
+	r.roll()
+	r.remote = []uint32{6}
+	r.crash(5)
+	mail := r.host.Mail(nil)
+	if len(mail) < 2 || !mail[len(mail)-1].End {
+		t.Fatalf("mail %+v ends with no end of the replay", mail)
+	}
+	base := st6.Base()
+	st := NewStorage()
+	if err := st.ApplySnapshot(raftpb.Snapshot{Metadata: base}); err != nil {
+		t.Fatal(err)
+	}
+	rs := NewRounds(6, st, r.host.Log.MaxBlobBytes())
+	for _, m := range mail[:len(mail)-1] {
+		if m.Loop != 1 || m.Shard != 0 || m.End || m.Ref.LSN <= from {
+			t.Fatalf("mail %+v for shard 6, whose replay LSN is %d", m, from)
+		}
+		if err := rs.Replay(m.Ref, m.Kind, m.Data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rs.Replayed()
+	if last, _ := st.LastIndex(); last != 5 || st.HardState() != st6.HardState() {
+		t.Fatalf("shard 6 replayed to last index %d, hard state %+v; want 5 and %+v", last, st.HardState(), st6.HardState())
+	}
+	if dead := rs.Dead(nil); len(dead) != 0 {
+		t.Fatalf("its one live round replayed, the shard reports %v dead", dead)
+	}
+}

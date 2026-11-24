@@ -513,3 +513,35 @@ func TestOnePieceAtATime(t *testing.T) {
 		t.Fatalf("%d steps with a piece in flight", pieces)
 	}
 }
+
+// A store whose log a shard on the round driver writes to stops on a broken index rather than
+// closing its log for a rebuild under the driver's batches.
+func TestABrokenIndexStopsAStoreWithAShardOnTheRoundDriver(t *testing.T) {
+	h := newHarness(t, testConfig())
+	h.s.AddRemote(9, 1, 0)
+	gen := h.s.logGen
+	h.s.indexBroken(&h.ctx, lsm.ErrCheck, &h.out)
+	if !errors.Is(h.s.Err(), lsm.ErrCheck) || h.s.phase == draining || h.s.logGen != gen {
+		t.Fatalf("phase %d, err %v after %d restarts of the log", h.s.phase, h.s.Err(), h.s.logGen-gen)
+	}
+}
+
+// A store whose log a shard on the round driver writes to stops when its log is out of room, as
+// one hosting shards does: the shard's round failed for room would never be durable.
+func TestAStoreWithAShardOnTheRoundDriverStopsOutOfRoom(t *testing.T) {
+	cfg := cleanConfig()
+	cfg.Log.Reserve, cfg.CleanFree = 4, -1
+	h := newHarnessOn(t, cfg, cleanGeo)
+	h.s.AddRemote(9, 1, 0)
+	for i := 0; h.s.Err() == nil; i++ {
+		if i == 5000 {
+			t.Fatal("the store kept serving a full log")
+		}
+		if !h.step() {
+			h.write(chunk(uint32(i)), 0, fill(16*core.BlockSize, byte(i)), 0)
+		}
+	}
+	if !errors.Is(h.s.Err(), disklog.ErrNoSpace) {
+		t.Fatalf("stopped with %v", h.s.Err())
+	}
+}

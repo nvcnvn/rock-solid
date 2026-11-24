@@ -41,6 +41,8 @@ type rig struct {
 	checkpoints int
 	// bases is the base a crash restores each owner's storage on, as its manifest's runs would.
 	bases map[uint32]raftpb.SnapshotMetadata
+	// remote is the owners a crash knows as shards on the round driver, each its index as ShardID.
+	remote []uint32
 }
 
 // checkpoint writes a manifest naming the host's shards, and returns its replay floor.
@@ -188,6 +190,9 @@ func (r *rig) crash(owners ...uint32) map[uint32]*Storage {
 			}
 		}
 		r.host.Add(o, sts[o])
+	}
+	for i, o := range r.remote {
+		r.host.AddRemote(o, 1, uint32(i))
 	}
 	var err error
 	if r.rec, err = disklog.Recover(&r.ctx, rigConfig(), rigGeometry.DiskBlocks(), disklog.ModeOpen, 1<<20, &r.out); err != nil {

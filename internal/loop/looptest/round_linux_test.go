@@ -156,7 +156,7 @@ func realRounds(t *testing.T, n, perLoop int, gap int64, batch int, run time.Dur
 		}
 		loops, pools, ms = append(loops, l), append(pools, pool), append(ms, m)
 	}
-	lg := loops[n].AttachLog(log, 1, logIOs, n+1)
+	lg := loops[n].AttachLog(log, roundLogConfig(0), 1, logIOs, n+1)
 	lats := make([][]core.Tick, n)
 	shards := make([][]*stub, n)
 	for i := range n {

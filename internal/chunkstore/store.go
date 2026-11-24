@@ -122,7 +122,7 @@ type BaseFetch struct {
 	Version uint64
 }
 
-// Output is the actions and replies of calls into the store, reused by the caller: Bases asks for gated writes' bases from other members; Ordered hands over each gated write's or punch's merged blocks as it is ordered (a write's whole blocks, a punch's merged edge blocks, none for a punch without them) in a buffer the caller frees, and Logged answers it once its records are durable or have failed; Rebuilt reports that the index started a rebuild, after which the store holds what a restart would.
+// Output is the actions and replies of calls into the store, reused by the caller: Bases asks for gated writes' bases from other members; Ordered hands over each gated write's or punch's merged blocks as it is ordered (a write's whole blocks, a punch's merged edge blocks, none for a punch without them) in a buffer the caller frees, and Logged answers it once its records are durable or have failed; Mail is what a restart's replay sends the shards on the round driver, for the caller to hand each one's loop; Rebuilt reports that the index started a rebuild, after which the store holds what a restart would.
 type Output struct {
 	Actions []core.Action
 	Replies []Reply
@@ -130,13 +130,15 @@ type Output struct {
 	Logged  []Reply
 	Bases   []BaseFetch
 	Rounds  []raftshard.Done
+	Mail    []raftshard.Mail
 	Rebuilt bool
 }
 
 // Reset empties the output for reuse.
 func (o *Output) Reset() {
 	clear(o.Replies)
-	o.Actions, o.Replies, o.Ordered, o.Logged, o.Bases, o.Rounds, o.Rebuilt = o.Actions[:0], o.Replies[:0], o.Ordered[:0], o.Logged[:0], o.Bases[:0], o.Rounds[:0], false
+	clear(o.Mail)
+	o.Actions, o.Replies, o.Ordered, o.Logged, o.Bases, o.Rounds, o.Mail, o.Rebuilt = o.Actions[:0], o.Replies[:0], o.Ordered[:0], o.Logged[:0], o.Bases[:0], o.Rounds[:0], o.Mail[:0], false
 }
 
 type phase uint8
@@ -1886,7 +1888,7 @@ func (s *Store) housekeep(ctx *core.Context, out *Output) {
 		s.admitHeld(ctx, out)
 		if s.log.Stalled() && (!victim || s.log.CopiesStalled() || s.plant.noSpaceWithVictim) {
 			s.log.FailStalled(ctx, &s.lout)
-			if len(s.shards) > 0 {
+			if s.raft != nil {
 				s.stop(ctx, disklog.ErrNoSpace, out)
 			}
 			return
@@ -1967,6 +1969,7 @@ func (s *Store) logEvent(ctx *core.Context, ev *disklog.Event, out *Output) {
 				s.recoveryFailed(ctx, err)
 				return
 			}
+			out.Mail = s.raft.Mail(out.Mail)
 		}
 		if s.plant.replayCopyAsWrite {
 			for i := range ev.Entries {
@@ -2003,6 +2006,7 @@ func (s *Store) logEvent(ctx *core.Context, ev *disklog.Event, out *Output) {
 		// After resume's Recount: replay counted again the blobs that died before the manifest.
 		if s.raft != nil {
 			s.raft.Recovered(log)
+			out.Mail = s.raft.Mail(out.Mail)
 		}
 		s.gateHeld()
 		s.freeSlots(true)
@@ -2590,7 +2594,7 @@ func (s *Store) InstallMerge(ctx *core.Context, c *lsm.Compaction, out *Output) 
 // lets the log's rounds in flight finish and recovers its log again as an open does. A check that
 // fails again before a checkpoint completes after the rebuild stops the store with err.
 func (s *Store) indexBroken(ctx *core.Context, err error, out *Output) {
-	if s.rebuilt || len(s.shards) > 0 {
+	if s.rebuilt || s.raft != nil {
 		s.stop(ctx, err, out)
 		return
 	}

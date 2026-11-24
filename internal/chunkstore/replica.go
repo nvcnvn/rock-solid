@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"cmp"
 	"errors"
+	"fmt"
 	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -1576,6 +1577,9 @@ func (r *Replica) drainStore(ctx *core.Context, out *ReplicaOutput) {
 			r.leads[i].active, r.leads[i].serving, r.leads[i].asking, r.leads[i].peer = false, false, true, nil
 		}
 		r.recs = r.recs[:0]
+	}
+	if len(r.sout.Mail) > 0 {
+		panic(fmt.Sprintf("chunkstore: the store mailed %+v, and a replica hosts no shard on the round driver", r.sout.Mail[0]))
 	}
 	acts := r.sout.Actions
 	r.sout.Reset()

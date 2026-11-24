@@ -1,6 +1,7 @@
 package node
 
 import (
+	"fmt"
 	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
@@ -191,6 +192,9 @@ func (d *Device) closeStore() {
 }
 
 func (d *Device) flush(out *DeviceOutput) {
+	if len(d.sout.Mail) > 0 {
+		panic(fmt.Sprintf("node: the store mailed %+v, and a device hosts no shard on the round driver", d.sout.Mail[0]))
+	}
 	out.Actions = append(out.Actions, d.sout.Actions...)
 	d.sout.Reset()
 }

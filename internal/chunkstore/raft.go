@@ -57,6 +57,17 @@ func (s *Store) AddRaft(owner uint32, st *raftshard.Storage, sh RaftShard) {
 	}
 }
 
+// AddRemote knows the shard whose blobs carry owner as shard id on the round driver of loop,
+// which writes its rounds to this store's log: a restart's replay hands its blobs to Output's
+// Mail, and a broken index stops the store rather than rebuilding it under the driver. It is
+// called as AddRaft is.
+func (s *Store) AddRemote(owner uint32, loop int, id uint32) {
+	if s.raft == nil {
+		s.raft = raftshard.NewHost(s.log)
+	}
+	s.raft.AddRemote(owner, loop, id)
+}
+
 // WriteRound submits round flush of owner's shard, whose contents r stay valid until
 // Output.Rounds names it durable.
 func (s *Store) WriteRound(ctx *core.Context, owner uint32, flush uint64, r *raftshard.Round, out *Output) error {

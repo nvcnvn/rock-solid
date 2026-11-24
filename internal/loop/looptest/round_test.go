@@ -311,7 +311,7 @@ func newRoundRig(t *testing.T, seed uint64, n, perLoop, proposals int, gap core.
 		r.shards, r.ms = append(r.shards, nil), append(r.ms, m)
 	}
 	owner := r.loops[len(r.loops)-1]
-	lg := owner.AttachLog(log, 1, logIOs, total+1)
+	lg := owner.AttachLog(log, roundLogConfig(maxRecord), 1, logIOs, total+1)
 	for i, l := range r.loops {
 		if n > 0 && i == n {
 			break
@@ -513,7 +513,7 @@ func newInstant(tb testing.TB, m loop.Machine) *instant {
 	}
 	drv.r = dr
 	AddWithDisk(node, k, l, dr)
-	return &instant{s: s, l: l, pool: pool, log: log, lg: l.AttachLog(log, 1, logIOs, 1)}
+	return &instant{s: s, l: l, pool: pool, log: log, lg: l.AttachLog(log, roundLogConfig(0), 1, logIOs, 1)}
 }
 
 func (in *instant) run() {
@@ -680,7 +680,6 @@ func TestRoundMailAndDeadBlobsCrossLoops(t *testing.T) {
 			data := []byte("replayed")
 			r.lg.Send(0, loop.Mail{Shard: st.id, Kind: loop.MailReplayed, Ref: st.refs[0], Blob: disklog.BlobRaftEntries, Data: data})
 			r.lg.Send(0, loop.Mail{Shard: st.id, Kind: loop.MailRewrite, Ref: disklog.BlobRef{Segment: 3}})
-			data[0] = 'X'
 			half := st.refs[:len(st.refs)/2]
 			r.loops[0].Dead(st.id, half)
 			r.ms[len(r.ms)-1].left = 0
@@ -893,7 +892,7 @@ func TestRoundSeveralLogsOnOneLoop(t *testing.T) {
 			AddWithDisk(node, k, l, dr)
 			for j := range 2 {
 				log := formatLog(t, nil, pool, roundLogConfig(0), 1+core.IOID(j)*logIOs)
-				logs, lgs = append(logs, log), append(lgs, l.AttachLog(log, 1+core.IOID(j)*logIOs, core.IOID(j+1)*logIOs, 2))
+				logs, lgs = append(logs, log), append(lgs, l.AttachLog(log, roundLogConfig(0), 1+core.IOID(j)*logIOs, core.IOID(j+1)*logIOs, 2))
 			}
 		} else {
 			Add(node, k, l)
@@ -929,7 +928,7 @@ func TestRoundSeveralLogsOnOneLoop(t *testing.T) {
 			t.Fatalf("a log whose IO IDs overlap another's: %v", p)
 		}
 	}()
-	loops[1].AttachLog(logs[0], logIOs+5, logIOs+6, 2)
+	loops[1].AttachLog(logs[0], roundLogConfig(0), logIOs+5, logIOs+6, 2)
 }
 
 // TestRoundShardWithNothingReadyIsToldNothing marks a shard that says it has records and gives
@@ -1102,5 +1101,101 @@ func TestRoundRemovedShardIsToldNothing(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// ownWriter is an owner loop's machine that writes a record of its own to the loop's log on timer
+// 1 and proposes to a shard in the same pass, as a chunk store's write and a shard's commit meet.
+type ownWriter struct {
+	in     *instant
+	s      *stub
+	ticket disklog.Ticket
+	lsn    uint64
+}
+
+func (m *ownWriter) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
+	if ev.Kind != core.EvTimer || ev.Timer != 1 {
+		return out
+	}
+	buf, err := ctx.Pool.Alloc(proposal)
+	if err != nil {
+		panic(err)
+	}
+	var o disklog.Output
+	if m.ticket, err = m.in.log.Submit(ctx, disklog.Hot, disklog.Item{Entry: disklog.BlobEntry(99, 1000, proposal), Buf: buf}, &o); err != nil {
+		panic(err)
+	}
+	m.s.propose(ctx.Now)
+	return append(out, o.Actions...)
+}
+
+func (m *ownWriter) OnLog(_ *core.Context, _ *loop.Log, ev *disklog.Event, out []core.Action) []core.Action {
+	if ev != nil && ev.Kind == disklog.Durable && slices.Contains(ev.Tickets, m.ticket) {
+		m.lsn = ev.LSN
+	}
+	return out
+}
+
+// TestTheOwnersRecordsShareARoundWithItsShards writes a record of the owner loop's machine and a
+// shard's in one pass: both go out in one round, as the log is held from the pass's start.
+func TestTheOwnersRecordsShareARoundWithItsShards(t *testing.T) {
+	m := &ownWriter{}
+	in := newInstant(t, m)
+	m.in = in
+	m.s = &stub{l: in.l, pool: in.pool}
+	m.s.id = in.l.AddShard(m.s, in.lg)
+	in.l.Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: 1})
+	in.run()
+	if m.lsn == 0 || len(m.s.refs) != 1 {
+		t.Fatalf("the machine's record durable at lsn %d, the shard's at %v", m.lsn, m.s.refs)
+	}
+	if m.s.refs[0].LSN != m.lsn {
+		t.Fatalf("the machine's record went out at lsn %d, the shard's at %d", m.lsn, m.s.refs[0].LSN)
+	}
+}
+
+// TestAProducersBatchWaitsAtTheOwnerWhileNoLogIsServed hands the owner a producer loop's batch
+// while its disk recovers: the batch waits in the owner's queue, the producer reading nothing of
+// the log, and is written once a log is served.
+func TestAProducersBatchWaitsAtTheOwnerWhileNoLogIsServed(t *testing.T) {
+	r := newRoundRig(t, 1, 1, 0, 0, 2000, 0)
+	defer r.close()
+	s := &stub{l: r.loops[0], pool: r.pools[0]}
+	s.id = r.loops[0].AddShard(s, r.lg)
+	r.lg.Serve(nil)
+	s.propose(0)
+	for r.s.Step() {
+	}
+	if s.readies != 1 || s.durable != 0 {
+		t.Fatalf("with no log served the shard gave %d readies, %d durable", s.readies, s.durable)
+	}
+	r.lg.Serve(r.log)
+	r.loops[1].Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: 1})
+	for r.s.Step() {
+	}
+	if s.durable != 1 || s.err != nil {
+		t.Fatalf("%d durable once the log was served, err %v", s.durable, s.err)
+	}
+}
+
+// TestRaftBlobsReportedDeadWaitForALog reports a shard's durable Raft blob dead while its disk
+// recovers: the log served next takes the report.
+func TestRaftBlobsReportedDeadWaitForALog(t *testing.T) {
+	in := newInstant(t, &proposer{})
+	s := &stub{l: in.l, pool: in.pool}
+	s.id = in.l.AddShard(s, in.lg)
+	s.propose(0)
+	in.run()
+	if len(s.refs) != 1 || in.log.LiveBlocks() == 0 {
+		t.Fatalf("blobs %v durable, %d live blocks", s.refs, in.log.LiveBlocks())
+	}
+	in.lg.Serve(nil)
+	in.l.Dead(s.id, s.refs)
+	if in.log.LiveBlocks() == 0 {
+		t.Fatal("a log no longer served took a dead report")
+	}
+	in.lg.Serve(in.log)
+	if live := in.log.LiveBlocks(); live != 0 {
+		t.Fatalf("the served log holds %d live blocks of a blob reported dead", live)
 	}
 }

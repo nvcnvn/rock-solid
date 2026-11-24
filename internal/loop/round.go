@@ -36,6 +36,8 @@ const (
 	// MailRewrite asks the shard to rewrite its runs with pieces in the segment of Ref, a victim of
 	// the cleaner.
 	MailRewrite
+	// MailRecovered ends the replay: every MailReplayed of the restart came before it.
+	MailRecovered
 )
 
 // Mail is what a disk's owner sends one of its shards, off the data path; Data is the shard's to
@@ -61,15 +63,19 @@ type LogMachine interface {
 	OnLog(ctx *core.Context, lg *Log, ev *disklog.Event, out []core.Action) []core.Action
 }
 
-// Log is a disk's log as a node's loops share it: the loop that owns it and each loop's hand-off to it.
+// Log is a disk's log as a node's loops share it: the loop that owns it and each loop's hand-off
+// to it. Only the owner reads log; the other loops read the commit depth and record cap the log is
+// configured with, which every log it serves shares.
 type Log struct {
-	owner    *Loop
-	disk     uint32
-	log      *disklog.Log
-	ios      [2]core.IOID
-	lm       LogMachine
-	handoffs []*handoff
-	out      disklog.Output
+	owner     *Loop
+	disk      uint32
+	log       *disklog.Log
+	depth     int
+	maxRecord uint64
+	ios       [2]core.IOID
+	lm        LogMachine
+	handoffs  []*handoff
+	out       disklog.Output
 	// batches are the batches submitted and not yet durable, in ticket order; those before taken
 	// have their first record in a round, those before head are durable.
 	batches     []batch
@@ -79,6 +85,9 @@ type Log struct {
 	queued []*handoff
 	copies []core.IOBuf
 	dead   []disklog.BlobRef
+	// unburied are the Raft blobs reported dead while no log is served, which the next log served,
+	// the one recovery replayed them into, takes.
+	unburied []disklog.BlobRef
 }
 
 // A handoff carries one loop's batches of records for one disk to its owner. The loop sends a
@@ -138,32 +147,41 @@ type shard struct {
 	marked bool
 }
 
-// AttachLog makes l the owner of log, a formatted or recovered log on its disk ring whose IO IDs
-// run from firstIO up to endIO, which loops of IDs 0 to loops-1 hand records to; log is nil while
-// the disk recovers, until Serve. The log gets the disk completions of its IO IDs and the trim
+// AttachLog makes l the owner of log, a formatted or recovered log of configuration cfg on its
+// disk ring whose IO IDs run from firstIO up to endIO, which loops of IDs 0 to loops-1 hand records
+// to; log is nil while the disk recovers, until Serve. The log gets the disk completions of its IO IDs and the trim
 // timer; the loop's machine gets the rest, and every completion while there is no log. It runs
 // before the loops start. The logs of a loop share the trim timer, and every log takes each firing
 // and arms it again, so a log's paced TRIM may wait for the time another log armed it to.
-func (l *Loop) AttachLog(log *disklog.Log, firstIO, endIO core.IOID, loops int) *Log {
+func (l *Loop) AttachLog(log *disklog.Log, cfg disklog.Config, firstIO, endIO core.IOID, loops int) *Log {
 	for _, o := range l.logs {
 		if firstIO < o.ios[1] && o.ios[0] < endIO {
 			panic(fmt.Sprintf("loop: log IO IDs %d to %d overlap another log's %d to %d", firstIO, endIO, o.ios[0], o.ios[1]))
 		}
 	}
-	lg := &Log{owner: l, disk: uint32(len(l.logs)), log: log, ios: [2]core.IOID{firstIO, endIO}, handoffs: make([]*handoff, loops)}
+	lg := &Log{owner: l, disk: uint32(len(l.logs)), depth: cfg.CommitDepth, maxRecord: cfg.MaxRecordBytes, ios: [2]core.IOID{firstIO, endIO}, handoffs: make([]*handoff, loops)}
 	lg.lm, _ = l.m.(LogMachine)
 	l.logs = append(l.logs, lg)
+	lg.Serve(log)
 	return lg
 }
 
 // Serve makes log, or nil while the disk recovers again, the disk's log from now on, as the
 // machine that recovers it says; it runs on lg's owner, with no batch in flight. While no log is
-// served, marked shards stay marked and send nothing.
+// served, the owner's marked shards stay marked, other loops' batches wait in its queue, and the
+// Raft blobs reported dead wait for the log recovery replayed them into.
 func (lg *Log) Serve(log *disklog.Log) {
 	if len(lg.batches) > 0 {
 		panic(fmt.Sprintf("loop: disk %d's log changed with batches in flight", lg.disk))
 	}
+	if log != nil && (log.CommitDepth() != lg.depth || log.MaxRecordBytes() != lg.maxRecord) {
+		panic(fmt.Sprintf("loop: disk %d served a log of commit depth %d and record cap %d, attached with %d and %d", lg.disk, log.CommitDepth(), log.MaxRecordBytes(), lg.depth, lg.maxRecord))
+	}
 	lg.log = log
+	if log != nil && len(lg.unburied) > 0 {
+		lg.bury(lg.unburied)
+		lg.unburied = lg.unburied[:0]
+	}
 }
 
 // Log is the disk's log, nil while it recovers.
@@ -184,7 +202,7 @@ func (l *Loop) logOf(io core.IOID) *Log {
 func (l *Loop) AddShard(s Shard, lg *Log) ShardID {
 	h := lg.handoffs[l.cfg.ID]
 	if h == nil {
-		h = &handoff{lg: lg, from: l, pool: l.ctx.Pool, idx: len(l.handoffs), slots: make([]slot, lg.log.CommitDepth()+1)}
+		h = &handoff{lg: lg, from: l, pool: l.ctx.Pool, idx: len(l.handoffs), slots: make([]slot, lg.depth+1)}
 		lg.handoffs[l.cfg.ID] = h
 		l.handoffs = append(l.handoffs, h)
 	}
@@ -218,7 +236,7 @@ func itemBytes(e *disklog.Entry) uint64 {
 // the next round.
 func (l *Loop) collect(h *handoff, s *slot) {
 	h.items = h.items[:0]
-	limit := h.lg.log.MaxRecordBytes()
+	limit := h.lg.maxRecord
 	var bytes uint64
 	n := 0
 	for n < len(h.marked) && bytes < limit {
@@ -251,10 +269,10 @@ func (l *Loop) collect(h *handoff, s *slot) {
 	h.marked = h.marked[:copy(h.marked, h.marked[n:])]
 }
 
-// sendable reports whether h may send a batch now: its disk serves a log, shards are marked, a
-// slot is free, and the owner has taken h's last batch into a round.
+// sendable reports whether h may send a batch now: shards are marked, a slot is free, the owner
+// has taken h's last batch into a round, and, on the owner, its disk serves a log.
 func (h *handoff) sendable() bool {
-	return h.lg.log != nil && len(h.marked) > 0 && h.sent-h.noticed < uint64(len(h.slots)) && h.taken.Load() == h.sent
+	return len(h.marked) > 0 && h.sent-h.noticed < uint64(len(h.slots)) && h.taken.Load() == h.sent && (h.from != h.lg.owner || h.lg.log != nil)
 }
 
 // wait asks the owner to wake h's loop when it takes h's last batch into a round, if shards wait
@@ -270,7 +288,8 @@ func (h *handoff) wait() bool {
 // endRounds runs at the end of a pass: the logs this loop owns take the batches waiting for room
 // in its pool, before its own shards' Readies take that room, each disk whose owner took this
 // loop's last batch into a round gets one with what the shards marked since have ready, and the
-// logs this loop owns start the rounds the pass's hand-offs filled.
+// logs this loop owns, held since the pass began, start the rounds the pass filled: its machine's
+// own records share them with the hand-offs.
 func (l *Loop) endRounds() {
 	for _, lg := range l.logs {
 		lg.takeQueued()
@@ -353,13 +372,13 @@ func (l *Loop) handoff(ev *core.Event) {
 }
 
 // Send hands m to its shard on the loop of ID to, which takes it at the end of the owner's pass
-// if it is the owner, else on its next pass; it runs on lg's owner.
+// if it is the owner, else on its next pass; it runs on lg's owner, and m.Data becomes the
+// shard's, the caller keeping no hold on it.
 func (lg *Log) Send(to int, m Mail) {
 	h := lg.handoffs[to]
 	if h == nil {
 		panic(fmt.Sprintf("loop: mail for loop %d, which has no shard on disk %d", to, lg.disk))
 	}
-	m.Data = append([]byte(nil), m.Data...)
 	h.mu.Lock()
 	h.mail = append(h.mail, m)
 	h.mu.Unlock()
@@ -385,6 +404,10 @@ func (l *Loop) Dead(id ShardID, refs []disklog.BlobRef) {
 }
 
 func (lg *Log) bury(refs []disklog.BlobRef) {
+	if lg.log == nil {
+		lg.unburied = append(lg.unburied, refs...)
+		return
+	}
 	if err := lg.log.RaftBlobsDead(refs); err != nil {
 		panic(fmt.Sprintf("loop: a shard reported dead a Raft blob the log does not hold: %v", err))
 	}

@@ -112,7 +112,7 @@ func durableRuns(t *testing.T, path string, wait bool) {
 	if err := w.l.AttachDisk(r); err != nil {
 		t.Fatal(err)
 	}
-	w.id = w.l.AddShard(w, w.l.AttachLog(log, 1, 1<<32, 1))
+	w.id = w.l.AddShard(w, w.l.AttachLog(log, cfg, 1, 1<<32, 1))
 
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()

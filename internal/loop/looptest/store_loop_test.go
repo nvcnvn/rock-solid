@@ -57,7 +57,7 @@ func (sl *storeLoop) start() {
 	if err := l.AttachDisk(dr); err != nil {
 		sl.t.Fatal(err)
 	}
-	sl.ring, sl.lg = dr, l.AttachLog(nil, chunkstore.FirstLogIO, chunkstore.EndLogIO, 1)
+	sl.ring, sl.lg = dr, l.AttachLog(nil, storetest.Config().Log, chunkstore.FirstLogIO, chunkstore.EndLogIO, 1)
 	AddWithDisk(node, k, l, dr)
 }
 
@@ -244,7 +244,7 @@ func TestADeviceOnALoopReportsTheDiskItFormattedOpened(t *testing.T) {
 	if err := l.AttachDisk(dr); err != nil {
 		t.Fatal(err)
 	}
-	m.lg = l.AttachLog(nil, chunkstore.FirstLogIO, chunkstore.EndLogIO, 1)
+	m.lg = l.AttachLog(nil, storetest.Config().Log, chunkstore.FirstLogIO, chunkstore.EndLogIO, 1)
 	AddWithDisk(n, k, l, dr)
 	l.Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: 1})
 	for s.Step() {

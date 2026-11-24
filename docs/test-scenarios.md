@@ -7306,6 +7306,14 @@ Recovery from manifest and log is under Shard indexes in the disk owner's checkp
   - A shard added while a checkpoint runs joins the next one, and a restart after it restores the
     shard on a compacted base; the running checkpoint once asked its tree for pieces of a flush it
     never began, which stopped the store (`TestAShardAddedDuringACheckpointJoinsTheNext`).
+- **Shards on the round driver.** A restart of a disk whose shard moved to the round driver mails
+  it, in order, only its blobs past its replay LSN, though another shard's older round keeps its
+  dead ones in the replay, then the end of the replay, and a `raftshard.Rounds` on the base taking
+  them rebuilds its storage and reports nothing dead (`TestARestartMailsAShardOnTheRoundDriverItsLiveRounds`).
+  A store that knows a shard on the round driver stops on a broken index rather than draining its
+  log for a rebuild (`TestABrokenIndexStopsAStoreWithAShardOnTheRoundDriver`), and stops with
+  `ErrNoSpace` when its log is out of room (`TestAStoreWithAShardOnTheRoundDriverStopsOutOfRoom`). The end-to-end
+  restart is under [Round driver](#round-driver).
 - **Lagging follower.** A follower behind the compaction index gets a `MsgSnap` built from a point-in-time view of the shard's LSM tree, which never blocks the writer, and catches up from it. A view held open holds back the cleaner (asserted in the LSM tree tests).
 - **Index rebuild.** One index rebuilds from its manifest and the log while the disk's other indexes serve, without restarting the log.
 
@@ -8602,8 +8610,8 @@ Hand-off, with 1, 2, 4 and 8 producer loops (`TestRoundsHandOffOncePerRoundAndFl
   (`TestRoundMailAndDeadBlobsCrossLoops`). Mail sent on the owner loop, from its machine's event or
   from a shard's `Durable`, reaches the shard after the sender's own actions run, and those actions
   are kept, and the shard still hears of its next record
-  (`TestRoundSendOnOwnerKeepsTheCallersActions`). Hanging recovery's replay and the
-  cleaner's moves for a shard's runs on this is the work of the items that wire them.
+  (`TestRoundSendOnOwnerKeepsTheCallersActions`). Hanging the cleaner's moves for a shard's
+  runs on this is the work of the item that wires them.
 - A Raft shard's rounds through the driver (`raftshard.Rounds`), on a producer loop and on the
   owner, ten rounds of three 1,000-byte entries and a hard state, every third compacting to the
   commit before it: every round is durable in order, and the blobs it reports dead through
@@ -8621,7 +8629,12 @@ Hand-off, with 1, 2, 4 and 8 producer loops (`TestRoundsHandOffOncePerRoundAndFl
   queued, and once the pool frees and the shard is marked again it and the rounds after it become
   durable (`TestRoundOfARaftShardWaitsOutAFullPool`). A round 0, a write while a round is queued
   or in flight, and `Durable` with none in flight or after `Delete` panic
-  (`TestRoundsPanicOnABrokenCallOrder`).
+  (`TestRoundsPanicOnABrokenCallOrder`). A chunk store on its device loop, with a Raft shard on
+  the round driver of that loop and one on another loop, seven rounds each compacting every
+  third, restarted: each shard is mailed its blobs and the end of the replay, its storage, on the
+  base its runs would restore, equals its state before, and the log holds as many live blocks as
+  before, the blobs the shards report dead during the replay taken once the log is served
+  (`TestRaftShardsOnTwoLoopsRecoverTheirStorage`).
 - The owner's machine keeps its own disk completions and, as a `LogMachine`, the events of its own
   log records; an owner machine that is not one panics on a log event the driver did not submit
   (`TestRoundOwnerMachineKeepsItsDiskAndLogEvents`). Two logs on one loop, fed from it and another
@@ -8630,8 +8643,13 @@ Hand-off, with 1, 2, 4 and 8 producer loops (`TestRoundsHandOffOncePerRoundAndFl
   recovers, a completion in the log's range reaches the machine; once it serves the log the machine
   recovered, the machine's record comes back as the log's `Durable` and a nil event follows each
   completion, and its earlier read is not handed over again (`TestALoopServesTheLogItsMachineRecovered`).
-  A shard marked while no log is served stays marked and is collected once the log is served
-  (`TestAMarkedShardWaitsWhileNoLogIsServed`). A storage node's device on a blank disk formats it on
+  A shard on the owner marked while no log is served stays marked and is collected once the log
+  is served (`TestAMarkedShardWaitsWhileNoLogIsServed`); a producer loop's batch, sent meanwhile,
+  waits in the owner's queue and is written once the log is served
+  (`TestAProducersBatchWaitsAtTheOwnerWhileNoLogIsServed`); a Raft blob reported dead meanwhile
+  leaves the live blocks of the log served next, not before (`TestRaftBlobsReportedDeadWaitForALog`).
+  A record the owner's machine writes and a shard's, made in one pass, go out in one round
+  (`TestTheOwnersRecordsShareARoundWithItsShards`). A storage node's device on a blank disk formats it on
   its loop and reports it opened, though the format ends with no log event, only the nil after its
   last completion (`TestADeviceOnALoopReportsTheDiskItFormattedOpened`).
 - A marked shard whose `Ready` adds nothing is not told anything durable

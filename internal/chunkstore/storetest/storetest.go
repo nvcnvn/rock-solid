@@ -12,6 +12,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/raftshard"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
@@ -92,6 +93,10 @@ type Rig struct {
 	sent   map[uint64]change
 	// trimmed is the first block of every range the store trimmed.
 	trimmed []core.LBA
+	// Opened, where set, is called with each store Format or Open makes, before any event, as a
+	// node adds its shards; Mail is handed the store's Mail, for the shards on the round driver.
+	Opened func(*chunkstore.Store)
+	Mail   func(*raftshard.Mail)
 }
 
 type change struct {
@@ -130,6 +135,7 @@ func (r *Rig) Format(log uint64) {
 	if r.S, err = chunkstore.Format(&r.ctx, r.Cfg, disklog.Superblock{LogID: log, Geometry: geo}, &r.out); err != nil {
 		r.T.Fatal(err)
 	}
+	r.opened()
 	r.take()
 }
 
@@ -150,8 +156,20 @@ func newRig(t testing.TB, d Disk, cfg chunkstore.Config) *Rig {
 // Pool is the buffer pool of the store's process.
 func (r *Rig) Pool() core.BufPool { return r.ctx.Pool }
 
+func (r *Rig) opened() {
+	if r.Opened != nil {
+		r.Opened(r.S)
+	}
+}
+
 // take executes the store's actions and books its replies.
 func (r *Rig) take() {
+	for i := range r.out.Mail {
+		if r.Mail == nil {
+			r.T.Fatalf("the store mailed %+v with no shard to take it", r.out.Mail[i])
+		}
+		r.Mail(&r.out.Mail[i])
+	}
 	if h, ok := r.D.(Host); ok {
 		h.Serve(r.S.Log())
 	}
@@ -266,6 +284,7 @@ func (r *Rig) open() {
 	if r.S, err = chunkstore.Open(&r.ctx, r.Cfg, r.D.Blocks(), &r.out); err != nil {
 		r.T.Fatal(err)
 	}
+	r.opened()
 	r.take()
 	r.Settle()
 }
