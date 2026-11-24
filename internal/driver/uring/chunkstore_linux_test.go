@@ -1,10 +1,8 @@
 package uring
 
 import (
-	"errors"
 	"os"
 	"testing"
-	"time"
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore/storetest"
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -25,10 +23,10 @@ type suiteDisk struct {
 }
 
 func newSuiteDisk(t *testing.T) storetest.Disk {
-	dev := os.Getenv("RS_RAW_DEVICE")
-	if dev == "" {
+	if os.Getenv("RS_RAW_DEVICE") == "" {
 		return newSuiteDiskOf(t, storetest.DiskBytes)
 	}
+	dev := rawDevice(t)
 	zeroRange(t, dev, 0, storetest.DiskBytes)
 	sd := &suiteDisk{t: t, path: dev, blocks: storetest.DiskBytes / bs}
 	sd.start()
@@ -50,15 +48,7 @@ func TestAFreedSlotSegmentReadsAsZerosOnAFile(t *testing.T) {
 func (sd *suiteDisk) start() {
 	sd.r, sd.pool = newRing(sd.t, storetest.PoolBytes, 256)
 	var err error
-	// A killed process's ring holds a raw device's O_EXCL claim until the kernel's teardown of the
-	// ring, in a worker, puts its files.
-	for range 500 {
-		if sd.d, err = sd.r.Open(sd.path, false); !errors.Is(err, unix.EBUSY) {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if err != nil {
+	if sd.d, err = sd.r.Open(sd.path, false); err != nil {
 		sd.t.Fatal(err)
 	}
 	if sd.blocks != 0 {

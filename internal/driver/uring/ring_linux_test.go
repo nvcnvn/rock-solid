@@ -438,8 +438,12 @@ func trimZeroesTheHeader(t *testing.T, g *rig, discards bool) (zeroTail bool) {
 	expect(t, g.run(t, 1, func(out []core.Action) []core.Action {
 		return append(out, core.Action{Kind: core.ActDiskTrim, IO: 2, LBA: 32, Len: 4 * bs})
 	}), core.Event{IO: 2})
-	if g.r.InFlight() != 0 || len(g.enters(t)) != before+1 {
-		t.Fatalf("%d in flight after the trim, io_uring_enter submissions %v", g.r.InFlight(), g.enters(t))
+	entries := 2
+	if g.d.t.file {
+		entries = 1
+	}
+	if e := g.enters(t); g.r.InFlight() != 0 || len(e) != before+1 || e[before] != entries {
+		t.Fatalf("%d in flight after the trim, io_uring_enter submissions %v, want %d more submitting %d", g.r.InFlight(), e, 1, entries)
 	}
 	rd := alloc(t, g.pool.Pool, 4*bs)
 	expect(t, g.run(t, 1, func(out []core.Action) []core.Action {

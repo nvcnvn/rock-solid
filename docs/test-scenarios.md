@@ -8317,7 +8317,12 @@ profile refuses `io_uring_setup` with `EPERM`, so container runs use
 
 The tests that need a block device or a real drive run as root on a spare drive, which they
 overwrite: `RS_RAW_DEVICE` names it, always by its `/dev/disk/by-id/` path, as `nvme0n1` and
-`nvme1n1` can swap across reboots, and without it they skip. The file-backed measurement needs
+`nvme1n1` can swap across reboots, and without it they skip. Before any write each checks that
+the path is a block device that an `O_RDWR|O_EXCL` open finds free, and fails otherwise: named a
+mounted loop device, the benchmark and every device test fail and the loop's file is unchanged
+(before the check, the benchmark's prefill overwrote the file system), and the OS disk's
+`by-id` path, its partitions and its md array are refused with `EBUSY`. A partition or disk that
+nothing holds, mounted nowhere and in no array, passes the check. The file-backed measurement needs
 `RS_URING_DIR` on a file system on that drive. All rows ran on a WDC SN720 512 GB (client NVMe,
 volatile write cache, DLFEAT 1: deallocated blocks read as zeros), Linux 7.0, Xeon-D, 12 threads:
 
@@ -8334,10 +8339,13 @@ RS_URING_DIR=/mnt/rs/u ./uring.test -test.run TestDurableWritesIntoAFileCommitNo
 ```
 
 - A raw device is opened `O_DIRECT` and `O_EXCL` and sized with `BLKGETSIZE64` (its blocks match
-  sysfs's `size`); a second `O_EXCL` open and a second ring's `Open` fail with `EBUSY`, and once the
-  first ring is closed `Open` succeeds at once. That last step failed until `Close` unregistered
-  the file table: the kernel drops it with the ring later, in a worker, and it held the claim.
-  `TestARawDeviceIsOpenedExclusively`.
+  sysfs's `size`); a second `O_EXCL` open fails with `EBUSY`, and a second ring's `Open` too, after
+  its 2 s of retries, and once the first ring is closed `Open` succeeds at once. That last step
+  failed until `Close` unregistered the file table: the kernel drops it with the ring later, in a
+  worker, and it held the claim. `TestARawDeviceIsOpenedExclusively`.
+- `Open` waits out a claim that is about to go, such as a killed process's: with no retry, the
+  crash test's first child on `linear` failed to open the device with `EBUSY`, and with
+  `Ring.Open`'s every child of every target opens it. `TestCrashOnARealDisk`.
 - A trim of a raw device is a `BLOCK_URING_CMD_DISCARD` with the header write behind it, in one
   `io_uring_enter` submitting 2: the device's discard count (`/sys/class/block/…/stat`) rises by
   the trim's sectors, the header reads back as zeros, and on this drive so do the blocks after it.
@@ -8366,11 +8374,17 @@ RS_URING_DIR=/mnt/rs/u ./uring.test -test.run TestDurableWritesIntoAFileCommitNo
   | QD 1, read | 35 µs | −1.7 to −3.8 µs, inside rep-to-rep noise of 5 µs | |
   | Registration | | 16.1 ms per GiB already touched | 17 to 70 ms per GiB |
 
-  The savings match the spike's; the totals are higher because the driver never waits in
-  `io_uring_enter`: each wait is a `poll` and a `read` of the eventfd, and while the goroutine sits
-  in `poll` the Go runtime's other threads run, which shows most at QD 1 reads, whose 90 µs on this
-  drive leave the most time to wait. Open: tolerance. Open: polled completions
-  (`IORING_SETUP_IOPOLL`) are an open question, not built.
+  The savings match the spike's. The totals are higher, most at QD 1, because the benchmark waits
+  in `poll` and reads the eventfd, as the loop does, rather than in `io_uring_enter`: a sleep in
+  `io_uring_enter` counts as iowait, which keeps the core's clock up and its idle states shallow,
+  and a sleep in `poll` does not. The box runs `intel_pstate` on `powersave` with C-states down to
+  C10. Waiting in `io_uring_enter` (`min_complete` 1) instead, a QD 1 read took 69.5 µs against
+  104 µs and 6.4 µs of CPU against 35 µs, in the same cycles (`perf stat`: 1.26 GHz against
+  3.7 GHz); a QD 1 write 10.5 µs against 12.0 µs and 4.5 µs of CPU against 6.1 µs. `GOMAXPROCS`
+  12, 2 or 1 changes a QD 1 read's CPU little (35, 36, 48 µs), so it is not the Go runtime's other
+  threads. So `cpu-ns/op` at QD 1 compares clock speeds, not work; the
+  [durable write benchmark](#durable-write-benchmark) measures the difference. Open: tolerance.
+  Open: polled completions (`IORING_SETUP_IOPOLL`) are an open question, not built.
 - Many reads in flight: recovery's segment-header reads (4,096 to 262,144 per disk) go out at the read
   depth recovery asks for and the ring defers what does not fit, never drops it. Open: ring depth.
 - The [crash test](#crash-tests-on-real-disks) on device-mapper targets (root; in Docker,
@@ -8385,16 +8399,32 @@ RS_URING_DIR=/mnt/rs/u ./uring.test -test.run TestDurableWritesIntoAFileCommitNo
   - `flakey`: the history clients are stopped, then the table swaps to `flakey` with `drop_writes`
     and the driver stops counting acknowledgments: every write from then on completes and is lost,
     as on a power cut of a drive whose cache is durable. 149 restarts kept a change never
-    acknowledged: 42 s.
+    acknowledged: 42 s. It adds little over `linear`: the suspend before the swap finishes every
+    write in flight and every later one is lost, with no acknowledgment counted, so the disk it
+    leaves is the one a kill at the swap leaves, and an acknowledgment before the flush goes
+    unseen. It stays for the 20 ms the store runs on after its writes stop landing, reading back
+    blocks older than it wrote, which no other target gives, at 13 s for 50 cycles.
   - `delay`: every I/O 5 ms late; nothing fails, and the run takes 289 s.
   - `log-writes`, the power cut that loses every write not yet flushed: `dm-log-writes` logs each
     write with its data and each flush into another window of the drive, and after the kill the
     test puts back a copy of the window taken before the cycle and replays only the writes logged
     before the last flush. 135 s; 19,736 writes replayed behind 15,720 flushes, and 6 completed
-    writes never flushed were dropped. Planted in a scratch copy of the log, a round reported
-    durable once its write completes, before its flush, fails on `log-writes` at cycle 86 (the
-    restarted child's read of a chunk finds a malformed header), and passes all 150 cycles of
-    `linear`.
+    writes never flushed were dropped.
+  - The plant `log-writes` exists for, applied by hand and never committed: in
+    `internal/disklog/groupcommit.go`, where a round's record write completes, right after
+    `l.sendFlushes(out)` add
+    `if i == 0 { if r.flushSent { l.stale = append(l.stale, r.flushIO) }; l.retire(out); l.startRounds(ctx, out) }`,
+    so the oldest round is reported durable once its write completes, before its flush. Built
+    into a separate test binary, it fails on `log-writes` at cycle 74, 70 and 95 of seeds 1, 7 and
+    11 (the restarted child's read of a chunk finds a malformed header or a bad magic), and passes
+    all 150 cycles of `linear`. A kill lands between a write's completion and the issue of its
+    linked flush only rarely, and a flush already issued is not stopped by the kill: the ring's
+    teardown waits for it and `dm-log-writes` logs it before the cut. A 10 ms flush delay under
+    the logged window (`dm-delay`, `delay <raw> 0 0 <raw> 0 0 <raw> 0 10`) drops more writes, 26
+    to 30 per 150 cycles, but the plant then passes all 150 cycles of the same three seeds, so
+    the rig has no delay. Open: a cut where the kill lands, such as a `dm-log-writes` mark sent
+    before the kill, only the flushes logged before it replayed and the acknowledgments after it
+    ignored.
 
 ## TCP network driver
 
@@ -8881,7 +8911,13 @@ Over TCP and io_uring on files, in Docker, `TestTheOperatorsCommandLineOverTCP` 
   above. Open: tolerance against fio.
 - Idle gaps are part of every run, since a drive idle for 100 ms adds about 1 ms to the next durable
   write.
-- Reports CPU per write. Open: no target is given.
+- Reports CPU per write, in cycles as well as time, and the CPU frequency governor and idle states
+  of the run: under `powersave` a wait in `epoll_wait` lets the core slow down where a wait in
+  `io_uring_enter` does not (a QD 1 read on the raw-device benchmark: 104 µs and 35 µs of CPU in
+  `poll`, 69.5 µs and 6.4 µs in `io_uring_enter`, the same cycles). It runs both ways, the loop's
+  event mode and a wait in `io_uring_enter`, under the governor it names, which answers the
+  [open question](design.md#roadmap-and-open-questions) on waiting at queue depth 1. Open: no
+  target is given.
 - Reports the recovery time of a full disk's segment headers (4,096 headers at 256 GiB, 262,144 at
   16 TiB), with many reads in flight. Open: no target is given.
 - Runs nightly; a 20% regression is a bug. The hot path reports zero allocations per operation.

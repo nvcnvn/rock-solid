@@ -22,13 +22,26 @@ import (
 const blkZeroOut = 0x127f
 
 // rawDevice is the block device RS_RAW_DEVICE names, which the test overwrites; without it the
-// test skips.
+// test skips. It fails the test unless the path is a block device nothing holds open exclusively:
+// a mount, a device-mapper table, an md array or another test.
 func rawDevice(t testing.TB) string {
 	t.Helper()
 	dev := os.Getenv("RS_RAW_DEVICE")
 	if dev == "" {
 		t.Skip("RS_RAW_DEVICE names no block device to overwrite")
 	}
+	var st unix.Stat_t
+	if err := unix.Stat(dev, &st); err != nil {
+		t.Fatalf("RS_RAW_DEVICE %s: %v", dev, err)
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFBLK {
+		t.Fatalf("RS_RAW_DEVICE %s is not a block device", dev)
+	}
+	fd, err := unix.Open(dev, unix.O_RDWR|unix.O_EXCL|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatalf("RS_RAW_DEVICE %s is in use, not overwriting it: %v", dev, err)
+	}
+	_ = unix.Close(fd)
 	return dev
 }
 

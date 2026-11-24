@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -201,13 +202,15 @@ func (r *Ring) Status() Status { return r.status }
 func (r *Ring) Fd() int { return r.efd }
 
 // Close unmaps the ring and closes it, its eventfd and its disks. I/O still in flight is abandoned,
-// its buffers quarantined, as the kernel tears the ring down without waiting for it. The file
-// table is unregistered first: the kernel drops it with the ring only later, in a worker, and
-// until then it holds a raw device's O_EXCL claim, which would refuse the next Open.
+// its buffers quarantined, as the kernel tears the ring down without waiting for it. When nothing
+// can be in flight the file table is unregistered first: the kernel drops it with the ring only
+// later, in a worker, and until then it holds a raw device's O_EXCL claim, which would refuse the
+// next Open. Before Linux 6.13 the unregister waits for I/O in flight, which a hung device may
+// never complete.
 func (r *Ring) Close() {
 	r.quarantine()
 	r.ops = nil
-	if r.status.FixedFiles {
+	if r.status.FixedFiles && r.status.Failed == nil && r.inflight == 0 {
 		_ = r.reg(unregFiles, nil, 0)
 	}
 	for _, d := range r.disks {
@@ -238,18 +241,28 @@ type Disk struct {
 }
 
 // Open opens the file or block device at path for the ring; fua makes it a durability: fua disk,
-// whose writes carry FUA and whose flushes submit nothing.
+// whose writes carry FUA and whose flushes submit nothing. A block device is opened O_EXCL, and
+// Open retries for up to openBusyWait while it is busy.
 func (r *Ring) Open(path string, fua bool) (*Disk, error) {
 	var st unix.Stat_t
 	if err := unix.Stat(path, &st); err != nil {
 		return nil, fmt.Errorf("uring: %w", err)
 	}
 	flags := unix.O_RDWR | unix.O_DIRECT | unix.O_CLOEXEC
-	if st.Mode&unix.S_IFMT == unix.S_IFBLK {
-		flags |= unix.O_EXCL
+	if st.Mode&unix.S_IFMT != unix.S_IFBLK {
+		return r.open(path, flags, fua)
 	}
-	return r.open(path, flags, fua)
+	// A killed process's ring keeps the device's O_EXCL claim until the kernel's teardown of the
+	// ring, in a worker and after its in-flight I/O, puts its files; nothing left to wait on.
+	d, err := r.open(path, flags|unix.O_EXCL, fua)
+	for deadline := time.Now().Add(openBusyWait); errors.Is(err, unix.EBUSY) && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+		d, err = r.open(path, flags|unix.O_EXCL, fua)
+	}
+	return d, err
 }
+
+const openBusyWait = 2 * time.Second
 
 func (r *Ring) open(path string, flags int, fua bool) (*Disk, error) {
 	fd, err := unix.Open(path, flags, 0)
@@ -304,8 +317,9 @@ func (d *Disk) Fixed() bool { return d.t.fixed }
 // Execute queues a read, write, flush or trim for the ring's next Submit. An action refused and a
 // flush under fua complete at the ring's next Reap without a submission, and so does every action
 // on a failed ring, with DiskIO; so does a linked flush not right behind a write of its disk queued
-// in this pass, which breaks the action contract. A trim of a device is a discard with the write of its segment header
-// hard-linked behind it, which runs whatever the discard's result and completes the trim.
+// in this pass, which breaks the action contract. A trim of a device is a discard with the write
+// of its segment header hard-linked behind it, which runs whatever the discard's result and
+// completes the trim.
 func (d *Disk) Execute(a *core.Action) {
 	r := d.r
 	last := r.last
@@ -426,10 +440,11 @@ func (r *Ring) enter(n uint32) loop.Enter {
 // requeue moves the entries the kernel did not take back from the submission queue to the head of
 // the queue; the kernel reads the submission queue only inside io_uring_enter, so lowering its
 // tail withdraws them. Whether it took any is read from the submission queue's head, which it moves
-// from start past every entry it consumed, not from the syscall's count, which an error replaces. The kernel stops early when it cannot allocate a request, even inside a link
-// chain, and then runs the chain's part it took alone (io_submit_sqes and io_submit_state_end,
-// Linux 6.12). So when the last entry taken links to the next, the rest of its chain waits at the
-// head of the queue until it completes.
+// from start past every entry it consumed, not from the syscall's count, which an error replaces.
+// The kernel stops early when it cannot allocate a request, even inside a link chain, and then
+// runs the chain's part it took alone (io_submit_sqes and io_submit_state_end, Linux 6.12). So
+// when the last entry taken links to the next, the rest of its chain waits at the head of the
+// queue until it completes.
 func (r *Ring) requeue(start uint32) {
 	head, tail := atomic.LoadUint32(r.sqHead), *r.sqTail
 	left := tail - head
