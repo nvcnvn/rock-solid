@@ -469,7 +469,9 @@ func (l *Loop) Pass() {
 		if id == disklog.TrimTimer && len(l.logs) > 0 {
 			l.record(trace.EventRecord(&l.ev, l.cfg.MsgType))
 			for _, lg := range l.logs {
-				lg.onDisk(&l.ev)
+				if lg.log != nil {
+					lg.onDisk(&l.ev)
+				}
 			}
 			continue
 		}

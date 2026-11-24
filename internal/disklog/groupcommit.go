@@ -445,17 +445,25 @@ type lane struct {
 	opened uint64
 }
 
+// staleFlush is the flush of a round that a later flush retired, still in flight since at.
+type staleFlush struct {
+	io core.IOID
+	at core.Tick
+}
+
 type round struct {
-	lsn          uint64
-	writeIO      core.IOID
-	flushIO      core.IOID
-	writeDone    bool
-	recordDone   bool
-	hasSlot      bool
-	slotIO       core.IOID
-	slotDone     bool
-	slotVec      []core.IOVec
-	flushSent    bool
+	lsn        uint64
+	writeIO    core.IOID
+	flushIO    core.IOID
+	writeDone  bool
+	recordDone bool
+	hasSlot    bool
+	slotIO     core.IOID
+	slotDone   bool
+	slotVec    []core.IOVec
+	flushSent  bool
+	// at is when the round issued the oldest of its writes and flush not yet complete.
+	at           core.Tick
 	abandoned    bool
 	segment      uint32
 	block        uint32
@@ -542,6 +550,7 @@ type Log struct {
 	phase      formatPhase
 	formatIO   core.IOID
 	formatSync core.IOID
+	formatAt   core.Tick
 	formatLeft uint32
 	formatNext uint32
 
@@ -576,7 +585,7 @@ type Log struct {
 	rounds []round
 	first  int
 	count  int
-	stale  []core.IOID
+	stale  []staleFlush
 
 	err         error
 	manifest    ManifestPos
@@ -606,6 +615,7 @@ func Format(ctx *core.Context, cfg Config, sb Superblock, firstIO core.IOID, out
 	if err != nil {
 		return nil, err
 	}
+	l.now = ctx.Now
 	if _, err := AppendSuperblock(ctx.Pool.Bytes(l.rounds[0].head)[:0], sb); err != nil {
 		l.release(ctx)
 		return nil, err
@@ -761,7 +771,7 @@ func (l *Log) io() core.IOID {
 }
 
 func (l *Log) writeFormat(buf core.IOBuf, lba core.LBA, out *Output) {
-	l.formatIO, l.formatSync = l.io(), l.io()
+	l.formatIO, l.formatSync, l.formatAt = l.io(), l.io(), l.now
 	r := &l.rounds[0]
 	r.vec = append(r.vec[:0], core.IOVec{Buf: buf, Len: core.BlockSize})
 	out.Actions = append(out.Actions,
@@ -813,6 +823,26 @@ func (l *Log) ReplayBytes() uint64 { return l.replayBytes }
 
 // InFlight is the number of rounds written but not yet durable.
 func (l *Log) InFlight() int { return l.count }
+
+// Oldest is the age at now of the oldest write or flush the log issued that has not completed, 0
+// if none; trims and the header writes that stand for a slot's trim are left out.
+func (l *Log) Oldest(now core.Tick) core.Tick {
+	at, ok := l.formatAt, l.phase != formatDone && l.phase != formatTrim
+	for i := range l.count {
+		if r := l.round(i); !ok || r.at < at {
+			at, ok = r.at, true
+		}
+	}
+	for _, f := range l.stale {
+		if !ok || f.at < at {
+			at, ok = f.at, true
+		}
+	}
+	if !ok {
+		return 0
+	}
+	return now - min(at, now)
+}
 
 // CommitDepth is commit_depth, the most rounds in flight at once.
 func (l *Log) CommitDepth() int { return len(l.rounds) }
@@ -1316,7 +1346,7 @@ func (l *Log) diskDone(ctx *core.Context, io core.IOID, derr core.DiskError, out
 			}
 			for range i {
 				if l.round(0).flushSent {
-					l.stale = append(l.stale, l.round(0).flushIO)
+					l.stale = append(l.stale, staleFlush{l.round(0).flushIO, l.round(0).at})
 				}
 				l.retire(out)
 			}
@@ -1325,10 +1355,13 @@ func (l *Log) diskDone(ctx *core.Context, io core.IOID, derr core.DiskError, out
 			return
 		}
 	}
-	if j := slices.Index(l.stale, io); j >= 0 {
-		l.stale = slices.Delete(l.stale, j, j+1)
-		if derr != core.DiskOK && l.err == nil {
-			l.fail(ctx, derr, out)
+	for j, f := range l.stale {
+		if f.io == io {
+			l.stale = slices.Delete(l.stale, j, j+1)
+			if derr != core.DiskOK && l.err == nil {
+				l.fail(ctx, derr, out)
+			}
+			return
 		}
 	}
 }
@@ -1347,7 +1380,7 @@ func (l *Log) formatDone(ctx *core.Context, io core.IOID, derr core.DiskError, o
 			l.trimNextSegment(out)
 		}
 		if l.formatLeft--; l.formatLeft == 0 {
-			l.phase, l.formatSync = formatFlush, l.io()
+			l.phase, l.formatSync, l.formatAt = formatFlush, l.io(), l.now
 			out.Actions = append(out.Actions, core.Action{Kind: core.ActDiskFsync, IO: l.formatSync})
 		}
 		return
@@ -1412,7 +1445,7 @@ func (l *Log) sendFlushes(out *Output) {
 			return
 		}
 		if !r.flushSent {
-			r.flushSent = true
+			r.flushSent, r.at = true, l.now
 			out.Actions = append(out.Actions, core.Action{Kind: core.ActDiskFsync, IO: r.flushIO})
 		}
 	}
@@ -1832,6 +1865,7 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 		hasSlot:      hasSlot,
 		slotVec:      r.slotVec,
 		flushSent:    l.earlierWritten() && !hasSlot,
+		at:           ctx.Now,
 		segment:      t.segment,
 		block:        t.offset,
 		headerBlocks: lay.HeaderBlocks,

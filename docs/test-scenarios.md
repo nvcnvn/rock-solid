@@ -6090,6 +6090,7 @@ detector marks the disks, and the row reads each mark from the committed disk re
 | A heartbeat at 14.9 s | Not marked; the 5 s count restarts from 14.9 s |
 | A primary reports member M after waiting 1 s; the direct probe answers that M's log failed | M is marked down at once, not after 5 s; a second report while the probe is out sends no second probe |
 | The same report; M's node and loop are up, but a write M's disk took 1.2 s ago has not completed | The probe answers from memory with age 1.2 s; M is marked down at once |
+| The disk's oldest unfinished I/O is one of its log's format writes or flushes, or a flush whose round a later flush already made durable | The log ages it like a round's write, so the probe reports it (`disklog` `TestOldestAgesEveryFormatWriteAndFlush`, `TestOldestAgesAFlushALaterFlushRetired`) |
 | The same report, and the answer names another log | M is marked down |
 | The same report, and M's loop does not answer within 1 s | M is marked down 1 s after the probe, as silent: it is marked up at its next normal heartbeat |
 | The same report reaches a new leader before M's first heartbeat to it | No probe: M's heartbeat, due within a second, stands for it, and a healthy one leaves M up |
@@ -8625,7 +8626,14 @@ Hand-off, with 1, 2, 4 and 8 producer loops (`TestRoundsHandOffOncePerRoundAndFl
   log records; an owner machine that is not one panics on a log event the driver did not submit
   (`TestRoundOwnerMachineKeepsItsDiskAndLogEvents`). Two logs on one loop, fed from it and another
   loop, each get only their own completions and every proposal becomes durable; overlapping IO ranges
-  are refused (`TestRoundSeveralLogsOnOneLoop`).
+  are refused (`TestRoundSeveralLogsOnOneLoop`). While a loop serves no log, as while its disk
+  recovers, a completion in the log's range reaches the machine; once it serves the log the machine
+  recovered, the machine's record comes back as the log's `Durable` and a nil event follows each
+  completion, and its earlier read is not handed over again (`TestALoopServesTheLogItsMachineRecovered`).
+  A shard marked while no log is served stays marked and is collected once the log is served
+  (`TestAMarkedShardWaitsWhileNoLogIsServed`). A storage node's device on a blank disk formats it on
+  its loop and reports it opened, though the format ends with no log event, only the nil after its
+  last completion (`TestADeviceOnALoopReportsTheDiskItFormattedOpened`).
 - A marked shard whose `Ready` adds nothing is not told anything durable
   (`TestRoundShardWithNothingReadyIsToldNothing`). A `Keep` buffer bound for another loop's disk
   panics, and one whose submit fails is not freed (`TestRoundKeptBuffers`).
@@ -8688,15 +8696,19 @@ once.
 
 - One suite, `internal/chunkstore/storetest`, written once against its `Disk` interface (queue an
   action, wait for completions, restart the process over the same disk) and run unchanged on the
-  simulated disk (`storetest`'s own tests) and on io_uring over a 256 MiB file-backed disk
-  (`internal/driver/uring`, Linux, in Docker with `--security-opt seccomp=unconfined`); the driver
-  is the suite's only parameter. Done-when checkpoint: the same suite later passes on SPDK (phase 9).
+  simulated disk (`storetest`'s own tests), on io_uring over a 256 MiB file-backed disk
+  (`internal/driver/uring`, Linux, in Docker with `--security-opt seccomp=unconfined`), and on a
+  stepped loop that owns the store's log; the driver is the suite's only parameter. Done-when
+  checkpoint: the same suite later passes on SPDK (phase 9).
 - The suite drives the store directly, queueing its actions as a loop's pass does and handing it
-  every completion, with merges and cleaner jobs run inline; it does not step a loop on `looptest`,
-  since the store is not a loop machine yet and the loop's disk path has its own tests (the io_uring
-  driver's rig, the round driver's stepped runs). io_uring submits the queue in one batch; the
-  simulated disk runs one queued action per completion, so a crash can fall between a round's write
-  and its fsync. Results are checked against a byte-range model of the acknowledged changes and the
+  every completion, with merges and cleaner jobs run inline. io_uring submits the queue in one
+  batch; the simulated disk runs one queued action per completion, so a crash can fall between a
+  round's write and its fsync. On the loop (`TestSuiteOnALoopThatOwnsTheLog` and, over 4 seeds,
+  `TestFaultsOnALoopThatOwnsTheLog`, in `internal/loop/looptest`), a `storetest.Host` disk, the
+  loop attaches the log before the store opens it, serves each log the store opens or formats, hands
+  the log its completions and TRIM timer and the store the log's events through `Store.OnLog`; each
+  case fails if no log event came through the loop, or if the store reports an unfinished I/O with
+  nothing in flight. Results are checked against a byte-range model of the acknowledged changes and the
   order of the replies, never against traces.
 - The store runs the single-node configuration, every check on and no merged-block cache: the cache
   (`MergeCache`) is a replica primary's, and the replica tests cover it.

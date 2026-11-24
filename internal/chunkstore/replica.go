@@ -1124,6 +1124,13 @@ func (r *Replica) OnEvent(ctx *core.Context, ev *core.Event, out *ReplicaOutput)
 	r.drain(ctx, out)
 }
 
+// OnLog takes an event of the store's log, or the nil that follows each disk completion, from the
+// loop that owns the log.
+func (r *Replica) OnLog(ctx *core.Context, ev *disklog.Event, out *ReplicaOutput) {
+	r.st.OnLog(ctx, ev, &r.sout)
+	r.drain(ctx, out)
+}
+
 func (r *Replica) recv(ctx *core.Context, ev *core.Event, out *ReplicaOutput) {
 	frame, data := Frame(ctx.Pool, &ev.Msg)
 	buf := ev.Msg.Buf

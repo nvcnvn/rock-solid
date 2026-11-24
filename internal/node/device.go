@@ -128,6 +128,20 @@ func (d *Device) OnEvent(ctx *core.Context, ev *core.Event, out *DeviceOutput) {
 	d.settle(ctx, nil, out)
 }
 
+// OnLog takes an event of the store's log, or the nil that follows each disk completion, from the
+// loop that owns the log.
+func (d *Device) OnLog(ctx *core.Context, ev *disklog.Event, out *DeviceOutput) {
+	switch {
+	case d.rep != nil:
+		d.rep.OnLog(ctx, ev, &d.rout)
+		d.take(ctx, out)
+		return
+	case d.st != nil:
+		d.st.OnLog(ctx, ev, &d.sout)
+	}
+	d.settle(ctx, nil, out)
+}
+
 // settle moves the start on once recovery or the format ends: an open store serves, StartDevice
 // says to format or fail one that did not recover, and a format that does not serve has failed.
 func (d *Device) settle(ctx *core.Context, err error, out *DeviceOutput) {

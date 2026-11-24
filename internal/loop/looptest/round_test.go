@@ -545,6 +545,25 @@ func newInstantRig(tb testing.TB, shards int) (round func()) {
 	}
 }
 
+func TestAMarkedShardWaitsWhileNoLogIsServed(t *testing.T) {
+	in := newInstant(t, &proposer{})
+	s := &stub{l: in.l, pool: in.pool, kind: 99}
+	s.id = in.l.AddShard(s, in.lg)
+	in.lg.Serve(nil)
+	s.propose(0)
+	in.l.Pass()
+	if s.readies != 0 || s.durable != 0 {
+		t.Fatalf("with no log served the shard gave %d readies, %d durable", s.readies, s.durable)
+	}
+	in.lg.Serve(in.log)
+	for i := 0; s.durable == 0; i++ {
+		if i == 10 {
+			t.Fatal("the shard's proposal took more than 10 passes once the log was served")
+		}
+		in.l.Pass()
+	}
+}
+
 func TestRoundAllocatesNothing(t *testing.T) {
 	if raceEnabled {
 		t.Skip("the race detector's runtime allocates in a round")
@@ -809,7 +828,7 @@ func (m *diskUser) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action)
 type logUser struct{ *diskUser }
 
 func (m logUser) OnLog(ctx *core.Context, lg *loop.Log, ev *disklog.Event, out []core.Action) []core.Action {
-	if ev.Kind == disklog.Durable && slices.Contains(ev.Tickets, m.ticket) {
+	if ev != nil && ev.Kind == disklog.Durable && slices.Contains(ev.Tickets, m.ticket) {
 		m.durable++
 	}
 	return out

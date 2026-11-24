@@ -43,6 +43,10 @@ const (
 	fetchIOBit          = 1 << 63
 )
 
+// FirstLogIO and EndLogIO bound the IO IDs of the store's log and its recoveries, from every
+// open, format and rebuild.
+const FirstLogIO, EndLogIO core.IOID = 1 << 40, cleanIOBit
+
 // Config is a store's settings.
 type Config struct {
 	// Log is the disk log's group commit settings.
@@ -1703,6 +1707,17 @@ func (s *Store) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
 	s.pump(ctx, out)
 }
 
+// OnLog takes an event of the store's log from the loop that owns the log and hands it the log's
+// disk completions and TRIM timer, which OnEvent then never sees; a nil ev follows each of them,
+// and the store acts on the events of one completion only at that nil, as when it drives its log.
+func (s *Store) OnLog(ctx *core.Context, ev *disklog.Event, out *Output) {
+	if ev != nil {
+		s.logEvent(ctx, ev, out)
+		return
+	}
+	s.pump(ctx, out)
+}
+
 func (s *Store) fetchDone(ctx *core.Context, fi int32, derr core.DiskError, out *Output) {
 	f := &s.fetches[fi]
 	if derr != core.DiskOK && f.err == nil {
@@ -1829,7 +1844,7 @@ func (s *Store) pump(ctx *core.Context, out *Output) {
 		}
 	}
 	for i := range s.lout.Actions {
-		if a := &s.lout.Actions[i]; a.Kind == core.ActDiskRead || a.Kind == core.ActDiskWrite || a.Kind == core.ActDiskFsync {
+		if a := &s.lout.Actions[i]; (a.Kind == core.ActDiskRead || a.Kind == core.ActDiskWrite || a.Kind == core.ActDiskFsync) && (s.log == nil || a.IO >= EndLogIO) {
 			s.issued = append(s.issued, issuedIO{a.IO, ctx.Now})
 		}
 	}
@@ -1842,12 +1857,16 @@ type issuedIO struct {
 	at core.Tick
 }
 
-// Oldest is the age at now of the oldest disk read, write or flush the store issued that has not completed, 0 if none; trims are left out.
+// Oldest is the age at now of the oldest disk read, write or flush the store or its log issued that has not completed, 0 if none; trims are left out.
 func (s *Store) Oldest(now core.Tick) core.Tick {
-	if len(s.issued) == 0 {
-		return 0
+	var age core.Tick
+	if len(s.issued) > 0 {
+		age = now - min(s.issued[0].at, now)
 	}
-	return now - min(s.issued[0].at, now)
+	if s.log != nil {
+		age = max(age, s.log.Oldest(now))
+	}
+	return age
 }
 
 func (s *Store) completed(io core.IOID) {

@@ -30,6 +30,16 @@ type Disk interface {
 	Restart()
 }
 
+// Host is a Disk whose completions a loop that owns the store's log hands the store, through the
+// Rig's OnEvent and OnLog, as a storage node's device loop does.
+type Host interface {
+	Disk
+	// Serve hands the loop the store's log, nil while it recovers, after each call into the store.
+	Serve(log *disklog.Log)
+	// Step runs the loop until it handed r's store something; it reports false with nothing to do.
+	Step(r *Rig) bool
+}
+
 // DiskBytes is the size of the disk each case runs on.
 const DiskBytes = 256 << 20
 
@@ -142,6 +152,9 @@ func (r *Rig) Pool() core.BufPool { return r.ctx.Pool }
 
 // take executes the store's actions and books its replies.
 func (r *Rig) take() {
+	if h, ok := r.D.(Host); ok {
+		h.Serve(r.S.Log())
+	}
 	for i := range r.out.Actions {
 		a := &r.out.Actions[i]
 		switch a.Kind {
@@ -187,6 +200,9 @@ func (r *Rig) take() {
 // Step waits for the disk's next completions and hands them to the store; it reports false with
 // nothing in flight.
 func (r *Rig) Step() bool {
+	if h, ok := r.D.(Host); ok {
+		return h.Step(r)
+	}
 	if r.inflight == 0 {
 		return false
 	}
@@ -197,6 +213,20 @@ func (r *Rig) Step() bool {
 		r.take()
 	}
 	return true
+}
+
+// OnEvent hands the store a disk completion or timer from a Host's loop, on that loop's clocks.
+func (r *Rig) OnEvent(ctx *core.Context, ev *core.Event) {
+	r.ctx.Now, r.ctx.Raw = ctx.Now, ctx.Raw
+	r.S.OnEvent(&r.ctx, ev, &r.out)
+	r.take()
+}
+
+// OnLog hands the store an event of its log from a Host's loop, on that loop's clocks.
+func (r *Rig) OnLog(ctx *core.Context, ev *disklog.Event) {
+	r.ctx.Now, r.ctx.Raw = ctx.Now, ctx.Raw
+	r.S.OnLog(&r.ctx, ev, &r.out)
+	r.take()
 }
 
 // Settle runs the disk until nothing is in flight.

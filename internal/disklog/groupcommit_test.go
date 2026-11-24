@@ -419,6 +419,42 @@ func TestAnErrorOnALaterFlushFailsTheLog(t *testing.T) {
 	h.close()
 }
 
+func TestOldestAgesAFlushALaterFlushRetired(t *testing.T) {
+	cfg := testConfig(0)
+	cfg.CommitDepth = 2
+	h := formatted(t, gib, cfg)
+	h.submit(disklog.Hot, h.write(0, 1, 1))
+	h.submit(disklog.Cold, h.write(1, 1, 2))
+	h.step(0)
+	h.step(1)
+	h.step(1)
+	if h.log.InFlight() != 0 || len(h.pending) != 1 {
+		t.Fatalf("in flight %d, pending %+v", h.log.InFlight(), h.pending)
+	}
+	if age := h.log.Oldest(h.ctx.Now + 5_000_000); age < 5_000_000 {
+		t.Fatalf("a flush in flight is %d old", age)
+	}
+	h.step(0)
+	if age := h.log.Oldest(h.ctx.Now + 5_000_000); age != 0 {
+		t.Fatalf("no I/O in flight is %d old", age)
+	}
+	h.close()
+}
+
+func TestOldestAgesEveryFormatWriteAndFlush(t *testing.T) {
+	h := newHarness(t, gib, 64<<20, testConfig(0))
+	for len(h.pending) > 0 {
+		trimsOnly := !slices.ContainsFunc(h.pending, func(p pendingIO) bool { return p.act.Kind != core.ActDiskTrim })
+		if age := h.log.Oldest(h.ctx.Now + 5_000_000); (age >= 5_000_000) == trimsOnly {
+			t.Fatalf("%d actions pending, trims only %v: %d old", len(h.pending), trimsOnly, age)
+		}
+		h.step(0)
+	}
+	if age := h.log.Oldest(h.ctx.Now + 5_000_000); age != 0 {
+		t.Fatalf("a formatted log is %d old", age)
+	}
+}
+
 func TestAFullPoolNeverStallsARound(t *testing.T) {
 	const own = 64 + 63
 	h := newHarness(t, gib, (own+8)*core.BlockSize, testConfig(0))

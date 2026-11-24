@@ -54,7 +54,9 @@ type ShardID uint32
 // LogMachine is an owner loop's machine that calls into its logs besides the round driver, as a
 // chunk store's reads, a checkpoint or the cleaner do: it gets every event of each log the loop
 // owns once the round driver has counted its own tickets, and ignores the tickets it did not
-// submit.
+// submit; after each disk completion or trim timer a log takes, and after the events of any
+// other call into it, it gets a nil ev, as a machine that drives its log itself looks at it after
+// every call.
 type LogMachine interface {
 	OnLog(ctx *core.Context, lg *Log, ev *disklog.Event, out []core.Action) []core.Action
 }
@@ -137,8 +139,9 @@ type shard struct {
 }
 
 // AttachLog makes l the owner of log, a formatted or recovered log on its disk ring whose IO IDs
-// run from firstIO up to endIO, which loops of IDs 0 to loops-1 hand records to. The log gets the
-// disk completions of its IO IDs and the trim timer; the loop's machine gets the rest. It runs
+// run from firstIO up to endIO, which loops of IDs 0 to loops-1 hand records to; log is nil while
+// the disk recovers, until Serve. The log gets the disk completions of its IO IDs and the trim
+// timer; the loop's machine gets the rest, and every completion while there is no log. It runs
 // before the loops start. The logs of a loop share the trim timer, and every log takes each firing
 // and arms it again, so a log's paced TRIM may wait for the time another log armed it to.
 func (l *Loop) AttachLog(log *disklog.Log, firstIO, endIO core.IOID, loops int) *Log {
@@ -153,10 +156,23 @@ func (l *Loop) AttachLog(log *disklog.Log, firstIO, endIO core.IOID, loops int) 
 	return lg
 }
 
-// logOf is the log whose IO IDs hold io, or nil.
+// Serve makes log, or nil while the disk recovers again, the disk's log from now on, as the
+// machine that recovers it says; it runs on lg's owner, with no batch in flight. While no log is
+// served, marked shards stay marked and send nothing.
+func (lg *Log) Serve(log *disklog.Log) {
+	if len(lg.batches) > 0 {
+		panic(fmt.Sprintf("loop: disk %d's log changed with batches in flight", lg.disk))
+	}
+	lg.log = log
+}
+
+// Log is the disk's log, nil while it recovers.
+func (lg *Log) Log() *disklog.Log { return lg.log }
+
+// logOf is the served log whose IO IDs hold io, or nil.
 func (l *Loop) logOf(io core.IOID) *Log {
 	for _, lg := range l.logs {
-		if io >= lg.ios[0] && io < lg.ios[1] {
+		if lg.log != nil && io >= lg.ios[0] && io < lg.ios[1] {
 			return lg
 		}
 	}
@@ -235,10 +251,10 @@ func (l *Loop) collect(h *handoff, s *slot) {
 	h.marked = h.marked[:copy(h.marked, h.marked[n:])]
 }
 
-// sendable reports whether h may send a batch now: shards are marked, a slot is free, and the
-// owner has taken h's last batch into a round.
+// sendable reports whether h may send a batch now: its disk serves a log, shards are marked, a
+// slot is free, and the owner has taken h's last batch into a round.
 func (h *handoff) sendable() bool {
-	return len(h.marked) > 0 && h.sent-h.noticed < uint64(len(h.slots)) && h.taken.Load() == h.sent
+	return h.lg.log != nil && len(h.marked) > 0 && h.sent-h.noticed < uint64(len(h.slots)) && h.taken.Load() == h.sent
 }
 
 // wait asks the owner to wake h's loop when it takes h's last batch into a round, if shards wait
@@ -278,8 +294,10 @@ func (l *Loop) endRounds() {
 				}
 			}
 		}
-		lg.log.Release(&l.ctx, &lg.out)
-		lg.drain()
+		if lg.log != nil {
+			lg.log.Release(&l.ctx, &lg.out)
+		}
+		lg.drain(false)
 	}
 }
 
@@ -373,8 +391,12 @@ func (lg *Log) bury(refs []disklog.BlobRef) {
 }
 
 // takeQueued takes the queued batches in order until one finds the owner's pool full; that one
-// and those behind it wait for a later pass, as the owner's buffers free when rounds complete.
+// and those behind it wait for a later pass, as the owner's buffers free when rounds complete, or
+// for a log to serve.
 func (lg *Log) takeQueued() {
+	if lg.log == nil {
+		return
+	}
 	n := 0
 	for n < len(lg.queued) && lg.take(lg.queued[n]) {
 		n++
@@ -456,15 +478,17 @@ func (lg *Log) copyIn(h *handoff) bool {
 
 // onDisk hands the log a disk completion or its trim timer.
 func (lg *Log) onDisk(ev *core.Event) {
-	lg.log.OnEvent(&lg.owner.ctx, ev, &lg.out)
-	lg.drain()
+	l := lg.owner
+	lg.log.OnEvent(&l.ctx, ev, &lg.out)
+	lg.drain(true)
 }
 
 // drain executes the log's actions, counts its outcomes against the batches they hold, hands
 // every event to the loop's machine if it is a LogMachine, and reports the batches taken and
-// durable. An event the round driver does not consume, with no LogMachine to take it, is a broken
+// durable; then it hands a LogMachine a nil event after a completion or trim timer, or any event.
+// An event the round driver does not consume, with no LogMachine to take it, is a broken
 // invariant: something calls the log with nothing to hear its answer.
-func (lg *Log) drain() {
+func (lg *Log) drain(completion bool) {
 	l := lg.owner
 	l.out = append(l.out[:0], lg.out.Actions...)
 	l.execute()
@@ -478,8 +502,13 @@ func (lg *Log) drain() {
 			l.execute()
 		}
 	}
+	completion = completion || len(lg.out.Events) > 0
 	lg.out.Reset()
 	lg.progress()
+	if lg.lm != nil && completion {
+		l.out = lg.lm.OnLog(&l.ctx, lg, nil, l.out[:0])
+		l.execute()
+	}
 }
 
 // count counts the outcome of ev against the batches holding its tickets, and reports whether
@@ -517,8 +546,7 @@ func (lg *Log) count(ev *disklog.Event) bool {
 // resolved, in order, as durable, then wakes each loop told something once.
 func (lg *Log) progress() {
 	l := lg.owner
-	start := lg.log.Unstarted()
-	for ; lg.taken < len(lg.batches) && (lg.batches[lg.taken].end == 0 || lg.batches[lg.taken].first < start); lg.taken++ {
+	for ; lg.taken < len(lg.batches) && (lg.batches[lg.taken].end == 0 || lg.batches[lg.taken].first < lg.log.Unstarted()); lg.taken++ {
 		b := &lg.batches[lg.taken]
 		b.h.taken.Store(b.seq + 1)
 		if b.h.waiting.Swap(false) {

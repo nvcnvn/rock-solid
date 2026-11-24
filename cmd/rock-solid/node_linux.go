@@ -115,6 +115,7 @@ func (p *storageNode) add(dm *deviceMachine, path string) error {
 		if err := nl.l.AttachDisk(nl.ring); err != nil {
 			return err
 		}
+		dm.lg = nl.l.AttachLog(nil, chunkstore.FirstLogIO, chunkstore.EndLogIO, len(p.cfg.Devices)+1)
 	}
 	lfd, _, err := tcp.ListenTCP(netip.AddrPortFrom(p.cfg.Listen.Addr(), p.cfg.Listen.Port()+uint16(id)))
 	if err != nil {
@@ -216,11 +217,13 @@ func (m *nodeMachine) take(ctx *core.Context, device uint64, o *node.DeviceOutpu
 }
 
 // deviceMachine runs one device's node.Device on its loop and mails the node's loop what it
-// outputs for the node.
+// outputs for the node. Its loop owns the store's log, served to the loop whenever the store opens,
+// formats or rebuilds one.
 type deviceMachine struct {
 	p   *storageNode
 	cfg node.DeviceConfig
 	d   *node.Device
+	lg  *loop.Log
 	out node.DeviceOutput
 }
 
@@ -232,6 +235,26 @@ func (m *deviceMachine) OnEvent(ctx *core.Context, ev *core.Event, acts []core.A
 	m.p.loops[m.cfg.Loop].mail.run(ctx)
 	if !wake(ev) {
 		m.d.OnEvent(ctx, ev, &m.out)
+	}
+	return m.done(acts)
+}
+
+func (m *deviceMachine) OnLog(ctx *core.Context, _ *loop.Log, ev *disklog.Event, acts []core.Action) []core.Action {
+	m.out.Reset()
+	m.d.OnLog(ctx, ev, &m.out)
+	return m.done(acts)
+}
+
+// done serves the loop the store's log and hands on what the device output.
+func (m *deviceMachine) done(acts []core.Action) []core.Action {
+	if m.lg != nil {
+		var log *disklog.Log
+		if st := m.d.Store(); st != nil {
+			log = st.Log()
+		}
+		if m.lg.Log() != log {
+			m.lg.Serve(log)
+		}
 	}
 	if o, ok := m.out.Clone(); ok {
 		m.p.loops[0].mail.post(func(ctx *core.Context) { m.p.nm.take(ctx, m.cfg.Device, &o) })
