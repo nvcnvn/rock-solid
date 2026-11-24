@@ -31,6 +31,8 @@ const attemptWait = 5 * time.Second
 
 const adminUsage = `usage:
   rock-solid disk lost <disk> -ctl node=host:port,...      declare a down disk lost for good
+  rock-solid disk drain <disk> -ctl node=host:port,...     move every PG member off a disk
+  rock-solid disk undrain <disk> -ctl node=host:port,...   end a disk's drain
   rock-solid disk remove <disk> -ctl node=host:port,...    remove a drained disk
   rock-solid disk failed -ctl node=host:port,...           list the devices nodes left failed at start
   rock-solid pool <pool> -ctl node=host:port,... [settings] create or change a pool
@@ -79,6 +81,10 @@ func printDone(stdout io.Writer, a *meta.Admin, an *meta.AdminAnswer) {
 		_, _ = fmt.Fprintf(stdout, "disk %d declared lost\n", a.Disk)
 	case meta.AdminRemove:
 		_, _ = fmt.Fprintf(stdout, "disk %d removed\n", a.Disk)
+	case meta.AdminDrain:
+		_, _ = fmt.Fprintf(stdout, "disk %d draining\n", a.Disk)
+	case meta.AdminUndrain:
+		_, _ = fmt.Fprintf(stdout, "disk %d no longer draining\n", a.Disk)
 	case meta.AdminPool:
 		_, _ = fmt.Fprintf(stdout, "pool %d set\n", a.Pool)
 	case meta.AdminGiveUp:
@@ -107,7 +113,7 @@ func printDone(stdout io.Writer, a *meta.Admin, an *meta.AdminAnswer) {
 	}
 }
 
-// parseAdmin parses `disk lost|remove <disk>`, `disk failed`, `pool <pool> [settings]` or `pg give-up <pool> <pg>` with the
+// parseAdmin parses `disk lost|remove|drain|undrain <disk>`, `disk failed`, `pool <pool> [settings]` or `pg give-up <pool> <pg>` with the
 // flags that say where the command goes, before or after the positional arguments.
 func parseAdmin(args []string) (meta.Admin, adminConfig, error) {
 	var a meta.Admin
@@ -135,11 +141,8 @@ func parseAdmin(args []string) (meta.Admin, adminConfig, error) {
 		return uint32(n), nil
 	}
 	switch {
-	case len(pos) == 3 && pos[0] == "disk" && (pos[1] == "lost" || pos[1] == "remove") && !pooled:
-		a.Op = meta.AdminLost
-		if pos[1] == "remove" {
-			a.Op = meta.AdminRemove
-		}
+	case len(pos) == 3 && pos[0] == "disk" && diskOps[pos[1]] != 0 && !pooled:
+		a.Op = diskOps[pos[1]]
 		a.Disk, err = number(pos[2])
 	case len(pos) == 2 && pos[0] == "disk" && pos[1] == "failed" && !pooled:
 		a.Op = meta.AdminFailed
@@ -169,6 +172,9 @@ func parseAdmin(args []string) (meta.Admin, adminConfig, error) {
 	}
 	return a, cfg, err
 }
+
+// diskOps are the commands on one disk, by name.
+var diskOps = map[string]meta.AdminOp{"lost": meta.AdminLost, "remove": meta.AdminRemove, "drain": meta.AdminDrain, "undrain": meta.AdminUndrain}
 
 // parseMixed parses fs over args, whose positional arguments may come before, between or after the
 // flags, and returns the positional ones.

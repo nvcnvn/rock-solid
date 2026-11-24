@@ -477,8 +477,11 @@ func (c *Control) exit(x diskExit) error {
 		return nil
 	}
 	if x.remove {
-		if !c.disks[x.id-1].Drain || names(&c.table, x.id, true) {
+		if !c.disks[x.id-1].Drain {
 			return ErrNotDrained
+		}
+		if n := naming(&c.table, x.id, true); n > 0 {
+			return fmt.Errorf("%w: %d PGs still name it", ErrNotDrained, n)
 		}
 		return c.rec.Remove(x.id)
 	}
@@ -491,20 +494,22 @@ func (c *Control) exit(x diskExit) error {
 // names reports whether a PG of t names disk id: with past, as a member or in
 // an interval since its last activated one; without, as a member of its current interval not marked
 // down, which the epoch model's Lost needs.
-func names(t *chunkstore.Table, id uint32, past bool) bool {
+func names(t *chunkstore.Table, id uint32, past bool) bool { return naming(t, id, past) > 0 }
+
+// naming counts the PGs of t that name disk id, as names does.
+func naming(t *chunkstore.Table, id uint32, past bool) int {
+	n := 0
 	for _, pt := range t.Pools {
 		for _, e := range pt.PGs {
-			if slices.ContainsFunc(e.Members, func(m chunkstore.Member) bool { return m.Disk == id && (past || m.Mark != chunkstore.MarkDown) }) {
-				return true
-			}
-			if past && slices.ContainsFunc(e.Past, func(p chunkstore.PastInterval) bool {
-				return slices.ContainsFunc(p.Members, func(m chunkstore.Member) bool { return m.Disk == id })
-			}) {
-				return true
+			if slices.ContainsFunc(e.Members, func(m chunkstore.Member) bool { return m.Disk == id && (past || m.Mark != chunkstore.MarkDown) }) ||
+				past && slices.ContainsFunc(e.Past, func(p chunkstore.PastInterval) bool {
+					return slices.ContainsFunc(p.Members, func(m chunkstore.Member) bool { return m.Disk == id })
+				}) {
+				n++
 			}
 		}
 	}
-	return false
+	return n
 }
 
 // reapply applies again each staged declaration and removal, which a reload of the record drops,
@@ -606,16 +611,18 @@ func (c *Control) diskView(live []chunkstore.RecordedDisk, now core.Tick) []Disk
 	return v
 }
 
-// poolDisks is each disk of in, with its capacity figures, that the record knows, whose log is
-// not gone and whose node is not role meta, at the node, class, mark and drain the record gives it.
+// poolDisks is each disk of in, with its capacity figures, that the record knows and whose log is
+// not gone, at the node, class, mark and drain the record gives it, draining too on a node of role
+// meta, since leaving the pool would drop its members at once.
 func (c *Control) poolDisks(in []chunkstore.Disk) []chunkstore.Disk {
 	ds := c.rec.Disks()
 	var out []chunkstore.Disk
 	for _, d := range in {
-		if d.ID == 0 || int(d.ID) > len(ds) || ds[d.ID-1].Gone || slices.ContainsFunc(c.nodes, func(n nodeState) bool { return n.id == ds[d.ID-1].Node && n.only }) {
+		if d.ID == 0 || int(d.ID) > len(ds) || ds[d.ID-1].Gone {
 			continue
 		}
-		d.Node, d.Class, d.Drain = ds[d.ID-1].Node, ds[d.ID-1].Class, slices.Contains(c.drains, d.ID)
+		only := slices.ContainsFunc(c.nodes, func(n nodeState) bool { return n.id == ds[d.ID-1].Node && n.only })
+		d.Node, d.Class, d.Drain = ds[d.ID-1].Node, ds[d.ID-1].Class, only || slices.Contains(c.drains, d.ID)
 		d.Mark, d.DownSince = c.det.Mark(d.ID)
 		out = append(out, d)
 	}

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"math/rand/v2"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -19,8 +20,10 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/meta"
+	"github.com/nvcnvn/rock-solid/internal/node"
 )
 
 // minHeap is the least GOMEMLIMIT a budget sets: at 0 the collector would run back to back.
@@ -109,6 +112,20 @@ type nodeConfig struct {
 	Pool    uint32
 	// Memory is the daemon's memory budget in MiB, 0 for none.
 	Memory int64
+	// MetaOnly is role meta: the node holds metadata and no PG member.
+	MetaOnly bool
+}
+
+// release is the format level this build's nodes report.
+const release = 1
+
+// machine is the configuration of cfg's node machine.
+func (cfg nodeConfig) machine() node.Config {
+	nc := node.Config{Node: cfg.Node, Release: release, Group: cfg.Group, Seed: rand.Uint64(), MetaOnly: cfg.MetaOnly}
+	for _, v := range cfg.Ctls {
+		nc.Ctls = append(nc.Ctls, core.NodeID{Node: v.Node})
+	}
+	return nc
 }
 
 // daemon is a process's loops, run until Stop.
@@ -260,9 +277,14 @@ func parseNode(args []string) (nodeConfig, error) {
 	fs.StringVar(&cfg.Class, "class", "ssd", "the class of the node's devices")
 	pool := fs.Uint("pool", 1, "the pool the node's stores serve")
 	fs.Int64Var(&cfg.Memory, "memory", 0, "the daemon's memory budget in MiB, which GOMEMLIMIT is held at less the slabs mapped outside the Go heap; 0 leaves GOMEMLIMIT alone")
+	role := fs.String("role", "storage", "storage, holding PG members and metadata, or meta, holding metadata alone")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
+	if *role != "storage" && *role != "meta" {
+		return cfg, fmt.Errorf("-role %q is neither storage nor meta", *role)
+	}
+	cfg.MetaOnly = *role == "meta"
 	if *node >= daemonNodes || *pool > math.MaxUint32 {
 		return cfg, fmt.Errorf("-node %d is not below %d, where a daemon's node lies, or -pool %d is past 32 bits", *node, daemonNodes, *pool)
 	}

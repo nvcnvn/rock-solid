@@ -45,7 +45,9 @@ func members(c *meta.Control) []chunkstore.Member {
 }
 
 // The operator's command line over TCP against a single-voter control plane with two storage
-// node processes: a pool created from it places its PGs on the disks the nodes reported; a
+// node processes: each shard-map group gets a voter on each node, both reporting they hold
+// metadata; a pool created from it places its PGs on the disks the nodes reported; a disk holding
+// members, drained, is refused removal until balance has moved them off, then removed; a
 // declaration for an up disk prints the leader's refusal; the device with no valid superblock is
 // printed failed; and once node 3 is killed and its disks' PGs refill, keeping them as leaving
 // members, its disks declared lost end every one of those members.
@@ -53,22 +55,47 @@ func TestTheOperatorsCommandLineOverTCP(t *testing.T) {
 	dir := testDir(t)
 	p := runCtl(t, dir)
 	a, b, bad := filepath.Join(dir, "adm-dev-a"), filepath.Join(dir, "adm-dev-b"), filepath.Join(dir, "adm-dev-bad")
-	c3, d3 := filepath.Join(dir, "adm-dev-c"), filepath.Join(dir, "adm-dev-d")
-	for _, path := range []string{a, b, c3, d3} {
+	c3, d3, e := filepath.Join(dir, "adm-dev-c"), filepath.Join(dir, "adm-dev-d"), filepath.Join(dir, "adm-dev-e")
+	for _, path := range []string{a, b, c3, d3, e} {
 		device(t, path, false)
 	}
 	device(t, bad, true)
-	base := freeBase(t, 7)
+	base := freeBase(t, 8)
 	ctlFlag := fmt.Sprintf("-ctl 1=127.0.0.1:%d -group %d", p.Port, ctlGroup)
 	var out2, out3 output
-	startNode(t, fmt.Sprintf("-node 2 %s -listen 127.0.0.1:%d -peers 3=127.0.0.1:%d -device %s -device %s -device %s", ctlFlag, base, base+4, a, b, bad), &out2)
-	node3 := startNode(t, fmt.Sprintf("-node 3 %s -listen 127.0.0.1:%d -peers 2=127.0.0.1:%d -device %s -device %s", ctlFlag, base+4, base, c3, d3), &out3)
+	startNode(t, fmt.Sprintf("-node 2 %s -listen 127.0.0.1:%d -peers 3=127.0.0.1:%d -device %s -device %s -device %s -device %s", ctlFlag, base, base+5, a, b, bad, e), &out2)
+	node3 := startNode(t, fmt.Sprintf("-node 3 %s -listen 127.0.0.1:%d -peers 2=127.0.0.1:%d -device %s -device %s", ctlFlag, base+5, base, c3, d3), &out3)
 	if !within(60*time.Second, func() bool {
 		return onCtl(t, p, func(_ *core.Context, c *meta.Control) bool {
-			return c != nil && len(upDisks(c, 2)) == 2 && len(upDisks(c, 3)) == 2
+			return c != nil && len(upDisks(c, 2)) == 3 && len(upDisks(c, 3)) == 2
 		})
 	}) {
 		t.Fatalf("the nodes' disks never came up; node 2 said:\n%s\nnode 3 said:\n%s", out2.String(), out3.String())
+	}
+
+	if err := onCtl(t, p, func(_ *core.Context, c *meta.Control) error {
+		return c.SetShardMap(&meta.ShardMap{Groups: []meta.Group{{ID: 1}, {ID: 2, Start: meta.PrefixEnd([]byte{meta.SpaceCtl})}}})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	voters := func() [][]uint32 {
+		return onCtl(t, p, func(_ *core.Context, c *meta.Control) [][]uint32 {
+			var ns [][]uint32
+			for _, g := range c.ShardMap().Groups {
+				var on []uint32
+				for _, v := range g.Voters {
+					on = append(on, v.Node)
+				}
+				ns = append(ns, slices.Sorted(slices.Values(on)))
+			}
+			return ns
+		})
+	}
+	if !within(10*time.Second, func() bool {
+		vs := voters()
+		return len(vs) == 2 && slices.Equal(vs[0], []uint32{2, 3}) && slices.Equal(vs[1], []uint32{2, 3})
+	}) {
+		t.Fatalf("the groups' voters are on nodes %v, not on 2 and 3", voters())
 	}
 
 	if code, said := admin(p, "pool", "1", "-replicas", "2", "-min-live", "2", "-failure-domain", "disk", "-pg-count", "16"); code != 0 || !strings.Contains(said, "pool 1 set") {
@@ -90,6 +117,27 @@ func TestTheOperatorsCommandLineOverTCP(t *testing.T) {
 			t.Fatalf("PG %d placed on %+v, the disks reported being %v", i, e.Members, reported)
 		}
 	}
+
+	drained := onCtl(t, p, func(_ *core.Context, c *meta.Control) uint32 { return diskOf(c, e) })
+	if !slices.ContainsFunc(placed, func(pg chunkstore.PGEntry) bool {
+		return slices.ContainsFunc(pg.Members, func(m chunkstore.Member) bool { return m.Disk == drained })
+	}) {
+		t.Fatalf("disk %d holds no member to drain", drained)
+	}
+	if code, said := admin(p, "disk", "drain", fmt.Sprint(drained)); code != 0 || !strings.Contains(said, fmt.Sprintf("disk %d draining", drained)) {
+		t.Fatalf("disk drain %d exited %d: %s", drained, code, said)
+	}
+	if code, said := admin(p, "disk", "remove", fmt.Sprint(drained)); code != 1 || !strings.Contains(said, "PGs still name it") {
+		t.Fatalf("a removal of disk %d still holding members exited %d: %s", drained, code, said)
+	}
+	start := time.Now()
+	if !within(90*time.Second, func() bool {
+		code, said := admin(p, "disk", "remove", fmt.Sprint(drained))
+		return code == 0 && strings.Contains(said, fmt.Sprintf("disk %d removed", drained))
+	}) {
+		t.Fatalf("disk %d never emptied; members %+v", drained, onCtl(t, p, func(_ *core.Context, c *meta.Control) []chunkstore.Member { return members(c) }))
+	}
+	t.Logf("disk %d drained and removed in %v", drained, time.Since(start))
 
 	upA := onCtl(t, p, func(_ *core.Context, c *meta.Control) uint32 { return diskOf(c, a) })
 	if code, said := admin(p, "disk", "lost", fmt.Sprint(upA)); code != 1 || !strings.Contains(said, "refused") || !strings.Contains(said, chunkstore.ErrLostRefused.Error()) {

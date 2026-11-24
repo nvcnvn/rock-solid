@@ -16,8 +16,11 @@ import (
 
 func TestParseNodeRefusesABadConfiguration(t *testing.T) {
 	ok := "-node 2 -ctl 1=127.0.0.1:7000 -listen 127.0.0.1:7100 -device /dev/a"
-	if _, err := parseNode(strings.Fields(ok)); err != nil {
-		t.Fatalf("%q: %v", ok, err)
+	if cfg, err := parseNode(strings.Fields(ok)); err != nil || cfg.MetaOnly {
+		t.Fatalf("%q: %v, role meta %v", ok, err, cfg.MetaOnly)
+	}
+	if cfg, err := parseNode(strings.Fields(ok + " -role meta")); err != nil || !cfg.machine().MetaOnly {
+		t.Fatalf("-role meta: %v, the node machine's role meta %v", err, cfg.machine().MetaOnly)
 	}
 	for _, args := range []string{
 		"-node 4294967298 -ctl 1=127.0.0.1:7000 -listen 127.0.0.1:7100 -device /dev/a",
@@ -34,6 +37,7 @@ func TestParseNodeRefusesABadConfiguration(t *testing.T) {
 		"-node 2 -ctl 1=127.0.0.1:7000 -listen 127.0.0.1:0 -device /dev/a",
 		"-node 2 -listen 127.0.0.1:7100 -device /dev/a",
 		"-node 2 -ctl 1=127.0.0.1:7000 -device /dev/a",
+		"-node 2 -ctl 1=127.0.0.1:7000 -listen 127.0.0.1:7100 -device /dev/a -role data",
 	} {
 		if _, err := parseNode(strings.Fields(args)); err == nil {
 			t.Errorf("%q taken", args)
@@ -62,6 +66,8 @@ func TestParseAdminTakesEachCommand(t *testing.T) {
 	for args, want := range map[string]meta.Admin{
 		"disk lost 5 -ctl 1=127.0.0.1:7000":                      {Op: meta.AdminLost, Disk: 5},
 		"-ctl 1=127.0.0.1:7000 disk remove 6":                    {Op: meta.AdminRemove, Disk: 6},
+		"disk drain 7 -ctl 1=127.0.0.1:7000":                     {Op: meta.AdminDrain, Disk: 7},
+		"-ctl 1=127.0.0.1:7000 disk undrain 8":                   {Op: meta.AdminUndrain, Disk: 8},
 		"disk failed -ctl 1=127.0.0.1:7000,2=127.0.0.1:7001":     {Op: meta.AdminFailed},
 		"pool 2 -ctl 1=127.0.0.1:7000 -preset rep2 -pg-count 64": {Op: meta.AdminPool, Pool: 2, Spec: chunkstore.PoolSpec{Replicas: new(2), PGCount: new(uint32(64))}},
 		"pool 3 -ctl 1=127.0.0.1:7000 -overcommit=false -failure-domain disk": {Op: meta.AdminPool, Pool: 3,
@@ -80,6 +86,8 @@ func TestParseAdminTakesEachCommand(t *testing.T) {
 		"disk lost 5",
 		"disk lost 5 -ctl 1=127.0.0.1:7000 -replicas 2",
 		"disk drop 5 -ctl 1=127.0.0.1:7000",
+		"disk drain 0 -ctl 1=127.0.0.1:7000",
+		"disk undrain 5 -ctl 1=127.0.0.1:7000 -replicas 2",
 		"pool -ctl 1=127.0.0.1:7000",
 		"pool 4294967296 -ctl 1=127.0.0.1:7000",
 		"pool 1 -ctl 1=127.0.0.1:7000 -preset rep9",

@@ -145,6 +145,125 @@ func TestALostDiskIsAnsweredOnceGone(t *testing.T) {
 	}
 }
 
+// A drain over the wire is answered once it commits, the disk drained, and the disk is then removed
+// by a removal; an undrain is answered once the disk's drain has ended, and a drain of an unknown
+// disk at once with ErrUnknownDisk.
+func TestADrainOverTheWireIsAnsweredOnceItCommits(t *testing.T) {
+	r := newHostRun(t)
+	r.lead()
+	r.report(&NodeReport{Node: 2, Opened: []OpenedDisk{{Device: 1, Log: 0x77, Blocks: 1 << 20}, {Device: 2, Log: 0x78, Blocks: 1 << 20}}})
+	r.run(StepInterval * 3)
+	r.answers()
+	r.admin(1, Admin{Op: AdminDrain, Disk: 9})
+	if got := r.answers(); len(got[1]) != 1 || !strings.Contains(got[1][0].Refused, ErrUnknownDisk.Error()) {
+		t.Fatalf("a drain of an unknown disk answered %+v", got)
+	}
+	for _, d := range []uint32{1, 2} {
+		r.admin(uint64(d+1), Admin{Op: AdminDrain, Disk: d})
+	}
+	if got := r.answers(); len(got) != 0 {
+		t.Fatalf("answered before the drains committed: %+v", got)
+	}
+	r.run(StepInterval * 5)
+	if got := r.answers(); len(got[2]) != 1 || got[2][0].Refused != "" || len(got[3]) != 1 || got[3][0].Refused != "" {
+		t.Fatalf("answered %+v", got)
+	}
+	if ds := r.h.Control().Disks(); !ds[0].Drain || !ds[1].Drain {
+		t.Fatalf("disks after the drains: %+v", ds)
+	}
+	r.admin(4, Admin{Op: AdminUndrain, Disk: 2})
+	r.admin(5, Admin{Op: AdminRemove, Disk: 1})
+	r.run(StepInterval * 5)
+	if got := r.answers(); len(got[4]) != 1 || got[4][0].Refused != "" || len(got[5]) != 1 || got[5][0].Refused != "" {
+		t.Fatalf("answered %+v", got)
+	}
+	if ds := r.h.Control().Disks(); !ds[0].Gone || ds[1].Drain || ds[1].Gone {
+		t.Fatalf("disks after the undrain and the removal: %+v", ds)
+	}
+}
+
+// A drain change that a race overtakes before it commits is refused with what happened: a drain
+// of a down disk declared lost with it, an undrain of a disk removed with it, and a drain undone
+// by an undrain, which is answered.
+func TestADrainChangeOvertakenIsRefusedWithWhy(t *testing.T) {
+	r := newHostRun(t)
+	r.lead()
+	node := NodeReport{Node: 2, Opened: []OpenedDisk{{Device: 1, Log: 0x77, Blocks: 1 << 20}, {Device: 2, Log: 0x78, Blocks: 1 << 20}}}
+	r.report(&node)
+	r.report(&NodeReport{Node: 3, Opened: []OpenedDisk{{Device: 1, Log: 0x88, Blocks: 1 << 20}}})
+	r.run(StepInterval * 3)
+	for range 2 * chunkstore.NodeDownAfter / StepInterval {
+		r.report(&node)
+		r.run(StepInterval)
+	}
+	r.admin(1, Admin{Op: AdminDrain, Disk: 1})
+	r.run(StepInterval * 5)
+	r.answers()
+	r.admin(2, Admin{Op: AdminDrain, Disk: 3})
+	r.admin(3, Admin{Op: AdminLost, Disk: 3})
+	r.admin(4, Admin{Op: AdminUndrain, Disk: 1})
+	r.admin(5, Admin{Op: AdminRemove, Disk: 1})
+	r.admin(6, Admin{Op: AdminDrain, Disk: 2})
+	r.admin(7, Admin{Op: AdminUndrain, Disk: 2})
+	r.run(StepInterval * 5)
+	got := r.answers()
+	for i, want := range []string{"declared lost or removed", "", "declared lost or removed", "", "another command changed its drain", ""} {
+		req := uint64(i + 2)
+		if len(got[req]) != 1 || want == "" && got[req][0].Refused != "" || !strings.Contains(got[req][0].Refused, want) {
+			t.Fatalf("request %d answered %+v, want a refusal naming %q", req, got[req], want)
+		}
+	}
+}
+
+// A drained disk that holds members empties through balance moves, never more than max_moves at
+// once; its removal is refused with how many PGs still name it until then, and answered after.
+func TestADrainedDiskWithMembersEmptiesAndIsRemoved(t *testing.T) {
+	r := newHostRun(t)
+	r.lead()
+	node := NodeReport{Node: 2, Opened: []OpenedDisk{{Device: 1, Log: 0x77, Blocks: 1 << 20}, {Device: 2, Log: 0x78, Blocks: 1 << 20}}}
+	r.report(&node)
+	r.run(StepInterval * 3)
+	r.admin(1, Admin{Op: AdminPool, Pool: 1, Spec: spec(1, 8)})
+	r.run(StepInterval * 5)
+	r.admin(2, Admin{Op: AdminDrain, Disk: 1})
+	r.run(StepInterval * 5)
+	r.answers()
+	if named(r.h.Control().Table(), 1, true) == 0 {
+		t.Fatal("disk 1 holds no member")
+	}
+	r.admin(3, Admin{Op: AdminRemove, Disk: 1})
+	if got := r.answers(); len(got[3]) != 1 || !strings.Contains(got[3][0].Refused, "PGs still name it") {
+		t.Fatalf("a removal of a disk still named answered %+v", got)
+	}
+	for steps := 0; named(r.h.Control().Table(), 1, true) > 0; steps++ {
+		tb := r.h.Control().Table()
+		if steps > 100 {
+			t.Fatalf("disk 1 is still named by %d PGs", named(tb, 1, true))
+		}
+		if n := moving(tb); n > MaxMoves {
+			t.Fatalf("%d moves in flight", n)
+		}
+		rp := chunkstore.Report{ID: 1, Disks: []chunkstore.DiskState{{Log: 0x77}, {Log: 0x78}}}
+		for i, e := range tb.Pools[0].PGs {
+			f := chunkstore.PGReport{PGFields: chunkstore.PGFields{Epoch: tb.Epoch, PG: core.PGID{Pool: 1, Index: uint32(i)}, Interval: e.Interval}, PGCount: uint32(len(tb.Pools[0].PGs))}
+			rp.Activations, rp.Recovered = append(rp.Activations, f), append(rp.Recovered, f)
+		}
+		var m core.Msg
+		if err := chunkstore.Attach(r.pool, &m, chunkstore.AppendReport(nil, &rp), core.NoBuf); err != nil {
+			t.Fatal(err)
+		}
+		r.recv(core.NodeID{Node: 2, Loop: 1}, m)
+		r.report(&node)
+		r.run(StepInterval)
+	}
+	r.answers()
+	r.admin(4, Admin{Op: AdminRemove, Disk: 1})
+	r.run(StepInterval * 5)
+	if got := r.answers(); len(got[4]) != 1 || got[4][0].Refused != "" || !r.h.Control().Disks()[0].Gone {
+		t.Fatalf("a removal of the emptied disk answered %+v", got)
+	}
+}
+
 // A give-up is refused for a PG the table lacks, for an interval not current and for one with nothing lost; once its
 // primary reports chunks unfound, which a read of the PG gives with its interval, it is answered when it commits, with
 // the interval it gave up and the chunks it dropped. Sent again after a newer interval leaves chunks unfound, it is
@@ -362,7 +481,7 @@ func TestAdminCrossesTheWireWhole(t *testing.T) {
 	pool := sim.NewPool(1<<20, 0)
 	full := chunkstore.PoolSpec{Replicas: new(3), MinLive: new(2), Data: new(4), Parity: new(2), EncodeOnWrite: new(true), MaxPerDomain: new(1),
 		Overcommit: new(false), WriteLimit: new(uint8(90)), PGCount: new(uint32(1 << 31)), Sealed: "ec", FailureDomain: "disk", Locality: "node", DiskClass: "nvme"}
-	for _, a := range []Admin{{Op: AdminLost, Disk: 1 << 31}, {Op: AdminRemove, Disk: 1}, {Op: AdminFailed}, {Op: AdminPool, Pool: 7}, {Op: AdminPool, Pool: 1, Spec: full}, {Op: AdminGiveUp, Pool: 1 << 31, PG: 1<<32 - 1, Interval: 1<<32 - 1}, {Op: AdminPG, Pool: 2, PG: 5}} {
+	for _, a := range []Admin{{Op: AdminLost, Disk: 1 << 31}, {Op: AdminRemove, Disk: 1}, {Op: AdminFailed}, {Op: AdminPool, Pool: 7}, {Op: AdminPool, Pool: 1, Spec: full}, {Op: AdminGiveUp, Pool: 1 << 31, PG: 1<<32 - 1, Interval: 1<<32 - 1}, {Op: AdminPG, Pool: 2, PG: 5}, {Op: AdminDrain, Disk: 1<<32 - 1}, {Op: AdminUndrain, Disk: 4}} {
 		var m core.Msg
 		if err := EncodeAdmin(pool, 1, 5, &a, &m); err != nil {
 			t.Fatal(err)
@@ -392,7 +511,7 @@ func TestAdminCrossesTheWireWhole(t *testing.T) {
 }
 
 func FuzzDecodeAdmin(f *testing.F) {
-	for _, a := range []Admin{{Op: AdminLost, Disk: 2}, {Op: AdminRemove, Disk: 3}, {Op: AdminFailed}, {Op: AdminGiveUp, Pool: 1, PG: 7, Interval: 3}, {Op: AdminPG, Pool: 1, PG: 7}} {
+	for _, a := range []Admin{{Op: AdminLost, Disk: 2}, {Op: AdminRemove, Disk: 3}, {Op: AdminFailed}, {Op: AdminGiveUp, Pool: 1, PG: 7, Interval: 3}, {Op: AdminPG, Pool: 1, PG: 7}, {Op: AdminDrain, Disk: 4}, {Op: AdminUndrain, Disk: 5}} {
 		addWire(f, func(pool core.BufPool, m *core.Msg) { _ = EncodeAdmin(pool, 1, 4, &a, m) })
 	}
 	fuzzNodeWire(f, func(pool core.BufPool, m *core.Msg) {

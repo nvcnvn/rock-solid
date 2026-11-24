@@ -262,6 +262,38 @@ func TestAMetaOnlyNodeHoldsVotersAndNoMember(t *testing.T) {
 	}
 }
 
+// A node that turns role meta drains its disks: a member there leaves through a move, as a
+// drained disk's do, and none is dropped from its PG in one table.
+func TestANodeTurningMetaDrainsItsDisks(t *testing.T) {
+	r, in := poolRun(t)
+	if members(r.ctl.Table(), 1) == 0 {
+		t.Fatal("disk 1 holds no member")
+	}
+	nr := r.reports[0]
+	nr.MetaOnly = true
+	r.heartbeat(&nr)
+	in.Moves = 16
+	for steps := 0; named(r.ctl.Table(), 1, false) > 0; steps++ {
+		var up []int
+		for i, e := range r.ctl.Table().Pools[0].PGs {
+			if slices.ContainsFunc(e.Members, func(m chunkstore.Member) bool { return m.Disk == 1 && !m.Leaving }) {
+				up = append(up, i)
+			}
+		}
+		if steps > 40 {
+			t.Fatalf("disk 1 still holds the members of PGs %v", up)
+		}
+		r.run(sec)
+		r.heal(true)
+		r.settle(in)
+		for _, i := range up {
+			if e := r.ctl.Table().Pools[0].PGs[i]; !slices.ContainsFunc(e.Members, func(m chunkstore.Member) bool { return m.Disk == 1 }) {
+				t.Fatalf("PG %d dropped its member on disk 1 in one table: %+v", i, e.Members)
+			}
+		}
+	}
+}
+
 // The format level is raised only above the committed one, to a release every node heard runs,
 // and once every node with a disk up has been heard. A node on an older release that heartbeats
 // after it is raised is not marked up, and is named.

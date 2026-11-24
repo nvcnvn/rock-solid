@@ -256,6 +256,19 @@ func TestAnEarlierStartsAnswerIsNotTakenForAFetch(t *testing.T) {
 	}
 }
 
+// A node holds metadata whatever its role, so its heartbeat lets the leader place voters on its
+// disks; a role meta node also has its disks drained.
+func TestTheHeartbeatReportsTheNodesRole(t *testing.T) {
+	if nr := newRun(t, 1, 10).report(); !nr.Meta || nr.MetaOnly {
+		t.Fatalf("a storage node reported %+v", nr)
+	}
+	r := newRun(t, 1, 10)
+	r.n.cfg.MetaOnly = true
+	if nr := r.report(); !nr.Meta || !nr.MetaOnly {
+		t.Fatalf("a role meta node reported %+v", nr)
+	}
+}
+
 func TestTheStartReportsTheDevicesOpenedAndFailed(t *testing.T) {
 	r := newRun(t, 1)
 	if s, _ := r.n.Recovered(1, nil); s != chunkstore.StartOpened {

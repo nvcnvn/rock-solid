@@ -21,14 +21,16 @@ const (
 )
 
 // Config is a node's place in the cluster: its ID, the release its format level is, the loops of
-// the control-plane group's voters and its group ID, and the seed of the source its start draws
-// from, which the daemon takes from the operating system at each start.
+// the control-plane group's voters and its group ID, the seed of the source its start draws
+// from, which the daemon takes from the operating system at each start, and whether its role is
+// meta, holding metadata and no PG member; every node holds metadata.
 type Config struct {
-	Node    uint32
-	Release uint32
-	Ctls    []core.NodeID
-	Group   uint64
-	Seed    uint64
+	Node     uint32
+	Release  uint32
+	Ctls     []core.NodeID
+	Group    uint64
+	Seed     uint64
+	MetaOnly bool
 }
 
 // Hand is a session table for the replica on Device, answering its ask Answers, 0 when unasked.
@@ -394,7 +396,7 @@ func (n *Node) heartbeat(ctx *core.Context, out *Output) {
 	nr := &n.report
 	// With no replica running this reports the version only received, safe while a store's fence
 	// table starts empty in memory: a replica that starts later is handed n.table before any write.
-	*nr = meta.NodeReport{Node: n.cfg.Node, Release: n.cfg.Release, Epoch: n.epoch, Sessions: n.table.Version, Opened: n.opened, Failed: n.failed, Replicas: n.metas}
+	*nr = meta.NodeReport{Node: n.cfg.Node, Release: n.cfg.Release, Meta: true, MetaOnly: n.cfg.MetaOnly, Epoch: n.epoch, Sessions: n.table.Version, Opened: n.opened, Failed: n.failed, Replicas: n.metas}
 	for _, r := range n.reps {
 		if r.runs {
 			nr.Sessions, nr.Epoch = min(nr.Sessions, r.held), min(nr.Epoch, r.epoch)

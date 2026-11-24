@@ -112,7 +112,7 @@ func runCtl(t *testing.T, dir string) *ctl {
 	disk := filepath.Join(dir, "node-ctl-disk")
 	t.Cleanup(func() { _ = os.Remove(disk) })
 	local := netip.MustParseAddrPort("127.0.0.1:0")
-	p, err := newCtl(ctlConfig{Node: 1, Voters: []voter{{1, local}}, Group: ctlGroup, Listen: local, Disk: disk, Format: true, DiskBytes: 512 << 20})
+	p, err := newCtl(ctlConfig{Node: 1, Voters: []voter{{1, local}}, Group: ctlGroup, Listen: local, Disk: disk, Format: true, DiskBytes: 512 << 20, MaxReplayBytes: 64 << 20})
 	if err != nil {
 		t.Fatal(err)
 	}

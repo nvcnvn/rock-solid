@@ -494,6 +494,8 @@ func (h *CtlHost) admin(ctx *core.Context, ev *core.Event, request uint64, out *
 		err = wrap(err, "pool %d", w.a.Pool)
 	case w.a.Op == AdminLost:
 		err = wrap(c.Lost(ctx.Now, w.a.Disk), "disk %d", w.a.Disk)
+	case w.a.Op == AdminDrain || w.a.Op == AdminUndrain:
+		err = wrap(c.Drain(w.a.Disk, w.a.Op == AdminDrain), "disk %d", w.a.Disk)
 	case w.a.Op == AdminPG:
 		pg := core.PGID{Pool: w.a.Pool, Index: w.a.PG}
 		an := AdminAnswer{Refused: wrap(ErrUnknownPG, "PG %s", pgName(pg)).Error()}
@@ -528,7 +530,7 @@ func wrap(err error, format string, arg any) error {
 }
 
 // settle answers each operator's command the Control no longer stages: one that took effect, a
-// pool committed with its settings or a disk gone, with no refusal; one the Control dropped, as a
+// pool committed with its settings, a disk gone or its drain committed as asked, with no refusal; one the Control dropped, as a
 // change the committed state refused after a reload, with that.
 func (h *CtlHost) settle(ctx *core.Context, out *CtlHostOutput) {
 	c := h.ctl
@@ -549,6 +551,16 @@ func (h *CtlHost) settle(ctx *core.Context, out *CtlHostOutput) {
 			}
 			if i, ok := slices.BinarySearchFunc(c.pools, w.a.Pool, cmpPool); !ok || c.pools[i].Pool != w.want {
 				refused = fmt.Sprintf("pool %d: the change was dropped before it committed", w.a.Pool)
+			}
+		} else if on := w.a.Op == AdminDrain; on || w.a.Op == AdminUndrain {
+			switch d := c.disks[w.a.Disk-1]; {
+			case d.Gone:
+				refused = fmt.Sprintf("disk %d: declared lost or removed before the drain change committed", w.a.Disk)
+			case d.Drain == on:
+			case slices.Contains(c.drains, w.a.Disk) == on:
+				return false
+			default:
+				refused = fmt.Sprintf("disk %d: another command changed its drain before this one committed", w.a.Disk)
 			}
 		} else {
 			if slices.Contains(c.exits, diskExit{w.a.Disk, w.a.Op == AdminRemove}) {
@@ -572,6 +584,22 @@ func (h *CtlHost) answerAdmin(ctx *core.Context, w *adminWait, an *AdminAnswer, 
 
 func (h *CtlHost) leased(ctx *core.Context) bool { return h.shard.Raft().LeaseRead(ctx) }
 
+// MaxMoves is max_moves: the most balance moves in flight at once, counted as the PGs with a leaving member.
+const MaxMoves = 1
+
+// moving counts the PGs of t with a leaving member.
+func moving(t *chunkstore.Table) int {
+	n := 0
+	for _, p := range t.Pools {
+		for _, e := range p.PGs {
+			if slices.ContainsFunc(e.Members, func(m chunkstore.Member) bool { return m.Leaving }) {
+				n++
+			}
+		}
+	}
+	return n
+}
+
 // step steps the Control and proposes its Txn; one the replica refuses at once is its answer.
 func (h *CtlHost) step(ctx *core.Context, out *CtlHostOutput) {
 	if h.ctl == nil {
@@ -580,7 +608,7 @@ func (h *CtlHost) step(ctx *core.Context, out *CtlHostOutput) {
 	h.token++
 	h.cout.Reset()
 	h.disks = h.ctl.AppendDisks(h.disks[:0])
-	if err := h.ctl.Step(&ControlInputs{Now: ctx.Now, Raw: ctx.Raw, Leased: h.leased(ctx), Disks: h.disks}, h.token, &h.cout); err != nil {
+	if err := h.ctl.Step(&ControlInputs{Now: ctx.Now, Raw: ctx.Raw, Leased: h.leased(ctx), Disks: h.disks, Moves: max(0, MaxMoves-moving(h.ctl.Table()))}, h.token, &h.cout); err != nil {
 		out.Errs = append(out.Errs, err)
 	}
 	h.handOut(ctx, out)

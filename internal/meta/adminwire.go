@@ -10,7 +10,7 @@ import (
 
 // An operator's command travels to the control-plane group in the same framing as a node's
 // messages, its token the request number the command line chose, and its body an op byte and the
-// op's arguments: a disk ID for a declaration or a removal, a pool ID and the pool's spec for a
+// op's arguments: a disk ID for a declaration, a removal, a drain or an undrain, a pool ID and the pool's spec for a
 // pool, nothing for the failed devices, a pool ID, a PG number and the interval for a give-up, a pool ID and a PG number
 // for a PG's state. A spec is a uvarint whose bit i is set when the i-th of its
 // optional settings is (replicas, min_live, data, parity, encode_on_write, max_per_domain,
@@ -29,7 +29,8 @@ const (
 type AdminOp byte
 
 // The operator's commands: declare a disk lost, remove a drained disk, create or change a pool,
-// list the devices nodes left failed, give up a PG's current interval, and read a PG's state.
+// list the devices nodes left failed, give up a PG's current interval, read a PG's state, and
+// drain a disk or end its drain.
 const (
 	AdminLost AdminOp = 1 + iota
 	AdminRemove
@@ -37,9 +38,11 @@ const (
 	AdminFailed
 	AdminGiveUp
 	AdminPG
+	AdminDrain
+	AdminUndrain
 )
 
-// Admin is an operator's command: Disk for AdminLost and AdminRemove, Pool and Spec for AdminPool,
+// Admin is an operator's command: Disk for AdminLost, AdminRemove, AdminDrain and AdminUndrain, Pool and Spec for AdminPool,
 // Pool, PG and the PG's current Interval for AdminGiveUp, Pool and PG for AdminPG.
 type Admin struct {
 	Op       AdminOp
@@ -65,7 +68,7 @@ type AdminAnswer struct {
 func EncodeAdmin(pool core.BufPool, group, request uint64, a *Admin, msg *core.Msg) error {
 	body := []byte{byte(a.Op)}
 	switch a.Op {
-	case AdminLost, AdminRemove:
+	case AdminLost, AdminRemove, AdminDrain, AdminUndrain:
 		body = binary.AppendUvarint(body, uint64(a.Disk))
 	case AdminPool:
 		body = appendSpec(binary.AppendUvarint(body, uint64(a.Pool)), &a.Spec)
@@ -87,7 +90,7 @@ func DecodeAdmin(pool core.BufPool, msg *core.Msg) (Admin, error) {
 	d := decoder{b: b}
 	a := Admin{Op: AdminOp(d.byte())}
 	switch a.Op {
-	case AdminLost, AdminRemove:
+	case AdminLost, AdminRemove, AdminDrain, AdminUndrain:
 		n := d.uvarint()
 		d.bad = d.bad || n > math.MaxUint32
 		a.Disk = uint32(n)

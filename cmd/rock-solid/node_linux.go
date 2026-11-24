@@ -18,9 +18,6 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/node"
 )
 
-// release is the format level this build's nodes report.
-const release = 1
-
 // storageNode is a storage node's process: loop 0 runs its node.Node, and loop k its k-th device's
 // node.Device, each on a TCP driver of its own and the device's on an io_uring ring of its own.
 // The machines' outputs for one another go between the loops as mail.
@@ -52,18 +49,14 @@ func newNode(cfg nodeConfig) (_ *storageNode, err error) {
 	for _, v := range append(cfg.Ctls, cfg.Peers...) {
 		p.addrs[v.Node] = v.Addr
 	}
-	var ctls []core.NodeID
-	for _, v := range cfg.Ctls {
-		ctls = append(ctls, core.NodeID{Node: v.Node})
-	}
-	p.nm = &nodeMachine{p: p, cfg: node.Config{Node: cfg.Node, Release: release, Ctls: ctls, Group: cfg.Group, Seed: rand.Uint64()}}
+	p.nm = &nodeMachine{p: p, cfg: cfg.machine()}
 	if err := p.add(nil, ""); err != nil {
 		return nil, err
 	}
 	for i, path := range cfg.Devices {
 		store := chunkstore.Config{Log: disklog.DefaultConfig(), Pool: core.PoolID(cfg.Pool), MergeCache: chunkstore.DefaultMergeCache}
 		dm := &deviceMachine{p: p, cfg: node.DeviceConfig{Device: deviceID(path), Class: cfg.Class, Loop: uint32(i + 1), Store: store,
-			Seed: rand.Uint64(), Group: cfg.Group, Ctl: ctls[0]}}
+			Seed: rand.Uint64(), Group: cfg.Group, Ctl: p.nm.cfg.Ctls[0]}}
 		if err := p.add(dm, path); err != nil {
 			return nil, err
 		}
