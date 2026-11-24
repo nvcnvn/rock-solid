@@ -67,7 +67,7 @@ type faultRun struct {
 	crashes [3]core.Tick
 	peering bool
 	asked   int
-	// a is the stand-in authority, whose detector marks the disks; changes is the detector's count of marks the table follows.
+	// a is the authority: the stand-in, whose detector marks the disks, or the real control plane; changes is the stand-in detector's count of marks the table follows.
 	a       *authority
 	changes uint64
 	// primaryFailed is set once a primary's disk has been made to fail, and rebuilt once a primary's index has rebuilt; listed is the primary's listing of each chunk at its last pass.
@@ -430,8 +430,11 @@ func (f *faultRun) block(n int, ch core.ChunkID, b uint16) []byte {
 	return got
 }
 
-// publish hands every running replica t, marking no PG active.
+// publish hands every running replica t, marking no PG active; a new interval of PG 0 waits for its primary to peer.
 func (f *faultRun) publish(t Table) {
+	if t.Entry(pg0).Interval != f.c.table.Entry(pg0).Interval {
+		f.peering = true
+	}
 	f.c.noteTable(&t)
 	f.c.table = t
 	for d := range f.c.reps {
@@ -450,8 +453,27 @@ func (f *faultRun) activated() bool {
 }
 
 // newInterval starts the PG's next interval, as the control plane does when the primary asks for one, with node first as its primary if not negative.
+// The real control plane takes it as an ask, or with first as an edit, and commits it at once.
 func (f *faultRun) newInterval(first int) {
 	_, e := f.c.table.entry(pg0)
+	if a := f.a; a.cp != nil {
+		if first < 0 {
+			a.asks = append(a.asks, PGInterval{pg0, e.Interval})
+		} else {
+			ds := []uint32{f.c.ids[first]}
+			for _, m := range e.Members {
+				if m.Disk != ds[0] {
+					ds = append(ds, m.Disk)
+				}
+			}
+			a.edits = append(a.edits, Edit{PG: pg0, Disks: ds})
+		}
+		a.next(f.c)
+		now, raw := a.now()
+		a.cp.Commit(now, raw)
+		f.tendReal()
+		return
+	}
 	k := e.Interval + 1
 	f.publish(f.c.next(func(t *Table) {
 		setInterval(t, pg0, k)
@@ -576,7 +598,7 @@ func (f *faultRun) inject() {
 			})
 		}
 	case 9:
-		if mk, _ := f.a.det.Mark(c.ids[m]); !f.peering && f.rng.Chance(1, 4) && up && mk == MarkUp {
+		if !f.peering && f.rng.Chance(1, 4) && up && f.mark(m) == MarkUp {
 			f.newInterval(m)
 		}
 	}
@@ -631,7 +653,11 @@ func (f *faultRun) tend(all bool) {
 			delete(f.heals, k)
 		}
 	}
-	if f.a.det.Changes() != f.changes {
+	switch {
+	case f.a.cp != nil:
+		f.tendReal()
+		f.asked = len(c.asks)
+	case f.a.det.Changes() != f.changes:
 		f.remark()
 	}
 	if len(c.asks) > f.asked {
@@ -646,6 +672,28 @@ func (f *faultRun) tend(all bool) {
 	if f.peering && f.activated() {
 		f.peering = false
 	}
+}
+
+// tendReal hands the running replicas the real control plane's newest table, once it commits one.
+func (f *faultRun) tendReal() {
+	if !f.a.due() {
+		return
+	}
+	if next := f.a.next(f.c); len(MakeDelta(&f.c.table, &next).Entries) > 0 {
+		f.publish(next)
+	}
+}
+
+// mark is node n's disk's mark: the detector's, or the real control plane's committed record's.
+func (f *faultRun) mark(n int) Mark {
+	if f.a.cp == nil {
+		m, _ := f.a.det.Mark(f.c.ids[n])
+		return m
+	}
+	if f.a.rec.Disks()[f.c.ids[n]-1].Up {
+		return MarkUp
+	}
+	return MarkDown
 }
 
 // remark starts the next interval of each PG whose members' marks the detector changed, with the detector's marks.
@@ -671,16 +719,18 @@ func (f *faultRun) remark() {
 
 // downMarked reports whether the detector has node m's disk down, which a failed store waits for before its node restarts.
 func (f *faultRun) downMarked(m int) bool {
-	mk, _ := f.a.det.Mark(f.c.ids[m])
-	return mk == MarkDown
+	return f.mark(m) == MarkDown
 }
 
 // marked reports whether the table follows the detector's marks and the detector has every disk up but a gone one.
 func (f *faultRun) marked() bool {
 	for n := range 3 {
-		if mk, _ := f.a.det.Mark(f.c.ids[n]); mk == MarkDown && !f.gone[n] {
+		if f.mark(n) == MarkDown && !f.gone[n] {
 			return false
 		}
+	}
+	if f.a.cp != nil {
+		return !f.a.due()
 	}
 	return f.a.det.Changes() == f.changes
 }
@@ -744,16 +794,12 @@ type faultPlant struct {
 	set func(c *rcluster)
 }
 
-// runFaults runs the fault workload, failing t on a broken invariant; with a plant, it checks only
-// the plant's invariant and returns its first violation instead.
-func runFaults(t *testing.T, seed uint64, clients, writes int, plant *faultPlant) error {
-	_, err := runFaultsOn(t, seed, clients, writes, plant, false)
-	return err
-}
-
-// runFaultsOn is runFaults, with slots on disks with chunk slots, the clients writing a whole
-// chunk one write in 8, returning what the stores did with slots.
-func runFaultsOn(t *testing.T, seed uint64, clients, writes int, plant *faultPlant, slots bool) (*slotsSeen, error) {
+// runFaultsOn runs the fault workload, failing t on a broken invariant; with a plant, it checks only
+// the plant's invariant and returns its first violation instead. With slots it runs on disks with
+// chunk slots, the clients writing a whole chunk one write in 8, and returns what the stores did
+// with slots; with real, on the real control plane, which marks the disks by its own detector and
+// answers the replicas' asks itself, else on the stand-in authority.
+func runFaultsOn(t *testing.T, seed uint64, clients, writes int, plant *faultPlant, slots, real bool) (*slotsSeen, error) {
 	set := sim.DefaultSettings()
 	geo, err := disklog.GeometryFor(diskBytes)
 	if err != nil {
@@ -764,18 +810,27 @@ func runFaultsOn(t *testing.T, seed uint64, clients, writes int, plant *faultPla
 		set.PoolBytes, geo, seen = 64<<20, slotSeedGeometry, &slotsSeen{}
 	}
 	s := sim.New(seed, set)
-	c := newRClusterOnDisks(t, rtable(4, 2), s, func(cfg *Config) { cfg.Log.MaxRecordBytes = 3 * core.BlockSize }, geo)
-	f := &faultRun{t: t, c: c, rng: core.NewRand(seed ^ 0xfa17), chunks: [2]core.ChunkID{chunkIn(pg0, 4, 0), chunkIn(pg0, 4, 1)},
+	a := &authority{pool: Pool{Replicas: 3, MinLive: 2, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 4},
+		down: map[uint32]core.Tick{}, opened: map[uint32][]OpenedLog{}}
+	tbl := rtable(4, 2)
+	if real {
+		tbl = realControl(t, a, 3)
+	}
+	c := newRClusterOnDisks(t, tbl, s, func(cfg *Config) { cfg.Log.MaxRecordBytes = 3 * core.BlockSize }, geo)
+	f := &faultRun{a: a, t: t, c: c, rng: core.NewRand(seed ^ 0xfa17), chunks: [2]core.ChunkID{chunkIn(pg0, 4, 0), chunkIn(pg0, 4, 1)},
 		ops: map[core.RequestID]faultOp{}, replied: map[core.RequestID]int{}, sent: map[[2]uint64]Update{}, flips: map[flipAt][]flip{},
 		errs: map[string]error{}, version: map[core.RequestID]uint64{}, kept: map[uint32][]keptChunk{}, to: map[core.RequestID]int{},
 		lost: map[core.RequestID]bool{}, heals: map[[2]uint32]core.Tick{}, images: map[[2]uint64][]byte{}, slots: seen}
-	f.a = &authority{pool: Pool{Replicas: 3, MinLive: 2, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 4}}
-	for n := range 3 {
-		if _, err := f.a.rec.Report(uint32(n), 0, c.logs[n], ""); err != nil {
-			t.Fatal(err)
+	if real {
+		a.attach(c)
+	} else {
+		for n := range 3 {
+			if _, err := a.rec.Report(uint32(n), 0, c.logs[n], ""); err != nil {
+				t.Fatal(err)
+			}
 		}
+		c.detect(a)
 	}
-	c.detect(f.a)
 	watchEpochs(c, &f.a.rec).tears = true
 	c.onPass = f.pass
 	c.cl.lost = func(peer core.NodeID) {
@@ -887,11 +942,11 @@ func runFaultsOn(t *testing.T, seed uint64, clients, writes int, plant *faultPla
 	return seen, c.found
 }
 
-// Clients pipeline sub-block writes and punches to two chunks while members are cut off and restarted, their disks and at times the primary's fail, the stand-in authority's failure detector marking them down and up, and they refuse, the primary's bases rot, the PG's interval changes and the primary crashes, rebuilds its index and moves, peering keeping some pending versions: every acknowledged version is whole on every member that acknowledged it, every write is answered once unless a crash of its primary lost it, the primary maps exactly the writes it answered OK in every chunk it lists nothing of, and once recovery settles every member lists nothing and maps them. One seed in 16 (seeds 2 and 18 of its own) runs on disks with chunk slots, its clients writing a whole chunk one write in 8, and the run fails if its slot seeds, more than one, wrote none, or, eight or more, held none across a replay.
+// Clients pipeline sub-block writes and punches to two chunks while members are cut off and restarted, their disks and at times the primary's fail, the real control plane's failure detector marking them down and up, and they refuse, the primary's bases rot, the PG's interval changes and the primary crashes, rebuilds its index and moves, peering keeping some pending versions: every acknowledged version is whole on every member that acknowledged it, every write is answered once unless a crash of its primary lost it, the primary maps exactly the writes it answered OK in every chunk it lists nothing of, and once recovery settles every member lists nothing and maps them. One seed in 16 (seeds 2 and 18 of its own) runs on disks with chunk slots, its clients writing a whole chunk one write in 8, and the run fails if its slot seeds, more than one, wrote none, or, eight or more, held none across a replay.
 func TestReplicatedWritesSurviveFaults(t *testing.T) {
 	var slots slotStats
 	seeds.Run(t, 0, 20, func(seed uint64) {
-		seen, err := runFaultsOn(t, seed, 2, 24, nil, slotSeed(seed, 16))
+		seen, err := runFaultsOn(t, seed, 2, 24, nil, slotSeed(seed, 16), true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -908,44 +963,47 @@ func TestReplicatedWritesSurviveFaults(t *testing.T) {
 
 // A recovery write that leaves out the blocks covered when it read its source, not when it was
 // ordered (the epoch change model's neg-recovery-covers-at-read), puts a source's block over a
-// write ordered in between, and two disks then hold different bytes under one version, the first
-// invariant it breaks, checked alone, at 13 of the first 500 seeds.
+// write ordered in between, and two disks then hold different bytes under one version, checked
+// alone, at 12 of the first 300 seeds on the real control plane.
 func TestPlantedRecoveryBugBreaksTheFaultRun(t *testing.T) {
-	if runFaults(t, 15, 2, 24, &faultPlant{invOneVersion, func(c *rcluster) { c.replicaPlants.coverAtRead = true }}) == nil {
-		t.Fatalf("seed 15 kept %q", invOneVersion)
+	if _, err := runFaultsOn(t, 24, 2, 24, &faultPlant{invOneVersion, func(c *rcluster) { c.replicaPlants.coverAtRead = true }}, false, true); err == nil {
+		t.Fatalf("seed 24 kept %q", invOneVersion)
 	}
 }
 
-// Each planted peering bug breaks its invariant, checked alone, at a seed of the first 500, as the
-// epoch change model's counterexample for it does: a restarted primary that never asks for a new
-// interval (neg-restart-no-ask) leaves its PG unactivated (98 of 500), and a restarted member that never
-// asks (neg-member-no-ask) keeps its replayed writes gated, unmapped, once recovery settles (1 of 500); a member logging a version
-// out of order (neg-log-out-of-order), here as writes sent again newest first after a reconnect,
-// leaves a member mapping other bytes once recovery settles (18 of 500); a version decided by its
-// own interval's members after a later interval kept it (neg-decide-by-own-interval, 10 of 500) and
-// a primary activating before every member persisted its missing list
-// (neg-activate-before-durable, 43 of 500) each drop a write the primary answered; and a later
-// peering that clears a missing-list entry recovery has not done (neg-peering-clears-missing)
-// leaves a member mapping other bytes once recovery settles (56 of 500); and a primary that holds a
+// Each planted peering bug breaks its invariant, checked alone, at a seed of the first 300 on the
+// real control plane, as the epoch change model's counterexample for it does: a restarted primary
+// that never asks for a new interval (neg-restart-no-ask) leaves its PG unactivated (3 of 300); a
+// member logging a version out of order (neg-log-out-of-order), here as writes sent again newest
+// first after a reconnect, leaves a member mapping other bytes once recovery settles (17 of 300); a
+// version decided by its own interval's members after a later interval kept it
+// (neg-decide-by-own-interval, 6 of 300) and a primary activating before every member persisted its
+// missing list (neg-activate-before-durable, 42 of 300) each drop a write the primary answered; a
+// later peering that clears a missing-list entry recovery has not done (neg-peering-clears-missing)
+// leaves a member mapping other bytes once recovery settles (14 of 300); a primary that holds a
 // write to a chunk it called unfound rather than answering it (neg-write-on-unfound) still holds it
-// once the run settles (53 of 500); and a primary whose interval a failed version ended that never
-// asks for the next (neg-never-ask) still leads it once the run settles (250 of 500).
+// once the run settles (13 of 300); and a primary whose interval a failed version ended that never
+// asks for the next (neg-never-ask) still leads it once the run settles (122 of 300). A restarted
+// member that never asks (neg-member-no-ask) keeps its replayed writes gated, unmapped, once
+// recovery settles at 1 of the stand-in authority's first 500 seeds and none of the real control
+// plane's first 300, so it runs on the stand-in.
 func TestPlantedPeeringBugsBreakTheFaultRun(t *testing.T) {
 	for _, p := range []struct {
-		name string
-		seed uint64
+		name    string
+		seed    uint64
+		standIn bool
 		faultPlant
 	}{
-		{"no ask after a restart", 7, faultPlant{invActivates, func(c *rcluster) { c.replicaPlants.neverAsk = true }}},
-		{"no ask after a member's restart", 410, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.memberNoAsk = true }}},
-		{"logged out of order", 13, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.resendNewestFirst = true }}},
-		{"decided by its own interval", 73, faultPlant{invMappedAnswers, func(c *rcluster) { c.replicaPlants.ownInterval = true }}},
-		{"activated before lists are durable", 38, faultPlant{invMappedAnswers, func(c *rcluster) { c.replicaPlants.activateEarly = true }}},
-		{"missing entry cleared", 7, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.relistNever, c.storePlants.clearListed = true, true }}},
-		{"a write held on an unfound chunk", 3, faultPlant{invHeldOrdered, func(c *rcluster) { c.replicaPlants.writeOnUnfound = true }}},
-		{"no ask after a failed version", 0, faultPlant{invAsks, func(c *rcluster) { c.replicaPlants.neverAskOnFail = true }}},
+		{"no ask after a restart", 26, false, faultPlant{invActivates, func(c *rcluster) { c.replicaPlants.neverAsk = true }}},
+		{"no ask after a member's restart", 410, true, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.memberNoAsk = true }}},
+		{"logged out of order", 13, false, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.resendNewestFirst = true }}},
+		{"decided by its own interval", 3, false, faultPlant{invMappedAnswers, func(c *rcluster) { c.replicaPlants.ownInterval = true }}},
+		{"activated before lists are durable", 2, false, faultPlant{invMappedAnswers, func(c *rcluster) { c.replicaPlants.activateEarly = true }}},
+		{"missing entry cleared", 24, false, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.relistNever, c.storePlants.clearListed = true, true }}},
+		{"a write held on an unfound chunk", 8, false, faultPlant{invHeldOrdered, func(c *rcluster) { c.replicaPlants.writeOnUnfound = true }}},
+		{"no ask after a failed version", 3, false, faultPlant{invAsks, func(c *rcluster) { c.replicaPlants.neverAskOnFail = true }}},
 	} {
-		if err := runFaults(t, p.seed, 2, 24, &p.faultPlant); err == nil || !strings.Contains(err.Error(), p.inv) {
+		if _, err := runFaultsOn(t, p.seed, 2, 24, &p.faultPlant, false, !p.standIn); err == nil || !strings.Contains(err.Error(), p.inv) {
 			t.Errorf("%s at seed %d: %v", p.name, p.seed, err)
 		}
 	}

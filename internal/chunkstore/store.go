@@ -446,7 +446,7 @@ func (s *Store) Serving() bool { return s.phase == serving }
 // Err is why the store stopped serving for good, or nil.
 func (s *Store) Err() error { return s.err }
 
-// Index is the store's chunk index, nil while it recovers.
+// Index is the store's chunk index: nil until recovery loads the manifest, partial until Serving.
 func (s *Store) Index() *Index { return s.ix }
 
 // Log is the store's disk log, nil while it recovers.

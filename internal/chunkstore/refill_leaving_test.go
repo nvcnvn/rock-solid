@@ -224,7 +224,12 @@ func TestRefillStopsAtMaxMembers(t *testing.T) {
 
 // refillRun is a PG of replicas copies on disks disks holding X, acknowledged, with recovery going.
 func refillRun(t *testing.T, replicas, minLive, disks int, plant func(*authority), name string) (r *soleRun, ch core.ChunkID, v uint64) {
-	r = newSoleRun(t, replicas, minLive, disks)
+	return refillRunOn(t, replicas, minLive, disks, plant, name, false)
+}
+
+// refillRunOn is refillRun, on the real control plane if real.
+func refillRunOn(t *testing.T, replicas, minLive, disks int, plant func(*authority), name string, real bool) (r *soleRun, ch core.ChunkID, v uint64) {
+	r = newSoleRunOn(t, replicas, minLive, disks, real)
 	if plant != nil {
 		plant(r.a)
 		r.c.planted = true
@@ -276,9 +281,39 @@ func (r *soleRun) declare(t *testing.T, disk uint32) {
 	}
 }
 
+// lost has an operator declare disk lost, as the record or the real control plane takes it, which may refuse it.
+func (r *soleRun) lost(disk uint32) error {
+	if r.a.cp == nil {
+		return r.a.rec.Lost(disk)
+	}
+	now, raw := r.a.now()
+	if err := r.a.cp.Lost(now, disk); err != nil {
+		return err
+	}
+	r.a.cp.Commit(now, raw)
+	r.publish()
+	return nil
+}
+
 // giveUp has an operator give up PG 0's current interval through the authority, as the leader checks it from the disk
-// record and the primary's report the watch heard, and publishes the table that commits it.
+// record and the primary's report the watch heard, and publishes the table that commits it. The real control plane
+// checks it from its own record and the reports it heard, against the table it committed last.
 func (r *soleRun) giveUp() error {
+	if r.a.cp != nil {
+		r.publish()
+		e := r.c.table.Entry(pg0)
+		now, raw := r.a.now()
+		if err := r.a.cp.GiveUp(now, pg0, e.Interval); err != nil {
+			return err
+		}
+		r.a.cp.Commit(now, raw)
+		t, _ := r.a.cp.Table()
+		if gs := t.Entry(pg0).GiveUps; len(gs) > len(e.GiveUps) && r.lostErr == nil {
+			r.lostErr = r.onlyLost(e, PGGiveUp{PG: pg0, GiveUp: gs[len(gs)-1]})
+		}
+		r.publish()
+		return nil
+	}
 	gone := func(d uint32) bool {
 		return slices.ContainsFunc(r.a.rec.Disks(), func(x RecordedDisk) bool { return x.ID == d && x.Gone })
 	}
@@ -919,10 +954,30 @@ func TestGiveUpsUnderFaultsLoseOnlyWhatIsLost(t *testing.T) {
 	}
 }
 
+// Each give-up bug planted in the control plane's check breaks invOnlyLost in the seeded give-up run, at the first of
+// seeds 0-39 to break it: giveUpFound at seed 0 (all 40), giveUpWithCandidate at 10 (1 of 40), giveUpNotStopped at 13
+// (2 of 40).
+func TestPlantedGiveUpBugsBreakTheGiveUpRun(t *testing.T) {
+	defer func() { plantGiveUp = placementPlants{} }()
+	for _, tc := range []struct {
+		name string
+		seed uint64
+		bug  placementPlants
+	}{
+		{"found", 0, placementPlants{giveUpFound: true}},
+		{"candidate", 10, placementPlants{giveUpWithCandidate: true}},
+		{"not stopped", 13, placementPlants{giveUpNotStopped: true}},
+	} {
+		plantGiveUp = tc.bug
+		if _, err := giveUpRun(t, tc.seed); err == nil || !strings.Contains(err.Error(), invOnlyLost) {
+			t.Errorf("%s, seed %d: %v", tc.name, tc.seed, err)
+		}
+	}
+}
+
 func giveUpRun(t *testing.T, seed uint64) (int, error) {
 	rng := core.NewRand(seed)
-	r, _, _ := refillRun(t, 2, 2, 5, nil, "")
-	r.watch()
+	r, _, _ := refillRunOn(t, 2, 2, 5, nil, "", true)
 	r.c.planted = true
 	chunks := []core.ChunkID{chunkIn(pg0, 1, 0), chunkIn(pg0, 1, 1), chunkIn(pg0, 1, 2)}
 	pick := func(ok func(d uint32) bool) uint32 {
@@ -957,7 +1012,7 @@ func giveUpRun(t *testing.T, seed uint64) (int, error) {
 				r.back(d)
 			}
 		case 4:
-			if d := pick(func(d uint32) bool { return r.isolated[d] && !r.c.declared[d] }); d != 0 && len(r.c.declared) < 2 && r.a.rec.Lost(d) == nil {
+			if d := pick(func(d uint32) bool { return r.isolated[d] && !r.c.declared[d] }); d != 0 && len(r.c.declared) < 2 && r.lost(d) == nil {
 				if r.c.declared == nil {
 					r.c.declared = map[uint32]bool{}
 				}

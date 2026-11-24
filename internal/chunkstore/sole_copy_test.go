@@ -50,22 +50,35 @@ func (r *soleRun) watch() {
 }
 
 func newSoleRun(t *testing.T, replicas, minLive, disks int) *soleRun {
+	return newSoleRunOn(t, replicas, minLive, disks, false)
+}
+
+// newSoleRunOn is newSoleRun, on the real control plane if real.
+func newSoleRunOn(t *testing.T, replicas, minLive, disks int, real bool) *soleRun {
 	a := &authority{pool: Pool{Replicas: replicas, MinLive: minLive, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 1},
-		down: map[uint32]core.Tick{}, drain: map[uint32]bool{}}
-	for n := range disks {
-		if _, err := a.rec.Report(uint32(n), 0, 0x5eed+uint64(n), ""); err != nil {
-			t.Fatal(err)
+		down: map[uint32]core.Tick{}, drain: map[uint32]bool{}, opened: map[uint32][]OpenedLog{}}
+	var tbl Table
+	if real {
+		tbl = realControl(t, a, disks)
+	} else {
+		for n := range disks {
+			if _, err := a.rec.Report(uint32(n), 0, 0x5eed+uint64(n), ""); err != nil {
+				t.Fatal(err)
+			}
 		}
+		var empty Table
+		tbl, _, _ = Next(&empty, &Inputs{Pools: a.pools()})
 	}
-	var empty Table
-	tbl, _, _ := Next(&empty, &Inputs{Pools: a.pools()})
 	c := newSoleCluster(t, tbl, disks)
+	if real {
+		a.attach(c)
+	}
 	r := &soleRun{c: c, a: a, isolated: map[uint32]bool{}, acked: map[core.ChunkID]uint64{}}
 	r.noteIntervals()
 	c.inv.Register(invStranded, func() error {
 		_, e := c.table.entry(pg0)
 		for ch, v := range r.acked {
-			if err := c.stranded(e, ch, v); err != nil {
+			if err := c.stranded(e, ch, v, r.removed); err != nil {
 				return err
 			}
 		}
@@ -75,8 +88,8 @@ func newSoleRun(t *testing.T, replicas, minLive, disks int) *soleRun {
 	return r
 }
 
-// stranded reports a disk that can serve version v of ch, holding it and listing nothing of it, in a PG none of whose members in e can, up or down, nor carries, running, an image of ch at v or above; a crashed member says nothing.
-func (c *rcluster) stranded(e *PGEntry, ch core.ChunkID, v uint64) error {
+// stranded reports a disk that can serve version v of ch, holding it and listing nothing of it, in a PG none of whose members in e can, up or down, nor carries, running, an image of ch at v or above; a member crashed or replaying says nothing, and a disk declared lost or, if removed is set, one it reports removed is not counted.
+func (c *rcluster) stranded(e *PGEntry, ch core.ChunkID, v uint64, removed func(d uint32) bool) error {
 	for n := range c.reps {
 		if !slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == c.ids[n] }) || c.reps[n].Store().Index() == nil {
 			continue
@@ -91,10 +104,10 @@ func (c *rcluster) stranded(e *PGEntry, ch core.ChunkID, v uint64) error {
 	for n := range c.reps {
 		member := slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == c.ids[n] })
 		idx := c.reps[n].Store().Index()
-		if c.declared[c.ids[n]] {
+		if c.declared[c.ids[n]] || removed != nil && removed(c.ids[n]) {
 			continue
 		}
-		if idx == nil {
+		if idx == nil || !c.reps[n].Store().Serving() {
 			if member {
 				return nil
 			}
@@ -113,7 +126,8 @@ func (c *rcluster) stranded(e *PGEntry, ch core.ChunkID, v uint64) error {
 	return nil
 }
 
-// newSoleCluster starts a node per disk under tbl, the disks tbl leaves out as sole members of extra PGs below min_live, which the next table drops.
+// newSoleCluster starts a node per disk under tbl, the disks tbl leaves out as sole members of extra PGs below min_live,
+// which the next table drops: tbl itself past epoch 1, as the real control plane commits it, and otherwise tbl one epoch on.
 func newSoleCluster(t *testing.T, tbl Table, disks int) *rcluster {
 	sized := cloneTable(tbl)
 	_, e := tbl.entry(pg0)
@@ -122,12 +136,17 @@ func newSoleCluster(t *testing.T, tbl Table, disks int) *rcluster {
 			sized.Pools[0].PGs = append(sized.Pools[0].PGs, PGEntry{Members: []Member{{Disk: d}}, Interval: 1})
 		}
 	}
-	c := newRClusterWith(t, sized, sim.New(1, sim.DefaultSettings()), nil)
-	if len(sized.Pools[0].PGs) > 1 {
-		next := cloneTable(tbl)
-		next.Epoch = sized.Epoch + 1
-		c.publish(next, true)
+	if len(sized.Pools[0].PGs) == len(tbl.Pools[0].PGs) {
+		return newRClusterWith(t, tbl, sim.New(1, sim.DefaultSettings()), nil)
 	}
+	next := cloneTable(tbl)
+	if tbl.Epoch > 1 {
+		sized.Epoch--
+	} else {
+		next.Epoch++
+	}
+	c := newRClusterWith(t, sized, sim.New(1, sim.DefaultSettings()), nil)
+	c.publish(next, true)
 	return c
 }
 
@@ -139,7 +158,7 @@ func (r *soleRun) members() []Member {
 // publish computes the next table from the marks, the reports and the clock, and hands it to the running replicas.
 func (r *soleRun) publish() {
 	c := r.c
-	next, _, _ := Next(&c.table, r.a.inputs(c))
+	next := r.a.next(c)
 	if d := MakeDelta(&c.table, &next); len(d.Entries) == 0 {
 		return
 	}
@@ -180,7 +199,9 @@ func (r *soleRun) removed(d uint32) bool {
 func (r *soleRun) lose(disk uint32) {
 	r.isolated[disk] = true
 	r.a.down[disk] = r.c.s.Time()
-	r.a.rec.Down(disk, r.c.s.Time())
+	if r.a.cp == nil {
+		r.a.rec.Down(disk, r.c.s.Time())
+	}
 	n := uint32(r.c.node(disk))
 	for o := range uint32(len(r.c.reps)) + 2 {
 		if o != n {
@@ -193,7 +214,9 @@ func (r *soleRun) lose(disk uint32) {
 func (r *soleRun) back(disk uint32) {
 	delete(r.isolated, disk)
 	delete(r.a.down, disk)
-	r.a.rec.Up(disk)
+	if r.a.cp == nil {
+		r.a.rec.Up(disk)
+	}
 	n := uint32(r.c.node(disk))
 	for o := range uint32(len(r.c.reps)) + 2 {
 		if o != n && !r.isolated[uint32(o)+1] {

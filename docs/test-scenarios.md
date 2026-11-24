@@ -2998,12 +2998,12 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | `internal/chunkstore/storetest` `TestFaultsOnTheSimulatedDisk` | 2,000 | 29 s |
   | `internal/chunkstore` `TestPlacementKeepsItsRules` | 1,000 | 20 s |
   | `internal/chunkstore` `TestSubBlockWritesMatchTheByteOracle` | 500 | 50 s |
-  | `internal/chunkstore` `TestReplicatedWritesSurviveFaults` | 1,000 | 106 s |
+  | `internal/chunkstore` `TestReplicatedWritesSurviveFaults` | 1,000 | 127 s |
   | `internal/chunkstore` `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries` | 500 | 45 s |
-  | `internal/chunkstore` `TestNoPGServesReadsFromTwoPrimaries` | 500 | 44 s |
+  | `internal/chunkstore` `TestNoPGServesReadsFromTwoPrimaries` | 500 | 42 s |
   | `internal/chunkstore` `TestNoFencedSessionsWriteIsApplied` | 500 | 41 s |
-  | `internal/chunkstore` `TestWritesPassTheWriteLimitOnlyWhereAdmitted` | 200 | 63 s |
-  | `internal/chunkstore` `TestTheDetectorMarksAFailedDiskDown` | 500 | 52 s |
+  | `internal/chunkstore` `TestWritesPassTheWriteLimitOnlyWhereAdmitted` | 200 | 60 s |
+  | `internal/chunkstore` `TestTheDetectorMarksAFailedDiskDown` | 500 | 47 s |
   | `internal/chunkstore` `TestWriteAdmissionHoldsAt90And95PercentFull` | 4 | 74 s |
   | `internal/loop/looptest` `TestSteppedLoopsReplayFromTheirSeed` | 200 | 56 s |
   | `internal/meta` `TestTheDiskRecordKeepsItsIdentitiesAcrossFailovers` | 2,000 | 2 s |
@@ -5449,10 +5449,16 @@ member settled every run while the split's PGs, not yet reported, could not move
   restarts with the give-up in its first table and keeps the listing, so with B declared lost Z
   reads unfound, not zeros (`TestARestartKeepsTheListingOfAWriteAfterAGiveUp`). A give-up staged with
   an edit replacing both members is left out of that table, and Y, which it does not record, reads
-  back (`TestAGiveUpWithAnEditKeepsTheChunksItDoesNotRecord`). Seeded: writes to three chunks while
-  disks are cut off, come back, are declared lost and restart, and give-ups at random through the
-  leader's check; no give-up breaks `invOnlyLost` and no chunk written since every give-up of it reads
-  zeros (`TestGiveUpsUnderFaultsLoseOnlyWhatIsLost`).
+  back (`TestAGiveUpWithAnEditKeepsTheChunksItDoesNotRecord`). Seeded, on the real control-plane
+  group: writes to three chunks while disks are cut off, come back, are declared lost and restart,
+  and give-ups at random, each declaration and give-up committed through `Control.Lost` and
+  `Control.GiveUp`; no committed give-up breaks `invOnlyLost` and no chunk written since every
+  give-up of it reads zeros (`TestGiveUpsUnderFaultsLoseOnlyWhatIsLost`). Most of its give-ups are
+  refused, as they should be: 4 commit over its 20 seeds a commit and 18 over the 200 of
+  `scripts/seeds.sh`, about the stand-in's 15. Each give-up bug planted in the control plane's check
+  breaks `invOnlyLost` there, over seeds 0 to 39: `giveUpFound` in all 40 (seed 0 in the test),
+  `giveUpWithCandidate` in seed 10 alone and `giveUpNotStopped` in 2, the first seed 13
+  (`TestPlantedGiveUpBugsBreakTheGiveUpRun`).
 - A give-up commits interval k+1 as a copy of k: next to a settings change, an edit, a mark
   change, a refill, a balance move or an activation of its PG it is left out of the table, alone
   it commits (`TestAGiveUpCommitsOnlyWithItsMembersUnchanged`). A store's drop leaves a write
@@ -5656,12 +5662,14 @@ swaps**
   member refuse through a table that puts it in `maintenance`, rots a block of the primary's copy,
   half the time cutting off disk 2, which a base fetch asks first, fails the primary's disk in about
   one seed in ten, after which every write is refused, and starts the PG's next interval; the
-  primary's own asks start one too. The run's authority runs the failure detector and starts the
-  next interval of each PG whose marks it changed; a member whose disk failed restarts only once the
-  detector marked it down, and after two failed restarts stays up with its store failed, kept down.
+  primary's own asks start one too. The run's authority is the real control-plane group of
+  [Control-plane placement faults](#control-plane-placement-faults): its leader's detector marks the
+  disks and starts the next interval of each PG whose marks it changed, and it answers the replicas'
+  asks; a member whose disk failed restarts only once the committed record marks it down, and after
+  two failed restarts stays up with its store failed, kept down.
   Member crashes and disk failures also land while the PG peers, at a tenth of the rate: each
   restart waits 4 s, and at the full rate peering would never end. The run ends once the table
-  follows the detector's marks and every disk not lost is up. A primary crash, index rebuild or
+  follows the committed marks and every disk not lost is up. A primary crash, index rebuild or
   move joins the schedule under [Recovery per PG](#recovery-per-pg): each leaves versions peering
   may drop mapped on the next primary until recovery supersedes them. Invariants, checked after
   every step: a member acknowledges a version only once it maps every block of it; every client
@@ -6029,10 +6037,12 @@ it on its missing list.
 
 `chunkstore.Detector` stands in for the control-plane leader's failure detection. The tables run it
 alone, fed heartbeats, `member_timeout` reports and probe answers on its own clock, with tables
-computed from its marks by `Next` (`detector_test.go`); the cluster rows run it on a simulated node
-of its own that three rep3 replicas heartbeat over the simulated network, beside the stand-in
-authority of [Peering and read leases](#peering-and-read-leases), which publishes a table whenever
-its marks change (`detect_cluster_test.go`). `node_down_after` 5 s, `member_timeout` 1 s,
+computed from its marks by `Next` (`detector_test.go`); the scripted cluster rows run it on a
+simulated node of its own that three rep3 replicas heartbeat over the simulated network, beside the
+stand-in authority of [Peering and read leases](#peering-and-read-leases), which publishes a table
+whenever its marks change (`detect_cluster_test.go`). The seeded row runs on the real control-plane
+group of [Control-plane placement faults](#control-plane-placement-faults) instead: its leader's
+detector marks the disks, and the row reads each mark from the committed disk record. `node_down_after` 5 s, `member_timeout` 1 s,
 `slow_disk_factor` 10×, `slow_disk_window` 1 minute, `refill_after` 10 minutes, `flap_count` 5,
 `flap_window` 10 minutes.
 
@@ -6070,7 +6080,7 @@ Cluster runs, each with a client keeping six one-block writes in flight over all
 
 | Run | Result |
 | --- | --- |
-| Seeded, 9 seeds a commit and 500 in `scripts/seeds.sh`: one disk's node cut off from every other node, its disk hung, or its log failing a write; in every other nine seeds, clocks slewed and drifting, delivery jittered up to 20 ms, and the detector's own node stopped for up to 4.5 s before the fault | Marked down within 1 to 5.1 s of the cut (sooner than `node_down_after` when a primary waits on it: its probe goes unanswered), 1 to 2.5 s of the hang, or 1.5 s of the failure, a quarter wider either way on noisy clocks; before it, primaries report their members' latencies; its mark is the only one that ever changes, and no other disk is ever marked down ("the detector marks down only a disk whose node was cut off, whose I/O stalled or slowed, or whose log failed", registered with `sim.Invariants`); the PGs take writes again within 5 s afterwards |
+| Seeded, 9 seeds a commit and 500 in `scripts/seeds.sh`: one disk's node cut off from every other node, its disk hung, or its log failing a write; in every other nine seeds, clocks slewed and drifting, delivery jittered up to 20 ms, and the control plane's node stopped for up to 4.5 s before the fault | Marked down within 1 to 5.1 s of the cut (sooner than `node_down_after` when a primary waits on it: its probe goes unanswered), 1 to 2.5 s of the hang, or 1.5 s of the failure, a quarter wider either way on noisy clocks; before it, primaries report their members' latencies; its mark is the only one that ever changes, and no other disk is ever marked down ("the detector marks down only a disk whose node was cut off, whose I/O stalled or slowed, or whose log failed", registered with `sim.Invariants`); the PGs take writes again within 5 s afterwards |
 | A disk's node is cut off for 2.5 s while writes wait on it | Marked down as silent when its probe goes unanswered, and up within 2 s of the heal |
 | A primary is cut off from one member only, which still answers the detector's probes | The primary reports the member once per `member_timeout` for as long as its write waits: three reports in 3.5 s |
 | A primary is cut off from a member for 0.5 s under a write, which it sends again after the heal | The member's acknowledgment of the resend gives no latency: the reconnect is not the disk's |
@@ -6187,7 +6197,7 @@ own ([Testing strategy](design.md#testing-strategy)).
     (`TestALeftMemberDownAtItsMovesEndKeepsAcknowledgedWrites`, seeds 0-9, 200 in `scripts/seeds.sh` in 18 s) keeps every
     acknowledged write and breaks no invariant, `invLeftGated` included, which judges naming from the cluster's
     table, not the replica's; it logs how many seeds had a restarted
-    disk drop a left PG's gated writes, 3 of seeds 0-9, and fails if none did. `leftNeverSettles` breaks
+    disk drop a left PG's gated writes, 4 of seeds 0-9 (2 on the real group), and fails if none did. `leftNeverSettles` breaks
     `invLeftGated` at 89 seeds of 500, seed 4 first (`TestALeftPGNeverSettledBreaksItsInvariant`).
   - The stranded-move shapes move the primary instead of restarting it, as the epoch change model's
     negatives do: an operator edit that removes the leaving disk and puts the new member first
@@ -6268,8 +6278,8 @@ own ([Testing strategy](design.md#testing-strategy)).
   nothing and maps the kept writes but in an unfound chunk ("once recovery settles, every member
   lists nothing and maps the kept writes, but in an unfound chunk"), both registered with
   `sim.Invariants` (`TestReplicatedWritesSurviveFaults`). The planted `neg-recovery-covers-at-read`
-  variant breaks the first, the first invariant it breaks, at 180 of the first 500 seeds, seed 4
-  among them (`TestPlantedRecoveryBugBreaksTheFaultRun`).
+  variant breaks the first, checked alone, at 12 of the first 300 seeds on the real control-plane
+  group, seed 24 first (`TestPlantedRecoveryBugBreaksTheFaultRun`).
 - Open: two faults that overlap before recovery finishes leave a chunk unfound although a member
   listed by the earlier interval holds its kept image (open question "Recovery sources across
   overlapping faults"). The fault run tolerates the same at its end in a chunk whose every recovery
@@ -6356,7 +6366,7 @@ the head of [Peering and read leases](#peering-and-read-leases).
 **Seeded runs**, with their seeds in `scripts/seeds.sh`:
 
 - The replica primary's fault run (`TestReplicatedWritesSurviveFaults`, 1,000), under [Replica
-  primary](#replica-primary), and the primary-change run
+  primary](#replica-primary), on the real control-plane group, and the primary-change run
   (`TestPeeringKeepsAcknowledgedWritesAcrossPrimaries`, 500), under [Peering and read
   leases](#peering-and-read-leases). Both register the epoch checks below, as the read run does.
   The primary-change run's authority knows 4 disks from the start and allows moves: it drains a
@@ -6364,13 +6374,14 @@ the head of [Peering and read leases](#peering-and-read-leases).
   recovered report again on each table, as late or repeated reports reach a real leader. Once its
   PG activates at the end, it gives recovery up to 30 s to copy every chunk to every member,
   those a drain moved included.
-- The read run (`TestNoPGServesReadsFromTwoPrimaries`, 500): 3 disks, 4 PGs and the failure
-  detector on drifting, slewed clocks and jittered delivery. One fault at a time lands on a disk
+- The read run (`TestNoPGServesReadsFromTwoPrimaries`, 500): 3 disks and 4 PGs on the real
+  control-plane group, whose leader's detector marks them, on drifting, slewed clocks and jittered
+  delivery. One fault at a time lands on a disk
   node every 0.5 to 3 s for 30 s, then 10 s pass quietly: a cut from every node but the client, and
   in half the cuts from the client too, for 0.5 to 6 s, in which the node gets no table; a suspend,
   a counted VM pause, a restore from a snapshot or a held migration, for 0.5 to 6 s, its messages
   queued or lost; a reboot; or a 0.2 to 2 s delay on one path. A node back from a cut gets the
-  newest table once the detector marks it up, or after 3 s, and in half the seeds that table makes
+  newest table once its disk is marked up, or after 3 s, and in half the seeds that table makes
   it lead every PG it is a member of. A client incarnation writes whole and partial blocks to 2
   chunks of each PG and dies at 4 to 12 s; its successor says hello to every disk node, reissues
   the unanswered writes and writes on. Reads of a chunk's first 4 blocks go to a random PG at a
@@ -6383,13 +6394,13 @@ the head of [Peering and read leases](#peering-and-read-leases).
   a version a primary already acknowledged to a write, or one a later activated interval kept, and
   at the run's end no interval activated after it keeps less of its chunk.
 - The write-limit run (`TestWritesPassTheWriteLimitOnlyWhereAdmitted`, 200): 3 disks and 4 PGs on
-  all three, the detector, every disk's `write_limit` 300 blocks above its fill at the start. A
+  all three on the real control-plane group, every disk's `write_limit` 300 blocks above its fill at the start. A
   client writes 16 chunks of 64 blocks, 8 at a time: a punch 1 write in 10, an overwrite of an
   acknowledged block 3 in 10, a granted new block 1 in 10, else a new block, while one fault at a
   time reboots a disk node or delays a path for 0.2 to 1 s. A write the primary orders while it
   holds a member at its limit, neither granted nor an overwrite, must never become a version a disk
   past its limit maps. Correct runs pass the limits through granted writes and fills reported late,
-  by at most 87 blocks over the first 100 seeds; no disk may pass its limit by more than the 300
+  by at most 85 blocks over the first 100 seeds; no disk may pass its limit by more than the 300
   blocks of room it had below it, a bound on the disks' own live blocks that holds whatever fills
   the primaries held and however the stores classed overwrites. Held fills are compared with the
   limit without grants, which arrive with phase 4. A run of its own, not the read run: capacity
@@ -6461,30 +6472,31 @@ is out of reach.
 property 2, which [MetaStore invariants](#metastore-invariants) plants, is a variant of the code
 (for the reboot that takes no time and for peer messages handled after reads, of the simulated
 reboot and loop) that fails the invariant its property maps to. A planted run checks that
-invariant alone, and the test runs a failing seed of the first 500. A counterexample whose trace
+invariant alone, and the test runs a failing seed of the first 500; the fault and read runs, on
+the real control-plane group, take theirs from the first 300 and 200. A counterexample whose trace
 needs several faults coordinated, which the seeded runs land one at a time, is a scripted trace in
 `TestPlantedBugsBreakTheirTraces` instead, or for a lease rule in `internal/lease`'s own: run every
 commit, it must pass unplanted and break its invariant planted.
 
 | Counterexample | Planted as | Run | Seeds of 500 | First | Invariant |
 | --- | --- | --- | --- | --- | --- |
-| A member logs a version out of order | Writes sent again newest first after a reconnect | Fault | 18 | 13 | "once recovery settles …" |
+| A member logs a version out of order | Writes sent again newest first after a reconnect | Fault | 17 of 300 | 13 | "once recovery settles …" |
 | A new primary merges before it holds a kept version | Sub-block spike M8 | Primary-change | 11 | 16 | "a member listing nothing maps …" |
 | Peering stops only the previous interval | | Trace: W acknowledged on disks 2 and 3; interval 2 replaces primary 2 with disk 1, interval 3 puts disk 3 in `maintenance`, both handed to disk 1 alone | | | "no acknowledged version is ever dropped" |
 | Members compare member lists | A member accepts a write tagged with an earlier interval whose disks are its current one's | Primary-change | 310 | 1 | Property 3's: the authority trims a past interval's members once a later activation is recorded, so peering of the next interval already stopped the late write |
 | A disk ID kept across a new log ID | | Primary-change | 212 | 2 | "no disk ID names two log IDs, and no log ID is up under two disk IDs": the node runs its new log under the old disk ID |
 | A write to a chunk with too few clean copies is ordered at once | | Primary-change | 143 | 0 | "no write is acknowledged on fewer than min_live disks that list nothing of its chunk, a member in maintenance counting as one" |
 | A restarted primary peers in its old interval | | Primary-change at `min_live` 1: at 2 none of 500: the write that reuses a version number goes to a chunk the old interval's peering left with too few clean copies, and now waits for recovery | 16 | 57 | "no two members hold different data under one version" |
-| A restarted primary never asks for a new interval | | Fault (the primary-change run's end asks itself) | 98 | 0 | Property 12's |
-| An older version decided by its own interval's members | | Fault | 10 | 51 | "the primary maps exactly …" |
-| A primary activates before missing lists are durable | | Fault | 37 | 7 | "the primary maps exactly …" |
+| A restarted primary never asks for a new interval | | Fault (the primary-change run's end asks itself) | 3 of 300 | 26 | Property 12's |
+| An older version decided by its own interval's members | | Fault | 6 of 300 | 3 | "the primary maps exactly …" |
+| A primary activates before missing lists are durable | | Fault | 42 of 300 | 2 | "the primary maps exactly …" |
 | The leader records an activation only decided | Decide reports it | Primary-change; and a trace: W on its way to disk 3 when interval 2 replaces it with disk 1; disk 2's list to disk 1 lost; interval 3 puts disk 2 in `maintenance`, handed to disk 1 alone | 500 | 0 | "no PG's last activated interval goes down, and every activation a table records happened": the recorded interval is not one a primary activated; on the trace, "no acknowledged version is ever dropped" |
-| Recovery picks its blocks at read | | Fault | 13 | 15 | "no two members hold different data under one version" |
+| Recovery picks its blocks at read | | Fault | 12 of 300 | 24 | "no two members hold different data under one version" |
 | A leaving member removed before its replacement recovered | Removed once its PG's interval activates | Primary-change | 120 | 3 | Property 13's |
 | A recovered report for an earlier interval removes the leaving member | | Primary-change | 136 | 3 | Property 13's |
 | Members accept a write only in its send epoch | | Primary-change | 441 | 0 | Property 7's |
-| A later peering clears a missing-list entry | A listed member holding the kept version as its newest left off the list, and a persisted list clearing the PG's earlier listings it leaves out | Fault | 56 | 7 | "once recovery settles …" |
-| Incarnations checked when a write arrives | At the primary, held replays exempt, with the store's fence off, and with `listerOrders`: with the primary holding every write while it lists the chunk, the successor's whole-block write waits too, and none of 500 seeds fails. The model's `neg-fence-on-arrival` needs no `ListerOrders`: its `Order` takes any write of `pin`, so the successor's can go first, while the code orders the writes it holds in their arrival order, so the rule map names both plants | Read | 17 | 24 | Property 11's: a dead incarnation's partial write held on a chunk the primary lacks is released after its successor's |
+| A later peering clears a missing-list entry | A listed member holding the kept version as its newest left off the list, and a persisted list clearing the PG's earlier listings it leaves out | Fault | 14 of 300 | 24 | "once recovery settles …" |
+| Incarnations checked when a write arrives | At the primary, held replays exempt, with the store's fence off, and with `listerOrders`: with the primary holding every write while it lists the chunk, the successor's whole-block write waits too, and none of the first 200 seeds fails. The model's `neg-fence-on-arrival` needs no `ListerOrders`: its `Order` takes any write of `pin`, so the successor's can go first, while the code orders the writes it holds in their arrival order, so the rule map names both plants | Read | 5 of 200 | 27 | Property 11's: a dead incarnation's partial write held on a chunk the primary lacks is released after its successor's |
 | A held write ordered again although another primary led | The lead's term kept across another primary's interval | Trace: P, peering cut off from Q, holds W; interval 3 makes Q primary with P in `maintenance`; the successor's W′ and W2 complete at Q; interval 4 makes P primary again | | | Property 11's |
 | A returning primary keeps its pending versions by number | `Settle` keeps every pending version at or below the kept one (`settleByNumber`); no model row, since the model answers no client at peering | Trace: primary 2, cut off from disk 3, orders W as 1.1; interval 2, handed to disks 1 and 3 alone, makes disk 3 primary without disk 2, and W2 is acknowledged as 2.1; interval 3 makes disk 2 primary again, its peering keeping 2.1 (`TestAReturningPrimaryRefusesAPendingVersionOffTheKeptChain` runs it unplanted, the read run's seed 366 found it) | | | "no acknowledged version is ever dropped", checked against the first interval activated after the version's |
 | A kept primary reads below `min_live` | | Trace: interval 2 marks disk 3 down; disk 3 restarts, and interval 3 makes it primary with disk 2 in `maintenance`, handed to disks 1 and 3 alone | | | Property 1's |
@@ -6497,13 +6509,13 @@ commit, it must pass unplanted and break its invariant planted.
 | A member logs past a version it failed | | Trace, as no seeded run makes a member refuse a version for a reason it then drops in the same interval (0 of 500 in the fault and primary-change runs): disk 3 refuses 1.1, the refusal lost, and then logs 1.2, a table marking it in `maintenance` for a moment and a dropped ack standing in for a refusal it gets past, such as its log's NoSpace, and its loss (the fault run's refusal fault uses the same flip); interval 2 keeps 1.2 and counts disk 3, which lacks 1.1's block | | | "a member listing nothing maps the kept writes applied in version order" |
 | A primary orders on in an interval a failed version ended | | Trace, as no seeded run fills a primary's log (none of 500 in the fault, read and primary-change runs, at `min_live` 2 and 1), and only a full log fails a version on the primary's own disk and leaves its store serving: a write in doubt stops it. Disk 1's log, all but a few segments held as reserve, fills with PGs 1 and 2's writes; 1.2 fails on it with NoSpace after it went out, and its chunk, with nothing pending, is forgotten, so the next write is numbered 1.2 again | | | "a primary sends a chunk's writes to each member in version order, again after a reconnect": the version goes out for a second write, property 6's `OneWritePerVersion`, before the model's torn source of property 5 can form |
 | Peering judges a past interval by the current `min_live` | | Trace, as no seeded run changes `min_live`: interval 2 lowers it to 1 and marks disk 3 down, W is acknowledged on disk 2 alone; interval 3 raises it to 2, makes disk 3 primary with disk 2 in `maintenance`, cut off from disk 3 | | | "no acknowledged version is ever dropped" |
-| A primary whose interval a failed version ended never asks for the next | | Fault | 250 | 0 | Property 15's |
-| A primary serves a version a member refused, before peering settles it | A primary maps the versions it refuses | Read | 33 | 2 | Property 14's `ReadsMapped`, as "no read returns a version before it commits, or one later lost": a read returns a version neither acknowledged nor kept |
+| A primary whose interval a failed version ended never asks for the next | | Fault | 122 of 300 | 3 | Property 15's |
+| A primary serves a version a member refused, before peering settles it | A primary maps the versions it refuses | Read | 109 of 200 | 0 | Property 14's `ReadsMapped`, as "no read returns a version before it commits, or one later lost": a read returns a version neither acknowledged nor kept |
 | A node that no longer leads a PG keeps its pending versions unanswered | | Trace, as in the seeded runs (none of 200 in the fault and read runs) a version that reached a member is answered by it, or by peering keeping it: primary 1, cut off from disks 2 and 3, orders 1.1, and interval 2 makes disk 2 primary with disk 1 in `maintenance` before the cut heals, so no member held 1.1, its resend in an ended interval is not sent, and peering drops it | | | Property 16's |
-| A primary serves reads in a new interval though another primary led the PG since | The lead's serving and kept version carried into it | Read | 45 | 8 | Property 14's `ReadsAcked`, as "every chunk's history of client writes, punches and reads is linearizable": a read no order of its chunk's history fits |
+| A primary serves reads in a new interval though another primary led the PG since | The lead's serving and kept version carried into it | Read | 19 of 200 | 12 | Property 14's `ReadsAcked`, as "every chunk's history of client writes, punches and reads is linearizable": a read no order of its chunk's history fits |
 | A primary refuses only the failed version, not the chunk's later ones | Not planted: the rule is `fail`'s loop over the chunk's later versions, and cutting it breaks nothing. A member refuses each later version of the chunk past one it failed, and a version failing on the primary's own log fails those queued behind it, so each later version is refused in its own right; with the loop cut to the failed version, none of 300 seeds of the fault, read and primary-change runs breaks | | | | Property 15's |
 | A new disk answers peering for the disk ID it replaced | | Primary-change | 64 | 2 | Property 4's `NothingCommittedDropped`, as "no acknowledged version is ever dropped": the node's new, empty disk answers for the old disk ID, peering counts it as that member, and the decision drops what the old disk acknowledged |
-| A member holding a version above the kept one is left off the missing list | | Read; also the primary-change runs at `min_live` 2 and 1 (52 and 50 of 300, "a member listing nothing maps …" first) and the fault run (156 of 300) | 84 | 4 | Property 14's `ReadsAcked`, as "every chunk's history of client writes, punches and reads is linearizable": `Settle` drops only a store's gated versions, so the version peering dropped stays mapped on a member that logged it unless the list sends it recovery |
+| A member holding a version above the kept one is left off the missing list | | Read; also the primary-change runs at `min_live` 2 and 1 (52 and 50 of 300, "a member listing nothing maps …" first) and the fault run (17 of 300) | 24 of 200 | 4 | Property 14's `ReadsAcked`, as "every chunk's history of client writes, punches and reads is linearizable": `Settle` drops only a store's gated versions, so the version peering dropped stays mapped on a member that logged it unless the list sends it recovery |
 
 The lease pair run's plants, seeds of 500 failing and the first. No margin for a suspend that
 delivers no `Resumed` (`Config.Resume` 0) 2 (28). The 1 s of that margin covers the errors of most other plants, so
@@ -6516,7 +6528,7 @@ new run ID 9 (6), no step check 52 (1), one on grants only 53 (1), no restart wa
 property 10, the step check at `1 + lease_drift / 2` 25 (3) and against a grant that gave no lease 3 (265).
 
 The read run also plants a primary that commits a version once its own log holds it, before its
-members do: a read returns a version the next interval drops at 360 seeds of 500, seed 0 first
+members do: a read returns a version the next interval drops at 128 of the first 200 seeds, seed 0 first
 (`TestPlantedReadBugsBreakTheReadRun`). It is no row of the model's table; it shows the read
 version check firing.
 
@@ -6524,8 +6536,8 @@ The primary-change run also plants a primary that recovers only its own copies: 
 a drain refilled among them, never reach the copy count, at 462 seeds of 500, seed 0 first.
 
 The write-limit run's planted bug, a primary ordering a plain write that adds live data past a
-member's limit, fails each of the run's two invariants, checked alone, at all 500 seeds, seed 0
-first (`TestPlantedLimitBugBreaksTheLimitRun`): its disks pass their limits by about 500 blocks.
+member's limit, fails each of the run's two invariants, checked alone, at all of the first 100
+seeds, seed 0 first (`TestPlantedLimitBugBreaksTheLimitRun`): its disks pass the 300 blocks of room.
 
 **Scripted scenarios.** Each row states what its tests check, and every one also holds the invariants
 above that its tests register. A row whose tests check less than the fault in [Testing
@@ -7601,20 +7613,25 @@ A daemon crash in the middle of a reuse window, and a write that crosses from a 
 
 The primary-change run and its leaving-member variant run against the real control-plane group as well as the stand-in, under the same invariants. A run's authority (`internal/chunkstore`, `control_plane_test.go`) either computes each table with `Next`, the stand-in, or has `meta.Control` at the leader of a real three-replica group commit it (`ctlgroup_test.go`, in `chunkstore_test`, since `meta` imports `chunkstore`). The real one is driven as the leader's host drives it. It learns each disk from its node's heartbeat. Asks reach the control plane's node as an asks frame, and activations and recovered reports as a report frame, over the simulated network, and that node hands them to `Control.Asked` and `OnEvent`, so a node cut off from it is heard by nobody. A message takes the network's 50 µs, a group commit the disk's write and flush (1,020 µs), and `Control` steps every `StepInterval` (100 ms) with its lease read, so a commit in flight overlaps asks, reports and heartbeats. It marks disks only by its own detector, so a run's down mark becomes a cut between the disk's node and the control plane's node, marked down once silent for `node_down_after` and up at its first heartbeat after the heal. The leader's host (`CtlHost`) takes no operator drains or PG edits and makes no balance moves yet, and the operator has no call for them, so the run hands its edits and drains to `Control` directly; the run's pool is staged once at set-up, when no disk is down, drained or classed.
 
-The down lever's wait reshapes the fault mix. While the mark waits, the disk stays up and its node runs, so the run goes on pulling levers against a PG whose members all run: moves and drains of running members take the place of moves of a down one, and a primary is seldom moved and marked down in one table. Over seeds 0 to 39 (plain run / leaving-member variant), counting what lands in PG 0's tables:
+The down lever's wait reshapes the fault mix. While the mark waits, the disk stays up and its node runs. The plain run keeps pulling levers then, moves, drains, formats and second failures, each finding the PG as it was before the mark, as an operator's edit or a second failure would while a node is silent but not yet marked: 17,300 of its 17,507 levers over these seeds. It is the only seeded run with edits, drains and formats on the real group. The leaving-member variant pulls no lever while a mark waits. The tables wait for the control plane's steps, so the clients write 192 times each, not 48, or their writes end before a move's interval starts. Over seeds 0 to 39 (plain run / leaving-member variant), counting what lands in PG 0's tables:
 
 | | Stand-in | Real group |
 | --- | --- | --- |
-| Interval changes | 268 / 280 | 401 / 401 |
-| Tables with a new down mark | 39 / 43 | 78 / 78 |
-| Primary moved and marked down in one table | 19 / 20 | 6 / 6 |
-| Disks formatted again | 17 / 17 | 40 / 40 |
-| Down members returned | 19 / 22 | 16 / 16 |
-| Leaving members crashed as the table removing them lands | 0 / 13 | 0 / 19 |
+| Levers pulled | 284 / 339 | 17,507 / 119 |
+| Interval changes | 268 / 280 | 419 / 138 |
+| Tables with a new down mark | 39 / 43 | 79 / 31 |
+| Primary moved and marked down in one table | 19 / 20 | 6 / 0 |
+| Disks formatted again | 18 / 18 | 74 / 13 |
+| Leaving members crashed as the table removing them lands | 0 / 13 | 0 / 7 |
+| Seeds where a restarted disk drops the gated writes of a PG it left | 3 / 11 | 0 / 7 |
 
-The real group's run pulls its move, down and crash levers thousands of times over those seeds (1,545, 2,822 and 2,766) against the stand-in's 20 to 30, nearly all on a disk whose cut is already pending, and starts 1,050 drains against 20.
+The leaving variant's gate is what lets its crash reach its subject on the real group. Each of its 7 crashes is of a drained disk (3 of them down-levered too), while some disk's down mark waits and each client still has 39 to 94 of its 192 writes left; the gate then holds until the clients end, so no lever follows a crash. Without the gate, levers stack while marks wait, every leaving member's crash lands after the clients end, and none of seeds 0 to 39 has a restarted disk drop the gated writes of a PG it left, the variant's subject. So on the real group the variant crashes a left member only while a down mark is pending; the stand-in's variant covers a crash in a quiet cluster (its 13). Each leaving variant's test fails unless one of its seeds drops a left PG's gated writes.
 
-- On the real group: the primary-change run (`TestPeeringKeepsAcknowledgedWritesAcrossPrimariesOnTheRealGroup`) and its leaving-member variant (`TestALeftMemberDownAtItsMovesEndKeepsAcknowledgedWritesOnTheRealGroup`), 10 seeds each in `go test` and 120 in `scripts/seeds.sh`, from seed 0. Each writes a conformance trace, `real-primaries-<seed>` or `real-leftdown-<seed>`. In `scripts/seeds.sh` (4 jobs) the pair's 240 seeds take 71 s against the stand-in pair's 56 s for 700, about 3.7 times a seed. An edit that moves a primary while it stays up lets the old primary restart holding part of a version its members hold whole, and it has no veto over that version (the keep rule's last row in [Peering and read leases](#peering-and-read-leases), `TestAMemberHoldingAVersionInPartDoesNotVetoIt`). In seeds 33 and 70 of both runs a disk formatted again and refilled recovers a chunk under a version that every member's crash leaves unacknowledged, then leads the next interval, which drops that version: the disk takes no image of the chunk, which would serve zeros over acknowledged bytes (`TestARealGroupRecoveryDroppedWithItsVersion`). The fault, read, write-limit, detector, give-up and P7 runs still use the stand-in.
+- On the real group: the primary-change run (`TestPeeringKeepsAcknowledgedWritesAcrossPrimariesOnTheRealGroup`) and its leaving-member variant (`TestALeftMemberDownAtItsMovesEndKeepsAcknowledgedWritesOnTheRealGroup`), 10 seeds each in `go test`, and 120 and 300 in `scripts/seeds.sh`, from seed 0. Each writes a conformance trace, `real-primaries-<seed>` or `real-leftdown-<seed>`. In `scripts/seeds.sh` (4 jobs) the plain run's 120 seeds take 30 s, 1 s a seed, as its levers keep landing while marks wait, and the variant's 300 take 25 s, 0.33 s a seed, about the stand-in's. An edit that moves a primary while it stays up lets the old primary restart holding part of a version its members hold whole, and it has no veto over that version (the keep rule's last row in [Peering and read leases](#peering-and-read-leases), `TestAMemberHoldingAVersionInPartDoesNotVetoIt`). A disk formatted again and refilled can recover a chunk under a version that every member's crash leaves unacknowledged, then lead the next interval, which drops that version: the disk takes no image of the chunk, which would serve zeros over acknowledged bytes (`TestARecoveryDroppedWithItsVersionLeavesTheCopyLacking`).
+- The fault, read, write-limit, detector and give-up runs, with their planted bugs, run on the real group alone, under their own sections: a down mark becomes a cut between the disk's node and the control plane's, the run reads each mark from the committed disk record, and the control plane answers the replicas' asks itself. In `scripts/seeds.sh` (4 jobs) their seeds cost what the stand-in's did, but the give-up run's 200, 40 s against 28 s, and the chunk store's list takes 923 s against 904 s. Three stay on the stand-in:
+  - The fenced-session run (`TestNoFencedSessionsWriteIsApplied`) fences its first session in a session table of its own, handed to the replicas by hand, and the stand-in detector's `Lags` hook keeps a down disk down while its node's session table lacks the fence. The real leader's lag check compares each node's reported session table with the leader's own, which this run never fences. The leader's side is `internal/meta`'s: `TestNoSessionIsFencedWhileItsClientsLeaseRuns` and its plant of a disk marked up with an older table (`upWithOldTable`).
+  - P7 (`TestP7SplitsAPoolWithWritesInFlight`) places PGs by hand, PG 37 on PG 18's members one interval above it and a split table moving PGs 74 and 75 to disk 4, where `Control` places them itself. The real group's splits are `internal/meta`'s (`ctl_test.go`): `TestAPoolChangeIsCheckedAgainstTheCommittedPool`, `TestAReportFromBeforeASplitIsDropped` and `TestAnAskFromBeforeASplitIsDropped`.
+  - The fault run's restarted member that never asks (`neg-member-no-ask`) breaks its invariant at 1 seed of 500 on the stand-in, seed 410, and at none of the real group's first 300: it needs a member to restart while its PG stays in its interval until the run ends. That seed's trace is scripted in `TestAMemberThatNeverAsksKeepsItsReplayedWritesGated`.
 - The cloned disk (`TestAClonedDiskIsRefused`, 30 in `scripts/seeds.sh`, 5 s): clients write to every PG of four disks on the real group while, at a random time 1 to 5 s in, a node's heartbeats name another node's member disk's log on its second device: in even seeds with the original up, in odd seeds once the original's node, cut off from the control plane, has its disk marked down. The control plane refuses it each time (`ErrLogRefused`), since a disk keeps its device when it moves and the same log on another device can only be a copy ([A disk is its log](design.md#epoch-changes-and-failure-detection)); the run fails unless it does, and it checks "no disk ID names two log IDs, and no log ID is up under two disk IDs" on the committed record after every step. A record that takes the clone as a new disk breaks it at seed 0 (`TestPlantedCloneJoinsBreaksTheDiskIDs`).
 - Open: P20 while [Space grants](#space-grants) are out and a refill after a disk failure moves members onto the fullest disks; P23 end to end, from the leader's record of when each PG last copied.
 

@@ -44,16 +44,18 @@ type authority struct {
 	// cp, when set, is the real control plane on c's node auth, which commits every table in place
 	// of Next (control_plane_test.go): cut is the nodes cut off from it, told the drains it took,
 	// rcv the recovered reports counted, reports the reports forwarded to it, opened the logs each
-	// node reports beside its replica's, and refused the heartbeats it refused.
-	t       *testing.T
-	c       *rcluster
-	cp      ControlPlane
-	cut     map[uint32]bool
-	told    map[uint32]bool
-	rcv     int
-	reports uint64
-	opened  map[uint32][]OpenedLog
-	refused []error
+	// node reports beside its replica's, refused the heartbeats it refused, and latencies the member
+	// latencies its heartbeats carried.
+	t         *testing.T
+	c         *rcluster
+	cp        ControlPlane
+	cut       map[uint32]bool
+	told      map[uint32]bool
+	rcv       int
+	reports   uint64
+	opened    map[uint32][]OpenedLog
+	refused   []error
+	latencies int
 }
 
 func (a *authority) inputs(c *rcluster) *Inputs {
@@ -256,7 +258,7 @@ func (r *primaryRun) stranded(next *Table) {
 	_, e := next.entry(pg0)
 	for id, op := range r.ops {
 		if rp, ok := r.c.cl.replies[id]; ok && rp.Status == StatusOK {
-			if err := r.c.stranded(e, op.c, rp.Version); err != nil {
+			if err := r.c.stranded(e, op.c, rp.Version, nil); err != nil {
 				r.fail(invStranded, err)
 			}
 		}
@@ -714,8 +716,13 @@ func runPrimaryRunOn(t *testing.T, seed uint64, plant *peerPlant, crashLeaving b
 			c.inv.Only(plant.inv)
 		}
 	}
+	// The real control plane's tables lag its steps, so a client writes more there, or its writes end before a move's interval starts.
+	writes := 48
+	if real {
+		writes = 192
+	}
 	for range 2 {
-		pc := &primaryClient{r: r, rng: r.rng.Fork(), left: 48, pipe: 8, at: map[core.RequestID]core.Tick{}}
+		pc := &primaryClient{r: r, rng: r.rng.Fork(), left: writes, pipe: 8, at: map[core.RequestID]core.Tick{}}
 		r.clients = append(r.clients, pc)
 		c.addClient(pc)
 	}
@@ -730,7 +737,8 @@ func runPrimaryRunOn(t *testing.T, seed uint64, plant *peerPlant, crashLeaving b
 		if c.found != nil && !r.runOn {
 			return r, c.found
 		}
-		if busy() && r.rng.Chance(1, 40) && (c.active() || r.duringPeering && r.rng.Chance(1, 10)) && !slices.ContainsFunc(r.members(), func(m Member) bool { return m.Mark == MarkUp && !r.running(m) }) {
+		// In the leaving variant a lever pulled while a down mark waits stacks on the PG as it was, and every leaving member's crash lands after the clients end.
+		if busy() && !(crashLeaving && a.cutting()) && r.rng.Chance(1, 40) && (c.active() || r.duringPeering && r.rng.Chance(1, 10)) && !slices.ContainsFunc(r.members(), func(m Member) bool { return m.Mark == MarkUp && !r.running(m) }) {
 			r.inject()
 		}
 	}
@@ -793,28 +801,24 @@ func TestPeeringKeepsAcknowledgedWritesAcrossPrimariesOnTheRealGroup(t *testing.
 	})
 }
 
-// The real group's seeds 33 and 70, in both variants of the run: disk 5, node 1's disk formatted
-// again and refilled into PG 0, recovers chunk {1 7 11} under a version of its interval that every
-// member's crash leaves unacknowledged. The next peering, with disk 5 primary, drops that version and
-// the recovered blocks with it, and must not take what disk 5 still holds for its image
-// (TestARecoveryDroppedWithItsVersionLeavesTheCopyLacking).
-func TestARealGroupRecoveryDroppedWithItsVersion(t *testing.T) {
-	for _, seed := range []uint64{33, 70} {
-		for _, crashLeaving := range []bool{false, true} {
-			if _, err := runPrimaryRunOn(t, seed, nil, crashLeaving, 2, true); err != nil {
-				t.Fatalf("seed %d, crashLeaving %v: %v", seed, crashLeaving, err)
-			}
-		}
-	}
-}
-
 // The same run with each leaving member crashed as the table removing it is published: restarted, its replay gates
 // the writes it logged in the move's interval, which it drops once a table names it in no interval of the PG. The run
 // fails if its seeds, more than one, never reach that.
 func TestALeftMemberDownAtItsMovesEndKeepsAcknowledgedWrites(t *testing.T) {
+	runLeftDown(t, false)
+}
+
+// The same run on the real control plane, as TestPeeringKeepsAcknowledgedWritesAcrossPrimariesOnTheRealGroup.
+func TestALeftMemberDownAtItsMovesEndKeepsAcknowledgedWritesOnTheRealGroup(t *testing.T) {
+	runLeftDown(t, true)
+}
+
+// runLeftDown runs the leaving-member variant over the seeds, failing t if more than one ran and
+// none dropped a left PG's gated writes.
+func runLeftDown(t *testing.T, real bool) {
 	run, left := 0, 0
 	seeds.Run(t, 0, 10, func(seed uint64) {
-		r, err := runPrimaryRun(t, seed, nil, true)
+		r, err := runPrimaryRunOn(t, seed, nil, true, 2, real)
 		if err != nil {
 			t.Fatalf("seed %d: %v", seed, err)
 		}
@@ -827,15 +831,6 @@ func TestALeftMemberDownAtItsMovesEndKeepsAcknowledgedWrites(t *testing.T) {
 	if run > 1 && left == 0 {
 		t.Fatalf("none of %d seeds dropped a left PG's gated writes", run)
 	}
-}
-
-// The same run on the real control plane, as TestPeeringKeepsAcknowledgedWritesAcrossPrimariesOnTheRealGroup.
-func TestALeftMemberDownAtItsMovesEndKeepsAcknowledgedWritesOnTheRealGroup(t *testing.T) {
-	seeds.Run(t, 0, 10, func(seed uint64) {
-		if _, err := runPrimaryRunOn(t, seed, nil, true, 2, true); err != nil {
-			t.Fatalf("seed %d: %v", seed, err)
-		}
-	})
 }
 
 // A disk that never drops the gated writes of a PG it left keeps them past the table naming it in no interval of the PG

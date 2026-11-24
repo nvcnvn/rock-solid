@@ -16,11 +16,14 @@ import (
 const invMarkedFaulty = "the detector marks down only a disk whose node was cut off, whose I/O stalled or slowed, or whose log failed"
 
 // dcluster is a replica cluster whose stand-in authority runs the detector on a simulated node of its own: the replicas heartbeat it and report the members that keep them waiting over the simulated network, it probes their loops, and the authority publishes a table computed with Next whenever its marks change or a replica asks for an interval or reports an activation.
+// On the real control plane det is nil: its own detector marks the disks, and the run reads its marks
+// in the committed record, changes counting each mark that record changed.
 type dcluster struct {
 	*rcluster
 	a       *authority
 	det     *Detector
 	changes uint64
+	up      map[uint32]bool
 	// faulty is the disks the run made fail; downAt when each disk was first marked down.
 	faulty map[uint32]bool
 	downAt map[uint32]core.Tick
@@ -29,20 +32,36 @@ type dcluster struct {
 }
 
 func newDCluster(t *testing.T, seed uint64, set sim.Settings) *dcluster {
+	return newDClusterOn(t, seed, set, false)
+}
+
+// newDClusterOn is newDCluster, on the real control plane if real.
+func newDClusterOn(t *testing.T, seed uint64, set sim.Settings, real bool) *dcluster {
 	s := sim.New(seed, set)
-	a := &authority{pool: Pool{Replicas: 3, MinLive: 2, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 4}, down: map[uint32]core.Tick{}}
-	for n := range 3 {
-		if _, err := a.rec.Report(uint32(n), 0, 0x5eed+uint64(n), ""); err != nil {
-			t.Fatal(err)
+	a := &authority{pool: Pool{Replicas: 3, MinLive: 2, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 4},
+		down: map[uint32]core.Tick{}, opened: map[uint32][]OpenedLog{}}
+	var tbl Table
+	if real {
+		tbl = realControl(t, a, 3)
+	} else {
+		for n := range 3 {
+			if _, err := a.rec.Report(uint32(n), 0, 0x5eed+uint64(n), ""); err != nil {
+				t.Fatal(err)
+			}
 		}
+		var empty Table
+		tbl, _, _ = Next(&empty, &Inputs{Pools: a.pools()})
 	}
-	var empty Table
-	tbl, _, _ := Next(&empty, &Inputs{Pools: a.pools()})
 	c := newRClusterOn(t, tbl, s)
-	d := &dcluster{rcluster: c, a: a, det: c.detect(a), faulty: map[uint32]bool{}, downAt: map[uint32]core.Tick{}}
+	d := &dcluster{rcluster: c, a: a, faulty: map[uint32]bool{}, downAt: map[uint32]core.Tick{}, up: map[uint32]bool{}}
+	if real {
+		a.attach(c)
+	} else {
+		d.det = c.detect(a)
+	}
 	c.inv.Register(invMarkedFaulty, func() error {
 		for _, r := range a.rec.Disks() {
-			if m, since := d.det.Mark(r.ID); m == MarkDown && !d.faulty[r.ID] {
+			if m, since := d.mark(r.ID); m == MarkDown && !d.faulty[r.ID] {
 				return fmt.Errorf("disk %d marked down at %d", r.ID, since)
 			}
 		}
@@ -72,6 +91,10 @@ func (c *rcluster) detect(a *authority) *Detector {
 // tend publishes a table when the detector's marks changed or a replica asked or activated, noting when each disk was first marked down.
 func (d *dcluster) tend() {
 	c := d.rcluster
+	if d.det == nil {
+		d.tendReal()
+		return
+	}
 	if d.det.Changes() == d.changes && len(c.asks) == d.a.seen && len(c.activations) == d.a.acts && len(d.a.edits) == 0 {
 		return
 	}
@@ -91,6 +114,51 @@ func (d *dcluster) tend() {
 		}
 	}
 	d.det.View(&c.table, d.a.pools())
+}
+
+// tendReal hands the nodes not cut off the real control plane's newest table, once it commits one or
+// a replica asked or activated, and notes each mark its record changed.
+func (d *dcluster) tendReal() {
+	c, a := d.rcluster, d.a
+	if a.due() || len(c.asks) > a.seen || len(c.activations) > a.acts || len(a.edits) > 0 {
+		if next := a.next(c); len(MakeDelta(&c.table, &next).Entries) > 0 {
+			c.table = next
+			for n := range c.reps {
+				if c.s.Node(uint32(n)).Up() && !d.cut[n] {
+					c.call(n, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.SetTable(ctx, next, out) })
+				}
+			}
+		}
+	}
+	for _, r := range a.rec.Disks() {
+		if up, ok := d.up[r.ID]; ok && up != r.Up {
+			d.changes++
+		}
+		d.up[r.ID] = r.Up
+		if !r.Up && d.downAt[r.ID] == 0 {
+			d.downAt[r.ID] = c.s.Time()
+		}
+	}
+}
+
+// mark is disk id's mark and since when it is down: the detector's, or the real control plane's
+// committed record's.
+func (d *dcluster) mark(id uint32) (Mark, core.Tick) {
+	if d.det != nil {
+		return d.det.Mark(id)
+	}
+	if r := d.a.rec.Disks()[id-1]; !r.Up {
+		return MarkDown, r.DownSince
+	}
+	return MarkUp, 0
+}
+
+// marks is the count of marks changed: the detector's, or the real control plane's record's.
+func (d *dcluster) marks() uint64 {
+	if d.det != nil {
+		return d.det.Changes()
+	}
+	return d.changes
 }
 
 // run steps the cluster for dur of simulated time, tending the table.
@@ -175,12 +243,12 @@ func noisy() sim.Settings {
 }
 
 // runDetection loads every PG with writes, then fails disk with fault and runs on: the detector marks it down within the fault's bound, a quarter wider either way with noise, which slews clocks by up to 22.6%, and only once, marks no other disk, and the PGs take writes again. With noise, clocks slew and drift, delivery is jittered, and the detector's own node stops for up to 4.5 s, counted by its clocks, before the fault.
-func runDetection(t *testing.T, seed uint64, fault diskFault, disk uint32, noise bool) {
+func runDetection(t *testing.T, seed uint64, fault diskFault, disk uint32, noise, real bool) {
 	set := sim.DefaultSettings()
 	if noise {
 		set = noisy()
 	}
-	d := newDCluster(t, seed, set)
+	d := newDClusterOn(t, seed, set, real)
 	cl := &dclient{c: d.rcluster, rng: core.NewRand(seed ^ 0xdec), pipe: 6, at: map[core.RequestID]core.Tick{}}
 	d.s.Node(d.client.Node).AddActor(d.client, cl)
 	if noise {
@@ -191,7 +259,7 @@ func runDetection(t *testing.T, seed uint64, fault diskFault, disk uint32, noise
 		d.run(stop)
 	}
 	d.run(3 * sec)
-	if cl.ok == 0 || !slices.ContainsFunc(d.det.disks, func(w watched) bool { return w.lat > 0 }) {
+	if cl.ok == 0 || d.det != nil && !slices.ContainsFunc(d.det.disks, func(w watched) bool { return w.lat > 0 }) || d.det == nil && d.a.latencies == 0 {
 		t.Fatalf("seed %d: before the fault, %d writes completed and no primary reported a member's latency", seed, cl.ok)
 	}
 	n := uint32(d.node(disk))
@@ -221,8 +289,8 @@ func runDetection(t *testing.T, seed uint64, fault diskFault, disk uint32, noise
 	if at == 0 || at-from < earliest || at-from > latest {
 		t.Fatalf("seed %d: %v of disk %d at %d: marked down at %d, want within [%d, %d] of the fault", seed, fault, disk, from, at, earliest, latest)
 	}
-	if d.det.Changes() != 1 {
-		t.Fatalf("seed %d: %d marks changed, want the one of disk %d", seed, d.det.Changes(), disk)
+	if d.marks() != 1 {
+		t.Fatalf("seed %d: %d marks changed, want the one of disk %d", seed, d.marks(), disk)
 	}
 	before := cl.ok
 	d.run(5 * sec)
@@ -234,7 +302,7 @@ func runDetection(t *testing.T, seed uint64, fault diskFault, disk uint32, noise
 // Each seed fails one disk of a loaded rep3 cluster: its node is cut off from every other, its I/O hangs or its log fails, on a clean network and clocks or, every other nine seeds, on noisy ones with a stop of the detector's node. The detector marks it down within the bound of its fault and no other disk, and the PGs take writes again. Fail-slow is judged on the latencies primaries report (TestAFailSlowDiskIsMarkedDown): the simulator advances its one clock to each completion it takes, so a slow disk delays the other disks' completions in flight as much as its own.
 func TestTheDetectorMarksAFailedDiskDown(t *testing.T) {
 	seeds.Run(t, 0, 9, func(seed uint64) {
-		runDetection(t, seed, diskFault(seed%3), uint32(1+seed/3%3), seed/9%2 == 1)
+		runDetection(t, seed, diskFault(seed%3), uint32(1+seed/3%3), seed/9%2 == 1, true)
 	})
 }
 

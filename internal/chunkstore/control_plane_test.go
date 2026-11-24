@@ -83,6 +83,7 @@ func (a *authority) attach(c *rcluster) {
 			if ev.Kind == core.EvNetRecv {
 				frame, data := Frame(ctx.Pool, &ev.Msg)
 				if k, err := Peek(frame); err == nil && k == KindReport && DecodeReport(frame, data, &rp) == nil && len(rp.Disks) > 0 {
+					a.latencies += len(rp.Latencies)
 					node := ev.Peer.Node
 					if err := a.cp.Heartbeat(ctx.Now, node, append([]OpenedLog{{0, rp.Disks[0].Log}}, a.opened[node]...)); err != nil {
 						a.refused = append(a.refused, err)
@@ -195,6 +196,15 @@ func (a *authority) due() bool {
 	t, rec := a.cp.Table()
 	a.rec = NewDiskRecord(rec)
 	return t.Epoch != a.c.table.Epoch
+}
+
+// cutting reports whether a disk the run marked down is still up in the real control plane's
+// record, its node cut off and not yet silent for node_down_after.
+func (a *authority) cutting() bool {
+	return a.cp != nil && slices.ContainsFunc(a.rec.Disks(), func(d RecordedDisk) bool {
+		_, down := a.down[d.ID]
+		return down && d.Up && !d.Gone
+	})
 }
 
 // report is node n's disk reporting log on device 0, and the disk ID the record gives it: at

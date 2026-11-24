@@ -282,7 +282,7 @@ func TestRecoveryLeavesOutTheBlocksTheIntervalsWritesCover(t *testing.T) {
 // block 1 under W2. Disk 1 restarts and interval 3 makes it primary: its peering keeps W1 and drops
 // W2, which disk 3 lacks, and block 1 with it, so disk 1's copy at W1 is no image. It takes the
 // chunk from disk 3 and serves X's block 1, where with the image, as imageOverDroppedRecovery
-// takes it, it serves zeros, as the real group's seeds 33 and 70 did.
+// takes it, it serves zeros.
 func TestARecoveryDroppedWithItsVersionLeavesTheCopyLacking(t *testing.T) {
 	want := append(bytes.Repeat([]byte{0x33}, core.BlockSize), bytes.Repeat([]byte{0x11}, core.BlockSize)...)
 	for _, plant := range []bool{false, true} {

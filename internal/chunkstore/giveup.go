@@ -14,11 +14,14 @@ var (
 	ErrNothingLost = errors.New("chunkstore: the PG is neither stopped nor has unfound chunks")
 )
 
+// plantGiveUp is the give-up bugs the seeded give-up run plants in the control plane's check.
+var plantGiveUp placementPlants
+
 // CheckGiveUp is the give-up of PG pg's current interval as the leader commits it, from e, pg's committed entry, gone, which
 // tells the disks the record has gone, and lead, the latest report of pg's primary or nil: every chunk of the PG if the
 // interval never activated and is stopped, else the unfound chunks lead names, which every node drops.
 func CheckGiveUp(pg core.PGID, e *PGEntry, gone func(disk uint32) bool, lead *LeadState) (PGGiveUp, error) {
-	return checkGiveUp(pg, e, gone, lead, placementPlants{})
+	return checkGiveUp(pg, e, gone, lead, plantGiveUp)
 }
 
 func checkGiveUp(pg core.PGID, e *PGEntry, gone func(uint32) bool, lead *LeadState, plant placementPlants) (PGGiveUp, error) {

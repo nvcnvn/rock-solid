@@ -281,7 +281,7 @@ func (r *readRun) fenceNode(n int) {
 func (r *readRun) fenced() bool {
 	c := r.d.rcluster
 	for _, x := range r.d.a.rec.Disks() {
-		if m, _ := r.d.det.Mark(x.ID); m == MarkUp && c.reps[x.Node].Store().Sessions().Version < c.sessions.Version {
+		if m, _ := r.d.mark(x.ID); m == MarkUp && c.reps[x.Node].Store().Sessions().Version < c.sessions.Version {
 			return false
 		}
 	}
@@ -373,7 +373,7 @@ func (r *readRun) heal() {
 // rejoined hands node n, cut off, the newest table, as its next fetch would, once the detector marks its disk up again or 3 s after the cut healed, and reports whether it did; with returns, the table that marks it up has it lead every PG it is a member of.
 func (r *readRun) rejoined(n int) bool {
 	c := r.d.rcluster
-	up, _ := r.d.det.Mark(c.ids[n])
+	up, _ := r.d.mark(c.ids[n])
 	if up != MarkUp && c.s.Time() < r.backBy {
 		return false
 	}
@@ -548,7 +548,7 @@ func runReadsWith(t *testing.T, seed uint64, fence bool, plant *readPlant) error
 	r := &readRun{rng: core.NewRand(seed ^ 0x4ead), reads: map[core.RequestID]readVersion{}, writes: map[core.RequestID]incWrite{}, acked: map[chunkVersion]bool{}, faulted: -1,
 		fence: fence, applied: map[*Store]map[uint64]bool{}, reqSession: map[opKey]uint64{}, verSession: map[chunkVersion]uint64{}}
 	r.returns = r.rng.Chance(1, 2)
-	d := newDCluster(t, seed, set)
+	d := newDClusterOn(t, seed, set, !fence)
 	r.d, d.cut = d, map[int]bool{}
 	c := d.rcluster
 	for _, x := range d.a.rec.Disks() {
@@ -678,8 +678,8 @@ func TestNoFencedSessionsWriteIsApplied(t *testing.T) {
 	})
 }
 
-// Each planted bug breaks its invariant, checked alone, at a seed of the first 500: the epoch change model's neg-fence-on-arrival (17 of 500), a primary that checks a write's incarnation as it arrives rather than as its store orders it, so that a dead incarnation's write held on a chunk the primary lacks is ordered after its successor's, here with listerOrders, as the successor's whole-block write would otherwise wait behind it while the primary lists the chunk; a primary that commits a version once its own log holds it (360 of 500), so that a read returns a version the next interval drops; the model's neg-serve-refused (33 of 500), a primary that maps the versions it refuses, so that a read returns one neither acknowledged nor kept; and its neg-serve-after-other-primary (45 of 500), a primary that keeps serving into a new interval though another primary led the PG since, so that a read returns bytes no order of its chunk's history fits.
-// With the writers as two sessions, the sessions model's neg-check-on-arrival (5 of 500), the same
+// Each planted bug breaks its invariant, checked alone, at a seed of the first 200 on the real control plane: the epoch change model's neg-fence-on-arrival (5 of 200), a primary that checks a write's incarnation as it arrives rather than as its store orders it, so that a dead incarnation's write held on a chunk the primary lacks is ordered after its successor's, here with listerOrders, as the successor's whole-block write would otherwise wait behind it while the primary lists the chunk; a primary that commits a version once its own log holds it (128 of 200), so that a read returns a version the next interval drops; the model's neg-serve-refused (109 of 200), a primary that maps the versions it refuses, so that a read returns one neither acknowledged nor kept; its neg-serve-after-other-primary (19 of 200), a primary that keeps serving into a new interval though another primary led the PG since, so that a read returns bytes no order of its chunk's history fits; and a member above the kept version left off the missing list (24 of 200).
+// With the writers as two sessions, on the stand-in, the sessions model's neg-check-on-arrival (5 of 500), the same
 // primary, orders a fenced session's write that waited in its store as the fence came; and its
 // neg-replica-no-check (130 of 500), a member that takes a replicated write without checking its
 // session, logs one its primary ordered before the fence reached it.
@@ -690,10 +690,10 @@ func TestPlantedReadBugsBreakTheReadRun(t *testing.T) {
 		fence bool
 		readPlant
 	}{
-		{"incarnation checked on arrival", 24, false, readPlant{inv: invIncarnation, set: func(r *readRun) { r.d.replicaPlants.fenceOnArrival, r.d.replicaPlants.listerOrders = true, true }}},
+		{"incarnation checked on arrival", 27, false, readPlant{inv: invIncarnation, set: func(r *readRun) { r.d.replicaPlants.fenceOnArrival, r.d.replicaPlants.listerOrders = true, true }}},
 		{"commit on the primary's own log", 0, false, readPlant{inv: invReadVersion, set: func(r *readRun) { r.d.replicaPlants.commitOnOwnLog = true }}},
-		{"a refused version served", 2, false, readPlant{inv: invReadVersion, set: func(r *readRun) { r.d.replicaPlants.serveRefused = true }}},
-		{"served on after another primary led", 8, false, readPlant{inv: invLinearizable, set: func(r *readRun) { r.d.replicaPlants.serveAfterOther = true }}},
+		{"a refused version served", 0, false, readPlant{inv: invReadVersion, set: func(r *readRun) { r.d.replicaPlants.serveRefused = true }}},
+		{"served on after another primary led", 12, false, readPlant{inv: invLinearizable, set: func(r *readRun) { r.d.replicaPlants.serveAfterOther = true }}},
 		{"a member above the kept version left off the list", 4, false, readPlant{inv: invLinearizable, set: func(r *readRun) { r.d.replicaPlants.noListAbove = true }}},
 		{"session checked on arrival", 223, true, readPlant{inv: invFencedWrite, set: func(r *readRun) { r.d.replicaPlants.fenceOnArrival = true }}},
 		{"member takes a fenced session's write", 5, true, readPlant{inv: invFencedWrite, set: func(r *readRun) { r.d.replicaPlants.memberNoFence = true }}},

@@ -313,7 +313,7 @@ func (lc *limitClient) Next(ctx *core.Context, acts []core.Action) []core.Action
 // runLimit runs the write-limit workload for 20 s of faults and 5 s after, failing t on a broken invariant registered with the simulator; with an invariant to plant against, the primaries admit plain writes past the limit and it checks that invariant alone, returning its first violation.
 func runLimit(t *testing.T, seed uint64, plant string) error {
 	planted := plant != ""
-	d := newDCluster(t, seed, sim.DefaultSettings())
+	d := newDClusterOn(t, seed, sim.DefaultSettings(), true)
 	c := d.rcluster
 	for _, x := range d.a.rec.Disks() {
 		d.faulty[x.ID] = true
@@ -400,7 +400,7 @@ func TestWritesPassTheWriteLimitOnlyWhereAdmitted(t *testing.T) {
 	})
 }
 
-// The planted primary that orders plain writes past a member's write_limit breaks each invariant, checked alone, at seed 0: the versions it orders past the limit (500 of 500 seeds), and the room each disk had below it, which correct runs pass by at most 87 blocks of 300 over the first 100 seeds and the plant by about 500 (500 of 500).
+// The planted primary that orders plain writes past a member's write_limit breaks each invariant, checked alone, at seed 0: the versions it orders past the limit (100 of the first 100 seeds), and the room each disk had below it, which correct runs pass by at most 85 blocks of 300 over the first 100 seeds and the plant by more (100 of 100).
 func TestPlantedLimitBugBreaksTheLimitRun(t *testing.T) {
 	for _, inv := range []string{invWriteLimit, invLimitRoom} {
 		if err := runLimit(t, 0, inv); err == nil || !strings.Contains(err.Error(), inv) {
