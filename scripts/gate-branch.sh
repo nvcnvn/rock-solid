@@ -34,7 +34,7 @@ base=$(git -C "$repo" merge-base main "$tip")
 [ "$base" != "$tip" ] || base=$(git -C "$repo" rev-parse "$tip^")
 out=$cache/gate/${ref//\//-}-$short
 wt=$cache/wt/$short-$$
-mkdir -p "$cache/gate-pass" "$cache/wt"
+mkdir -p "$cache/gate-pass" "$cache/wt" "$cache/linux-gocache"
 git -C "$repo" worktree add -q --detach "$wt" "$tip"
 trap 'git -C "$repo" worktree remove --force "$wt"' EXIT
 cd "$wt"
@@ -72,7 +72,7 @@ affected() {
 		BEGIN { n = split(want, w, " "); for (i = 1; i <= n; i++) W[w[i]] = 1 }
 		$1 ~ /\.test$/ { for (i = 2; i <= NF; i++) if ($i in W) { print substr($1, 1, length($1) - 5); next } }'
 }
-tests='{{.ImportPath}} {{.TestGoFiles}} {{.XTestGoFiles}}'
+tests='{{.ImportPath}} {{.GoFiles}} {{.TestGoFiles}} {{.XTestGoFiles}}'
 linuxonly=$(comm -13 <(go list -f "$tests" ./... | sort) <(GOOS=linux go list -f "$tests" ./... | sort) | cut -d' ' -f1)
 pkgs= linux=
 if [ -n "$full" ]; then
@@ -99,7 +99,7 @@ for m in $models; do
 	if [ -f "$pass" ]; then
 		skips+=("models-$m|$(head -1 "$pass")")
 	else
-		steps+=("models-$m|f=0; for c in \$(cd models/$m && ls ci*.cfg neg-*.cfg); do CI_LIMIT=${CI_LIMIT:-600} lockf -k $lock scripts/models.sh ci $m/\$c || f=1; done; [ \$f = 0 ] && echo 'passed in the gate of $ref at $short, $(date +%F)' >$pass")
+		steps+=("models-$m|cs=\$(cd models/$m && ls ci*.cfg neg-*.cfg 2>/dev/null); [ -n \"\$cs\" ] || { echo 'FAIL $m: no configuration'; exit 1; }; f=0; for c in \$cs; do CI_LIMIT=${CI_LIMIT:-600} lockf -k $lock scripts/models.sh ci $m/\$c || f=1; done; [ \$f = 0 ] && echo 'passed in the gate of $ref at $short, $(date +%F)' >$pass")
 	fi
 done
 if [ -n "$full" ]; then
@@ -114,7 +114,7 @@ elif [ -n "$linux" ]; then
 	steps+=("linux-test|docker info >/dev/null 2>&1 || { echo 'Error: the Docker daemon is not reachable; start it, or set RS_GATE_NO_LINUX=1 to skip this step'; exit 1; }; \
 docker run --rm --name rs-gate-$short-$$ --cpus 4 --memory 6g --security-opt seccomp=unconfined \
 -v \"\$PWD\":/src:ro -v $(go env GOMODCACHE):/go/pkg/mod:ro -w /src -e GOTOOLCHAIN=local -e GOMEMLIMIT \
--e GOFLAGS='-mod=mod -buildvcs=false' -e GOCACHE=/tmp/gocache golang:${GOTOOLCHAIN#go} \
+-v $cache/linux-gocache:/gocache -e GOFLAGS='-mod=mod -buildvcs=false' -e GOCACHE=/gocache golang:${GOTOOLCHAIN#go} \
 go test -p 1 -count=1 -timeout 30m $(paste -s -d ' ' - <<<"$linux")")
 fi
 [ -z "$conform" ] || steps+=("conform|scripts/conform.sh")
@@ -150,7 +150,7 @@ for s in "${steps[@]}"; do
 	if ! ${held[@]+"${held[@]}"} bash -c 'date +%s >"$0"; eval "$1"' "$out/$name.locked" "${s#*|}" >"$log" 2>&1; then
 		verdict=FAIL
 		failed=1
-		failures+=$'\n'"## $name"$'\n\n```\n'"$(grep -E '^(--- FAIL|FAIL|panic:|Error:)|(is|was) violated' "$log" | head -40)"$'\n```\n'
+		failures+=$'\n'"## $name"$'\n\n```\n'"$(grep -E '^(--- FAIL|FAIL|panic:|(docker: )?Error)|(is|was) violated' "$log" | head -40)"$'\n```\n'
 	fi
 	end=$(date +%s)
 	locked=$(cat "$out/$name.locked" 2>/dev/null || echo "$end")
