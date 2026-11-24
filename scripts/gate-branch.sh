@@ -8,7 +8,8 @@
 # on main. --plan prints the steps and runs none. --merge fast-forwards the clean main checkout to the
 # tip once every step passes, then lints main. Each step's log and summary.md land in
 # $cache/gate/<branch>-<sha>/; a model whose tree a gate passed, recorded in $cache/gate-pass/, is
-# skipped. Every step holds one machine-wide lock; wrap any other heavy command the same way:
+# skipped. Every step holds one machine-wide lock, a model step once per configuration; wrap any other
+# heavy command the same way:
 #   lockf -k "${XDG_CACHE_HOME:-$HOME/.cache}/rock-solid/heavy.lock" <command>
 set -euo pipefail
 
@@ -98,7 +99,7 @@ for m in $models; do
 	if [ -f "$pass" ]; then
 		skips+=("models-$m|$(head -1 "$pass")")
 	else
-		steps+=("models-$m|CI_LIMIT=${CI_LIMIT:-600} scripts/models.sh ci $m && echo 'passed in the gate of $ref at $short, $(date +%F)' >$pass")
+		steps+=("models-$m|f=0; for c in \$(cd models/$m && ls ci*.cfg neg-*.cfg); do CI_LIMIT=${CI_LIMIT:-600} lockf -k $lock scripts/models.sh ci $m/\$c || f=1; done; [ \$f = 0 ] && echo 'passed in the gate of $ref at $short, $(date +%F)' >$pass")
 	fi
 done
 if [ -n "$full" ]; then
@@ -143,7 +144,10 @@ for s in "${steps[@]}"; do
 	start=$(date +%s)
 	echo "$(date +%T) $name"
 	verdict=pass
-	if ! lockf -k "$lock" bash -c 'date +%s >"$0"; eval "$1"' "$out/$name.locked" "${s#*|}" >"$log" 2>&1; then
+	# The lock is shared with other sessions, so a model step takes it once per configuration.
+	held=(lockf -k "$lock")
+	[[ $name != models-* ]] || held=()
+	if ! ${held[@]+"${held[@]}"} bash -c 'date +%s >"$0"; eval "$1"' "$out/$name.locked" "${s#*|}" >"$log" 2>&1; then
 		verdict=FAIL
 		failed=1
 		failures+=$'\n'"## $name"$'\n\n```\n'"$(grep -E '^(--- FAIL|FAIL|panic:|Error:)|(is|was) violated' "$log" | head -40)"$'\n```\n'
