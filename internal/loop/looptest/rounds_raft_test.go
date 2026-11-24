@@ -15,10 +15,13 @@ import (
 
 // raftRounds is a Raft shard's log on the round driver, as its replica drives it: each round holds
 // a few entries and a hard state committing them, its storage takes it once durable, and every
-// third round compacts to the commit of the round before, as a checkpoint would.
+// third round compacts to the commit of the round before, as a checkpoint would. With reply it
+// tells the disk's owner its replay LSN as it moves.
 type raftRounds struct {
 	l     *loop.Loop
 	id    loop.ShardID
+	owner uint32
+	reply bool
 	pool  core.BufPool
 	st    *raftshard.Storage
 	rs    *raftshard.Rounds
@@ -46,7 +49,7 @@ func addRaftRounds(l *loop.Loop, pool core.BufPool, lg *loop.Log, owner uint32, 
 			panic(err)
 		}
 	}
-	rr := &raftRounds{l: l, pool: pool, st: st, rs: raftshard.NewRounds(owner, st, maxBlob), left: rounds}
+	rr := &raftRounds{l: l, owner: owner, pool: pool, st: st, rs: raftshard.NewRounds(owner, st, maxBlob), left: rounds}
 	rr.id = l.AddShard(rr, lg)
 	if rounds > 0 {
 		rr.next()
@@ -106,6 +109,18 @@ func (rr *raftRounds) bury() {
 	if rr.dead = rr.rs.Dead(rr.dead); len(rr.dead) > n {
 		rr.l.Dead(rr.id, rr.dead[n:])
 	}
+	if lsn, ok := rr.rs.ReplayLSN(); ok && rr.reply {
+		rr.l.Reply(rr.id, loop.Reply{Kind: loop.ReplyReplay, Owner: rr.owner, LSN: lsn})
+	}
+}
+
+// remove takes the shard off its loop and deletes its state, as its driver does once the replica
+// is removed, and tells the owner.
+func (rr *raftRounds) remove() {
+	rr.l.RemoveShard(rr.id)
+	newest := rr.rs.Delete()
+	rr.bury()
+	rr.l.Reply(rr.id, loop.Reply{Kind: loop.ReplyRemoved, Owner: rr.owner, LSN: newest})
 }
 
 func (rr *raftRounds) Mail(_ *core.Context, m *loop.Mail, out []core.Action) []core.Action {

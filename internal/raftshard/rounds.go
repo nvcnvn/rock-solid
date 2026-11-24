@@ -26,6 +26,8 @@ type Rounds struct {
 	bytes      uint64
 	dead       []disklog.BlobRef
 	deleted    bool
+	// told is the LSN of the oldest blob a restart needs that ReplayLSN last reported, 0 for none.
+	told uint64
 }
 
 // NewRounds keeps the rounds of the shard whose blobs carry owner and whose storage is st, already
@@ -112,13 +114,31 @@ func (r *Rounds) Replay(ref disklog.BlobRef, kind disklog.BlobKind, payload []by
 // Replayed ends the replay: a round torn at the log's tail, missing its last blob, is dropped.
 func (r *Rounds) Replayed() { r.dead = r.hd.recovered(r.dead) }
 
-// Delete gives up the shard's state, every blob of it that Durable or Replay took now dead. A blob
-// of a round still in flight is not among them: the round driver reports those of a shard taken
-// off its loop.
-func (r *Rounds) Delete() {
+// ReplayLSN reports, when it moved since the last call, the LSN a restart replays the shard after:
+// the one before its oldest blob a restart still needs. The shard tells the disk's owner, whose
+// checkpoints name it with that LSN.
+func (r *Rounds) ReplayLSN() (uint64, bool) {
+	if len(r.hd.refs) == 0 || r.hd.refs[0].LSN == r.told {
+		return 0, false
+	}
+	r.told = r.hd.refs[0].LSN
+	return r.told - 1, true
+}
+
+// Delete gives up the shard's state, every blob of it that Durable or Replay took now dead, and
+// returns the LSN of the newest of them, 0 for none, which the disk's owner keeps the shard's
+// owner from a new shard until the replay floor passes. A blob of a round still in flight is not
+// among them: the round driver reports those of a shard taken off its loop, and raises that LSN
+// to theirs.
+func (r *Rounds) Delete() uint64 {
+	var newest uint64
+	if n := len(r.hd.refs); n > 0 {
+		newest = r.hd.refs[n-1].LSN
+	}
 	r.deleted = true
 	r.dead = append(r.dead, r.hd.refs...)
 	r.hd.refs, r.hd.rounds, r.hd.closed, r.hd.newest = r.hd.refs[:0], r.hd.rounds[:0], 0, -1
+	return newest
 }
 
 // Dead appends to dst the blobs that died since the last call, which the driver reports dead to

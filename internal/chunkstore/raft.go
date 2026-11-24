@@ -59,14 +59,26 @@ func (s *Store) AddRaft(owner uint32, st *raftshard.Storage, sh RaftShard) {
 
 // AddRemote knows the shard whose blobs carry owner as shard id on the round driver of loop,
 // which writes its rounds to this store's log: a restart's replay hands its blobs to Output's
-// Mail, and a broken index stops the store rather than rebuilding it under the driver. It is
-// called as AddRaft is.
+// Mail, every checkpoint names it with the replay LSN it reports (RemoteReplay), and a broken
+// index stops the store rather than rebuilding it under the driver. It is called as AddRaft is,
+// before the shard writes a blob.
 func (s *Store) AddRemote(owner uint32, loop int, id uint32) {
 	if s.raft == nil {
 		s.raft = raftshard.NewHost(s.log)
 	}
 	s.raft.AddRemote(owner, loop, id)
 }
+
+// RemoteReplay takes the replay LSN owner's shard on the round driver reported: a restart needs
+// none of its blobs at or before lsn.
+func (s *Store) RemoteReplay(owner uint32, lsn uint64) { s.raft.RemoteReplay(owner, lsn) }
+
+// RemoveRemote forgets owner's shard on the round driver, taken off its loop with every blob of it
+// reported dead, the newest at lsn: its owner goes to no new shard while that blob can replay.
+func (s *Store) RemoveRemote(owner uint32, lsn uint64) { s.raft.RemoveRemote(owner, lsn) }
+
+// Reusable reports whether owner may be given to a new shard, hosted or on the round driver.
+func (s *Store) Reusable(owner uint32) bool { return s.raft == nil || s.raft.Reusable(owner) }
 
 // WriteRound submits round flush of owner's shard, whose contents r stay valid until
 // Output.Rounds names it durable.
@@ -135,6 +147,8 @@ func (s *Store) stepUnnamed() bool {
 // A step one writes only merge steps, so it names each shard with the replay LSN of the runs it
 // carries, that of the last due checkpoint that ended, and leaves out a shard none named: its rounds
 // all follow that checkpoint's base, where the replay floor stays.
+// Either names each shard on the round driver with the replay LSN it last reported, as its rounds
+// may predate any checkpoint's base.
 func (s *Store) beginShards(ctx *core.Context, due bool, durable uint64, idx []disklog.CheckpointIndex) ([]disklog.CheckpointIndex, error) {
 	if s.raft == nil {
 		return idx, nil
@@ -151,7 +165,7 @@ func (s *Store) beginShards(ctx *core.Context, due bool, durable uint64, idx []d
 				idx = append(idx, disklog.CheckpointIndex{Owner: r.owner, ReplayLSN: r.replay, Runs: t.CarriedRuns(), Bounds: t.Bounds()})
 			}
 		}
-		return idx, nil
+		return s.raft.RemoteIndexes(idx, durable), nil
 	}
 	if err := s.raft.Rewrite(ctx, s.lastBase, &s.lout); err != nil {
 		return idx, err
@@ -173,7 +187,7 @@ func (s *Store) beginShards(ctx *core.Context, due bool, durable uint64, idx []d
 		idx[k].Runs, idx[k].Bounds = t.CarriedRuns(), t.Bounds()
 		r.cpReplay, r.cpNamed = idx[k].ReplayLSN, true
 	}
-	return idx, nil
+	return s.raft.RemoteIndexes(idx, durable), nil
 }
 
 // shardsCheckpointed ends each shard tree's flush once the manifest is durable, reports the

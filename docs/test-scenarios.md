@@ -7321,8 +7321,25 @@ Recovery from manifest and log is under Shard indexes in the disk owner's checkp
   them rebuilds its storage and reports nothing dead (`TestARestartMailsAShardOnTheRoundDriverItsLiveRounds`).
   A store that knows a shard on the round driver stops on a broken index rather than draining its
   log for a rebuild (`TestABrokenIndexStopsAStoreWithAShardOnTheRoundDriver`), and stops with
-  `ErrNoSpace` when its log is out of room (`TestAStoreWithAShardOnTheRoundDriverStopsOutOfRoom`). The end-to-end
-  restart is under [Round driver](#round-driver).
+  `ErrNoSpace` when its log is out of room (`TestAStoreWithAShardOnTheRoundDriverStopsOutOfRoom`).
+  A shard reports the LSN before the oldest blob of its live rounds, once each time it moves
+  (`TestRoundsReplayRebuildsTheStorage`). Until its first report a checkpoint names it with the
+  durable LSN when it was added, before every blob it writes, and after a restart with the LSN
+  the loaded manifest gave it (`TestAShardOnTheRoundDriverIsNamedBeforeItsFirstReport`).
+  Checkpoints made due every few rounds, while such shards on the device loop and on another loop
+  write thirty rounds each, and then, the shards idle, the due checkpoints and merge steps of
+  chunk writes, name both with the replay LSN each reported: the replay floor moves, yet after
+  every step stays before the oldest blob either still needs, though the index's replay LSN
+  passes it, and a restart recovers both storages whole; leaving them out of the due or the merge
+  steps' checkpoints moved the floor past a live blob
+  (`TestCheckpointsNameTheShardsOnTheRoundDriver`). The shard on the other loop, removed with a
+  round in flight, and then the one on the device loop: the store hears each removal with the
+  LSN of its newest blob, the round in flight's for the first, and gives neither owner to a new
+  shard until checkpoints move the floor past it; a new shard given the first owner then restarts
+  with its own rounds alone (`TestARemovedShardsOwnerOnTheRoundDriverWaitsForTheFloor`). A
+  removed shard that reports a replay LSN or its removal again panics, since either could reach
+  a new shard given its owner (`TestARemovedShardRepliesNothingMore`). The end-to-end restart is
+  under [Round driver](#round-driver).
 - **Lagging follower.** A follower behind the compaction index gets a `MsgSnap` built from a point-in-time view of the shard's LSM tree, which never blocks the writer, and catches up from it. A view held open holds back the cleaner (asserted in the LSM tree tests).
 - **Index rebuild.** One index rebuilds from its manifest and the log while the disk's other indexes serve, without restarting the log.
 

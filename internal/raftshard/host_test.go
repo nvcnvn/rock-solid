@@ -45,11 +45,12 @@ type rig struct {
 	remote []uint32
 }
 
-// checkpoint writes a manifest naming the host's shards, and returns its replay floor.
+// checkpoint writes a manifest naming the host's shards, those on the round driver too, and
+// returns its replay floor.
 func (r *rig) checkpoint() uint64 {
 	r.t.Helper()
 	durable := r.host.Log.DurableLSN()
-	idx := r.host.Indexes(nil, durable)
+	idx := r.host.RemoteIndexes(r.host.Indexes(nil, durable), durable)
 	r.floor = durable
 	for _, ix := range idx {
 		r.floor = min(r.floor, ix.ReplayLSN)

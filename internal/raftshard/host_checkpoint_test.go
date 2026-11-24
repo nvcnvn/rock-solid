@@ -582,3 +582,43 @@ func TestARestartMailsAShardOnTheRoundDriverItsLiveRounds(t *testing.T) {
 		t.Fatalf("its one live round replayed, the shard reports %v dead", dead)
 	}
 }
+
+func (r *rig) remoteReplayLSN(owner uint32) uint64 {
+	r.t.Helper()
+	durable := r.host.Log.DurableLSN()
+	for _, ix := range r.host.RemoteIndexes(nil, durable) {
+		if ix.Owner == owner {
+			return ix.ReplayLSN
+		}
+	}
+	r.t.Fatalf("owner %d not on the round driver", owner)
+	return 0
+}
+
+// TestAShardOnTheRoundDriverIsNamedBeforeItsFirstReport adds shard 6 on the round driver: until it
+// reports, a checkpoint names it with the durable LSN when it was added, before every blob it
+// writes, which later records pass; once it reports, with that LSN; and after a restart, before it
+// reports again, with the LSN the loaded manifest names it with.
+func TestAShardOnTheRoundDriverIsNamedBeforeItsFirstReport(t *testing.T) {
+	r := newRig(t)
+	st5 := NewStorage()
+	r.host.Add(5, st5)
+	r.commit(st5, 5, 1, Round{Entries: entries(1, 1, 1, 100)})
+	added := r.host.Log.DurableLSN()
+	r.host.AddRemote(6, 1, 0)
+	r.commit(st5, 5, 2, Round{Entries: entries(2, 1, 1, 100)})
+	if got := r.remoteReplayLSN(6); got != added {
+		t.Fatalf("shard 6, added at durable LSN %d, is named with %d before it reports", added, got)
+	}
+	reported := r.host.Log.DurableLSN() - 1
+	r.host.RemoteReplay(6, reported)
+	if floor := r.checkpoint(); floor > reported {
+		t.Fatalf("the floor %d passed shard 6's reported replay LSN %d", floor, reported)
+	}
+	r.roll()
+	r.remote = []uint32{6}
+	r.crash(5)
+	if got := r.remoteReplayLSN(6); got != reported {
+		t.Fatalf("after a restart shard 6 is named with %d before it reports, the manifest's %d", got, reported)
+	}
+}

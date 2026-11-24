@@ -15,22 +15,36 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
-// storeShards runs a store on a device loop, ID 1, that owns its log, with a Raft shard on the
-// round driver of that loop and one on a producer loop, ID 0, both known to the store; each new
-// process starts its loops, and its shards on the bases their runs would restore, when the store
-// opens.
+// storeShards runs a store of configuration cfg on a device loop, ID 1, that owns its log, with a
+// Raft shard on the round driver of that loop and one on a producer loop, ID 0, both known to the
+// store, which hears their replies; each new process starts its loops, and its shards on the
+// bases their runs would restore, when the store opens. removed is the ReplyRemoved replies the
+// store heard, and reusable whether it found each one's owner reusable at once.
 type storeShards struct {
-	t       *testing.T
-	sd      *storetest.SimDisk
-	pool    core.BufPool
-	s       *sim.Scheduler
-	ring    *Disk
-	loops   [2]*loop.Loop
-	lg      *loop.Log
-	r       *storetest.Rig
-	maxBlob uint64
-	rounds  int
-	shards  [2]*raftRounds
+	t        *testing.T
+	cfg      chunkstore.Config
+	sd       *storetest.SimDisk
+	pool     core.BufPool
+	s        *sim.Scheduler
+	ring     *Disk
+	loops    [2]*loop.Loop
+	lg       *loop.Log
+	r        *storetest.Rig
+	maxBlob  uint64
+	rounds   int
+	shards   [2]*raftRounds
+	removed  []loop.Reply
+	reusable []bool
+}
+
+func newStoreShards(t *testing.T, cfg chunkstore.Config, rounds int) *storeShards {
+	sh := &storeShards{t: t, cfg: cfg, sd: storetest.NewSimDisk(1), rounds: rounds}
+	sh.start()
+	r := storetest.NewRig(t, sh, cfg)
+	r.Opened, r.Mail = sh.opened, sh.mail
+	sh.r, sh.maxBlob = r, r.S.Log().MaxBlobBytes()
+	sh.opened(r.S)
+	return sh
 }
 
 func (sh *storeShards) opened(st *chunkstore.Store) {
@@ -43,6 +57,7 @@ func (sh *storeShards) opened(st *chunkstore.Store) {
 			base = sh.shards[i].st.Base()
 		}
 		sh.shards[i] = addRaftRounds(l, l.Context().Pool, sh.lg, 1001+uint32(i), sh.maxBlob, sh.rounds, base)
+		sh.shards[i].reply = true
 		st.AddRemote(1001+uint32(i), i, uint32(sh.shards[i].id))
 		l.Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: 1})
 	}
@@ -69,7 +84,7 @@ func (sh *storeShards) start() {
 			sh.t.Fatal(err)
 		}
 		sh.loops[i], sh.ring = l, dr
-		sh.lg = l.AttachLog(nil, storetest.Config().Log, chunkstore.FirstLogIO, chunkstore.EndLogIO, 2)
+		sh.lg = l.AttachLog(nil, sh.cfg.Log, chunkstore.FirstLogIO, chunkstore.EndLogIO, 2)
 		AddWithDisk(node, k, l, dr)
 	}
 }
@@ -113,60 +128,180 @@ func (m storeShardsMachine) OnLog(ctx *core.Context, _ *loop.Log, ev *disklog.Ev
 	return out
 }
 
+func (m storeShardsMachine) OnReply(_ *loop.Log, r loop.Reply) {
+	switch r.Kind {
+	case loop.ReplyReplay:
+		m.sh.r.S.RemoteReplay(r.Owner, r.LSN)
+	case loop.ReplyRemoved:
+		m.sh.r.S.RemoveRemote(r.Owner, r.LSN)
+		m.sh.removed = append(m.sh.removed, r)
+		m.sh.reusable = append(m.sh.reusable, m.sh.r.S.Reusable(r.Owner))
+	}
+}
+
+type shardState struct {
+	hs          raftpb.HardState
+	first, last uint64
+	ents        []raftpb.Entry
+}
+
+func (sh *storeShards) storages() (out [2]shardState) {
+	for i, rr := range sh.shards {
+		if rr.err != nil {
+			sh.t.Fatalf("shard %d: %v", i, rr.err)
+		}
+		first, _ := rr.st.FirstIndex()
+		last, _ := rr.st.LastIndex()
+		ents, err := rr.st.Entries(first, last+1, 1<<62)
+		if err != nil {
+			sh.t.Fatal(err)
+		}
+		out[i] = shardState{rr.st.HardState(), first, last, ents}
+	}
+	return out
+}
+
+// restart ends the process and recovers the store, its shards making no new rounds, and checks
+// that each storage of shards recovered equal to its state before.
+func (sh *storeShards) restart(shards ...int) {
+	before := sh.storages()
+	sh.rounds = 0
+	sh.r.Restart()
+	after := sh.storages()
+	for _, i := range shards {
+		a, b := after[i], before[i]
+		if !sh.shards[i].recovered {
+			sh.t.Fatalf("shard %d was never told the replay ended", i)
+		}
+		if a.hs != b.hs || a.first != b.first || a.last != b.last || !reflect.DeepEqual(a.ents, b.ents) {
+			sh.t.Fatalf("shard %d recovered %+v and entries %d to %d, held %+v and %d to %d", i, a.hs, a.first, a.last, b.hs, b.first, b.last)
+		}
+	}
+}
+
+// oldestLive is the LSN of the oldest blob of rr not reported dead.
+func (rr *raftRounds) oldestLive() uint64 { return rr.refs[len(rr.dead)].LSN }
+
 // TestRaftShardsOnTwoLoopsRecoverTheirStorage writes rounds of a Raft shard on the device loop and
 // one on another loop, each compacting as it goes, and restarts the process: recovery mails each
 // shard its blobs, and each storage equals its state before, with every blob of its live rounds,
 // and no other, live in the log.
 func TestRaftShardsOnTwoLoopsRecoverTheirStorage(t *testing.T) {
-	sh := &storeShards{t: t, sd: storetest.NewSimDisk(1), rounds: 7}
-	sh.start()
-	r := storetest.NewRig(t, sh, storetest.Config())
-	r.Opened, r.Mail = sh.opened, sh.mail
-	sh.r, sh.maxBlob = r, r.S.Log().MaxBlobBytes()
-	sh.opened(r.S)
-	r.Settle()
-	type state struct {
-		hs          raftpb.HardState
-		first, last uint64
-		ents        []raftpb.Entry
-	}
-	snap := func() (out [2]state) {
-		for i, rr := range sh.shards {
-			if rr.err != nil {
-				t.Fatalf("shard %d: %v", i, rr.err)
-			}
-			first, _ := rr.st.FirstIndex()
-			last, _ := rr.st.LastIndex()
-			ents, err := rr.st.Entries(first, last+1, 1<<62)
-			if err != nil {
-				t.Fatal(err)
-			}
-			out[i] = state{rr.st.HardState(), first, last, ents}
-		}
-		return out
-	}
+	sh := newStoreShards(t, storetest.Config(), 7)
+	sh.r.Settle()
 	for i, rr := range sh.shards {
 		if rr.done != 7 || len(rr.dead) == 0 {
 			t.Fatalf("shard %d made %d rounds of 7, %d blobs dead", i, rr.done, len(rr.dead))
 		}
 	}
-	before := snap()
-	live := r.S.Log().LiveBlocks()
-	sh.rounds = 0
-	r.Restart()
-	for i, rr := range sh.shards {
-		if !rr.recovered {
-			t.Fatalf("shard %d was never told the replay ended", i)
-		}
-	}
-	after := snap()
-	for i := range after {
-		a, b := after[i], before[i]
-		if a.hs != b.hs || a.first != b.first || a.last != b.last || !reflect.DeepEqual(a.ents, b.ents) {
-			t.Fatalf("shard %d recovered %+v and entries %d to %d, held %+v and %d to %d", i, a.hs, a.first, a.last, b.hs, b.first, b.last)
-		}
-	}
-	if got := r.S.Log().LiveBlocks(); got != live {
+	live := sh.r.S.Log().LiveBlocks()
+	sh.restart(0, 1)
+	if got := sh.r.S.Log().LiveBlocks(); got != live {
 		t.Fatalf("the recovered log holds %d live blocks, %d before", got, live)
+	}
+}
+
+// smallReplay makes a checkpoint due every few rounds of a shard.
+func smallReplay() chunkstore.Config {
+	cfg := storetest.Config()
+	cfg.Log.MaxReplayBytes = 16 << 10
+	return cfg
+}
+
+// TestCheckpointsNameTheShardsOnTheRoundDriver makes checkpoints due while Raft shards on the
+// device loop and on another loop write rounds, and then, the shards idle, chunk writes make more
+// due and merge steps run: each checkpoint, due or a merge step's, names both with the replay LSN
+// they reported, so the replay floor moves yet never passes the oldest blob either still needs,
+// though the index's replay LSN does, and a restart recovers each storage whole.
+func TestCheckpointsNameTheShardsOnTheRoundDriver(t *testing.T) {
+	cfg := storetest.Config()
+	cfg.Log.MaxReplayBytes = 64 << 10
+	sh := newStoreShards(t, cfg, 30)
+	step := func() bool {
+		more := sh.r.Step()
+		floor := sh.r.S.Log().ReplayFloor()
+		for i, rr := range sh.shards {
+			if len(rr.refs) > len(rr.dead) && floor >= rr.oldestLive() {
+				t.Fatalf("the replay floor %d passed shard %d's live blob at %d", floor, i, rr.oldestLive())
+			}
+		}
+		return more
+	}
+	for step() {
+	}
+	if sh.r.S.Log().ReplayFloor() == 0 {
+		t.Fatal("no checkpoint moved the replay floor")
+	}
+	for i := range 400 {
+		sh.r.Write(storetest.Chunk(uint32(i%8)), 0, storetest.Fill(core.BlockSize, byte(i)), 0)
+		for step() {
+		}
+	}
+	sh.restart(0, 1)
+}
+
+// TestARemovedShardsOwnerOnTheRoundDriverWaitsForTheFloor removes the Raft shard on another loop
+// with a round in flight, and then the one on the device loop: the store gives neither owner to a
+// new shard until checkpoints move the replay floor past the newest blob of each, the round in
+// flight's included, and a new shard given an owner then restarts with its own rounds alone.
+func TestARemovedShardsOwnerOnTheRoundDriverWaitsForTheFloor(t *testing.T) {
+	sh := newStoreShards(t, smallReplay(), 10)
+	gone := sh.shards[0]
+	for gone.done < 3 || gone.flush == gone.done || gone.rs.HasReady() {
+		if !sh.r.Step() {
+			t.Fatal("no round of shard 0 went in flight")
+		}
+	}
+	gone.remove()
+	sh.r.Settle()
+	sh.shards[1].remove()
+	sh.r.Settle()
+	if len(sh.removed) != 2 || sh.removed[0].Owner != 1001 || sh.removed[1].Owner != 1002 {
+		t.Fatalf("the store heard removals %+v", sh.removed)
+	}
+	if sh.reusable[0] {
+		t.Fatal("the owner of a shard removed with a round in flight was reusable at once")
+	}
+	if newest := gone.refs[len(gone.refs)-1].LSN; sh.removed[0].LSN <= newest {
+		t.Fatalf("shard 0 was removed with its newest blob at %d, past none of its round in flight's, after %d", sh.removed[0].LSN, newest)
+	}
+	for i := 0; !sh.r.S.Reusable(1001) || !sh.r.S.Reusable(1002); i++ {
+		if floor := sh.r.S.Log().ReplayFloor(); floor >= sh.removed[0].LSN != sh.r.S.Reusable(1001) {
+			t.Fatalf("owner 1001 reusable %v with the floor at %d and its newest blob at %d", sh.r.S.Reusable(1001), floor, sh.removed[0].LSN)
+		}
+		if i == 2000 {
+			t.Fatal("the removed shards' owners never became reusable")
+		}
+		sh.r.Write(storetest.Chunk(uint32(i%8)), 0, storetest.Fill(4*core.BlockSize, byte(i)), 0)
+		sh.r.Settle()
+	}
+	fresh := addRaftRounds(sh.loops[0], sh.loops[0].Context().Pool, sh.lg, 1001, sh.maxBlob, 3, raftpb.SnapshotMetadata{})
+	fresh.reply = true
+	sh.r.S.AddRemote(1001, 0, uint32(fresh.id))
+	sh.shards[0] = fresh
+	sh.r.Settle()
+	if fresh.done != 3 {
+		t.Fatalf("the new shard made %d rounds of 3", fresh.done)
+	}
+	sh.restart(0)
+}
+
+// TestARemovedShardRepliesNothingMore removes the Raft shard on another loop: a replay LSN it
+// reports after, or a second removal, could reach a new shard given its owner, so Reply panics.
+func TestARemovedShardRepliesNothingMore(t *testing.T) {
+	sh := newStoreShards(t, smallReplay(), 3)
+	sh.r.Settle()
+	gone := sh.shards[0]
+	gone.remove()
+	sh.r.Settle()
+	for _, k := range []loop.ReplyKind{loop.ReplyReplay, loop.ReplyRemoved} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("a removed shard replied kind %d with no panic", k)
+				}
+			}()
+			gone.l.Reply(gone.id, loop.Reply{Kind: k, Owner: gone.owner, LSN: 1})
+		}()
 	}
 }

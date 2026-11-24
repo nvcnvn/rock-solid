@@ -18,8 +18,9 @@ import (
 // no buffers for waits until a later Durable event or the driver's Retry. A log that fails takes
 // its shards with it. The disk's checkpoint names each shard with the LSN its replay starts after,
 // and no shard is given the owner of a removed one while that one's blobs can still replay. A
-// shard on the round driver writes its own rounds through its loop; the host knows it only to
-// mail it a restart's replay.
+// shard on the round driver writes its own rounds through its loop; the host knows it to mail it
+// a restart's replay, to name it in checkpoints with the replay LSN it reports, and to keep its
+// owner once it is removed.
 type Host struct {
 	// Log is the disk's log: set before any Write, and by Recovered after a restart's replay.
 	Log     *disklog.Log
@@ -41,13 +42,15 @@ type Host struct {
 	mail     []Mail
 }
 
-// remoteShard is a shard on the round driver: its owner, its loop and ShardID there, and the LSN
-// at or before which a restart's replay skips its blobs.
+// remoteShard is a shard on the round driver: its owner, its loop and ShardID there, the LSN at
+// or before which a restart's replay skips its blobs, and the replay LSN a checkpoint names it
+// with, at or before every blob of it a restart still needs.
 type remoteShard struct {
-	owner uint32
-	loop  int
-	id    uint32
-	from  uint64
+	owner  uint32
+	loop   int
+	id     uint32
+	from   uint64
+	replay uint64
 }
 
 // Mail is what a restart's replay sends a shard on the round driver, at Shard on the loop of ID
@@ -198,13 +201,47 @@ func (h *Host) Add(owner uint32, st *Storage) {
 }
 
 // AddRemote knows the shard whose blobs carry owner as shard id on the round driver of loop, so a
-// restart's replay mails it its blobs, as Add does for a hosted shard.
+// restart's replay mails it its blobs, as Add does for a hosted shard, and checkpoints name it.
+// It is added before it writes a blob: until it reports a replay LSN, it is named with the log's
+// durable LSN when added, or with the one the loaded manifest names it with.
 func (h *Host) AddRemote(owner uint32, loop int, id uint32) {
 	if !h.Reusable(owner) {
 		panic(fmt.Sprintf("raftshard: owner %d hosted, in flight or with blobs that can replay", owner))
 	}
+	rs := remoteShard{owner: owner, loop: loop, id: id}
+	if h.Log != nil {
+		rs.replay = h.Log.DurableLSN()
+	}
 	h.remoteAt[owner] = len(h.remote)
-	h.remote = append(h.remote, remoteShard{owner: owner, loop: loop, id: id})
+	h.remote = append(h.remote, rs)
+}
+
+func (h *Host) remoteShard(owner uint32) int {
+	r, ok := h.remoteAt[owner]
+	if !ok {
+		panic(fmt.Sprintf("raftshard: owner %d not on the round driver", owner))
+	}
+	return r
+}
+
+// RemoteReplay takes the replay LSN owner's shard on the round driver reported: a restart needs
+// none of its blobs at or before lsn.
+func (h *Host) RemoteReplay(owner uint32, lsn uint64) {
+	h.remote[h.remoteShard(owner)].replay = lsn
+}
+
+// RemoveRemote forgets owner's shard on the round driver, taken off its loop with every blob of it
+// reported dead, the newest at lsn: owner goes to no new shard while that blob can replay.
+func (h *Host) RemoveRemote(owner uint32, lsn uint64) {
+	r := h.remoteShard(owner)
+	if lsn > 0 {
+		h.retire(owner, lsn)
+	}
+	last := len(h.remote) - 1
+	h.remote[r] = h.remote[last]
+	h.remoteAt[h.remote[r].owner] = r
+	h.remote = h.remote[:last]
+	delete(h.remoteAt, owner)
 }
 
 // Mail appends to dst what the replay sent the shards on the round driver since the last call, in
@@ -600,7 +637,7 @@ func (hd *hosted) recovered(dead []disklog.BlobRef) []disklog.BlobRef {
 func (h *Host) Loaded(m *disklog.Manifest) {
 	for _, ix := range m.Indexes {
 		if r, ok := h.remoteAt[ix.Owner]; ok {
-			h.remote[r].from = ix.ReplayLSN
+			h.remote[r].from, h.remote[r].replay = ix.ReplayLSN, ix.ReplayLSN
 		}
 		if k, ok := h.at[ix.Owner]; ok {
 			hd := &h.shards[k]
@@ -630,6 +667,15 @@ func (h *Host) Indexes(dst []disklog.CheckpointIndex, durable uint64) []disklog.
 		if k, ok := h.at[f.owner]; ok {
 			dst[n+k].ReplayLSN = min(dst[n+k].ReplayLSN, f.after)
 		}
+	}
+	return dst
+}
+
+// RemoteIndexes appends each shard on the round driver's index for a checkpoint whose base is the
+// durable LSN durable, with no runs: its owner and the replay LSN it reported, at most durable.
+func (h *Host) RemoteIndexes(dst []disklog.CheckpointIndex, durable uint64) []disklog.CheckpointIndex {
+	for _, rs := range h.remote {
+		dst = append(dst, disklog.CheckpointIndex{Owner: rs.owner, ReplayLSN: min(rs.replay, durable)})
 	}
 	return dst
 }

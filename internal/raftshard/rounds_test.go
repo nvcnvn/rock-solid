@@ -19,7 +19,8 @@ type landedBlob struct {
 }
 
 // TestRoundsReplayRebuildsTheStorage writes six rounds of several blobs each through Rounds,
-// compacting before the fourth, and a seventh whose last blob never lands, then replays every blob
+// compacting before the fourth: ReplayLSN reports the LSN before the oldest blob of the rounds
+// left live, once. Then a seventh round's last blob never lands, and the test replays every blob
 // not reported dead into a fresh storage on the base, as recovery's mail hands them over: the
 // storage equals the one before, the torn round's blobs are the only ones that die, and the blobs
 // left live are those the first Rounds kept.
@@ -68,6 +69,13 @@ func TestRoundsReplayRebuildsTheStorage(t *testing.T) {
 	dead := rs.Dead(nil)
 	if len(dead) == 0 {
 		t.Fatal("the compaction killed no round")
+	}
+	live := slices.IndexFunc(landed, func(b landedBlob) bool { return !slices.Contains(dead, b.ref) })
+	if lsn, ok := rs.ReplayLSN(); !ok || lsn != landed[live].ref.LSN-1 {
+		t.Fatalf("ReplayLSN reported %d, %v; the oldest live blob is at %d", lsn, ok, landed[live].ref.LSN)
+	}
+	if lsn, ok := rs.ReplayLSN(); ok {
+		t.Fatalf("ReplayLSN reported %d again with no blob dead since", lsn)
 	}
 	torn := write(7)
 	torn = torn[:len(torn)-1]

@@ -53,6 +53,32 @@ type Mail struct {
 // ShardID names a shard on its loop.
 type ShardID uint32
 
+// ReplyKind tags a Reply.
+type ReplyKind uint8
+
+// Reply kinds.
+const (
+	// ReplyReplay says a restart replays the shard after LSN: none of its blobs at or before it is
+	// needed.
+	ReplyReplay ReplyKind = iota + 1
+	// ReplyRemoved says the shard is off its loop for good with every Raft blob of it reported
+	// dead, the newest at LSN, 0 for none.
+	ReplyRemoved
+)
+
+// Reply is what a shard tells its disk's owner of its blobs, which carry Owner, off the data path.
+type Reply struct {
+	Kind  ReplyKind
+	Owner uint32
+	LSN   uint64
+}
+
+// ReplyMachine is an owner loop's machine that hears its shards' replies (Loop.Reply), after the
+// dead blobs each reported before; it only records them, so it takes no actions.
+type ReplyMachine interface {
+	OnReply(lg *Log, r Reply)
+}
+
 // LogMachine is an owner loop's machine that calls into its logs besides the round driver, as a
 // chunk store's reads, a checkpoint or the cleaner do: it gets every event of each log the loop
 // owns once the round driver has counted its own tickets, and ignores the tickets it did not
@@ -74,6 +100,7 @@ type Log struct {
 	maxRecord uint64
 	ios       [2]core.IOID
 	lm        LogMachine
+	rm        ReplyMachine
 	handoffs  []*handoff
 	out       disklog.Output
 	// batches are the batches submitted and not yet durable, in ticket order; those before taken
@@ -82,9 +109,10 @@ type Log struct {
 	head, taken int
 	notify      []*handoff
 	// queued are the hand-offs whose batch waits, in arrival order, for room in the owner's pool.
-	queued []*handoff
-	copies []core.IOBuf
-	dead   []disklog.BlobRef
+	queued  []*handoff
+	copies  []core.IOBuf
+	dead    []disklog.BlobRef
+	replies []Reply
 	// unburied are the Raft blobs reported dead while no log is served, which the next log served,
 	// the one recovery replayed them into, takes.
 	unburied []disklog.BlobRef
@@ -112,13 +140,17 @@ type handoff struct {
 	taken, durable atomic.Uint64
 	waiting        atomic.Bool
 
-	// mu guards mail, from the owner to h's loop, and dead, from h's loop to the owner.
+	// mu guards mail, from the owner to h's loop, and dead and replies, from h's loop to the
+	// owner.
 	mu       sync.Mutex
 	mail     []Mail
 	dead     []disklog.BlobRef
+	replies  []Reply
 	hasMail  atomic.Bool
 	unmailed bool
 	got      []Mail
+	// gone is h's removed shards whose ReplyRemoved waits for their batches in flight.
+	gone []ShardID
 }
 
 // A slot is a batch in flight: its shards, where each one's records end, and the producer's
@@ -141,10 +173,15 @@ type batch struct {
 	err        error
 }
 
+// A shard taken off its loop keeps gone, one past the last batch that may hold its records,
+// newest, the LSN of the newest Raft blob of them, and reply, its ReplyRemoved once given.
 type shard struct {
 	s      Shard
 	h      *handoff
 	marked bool
+	gone   uint64
+	newest uint64
+	reply  Reply
 }
 
 // AttachLog makes l the owner of log, a formatted or recovered log of configuration cfg on its
@@ -161,6 +198,7 @@ func (l *Loop) AttachLog(log *disklog.Log, cfg disklog.Config, firstIO, endIO co
 	}
 	lg := &Log{owner: l, disk: uint32(len(l.logs)), depth: cfg.CommitDepth, maxRecord: cfg.MaxRecordBytes, ios: [2]core.IOID{firstIO, endIO}, handoffs: make([]*handoff, loops)}
 	lg.lm, _ = l.m.(LogMachine)
+	lg.rm, _ = l.m.(ReplyMachine)
 	l.logs = append(l.logs, lg)
 	lg.Serve(log)
 	return lg
@@ -213,7 +251,10 @@ func (l *Loop) AddShard(s Shard, lg *Log) ShardID {
 // RemoveShard takes shard id off l for good, its ID never given again: mail for it is dropped,
 // and its batches in flight are written with no Durable call, their Raft blobs reported dead. It
 // runs on l.
-func (l *Loop) RemoveShard(id ShardID) { l.shards[id].s = nil }
+func (l *Loop) RemoveShard(id ShardID) {
+	sh := &l.shards[id]
+	sh.s, sh.gone = nil, sh.h.sent
+}
 
 // Mark asks the next round to collect shard id; a round visits only the shards marked since the last.
 func (l *Loop) Mark(id ShardID) {
@@ -364,8 +405,12 @@ func (l *Loop) handoff(ev *core.Event) {
 		h := lg.handoffs[ev.Timer]
 		h.mu.Lock()
 		lg.dead, h.dead = h.dead, lg.dead[:0]
+		lg.replies, h.replies = h.replies, lg.replies[:0]
 		h.mu.Unlock()
 		lg.bury(lg.dead)
+		for _, r := range lg.replies {
+			lg.reply(r)
+		}
 	default:
 		l.noticed(l.handoffs[ev.Timer])
 	}
@@ -395,12 +440,67 @@ func (l *Loop) Dead(id ShardID, refs []disklog.BlobRef) {
 		return
 	}
 	h.mu.Lock()
-	first := len(h.dead) == 0
+	first := len(h.dead) == 0 && len(h.replies) == 0
 	h.dead = append(h.dead, refs...)
 	h.mu.Unlock()
 	if first {
 		l.post(h.lg.owner, core.Event{Kind: core.EvMail, IO: core.IOID(h.lg.disk), Timer: core.TimerID(l.cfg.ID)}, &h.unmailed)
 	}
+}
+
+// Reply tells shard id's disk owner r, after the dead blobs id reported before it. A ReplyRemoved
+// follows RemoveShard and waits until the batches id had in flight are written, its LSN raised
+// to the newest Raft blob among them. A ReplyReplay comes only while id is on its loop, and nothing
+// after its ReplyRemoved.
+func (l *Loop) Reply(id ShardID, r Reply) {
+	sh := &l.shards[id]
+	if sh.reply.Kind == ReplyRemoved || (sh.s == nil) != (r.Kind == ReplyRemoved) {
+		panic(fmt.Sprintf("loop: shard %d replied %+v, on its loop %v, removed reply given %v", id, r, sh.s != nil, sh.reply.Kind == ReplyRemoved))
+	}
+	if r.Kind != ReplyRemoved {
+		l.reply(sh.h, r)
+		return
+	}
+	sh.reply = r
+	sh.h.gone = append(sh.h.gone, id)
+	l.replyGone(sh.h)
+}
+
+func (l *Loop) reply(h *handoff, r Reply) {
+	if h.lg.owner == l {
+		h.lg.reply(r)
+		return
+	}
+	h.mu.Lock()
+	first := len(h.dead) == 0 && len(h.replies) == 0
+	h.replies = append(h.replies, r)
+	h.mu.Unlock()
+	if first {
+		l.post(h.lg.owner, core.Event{Kind: core.EvMail, IO: core.IOID(h.lg.disk), Timer: core.TimerID(l.cfg.ID)}, &h.unmailed)
+	}
+}
+
+// replyGone sends the ReplyRemoved of each of h's removed shards whose batches are all written.
+func (l *Loop) replyGone(h *handoff) {
+	keep := 0
+	for _, id := range h.gone {
+		sh := &l.shards[id]
+		if h.noticed < sh.gone {
+			h.gone[keep] = id
+			keep++
+			continue
+		}
+		sh.reply.LSN = max(sh.reply.LSN, sh.newest)
+		l.reply(h, sh.reply)
+	}
+	h.gone = h.gone[:keep]
+}
+
+func (lg *Log) reply(r Reply) {
+	if lg.rm == nil {
+		panic(fmt.Sprintf("loop: a shard replied %+v to disk %d's owner, which is not a ReplyMachine", r, lg.disk))
+	}
+	lg.rm.OnReply(lg, r)
 }
 
 func (lg *Log) bury(refs []disklog.BlobRef) {
@@ -635,6 +735,9 @@ func (l *Loop) noticed(h *handoff) {
 		}
 		s.shards, s.ends, s.bufs, s.raft = s.shards[:0], s.ends[:0], s.bufs[:0], s.raft[:0]
 	}
+	if len(h.gone) > 0 {
+		l.replyGone(h)
+	}
 	if !h.hasMail.Swap(false) {
 		return
 	}
@@ -661,6 +764,7 @@ func (l *Loop) buryRemoved(id ShardID, refs []disklog.BlobRef, raft []bool) {
 		if raft[i] {
 			refs[n] = ref
 			n++
+			l.shards[id].newest = max(l.shards[id].newest, ref.LSN)
 		}
 	}
 	if n > 0 {
