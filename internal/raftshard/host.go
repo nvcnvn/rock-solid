@@ -247,7 +247,7 @@ func (h *Host) Durable(ctx *core.Context, ev *disklog.Event, out *disklog.Output
 			hd.landed = append(hd.taken(), landedRound{f.round, f.bytes})
 		}
 		if f.sum.done {
-			h.close(hd, f.sum)
+			h.dead = hd.close(f.sum, h.dead)
 			if f.round != 0 {
 				hd.done = f.round
 				dst = append(dst, Done{Owner: f.owner, Round: f.round})
@@ -272,7 +272,10 @@ func payloadBytes(r *Round) uint64 {
 // Retained is the entry payload bytes owner's shard holds in its storage, as Storage.Bytes counts
 // them, and in its rounds written and not yet taken into it, durable or not.
 func (h *Host) Retained(owner uint32) uint64 {
-	hd := h.shard(owner)
+	return h.shard(owner).retained()
+}
+
+func (hd *hosted) retained() uint64 {
 	hd.landed = hd.taken()
 	return hd.st.Bytes() + hd.flying
 }
@@ -368,35 +371,36 @@ func (h *Host) step(ctx *core.Context, hd *hosted, out *disklog.Output) error {
 	return h.Compact(hd.owner, i, hd.cutConf)
 }
 
-// close makes the blobs since the last whole round one round. A hard state in it frees the round
-// that held the newest one before, once every index that round holds is compacted, and no other:
-// a compaction frees every other round it covers.
-func (h *Host) close(hd *hosted, sum summary) {
+// close makes the blobs since the last whole round one round, appending to dead the blobs that
+// frees. A hard state in it frees the round that held the newest one before, once every index that
+// round holds is compacted, and no other: a compaction frees every other round it covers.
+func (hd *hosted) close(sum summary, dead []disklog.BlobRef) []disklog.BlobRef {
 	if sum.full {
-		h.dead = append(h.dead, hd.refs[:hd.closed]...)
+		dead = append(dead, hd.refs[:hd.closed]...)
 		hd.refs = append(hd.refs[:0], hd.refs[hd.closed:]...)
 		hd.rounds, hd.closed, hd.newest = hd.rounds[:0], 0, -1
 	}
 	hd.rounds = append(hd.rounds, liveRound{summary: sum, blobs: len(hd.refs) - hd.closed})
 	hd.closed = len(hd.refs)
 	if !sum.hs {
-		return
+		return dead
 	}
 	was := hd.newest
 	hd.newest = len(hd.rounds) - 1
 	if was >= 0 && hd.rounds[was].last <= hd.compacted {
-		h.collect(hd)
+		dead = hd.collect(dead)
 	}
+	return dead
 }
 
-// collect drops the rounds a restart no longer needs, keeping their blobs to report dead.
-func (h *Host) collect(hd *hosted) {
+// collect drops the rounds a restart no longer needs, appending their blobs to dead.
+func (hd *hosted) collect(dead []disklog.BlobRef) []disklog.BlobRef {
 	keep, from, to, newest := 0, 0, 0, -1
 	for j, r := range hd.rounds {
 		refs := hd.refs[from : from+r.blobs]
 		from += r.blobs
 		if r.last <= hd.compacted && (!r.hs || j < hd.newest) {
-			h.dead = append(h.dead, refs...)
+			dead = append(dead, refs...)
 			continue
 		}
 		if r.hs {
@@ -409,6 +413,7 @@ func (h *Host) collect(hd *hosted) {
 	hd.closed = to
 	to += copy(hd.refs[to:], hd.refs[from:])
 	hd.rounds, hd.refs, hd.newest = hd.rounds[:keep], hd.refs[:to], newest
+	return dead
 }
 
 // bury reports the dead blobs to the log once there is one.
@@ -431,13 +436,18 @@ func (h *Host) Compact(owner uint32, i uint64, cs raftpb.ConfState) error {
 		hd.cut, hd.cutConf = i, cs
 		return nil
 	}
+	var err error
+	h.dead, err = hd.compact(i, cs, h.dead)
+	h.bury()
+	return err
+}
+
+func (hd *hosted) compact(i uint64, cs raftpb.ConfState, dead []disklog.BlobRef) ([]disklog.BlobRef, error) {
 	if err := hd.st.Compact(i, cs); err != nil {
-		return err
+		return dead, err
 	}
 	hd.compacted = i
-	h.collect(hd)
-	h.bury()
-	return nil
+	return hd.collect(dead), nil
 }
 
 // Remove stops hosting owner's shard, as the driver does once the shard reports itself removed,
@@ -476,22 +486,29 @@ func (h *Host) Replayed(ev *disklog.Event) error {
 			h.dead = append(h.dead, ref)
 			continue
 		}
-		hd := &h.shards[k]
-		b := ev.Blob(i)
-		if len(b) > 0 && b[0] == 1 {
-			h.dead = append(h.dead, hd.refs[hd.closed:]...)
-			hd.refs = hd.refs[:hd.closed]
-		}
-		hd.refs = append(hd.refs, ref)
-		sum, err := hd.st.replay(e.BlobKind, b)
-		if err != nil {
+		var err error
+		if h.dead, err = h.shards[k].replay(ref, e.BlobKind, ev.Blob(i), h.dead); err != nil {
 			return err
-		}
-		if sum.done {
-			h.close(hd, sum)
 		}
 	}
 	return nil
+}
+
+// replay takes a replayed blob at ref, appending to dead those of a round its first blob shows torn.
+func (hd *hosted) replay(ref disklog.BlobRef, kind disklog.BlobKind, b []byte, dead []disklog.BlobRef) ([]disklog.BlobRef, error) {
+	if len(b) > 0 && b[0] == 1 {
+		dead = append(dead, hd.refs[hd.closed:]...)
+		hd.refs = hd.refs[:hd.closed]
+	}
+	hd.refs = append(hd.refs, ref)
+	sum, err := hd.st.replay(kind, b)
+	if err != nil {
+		return dead, err
+	}
+	if sum.done {
+		dead = hd.close(sum, dead)
+	}
+	return dead, nil
 }
 
 // Recovered ends a restart's replay with the log recovery handed over: a round torn at the log's
@@ -500,13 +517,18 @@ func (h *Host) Replayed(ev *disklog.Event) error {
 func (h *Host) Recovered(log *disklog.Log) {
 	h.Log = log
 	for k := range h.shards {
-		hd := &h.shards[k]
-		h.dead = append(h.dead, hd.refs[hd.closed:]...)
-		hd.refs = hd.refs[:hd.closed]
-		hd.st.pending = nil
-		h.collect(hd)
+		h.dead = h.shards[k].recovered(h.dead)
 	}
 	h.bury()
+}
+
+// recovered drops a round torn at the log's tail, appending its blobs to dead with those of the
+// rounds a restart no longer needs.
+func (hd *hosted) recovered(dead []disklog.BlobRef) []disklog.BlobRef {
+	dead = append(dead, hd.refs[hd.closed:]...)
+	hd.refs = hd.refs[:hd.closed]
+	hd.st.pending = nil
+	return hd.collect(dead)
 }
 
 // Loaded takes the manifest a restart's recovery loaded, before its replay and after every shard

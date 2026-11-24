@@ -8603,6 +8603,24 @@ Hand-off, with 1, 2, 4 and 8 producer loops (`TestRoundsHandOffOncePerRoundAndFl
   are kept, and the shard still hears of its next record
   (`TestRoundSendOnOwnerKeepsTheCallersActions`). Hanging recovery's replay and the
   cleaner's moves for a shard's runs on this is the work of the items that wire them.
+- A Raft shard's rounds through the driver (`raftshard.Rounds`), on a producer loop and on the
+  owner, ten rounds of three 1,000-byte entries and a hard state, every third compacting to the
+  commit before it: every round is durable in order, and the blobs it reports dead through
+  `Loop.Dead` are the oldest, which the log no longer holds, while it holds every other
+  (`TestRoundsOfARaftShardDieAsItCompacts`). Taken off its loop with its fifth round in flight and
+  its state deleted, the driver reports that round's blobs and `Rounds.Delete` every other: the
+  log holds no live block and the loop's pool is back where it started
+  (`TestRoundsOfARemovedRaftShardAllDie`). Six rounds of several blobs each, compacted before the
+  fourth, and a seventh whose last blob never landed, replayed blob by blob into a fresh storage on
+  the base as recovery's mail will hand them: the storage holds the same entries and commit, only
+  the torn round's blobs die, and the live blobs are those the writer kept
+  (`TestRoundsReplayRebuildsTheStorage`, `internal/raftshard`). A round missing its last blob,
+  then the first blob of the next: the torn round's blobs die at once
+  (`TestRoundsReplayDropsATornRoundAtTheNextFirstBlob`). A round its loop's pool cannot hold stays
+  queued, and once the pool frees and the shard is marked again it and the rounds after it become
+  durable (`TestRoundOfARaftShardWaitsOutAFullPool`). A round 0, a write while a round is queued
+  or in flight, and `Durable` with none in flight or after `Delete` panic
+  (`TestRoundsPanicOnABrokenCallOrder`).
 - The owner's machine keeps its own disk completions and, as a `LogMachine`, the events of its own
   log records; an owner machine that is not one panics on a log event the driver did not submit
   (`TestRoundOwnerMachineKeepsItsDiskAndLogEvents`). Two logs on one loop, fed from it and another
