@@ -3,6 +3,7 @@ package uring
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -405,7 +406,7 @@ func TestAFileIsWrittenInFullAndATrimZeroesOnlyTheHeader(t *testing.T) {
 		t.Fatal(err)
 	}
 	g := newRig(t, r, pool, d)
-	trimZeroesTheHeader(t, g)
+	trimZeroesTheHeader(t, g, false)
 	if err := unix.Stat(path, &after); err != nil {
 		t.Fatal(err)
 	}
@@ -421,11 +422,12 @@ func TestAFailedDiscardStillZeroesTheHeader(t *testing.T) {
 		t.Fatal(err)
 	}
 	d.t.file = false
-	trimZeroesTheHeader(t, newRig(t, r, pool, d))
+	trimZeroesTheHeader(t, newRig(t, r, pool, d), false)
 }
 
-// trimZeroesTheHeader fills blocks 32 to 35, trims them and reads back zeros in block 32 alone.
-func trimZeroesTheHeader(t *testing.T, g *rig) {
+// trimZeroesTheHeader fills blocks 32 to 35, trims them and reads back zeros in block 32, and the
+// other three as written or, when the discard may zero them, all zeros, which it reports.
+func trimZeroesTheHeader(t *testing.T, g *rig, discards bool) (zeroTail bool) {
 	t.Helper()
 	b := alloc(t, g.pool.Pool, 4*bs)
 	fill(g.pool, b, 1)
@@ -444,9 +446,11 @@ func trimZeroesTheHeader(t *testing.T, g *rig) {
 		return append(out, core.Action{Kind: core.ActDiskRead, IO: 3, LBA: 32, Buf: rd, Len: 4 * bs})
 	}), core.Event{IO: 3})
 	got, wrote := g.pool.Bytes(rd), g.pool.Bytes(b)
-	if !bytes.Equal(got[:bs], make([]byte, bs)) || !bytes.Equal(got[bs:], wrote[bs:]) {
+	zeroTail = discards && bytes.Equal(got[bs:], make([]byte, 3*bs))
+	if !bytes.Equal(got[:bs], make([]byte, bs)) || !zeroTail && !bytes.Equal(got[bs:], wrote[bs:]) {
 		t.Fatal("the trim did not zero the header block alone")
 	}
+	return zeroTail
 }
 
 // TestAFailedRingCompletesEveryOperationWithDiskIO fails a ring of two entries holding a read in
@@ -634,7 +638,7 @@ func TestCloseQuarantinesWhatTheKernelHolds(t *testing.T) {
 	}
 }
 
-func TestALinkedFlushJoinsOnlyAWriteOnItsDisk(t *testing.T) {
+func TestALinkedFlushBehindAnotherDisksWriteFails(t *testing.T) {
 	r, pool := newRing(t, 1<<20, 64)
 	var ds [3]*Disk
 	for i := range ds {
@@ -648,21 +652,107 @@ func TestALinkedFlushJoinsOnlyAWriteOnItsDisk(t *testing.T) {
 	ds[1].Execute(&core.Action{Kind: core.ActDiskFsync, IO: 2, Linked: true})
 	ds[0].Execute(&core.Action{Kind: core.ActDiskWrite, IO: 3, Buf: b, Len: bs, LBA: 1})
 	ds[2].Execute(&core.Action{Kind: core.ActDiskFsync, IO: 4, Linked: true})
-	if len(r.queue) != 3 || r.ops[r.queue[0]].sqe.flags&sqeIOLink != 0 || r.ops[r.queue[2]].hasThen {
+	if len(r.queue) != 2 || r.ops[r.queue[0]].sqe.flags&sqeIOLink != 0 || r.ops[r.queue[1]].hasThen {
 		t.Fatalf("a flush joined a write on another disk: queue %v", r.queue)
 	}
-	if e := r.Submit(); e.Took != 3 {
+	if e := r.Submit(); e.Took != 2 {
 		t.Fatalf("submitted %+v", e)
 	}
-	seen := map[core.IOID]bool{}
-	for _, ev := range reap(t, r, 4) {
-		if ev.Err != core.DiskOK || seen[ev.IO] {
+	expect(t, reap(t, r, 4), core.Event{IO: 2, Err: core.DiskIO}, core.Event{IO: 4, Err: core.DiskIO}, core.Event{IO: 1}, core.Event{IO: 3})
+}
+
+// TestACutBetweenTwoChainsWaitsForNothing has the kernel take a write and its flush, a whole
+// chain, of the three entries it was asked for: the read after them goes at the next Submit.
+func TestACutBetweenTwoChainsWaitsForNothing(t *testing.T) {
+	r, pool := newRing(t, 1<<20, 64)
+	d, err := r.Open(diskFile(t, 16), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, rd := alloc(t, pool.Pool, bs), alloc(t, pool.Pool, bs)
+	d.Execute(&core.Action{Kind: core.ActDiskWrite, IO: 1, Buf: b, Len: bs})
+	d.Execute(&core.Action{Kind: core.ActDiskFsync, IO: 2, Linked: true})
+	d.Execute(&core.Action{Kind: core.ActDiskRead, IO: 3, Buf: rd, Len: bs, LBA: 1})
+	if n := r.fill(); n != 3 {
+		t.Fatalf("copied %d entries, want 3", n)
+	}
+	if e := r.enter(2); e.Took != 2 || e.Errno != 0 {
+		t.Fatalf("enter %+v", e)
+	}
+	if r.after >= 0 || len(r.queue) != 1 {
+		t.Fatalf("waiting on %d, queue %v", r.after, r.queue)
+	}
+	if e := r.Submit(); e.Submit != 1 || e.Took != 1 {
+		t.Fatalf("submitted %+v, want the read", e)
+	}
+	evs := reap(t, r, 3)
+	if len(evs) != 3 {
+		t.Fatalf("completions %+v", evs)
+	}
+	for _, ev := range evs {
+		if ev.Err != core.DiskOK {
 			t.Fatalf("completion %+v", ev)
 		}
-		seen[ev.IO] = true
 	}
-	if len(seen) != 4 {
-		t.Fatalf("completions %v", seen)
+}
+
+// TestACutIsReadFromTheSubmissionQueueHead submits 1 of a write and its flush with the syscall's
+// count thrown away, as an error replaces it: the flush still waits for its write.
+func TestACutIsReadFromTheSubmissionQueueHead(t *testing.T) {
+	r, pool := newRing(t, 1<<20, 64)
+	d, err := r.Open(diskFile(t, 16), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Execute(&core.Action{Kind: core.ActDiskWrite, IO: 1, Buf: alloc(t, pool.Pool, bs), Len: bs})
+	d.Execute(&core.Action{Kind: core.ActDiskFsync, IO: 2, Linked: true})
+	if n := r.fill(); n != 2 {
+		t.Fatalf("copied %d entries, want 2", n)
+	}
+	start := *r.sqHead
+	if _, _, e := unix.Syscall6(unix.SYS_IO_URING_ENTER, uintptr(r.fd), 1, 0, 0, 0, 0); e != 0 {
+		t.Fatal(e)
+	}
+	r.requeue(start)
+	if r.after < 0 || r.ops[r.after].io != 1 || len(r.queue) != 1 {
+		t.Fatalf("waiting on %d, queue %v", r.after, r.queue)
+	}
+	expect(t, reap(t, r, 1), core.Event{IO: 1})
+	r.Submit()
+	expect(t, reap(t, r, 1), core.Event{IO: 2})
+}
+
+// TestEntriesTakenBackGoInFrontOfTheQueue fills a ring of 4 with 4 of 6 reads and has the kernel
+// take 1: the 3 it left go back in front of the 2 that did not fit, in the order executed.
+func TestEntriesTakenBackGoInFrontOfTheQueue(t *testing.T) {
+	r, pool := newRing(t, 1<<20, 4)
+	d, err := r.Open(diskFile(t, 16), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 6 {
+		d.Execute(&core.Action{Kind: core.ActDiskRead, IO: core.IOID(1 + i), Buf: alloc(t, pool.Pool, bs), Len: bs, LBA: core.LBA(i)})
+	}
+	if n := r.fill(); n != 4 {
+		t.Fatalf("copied %d entries, want 4", n)
+	}
+	if e := r.enter(1); e.Took != 1 || e.Errno != 0 {
+		t.Fatalf("enter %+v", e)
+	}
+	var queued []core.IOID
+	for _, i := range r.queue {
+		queued = append(queued, r.ops[i].io)
+	}
+	if fmt.Sprint(queued) != "[2 3 4 5 6]" || r.InFlight() != 1 || r.after >= 0 {
+		t.Fatalf("queue %v, %d in flight, waiting on %d", queued, r.InFlight(), r.after)
+	}
+	var evs []core.Event
+	for len(evs) < 6 {
+		r.Submit()
+		evs = append(evs, reap(t, r, 1)...)
+	}
+	if len(evs) != 6 {
+		t.Fatalf("completions %+v", evs)
 	}
 }
 

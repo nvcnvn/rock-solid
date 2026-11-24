@@ -23,6 +23,7 @@ const (
 
 	regBuffers     = 0
 	regFiles       = 2
+	unregFiles     = 3
 	regEventfd     = 4
 	regFilesUpdate = 6
 
@@ -200,10 +201,15 @@ func (r *Ring) Status() Status { return r.status }
 func (r *Ring) Fd() int { return r.efd }
 
 // Close unmaps the ring and closes it, its eventfd and its disks. I/O still in flight is abandoned,
-// its buffers quarantined, as the kernel tears the ring down without waiting for it.
+// its buffers quarantined, as the kernel tears the ring down without waiting for it. The file
+// table is unregistered first: the kernel drops it with the ring only later, in a worker, and
+// until then it holds a raw device's O_EXCL claim, which would refuse the next Open.
 func (r *Ring) Close() {
 	r.quarantine()
 	r.ops = nil
+	if r.status.FixedFiles {
+		_ = r.reg(unregFiles, nil, 0)
+	}
 	for _, d := range r.disks {
 		_ = unix.Close(d.raw)
 	}
@@ -297,8 +303,8 @@ func (d *Disk) Fixed() bool { return d.t.fixed }
 
 // Execute queues a read, write, flush or trim for the ring's next Submit. An action refused and a
 // flush under fua complete at the ring's next Reap without a submission, and so does every action
-// on a failed ring, with DiskIO; a flush linked behind a refused write completes with DiskIO, as
-// io_uring cancels a link. A trim of a device is a discard with the write of its segment header
+// on a failed ring, with DiskIO; so does a linked flush not right behind a write of its disk queued
+// in this pass, which breaks the action contract. A trim of a device is a discard with the write of its segment header
 // hard-linked behind it, which runs whatever the discard's result and completes the trim.
 func (d *Disk) Execute(a *core.Action) {
 	r := d.r
@@ -310,10 +316,9 @@ func (d *Disk) Execute(a *core.Action) {
 	}
 	if a.Kind == core.ActDiskFsync && a.Linked {
 		switch {
-		case last < 0 || r.ops[last].sent:
+		case last < 0 || r.ops[last].sent || !r.ops[last].on(&d.t):
 			r.done = append(r.done, core.Event{Kind: core.EvDiskDone, IO: a.IO, Err: core.DiskIO})
 			return
-		case !r.ops[last].on(&d.t):
 		case d.t.fua:
 			r.ops[last].then, r.ops[last].hasThen = a.IO, true
 			return
@@ -404,13 +409,14 @@ func (r *Ring) enter(n uint32) loop.Enter {
 		return loop.Enter{}
 	}
 	e := loop.Enter{Submit: n}
+	head := atomic.LoadUint32(r.sqHead)
 	took, _, errno := unix.Syscall6(unix.SYS_IO_URING_ENTER, uintptr(r.fd), uintptr(e.Submit), uintptr(e.Wait), 0, 0, 0)
 	if e.Errno = errno; errno == 0 {
 		e.Took = uint32(took)
 	}
 	switch errno {
 	case 0, unix.EINTR, unix.EAGAIN, unix.EBUSY:
-		r.requeue(e.Took)
+		r.requeue(head)
 	default:
 		r.fail(fmt.Errorf("uring: io_uring_enter submitting %d: %w", n, errno))
 	}
@@ -419,26 +425,27 @@ func (r *Ring) enter(n uint32) loop.Enter {
 
 // requeue moves the entries the kernel did not take back from the submission queue to the head of
 // the queue; the kernel reads the submission queue only inside io_uring_enter, so lowering its
-// tail withdraws them. The kernel stops early when it cannot allocate a request, even inside a
-// link chain, and then runs the chain's part it took alone (io_submit_sqes and
-// io_submit_state_end, Linux 6.12). So when the last entry taken links to the next, the rest of
-// its chain waits at the head of the queue until it completes.
-func (r *Ring) requeue(took uint32) {
+// tail withdraws them. Whether it took any is read from the submission queue's head, which it moves
+// from start past every entry it consumed, not from the syscall's count, which an error replaces. The kernel stops early when it cannot allocate a request, even inside a link
+// chain, and then runs the chain's part it took alone (io_submit_sqes and io_submit_state_end,
+// Linux 6.12). So when the last entry taken links to the next, the rest of its chain waits at the
+// head of the queue until it completes.
+func (r *Ring) requeue(start uint32) {
 	head, tail := atomic.LoadUint32(r.sqHead), *r.sqTail
-	if head == tail {
+	left := tail - head
+	if left == 0 {
 		return
 	}
-	n := int(tail - head)
-	r.queue = append(r.queue, make([]int32, n)...)
-	copy(r.queue[n:], r.queue)
-	for k := range n {
+	r.queue = append(r.queue, make([]int32, left)...)
+	copy(r.queue[left:], r.queue)
+	for k := range left {
 		i := int32(r.sqes[(head+uint32(k))&r.sqMask].userData)
 		r.queue[k] = i
 		r.ops[i].sent = false
 	}
-	r.inflight -= uint32(n)
+	r.inflight -= left
 	atomic.StoreUint32(r.sqTail, head)
-	if s := &r.sqes[(head-1)&r.sqMask]; took > 0 && s.flags&(sqeIOLink|sqeIOHardlink) != 0 {
+	if s := &r.sqes[(head-1)&r.sqMask]; head != start && s.flags&(sqeIOLink|sqeIOHardlink) != 0 {
 		r.after = int32(s.userData)
 	}
 }

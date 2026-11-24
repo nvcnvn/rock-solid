@@ -287,7 +287,10 @@ var slots = porcupine.Model{
 
 // TestCrashOnARealDisk kills the store's process RS_CRASH_CYCLES times (default 150) on seed
 // RS_CRASH_SEED (default 1), keeping the disk file, the oracle and the history in RS_CRASH_DIR if
-// it is set.
+// it is set. With RS_CRASH_TARGET set, the disk is RS_RAW_DEVICE's first blocks behind that
+// device-mapper target (dmRig), and each kill comes with the target's fault: error fails every
+// I/O from then on, flakey drops every write, and log-writes replays only the flushed writes, a
+// power cut; delay slows every I/O by 5 ms, and linear is the raw device alone.
 func TestCrashOnARealDisk(t *testing.T) {
 	newRing(t, 1<<20, 8)
 	seed, cycles := envUint(t, "RS_CRASH_SEED", 1), envUint(t, "RS_CRASH_CYCLES", 150)
@@ -297,7 +300,9 @@ func TestCrashOnARealDisk(t *testing.T) {
 	}
 	ct := &crashTest{t: t, seed: seed, rnd: core.NewRand(seed), changes: core.NewRand(seed + 1<<32), pace: core.NewRand(seed + 2<<32),
 		disk: filepath.Join(dir, "disk"), oracle: filepath.Join(dir, "oracle"), history: filepath.Join(dir, "history")}
-	if err := CreateFile(ct.disk, storetest.DiskBytes); err != nil {
+	if ct.target = os.Getenv("RS_CRASH_TARGET"); ct.target != "" {
+		ct.dm, ct.disk = newDMRig(t, rawDevice(t), ct.target, storetest.DiskBytes), dmPath
+	} else if err := CreateFile(ct.disk, storetest.DiskBytes); err != nil {
 		t.Fatal(err)
 	}
 	_ = os.Remove(ct.history)
@@ -331,6 +336,12 @@ func TestCrashOnARealDisk(t *testing.T) {
 	}
 	t.Logf("seed %d: %d cycles, %d changes sent, %d acknowledged; restarts that kept a change never acknowledged: %d, lost one: %d, kept the first rounds of one: %d",
 		seed, cycles, ct.seq, ct.acked, ct.keptCycles, ct.lostCycles, ct.tornCycles)
+	if ct.target == "error" {
+		t.Logf("error: %d of %d children answered a change with an error before their kill", ct.failed, cycles)
+	}
+	if ct.target == "log-writes" {
+		t.Logf("log-writes: %d writes replayed behind %d flushes, %d completed writes never flushed dropped", ct.dm.replayed, ct.dm.flushes, ct.dm.dropped)
+	}
 	ct.checkHistory()
 }
 
@@ -375,6 +386,14 @@ type crashTest struct {
 	t    *testing.T
 	seed uint64
 	rnd  *core.Rand
+	// target is RS_CRASH_TARGET, dm the device-mapper rig it puts the disk behind, or nil.
+	target string
+	dm     *dmRig
+	// failed counts the children the error target failed before their kill, and failFrom is the
+	// first change sent once it did, which must never be acknowledged, into a child that may have
+	// stopped.
+	failed   int
+	failFrom uint64
 	// changes draws the changes sent, pace the pauses between them, and rnd the kills, so the
 	// timing of a run leaves the changes and the kill points as the seed draws them.
 	changes, pace *core.Rand
@@ -430,8 +449,39 @@ func (ct *crashTest) cycle(cycle uint64) {
 		}
 	}
 	time.Sleep(time.Duration(ct.rnd.Below(500)) * time.Microsecond)
-	ct.kill()
-	ct.drain()
+	switch ct.target {
+	case "error":
+		ct.dm.swap("error")
+		ct.failFrom = ct.seq + 1
+		for range crashWindow {
+			ct.send()
+		}
+		time.Sleep(50 * time.Millisecond)
+		ct.kill()
+		if strings.Contains(ct.stderr.String(), "--- FAIL: TestCrashChild") {
+			ct.failed++
+		}
+		ct.drain()
+		ct.dm.swap("linear")
+	case "flakey":
+		// A client's write acknowledged once flakey drops writes would be lost, so they stop first.
+		for _, c := range ct.clients {
+			_ = c.Process.Signal(syscall.SIGKILL)
+			_ = c.Wait()
+		}
+		ct.clients = nil
+		ct.dm.swap("flakey")
+		time.Sleep(20 * time.Millisecond)
+		ct.kill()
+		_ = ct.ackPipe.Close()
+		ct.dm.swap("linear")
+	default:
+		ct.kill()
+		ct.drain()
+		if ct.dm != nil {
+			ct.dm.cut()
+		}
+	}
 	ct.record("kill %d", cycle)
 	ct.sync()
 	if ct.clientErr != "" {
@@ -467,7 +517,7 @@ func (ct *crashTest) send() {
 	if err := ct.hist.invoke(0, ct.seq, [sim.OpWords]uint64{uint64(kind), uint64(c), uint64(off)<<32 | uint64(n), ds}); err != nil {
 		ct.t.Fatal(err)
 	}
-	if _, err := ct.cmds.Write(cmd[:]); err != nil {
+	if _, err := ct.cmds.Write(cmd[:]); err != nil && ct.failFrom == 0 {
 		ct.fail("sending change %d: %v", ct.seq, err)
 	}
 }
@@ -486,6 +536,9 @@ func (ct *crashTest) start(format bool, cycle uint64) {
 		replyR[i], replyW[i] = ct.pipe()
 	}
 	ct.stderr.Reset()
+	if ct.dm != nil {
+		ct.dm.begin()
+	}
 	ct.child = exec.Command(os.Args[0], "-test.run=^TestCrashChild$", "-test.count=1", "-test.timeout=0")
 	ct.child.Env = append(os.Environ(), "RS_CRASH_CHILD="+ct.disk, fmt.Sprint("RS_CRASH_CLIENTS=", histClients))
 	if format {
@@ -551,7 +604,11 @@ func (ct *crashTest) drain() {
 		}
 		ct.ack(ack[:])
 		ct.acked++
+		if seq := binary.LittleEndian.Uint64(ack[:]); ct.failFrom != 0 && seq >= ct.failFrom {
+			ct.fail("change %d, sent once every I/O failed, was acknowledged", seq)
+		}
 	}
+	ct.failFrom = 0
 	_ = ct.ackPipe.Close()
 }
 

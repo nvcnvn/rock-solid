@@ -8224,16 +8224,22 @@ profile refuses `io_uring_setup` with `EPERM`, so container runs use
   `TestAFailedEnterIsTraced`.
 - A write and its `IORING_FSYNC_DATASYNC` emitted together go linked (`IOSQE_IO_LINK`) in one
   `io_uring_enter` (trace: one `io_uring_enter` submitting 2), and the bytes read back are the bytes
-  written. `TestAWriteAndItsLinkedFlushGoInOneEnter`. A linked flush joins only a write on its own
-  disk: behind another disk's write it goes on its own, and on a `fua` disk it completes at once
-  rather than with the other disk's write. `TestALinkedFlushJoinsOnlyAWriteOnItsDisk`.
+  written. `TestAWriteAndItsLinkedFlushGoInOneEnter`. A linked flush behind another disk's write,
+  on a `flush` or a `fua` disk, breaks the action contract and completes with `DiskIO` at once,
+  submitting nothing, while the writes go alone. `TestALinkedFlushBehindAnotherDisksWriteFails`.
 - A chain the kernel cuts never lets a flush run before its write: the test asks `io_uring_enter` to
   submit 1 of a chain of 2, which leaves the kernel where a failed request allocation does (the
   head taken and run alone, the rest in the submission queue). The driver takes the rest back and
   submits nothing until the head completes; then the flush goes alone, or completes with `DiskIO`
   unsubmitted when its write failed, and a trim's header write goes after its failed discard and
   still zeroes the header alone. `TestAFlushCutFromItsWriteWaitsForIt`,
-  `TestAFlushCutFromAFailedWriteFails`, `TestAHeaderWriteCutFromItsDiscardStillRuns`.
+  `TestAFlushCutFromAFailedWriteFails`, `TestAHeaderWriteCutFromItsDiscardStillRuns`. The cut is
+  read from the submission queue's head, so it holds when the syscall's count is lost
+  (`TestACutIsReadFromTheSubmissionQueueHead`, which throws it away). A cut between two chains,
+  the kernel taking a write and its flush of the three entries asked, makes nothing wait: the read
+  after them goes at the next `Submit` (`TestACutBetweenTwoChainsWaitsForNothing`). Entries taken
+  back go in front of those that did not fit, in the order executed: 4 of 6 reads copied into a
+  ring of 4 and 1 taken leave the queue at reads 2 to 6 (`TestEntriesTakenBackGoInFrontOfTheQueue`).
 - Vectored writes: a `DiskWrite` with a `Vec` of pool buffers writes them in order as one `WRITEV`;
   with `Vec` empty, or a `Vec` of one, it writes `Buf` with `WRITE_FIXED`. A vector whose lengths do
   not sum to `Len`, an element not in whole blocks or past its buffer, or more than 1,024 elements is
@@ -8309,31 +8315,86 @@ profile refuses `io_uring_setup` with `EPERM`, so container runs use
 
 ## io_uring on a raw device and NVMe
 
-- A raw device is opened `O_DIRECT` and `O_EXCL`, sized with `BLKGETSIZE64`, and a trim of it is a
-  `BLOCK_URING_CMD_DISCARD` that discards the range, with the header write behind it; on a loop
-  device under `--privileged` or a spare drive. The
-  [Shared ChunkStore suite](#shared-chunkstore-suite) runs on the loop device too.
-- File-backed disks: 1,000 durable 4 KiB writes into the file have a p50 near 0.95 ms on the NVMe
-  flush spike's drive, not the 2.5 ms of writes into never-written `fallocate`d extents, and the
-  ext4 journal's commit count does not rise across them.
-- Benchmarks, 4 KiB `O_DIRECT` on the NVMe flush spike's drive (registered buffers spike):
+The tests that need a block device or a real drive run as root on a spare drive, which they
+overwrite: `RS_RAW_DEVICE` names it, always by its `/dev/disk/by-id/` path, as `nvme0n1` and
+`nvme1n1` can swap across reboots, and without it they skip. The file-backed measurement needs
+`RS_URING_DIR` on a file system on that drive. All rows ran on a WDC SN720 512 GB (client NVMe,
+volatile write cache, DLFEAT 1: deallocated blocks read as zeros), Linux 7.0, Xeon-D, 12 threads:
 
-  | Case | Target |
-  | --- | --- |
-  | Fixed buffer, QD 32, read | −0.1 µs per I/O (1.88 → 1.77 µs), every rep |
-  | Fixed buffer and file, QD 32, write | −0.1 µs (1.63 → 1.53 µs) |
-  | Fixed buffer and file, QD 1 | −0.24 to −0.29 µs of 3.7 to 4.7 µs |
-  | Registration | 17 to 70 ms per GiB already touched, once |
+```sh
+go test -c -o uring.test ./internal/driver/uring/
+D=/dev/disk/by-id/nvme-…                     # the spare drive, whole
+sudo RS_RAW_DEVICE=$D ./uring.test -test.run 'RawDevice|TheChunkStoreSuite'
+for t in linear error flakey delay log-writes; do
+  sudo RS_RAW_DEVICE=$D RS_CRASH_TARGET=$t ./uring.test -test.run '^TestCrashOnARealDisk$'
+done
+sudo RS_RAW_DEVICE=$D ./uring.test -test.run '^$' -test.bench BenchmarkRawDevice -test.count 6
+mkfs.ext4 $D; mount $D /mnt/rs                 # then, on the file system
+RS_URING_DIR=/mnt/rs/u ./uring.test -test.run TestDurableWritesIntoAFileCommitNoJournal
+```
 
-  Open: tolerance. Open: polled completions (`IORING_SETUP_IOPOLL`) are an open question, not built.
+- A raw device is opened `O_DIRECT` and `O_EXCL` and sized with `BLKGETSIZE64` (its blocks match
+  sysfs's `size`); a second `O_EXCL` open and a second ring's `Open` fail with `EBUSY`, and once the
+  first ring is closed `Open` succeeds at once. That last step failed until `Close` unregistered
+  the file table: the kernel drops it with the ring later, in a worker, and it held the claim.
+  `TestARawDeviceIsOpenedExclusively`.
+- A trim of a raw device is a `BLOCK_URING_CMD_DISCARD` with the header write behind it, in one
+  `io_uring_enter` submitting 2: the device's discard count (`/sys/class/block/…/stat`) rises by
+  the trim's sectors, the header reads back as zeros, and on this drive so do the blocks after it.
+  `TestATrimOfARawDeviceDiscardsItThenZeroesTheHeader`.
+- The [Shared ChunkStore suite](#shared-chunkstore-suite) runs on the device's first 256 MiB,
+  written with zeros (`BLKZEROOUT`) before each case as a new disk file is, and passes: 9 cases in
+  3.3 s, the 3 simulator-only cases skipped. It passes the same on a loop device
+  (`losetup --direct-io=on`) over a file on the drive, and the raw-device tests above too.
+- File-backed disks: 1,000 durable 4 KiB writes (write and linked flush) into a disk file on ext4
+  on the drive have a p50 of 0.36 to 0.52 ms and a p99 of 1.4 to 1.6 ms over three runs, and the
+  ext4 journal commits 0 times across them (`TestDurableWritesIntoAFileCommitNoJournal`, which
+  allows one per 5 s commit interval). fio's 4 KiB write and `fdatasync` agrees on a prewritten file
+  (sync p50 0.47 ms); into a fresh `fallocate`d file it takes 0.96 ms and commits the journal once
+  per write (999 commits). The NVMe flush spike's drive took 0.95 ms and 2.5 ms: this drive flushes
+  about twice as fast, and the ratio holds.
+- Benchmarks, 4 KiB `O_DIRECT` reads and writes at random offsets in the device's first GiB from
+  random slots of a 64 MiB pool, 6 reps of 2 s (`BenchmarkRawDevice`, 0 allocations per I/O); the
+  medians of `cpu-ns/op`, the process's user and system time per I/O, against the
+  [registered buffers spike](design.md#appendix-io_uring-registered-buffers-spike):
+
+  | Case | Plain | Fixed buffer and file | Spike |
+  | --- | --- | --- | --- |
+  | QD 32, read | 2.99 µs | **−0.12 µs** (−0.11 buffer alone), every rep | −0.11 µs (1.88 → 1.77) |
+  | QD 32, write | 2.12 µs | **−0.08 µs** (−0.06 buffer alone), every rep | −0.10 µs (1.63 → 1.53) |
+  | QD 1, write | 6.07 µs | **−0.24 µs**, every rep | −0.24 to −0.29 µs of 3.7 to 4.7 µs |
+  | QD 1, read | 35 µs | −1.7 to −3.8 µs, inside rep-to-rep noise of 5 µs | |
+  | Registration | | 16.1 ms per GiB already touched | 17 to 70 ms per GiB |
+
+  The savings match the spike's; the totals are higher because the driver never waits in
+  `io_uring_enter`: each wait is a `poll` and a `read` of the eventfd, and while the goroutine sits
+  in `poll` the Go runtime's other threads run, which shows most at QD 1 reads, whose 90 µs on this
+  drive leave the most time to wait. Open: tolerance. Open: polled completions
+  (`IORING_SETUP_IOPOLL`) are an open question, not built.
 - Many reads in flight: recovery's segment-header reads (4,096 to 262,144 per disk) go out at the read
   depth recovery asks for and the ring defers what does not fit, never drops it. Open: ring depth.
-- The [crash test](#crash-tests-on-real-disks) on device-mapper targets, which need
-  `CAP_SYS_ADMIN` (in Docker, `--privileged`); no non-root way exists. An error target failing
-  writes or flushes at a chosen point (the log fails, no later acknowledgment, recovery is a
-  prefix), a target dropping writes not yet flushed, as a power cut does (an acknowledgment sent
-  before its flush loses a write), and a delay target slowing the device (nothing fails, latency
-  grows). Open: which targets (`dm-flakey` with `drop_writes`, `dm-error`, `dm-delay`) and settings.
+- The [crash test](#crash-tests-on-real-disks) on device-mapper targets (root; in Docker,
+  `--privileged`): with `RS_CRASH_TARGET` set the disk is `/dev/mapper/rs-crash`, the raw device's
+  first 256 MiB behind the target, and each kill comes with its fault. Seed 1, 150 cycles each, every
+  restart a prefix holding every acknowledged change, every history linearizable:
+  - `linear`, the raw device alone: 23 s.
+  - `error`: at the kill point the table swaps to `error` (`dmsetup suspend`, `load`, `resume`), the
+    driver sends 8 more changes and the child is killed 50 ms later. Every child answered a change
+    with an error first (150 of 150), no change sent after the swap was acknowledged, and recovery
+    after swapping back is a prefix: 37 s.
+  - `flakey`: the history clients are stopped, then the table swaps to `flakey` with `drop_writes`
+    and the driver stops counting acknowledgments: every write from then on completes and is lost,
+    as on a power cut of a drive whose cache is durable. 149 restarts kept a change never
+    acknowledged: 42 s.
+  - `delay`: every I/O 5 ms late; nothing fails, and the run takes 289 s.
+  - `log-writes`, the power cut that loses every write not yet flushed: `dm-log-writes` logs each
+    write with its data and each flush into another window of the drive, and after the kill the
+    test puts back a copy of the window taken before the cycle and replays only the writes logged
+    before the last flush. 135 s; 19,736 writes replayed behind 15,720 flushes, and 6 completed
+    writes never flushed were dropped. Planted in a scratch copy of the log, a round reported
+    durable once its write completes, before its flush, fails on `log-writes` at cycle 86 (the
+    restarted child's read of a chunk finds a malformed header), and passes all 150 cycles of
+    `linear`.
 
 ## TCP network driver
 
@@ -8885,9 +8946,8 @@ its own pipe.
   drive's write cache keep everything written; even with `O_DIRECT` and fsync on the path, it tests
   rounds in flight, not writes lost to a power cut. So a store that acknowledges a round once its
   write completes but before its flush passes here; the simulator's
-  [crash oracle](#crash-oracle) (`TestRecoveriesMatchTheCrashOracle`) catches it, and the
-  device-mapper targets of [io_uring on a raw device and NVMe](#io_uring-on-a-raw-device-and-nvme)
-  will. Power cuts come with the nightly real-cluster tests of phase 6.
+  [crash oracle](#crash-oracle) (`TestRecoveriesMatchTheCrashOracle`) catches it, and so does the
+  `log-writes` target of [io_uring on a raw device and NVMe](#io_uring-on-a-raw-device-and-nvme). Power cuts come with the nightly real-cluster tests of phase 6.
 
 ## Real-cluster histories
 

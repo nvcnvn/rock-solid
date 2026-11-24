@@ -1,7 +1,10 @@
 package uring
 
 import (
+	"errors"
+	"os"
 	"testing"
+	"time"
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore/storetest"
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -10,16 +13,27 @@ import (
 )
 
 // suiteDisk is a file-backed disk on its own ring, which Restart closes and opens again over the
-// same file, as a process restart does.
+// same file, as a process restart does; or, with RS_RAW_DEVICE set, the device's first blocks.
 type suiteDisk struct {
 	t    testing.TB
 	path string
 	pool *loop.Pool
 	r    *Ring
 	d    *Disk
+	// blocks, when not 0, is the part of a raw device the disk is.
+	blocks uint64
 }
 
-func newSuiteDisk(t *testing.T) storetest.Disk { return newSuiteDiskOf(t, storetest.DiskBytes) }
+func newSuiteDisk(t *testing.T) storetest.Disk {
+	dev := os.Getenv("RS_RAW_DEVICE")
+	if dev == "" {
+		return newSuiteDiskOf(t, storetest.DiskBytes)
+	}
+	zeroRange(t, dev, 0, storetest.DiskBytes)
+	sd := &suiteDisk{t: t, path: dev, blocks: storetest.DiskBytes / bs}
+	sd.start()
+	return sd
+}
 
 func newSuiteDiskOf(t *testing.T, bytes int) storetest.Disk {
 	sd := &suiteDisk{t: t, path: diskFile(t, bytes/bs)}
@@ -36,8 +50,19 @@ func TestAFreedSlotSegmentReadsAsZerosOnAFile(t *testing.T) {
 func (sd *suiteDisk) start() {
 	sd.r, sd.pool = newRing(sd.t, storetest.PoolBytes, 256)
 	var err error
-	if sd.d, err = sd.r.Open(sd.path, false); err != nil {
+	// A killed process's ring holds a raw device's O_EXCL claim until the kernel's teardown of the
+	// ring, in a worker, puts its files.
+	for range 500 {
+		if sd.d, err = sd.r.Open(sd.path, false); !errors.Is(err, unix.EBUSY) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
 		sd.t.Fatal(err)
+	}
+	if sd.blocks != 0 {
+		sd.d.t.blocks = sd.blocks
 	}
 }
 
