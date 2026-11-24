@@ -61,6 +61,8 @@ epoch/neg-step-half-drift	lease.halfStep	TestPlantedLeaseBugsBreakThePair
 epoch/neg-step-on-grants-only	lease.stepOnGrantsOnly	TestPlantedLeaseBugsBreakThePair
 epoch/neg-stay-keeps-interval	open	Spec conformance check
 epoch/neg-stay-sole-holder	chunkstore.refillSoleHolder	TestPlantedPeeringBugsBreakTheOracle
+epoch/neg-park-unpaired	open	A member on a full disk moves before the report
+epoch/neg-swap-full	open	A member on a full disk moves before the report
 epoch/neg-stop-previous-only	chunkstore.stopPreviousOnly	TestPlantedBugsBreakTheirTraces
 epoch/neg-transfer-keeps-lease	raftshard.transferKeepsLease	TestPlantedLeaseBugsBreakTheLeaseReaderInvariant
 epoch/neg-widen-past-two-drift	lease.widenLate	TestPlantedLeaseBugsBreakThePair

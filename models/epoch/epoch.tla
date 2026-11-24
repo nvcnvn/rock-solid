@@ -435,22 +435,26 @@ Replace(p, old, new) ==
 Without(m, S) == SelectSeq(m, LAMBDA d : d \notin S)
 
 \* A move adds the new member and marks the old one leaving, so the PG is one
-\* member wider until Remove. It needs no member leaving. The refill of a member
-\* merely down is the same change at any time, up to MaxMembers, and takes the
-\* old member behind the others, so that it does not lead on its return while
-\* one of them is up.
+\* member wider until Remove. The refill of a member merely down is the same
+\* change, and takes the old member behind the others, so that it does not lead
+\* on its return while one of them is up. Either parks any member not leaving,
+\* at any time, beside other leaving members, up to MaxMembers: the code moves
+\* an up member only once the PG recovered, or off a disk at its log reserve,
+\* whose member takes no copy so that the PG never recovers. With SwapFull a
+\* move of an up member deletes it in the table that adds its replacement.
 Add(p, old, new) ==
     LET x == ivs[p][Cur(p)]
+        down == St(p, Cur(p), old) = "down"
+        swap == ~down /\ Bug("SwapFull")
     IN /\ old \in Mem(p, Cur(p)) \ x.lv
-       /\ x.lv = {} \/ St(p, Cur(p), old) = "down"
        /\ new \notin Mem(p, Cur(p))
        /\ dnode[new] # 0
        /\ Len(x.mem) < MaxMembers
        /\ NewIntervals({p}, [q \in PG |->
-            [x EXCEPT !.mem = IF St(p, Cur(p), old) = "down"
-                              THEN Without(@, {old}) \o <<new, old>>
+            [x EXCEPT !.mem = IF down THEN Without(@, {old}) \o <<new, old>>
+                              ELSE IF swap THEN Without(@, {old}) \o <<new>>
                               ELSE Append(@, new),
-                      !.st[new] = "up", !.lv = @ \cup {old}]])
+                      !.st[new] = "up", !.lv = IF swap THEN @ ELSE @ \cup {old}]])
        /\ UNCHANGED <<reqIv, reports, recd>>
 
 \* A PG's number in a table whose pool split s times. A split doubles the pool's
@@ -514,8 +518,10 @@ Stay(p, l, out) ==
 \* disk that returns and takes a missing member's place, or two members refilled
 \* together, are one interval, where those actions make two. Each rule of theirs
 \* holds of the table as a whole: a member goes only with its disk gone, or
-\* leaving on a recovered report; a member newly leaving is down, unless none was
-\* leaving; one that stops leaving is up.
+\* leaving on a recovered report; one that stops leaving is up. An up member
+\* newly leaves only as a move, beside a member the table adds, or as a narrow,
+\* while none was leaving; a member always stays that is not leaving. With
+\* ParkUnpaired neither holds, so a table can park every member.
 Refill(p, mem, marks, lv) ==
     LET x == ivs[p][Cur(p)]
         was == Mem(p, Cur(p))
@@ -523,10 +529,12 @@ Refill(p, mem, marks, lv) ==
         y == [x EXCEPT !.mem = mem, !.st = [d \in Disk |-> IF d \in Range(mem) THEN to(d) ELSE @[d]], !.lv = lv]
     IN /\ Len(mem) <= MaxMembers
        /\ lv \subseteq Range(mem)
+       /\ \/ /\ x.lv = {} \/ Cardinality({d \in lv \ x.lv : to(d) # "down"}) <= Cardinality(Range(mem) \ was)
+             /\ Range(mem) \ lv # {}
+          \/ Bug("ParkUnpaired")
        /\ \A d \in was \ Range(mem) : dnode[d] = 0 \/ (d \in x.lv /\ Reported(p))
        /\ \A d \in Range(mem) \ was : dnode[d] # 0 /\ to(d) = "up" /\ d \notin lv
        /\ \A d \in Range(mem) \cap was : to(d) = St(p, Cur(p), d) \/ Allowed(p, d, St(p, Cur(p), d), to(d))
-       /\ \A d \in lv \ x.lv : x.lv = {} \/ to(d) = "down"
        /\ \A d \in (x.lv \cap Range(mem)) \ lv : to(d) = "up"
        /\ NewIntervals({p}, [q \in PG |-> y])
        /\ UNCHANGED <<reqIv, reports, recd>>
@@ -2367,16 +2375,17 @@ Settled(p) ==
        \/ reqIv[p] = k
 PeeringSettles == <>[](\A p \in PG : Settled(p))
 
-\* 13. When the leader removes a leaving member, every member of the PG's
-\* current interval but the leaving ones holds every acknowledged version and
-\* lists nothing. A leaving member whose disk is gone is no removal: Drop takes
+\* 13. When the leader removes a leaving member, a member of the PG's current
+\* interval is not leaving, and every such member holds every acknowledged
+\* version and lists nothing. A leaving member whose disk is gone is no removal: Drop takes
 \* it with the others unrecovered, there being no copy left to lose.
 RemovalKeepsCopies ==
     [][\A p \in PG :
          LET x == ivs[p][Len(ivs[p])]
          IN (Len(ivs'[p]) > Len(ivs[p]) /\ \E l \in x.lv \ Range(ivs'[p][Len(ivs'[p])].mem) : dnode[l] # 0)
-            => \A c \in ChunksOf(p) : \A v \in AckedV(c) : \A d \in Range(x.mem) \ x.lv :
-                 v \in dlog[d][c] /\ miss[d][c] = NoMiss]_vars
+            => /\ Range(x.mem) \ x.lv # {}
+               /\ \A c \in ChunksOf(p) : \A v \in AckedV(c) : \A d \in Range(x.mem) \ x.lv :
+                    v \in dlog[d][c] /\ miss[d][c] = NoMiss]_vars
 
 \* 18. An acknowledged write is not stranded: if a disk that is not gone, nor
 \* Removed, can serve all of a chunk's acknowledged writes, holding them and
@@ -2726,6 +2735,26 @@ RefillLostPlans == {RefillLostSecond}
 \* neg-drop-all-leaving: both members leaving, one lost, and the other holds what
 \* no member can serve.
 DropAllPlans == {Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), AddM(2, 2, 4), LostM(3), DropM(2)>>, Partial2, {})}
+\* deep-parks, on 4 nodes: disk 3 down and refilled onto disk 1, which fills before
+\* it recovers, so disk 4 joins with disk 1 parked beside disk 3, both leaving,
+\* then removed on the recovered report; or disk 2 down and lost instead.
+\* ci-parks has the first write alone and the removal; ci-parks-lost too, with
+\* disk 2 marked down in the table that parks disk 1, to fit 5 minutes;
+\* deep-parks-lost the first write alone and the lost plan; and neg-swap-full
+\* the lost plan with disk 1 swapped out.
+ParkFull == Plan(<<Mark(3, "down"), AddM(2, 3, 1), AddM(2, 1, 4), RemoveM(2)>>, Partial2, {})
+ParkFullLost == Plan(<<Mark(3, "down"), AddM(2, 3, 1), AddM(2, 1, 4), Mark(2, "down"), LostM(2)>>, Partial2, {})
+ParkDownLost == Plan(<<Mark(3, "down"), AddM(2, 3, 1),
+                       Tab(2, <<2, 1, 3, 4>>, <<"down", "up", "down", "up">>, {1, 3}), LostM(2)>>, Partial2, {})
+ParkPlans == {ParkFull, ParkFullLost}
+ParkOnePlans == {OneWrite(ParkFull)}
+ParkLostOnePlans == {OneWrite(ParkDownLost)}
+ParkFullLostOnePlans == {OneWrite(ParkFullLost)}
+ParkLostPlans == {ParkFullLost}
+\* neg-park-unpaired: with disk 3 leaving, a table parks disks 1 and 2 too and
+\* adds none, and the removal leaves the PG no member.
+ParkAllPlans == {OneWrite(Plan(<<Mark(3, "down"), AddM(2, 3, 1),
+                                 Tab(2, <<2, 1, 3>>, <<"up", "up", "down">>, {1, 2, 3}), RemoveM(2)>>, Partial2, {}))}
 
 GiveUpM(p) == [k |-> "giveup", p |-> p]
 \* ci-giveup-stopped: both members down together, refilled by nodes 1 and 4 in one
