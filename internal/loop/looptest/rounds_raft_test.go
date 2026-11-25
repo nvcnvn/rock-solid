@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"encoding/binary"
 	"fmt"
+	"reflect"
 	"slices"
 	"testing"
 
@@ -25,8 +26,9 @@ import (
 // would. With reply it tells the disk's owner its replay LSN as it moves, asks for a checkpoint
 // when full, and flushes its tree under each due checkpoint, marked with its storage's base; once
 // the checkpoint's manifest is durable it compacts to the index it applied at the mark and
-// rewrites what holds the replay floor back; its tree then merges its runs in steps, which the
-// next due checkpoint writes. A restart restores it from the runs the owner mails.
+// rewrites what holds the replay floor back; its tree then merges its runs in steps, asking for
+// a due checkpoint to write each, rewrites the runs a MailRewrite names, and replies its runs as
+// the cleaner weighs them whenever they change. A restart restores it from the runs the owner mails.
 type raftRounds struct {
 	l           *loop.Loop
 	id          loop.ShardID
@@ -69,6 +71,10 @@ type raftRounds struct {
 	// asked for its tree, checkpointed those mailed durable, and shares are the shares mailed.
 	rewrote, checkpointed int
 	shares                []uint64
+	// rewrites counts the runs the cleaner's MailRewrite marked, and costs is the runs it replied
+	// last as the cleaner weighs them.
+	rewrites int
+	costs    []disklog.RunCost
 }
 
 func newRaftRounds(l *loop.Loop, pool core.BufPool, lg *loop.Log, log *disklog.Log, rounds int) *raftRounds {
@@ -177,13 +183,25 @@ func (rr *raftRounds) named() runSet {
 	return rr.sets[rr.checkpointed-1]
 }
 
-// merge installs each merge step its tree has due, as a merge worker would, for the next due
-// checkpoint to write.
+// merge installs each merge step its tree has due, as a merge worker would, and with reply asks
+// for a due checkpoint to write the steps it installed, and tells the owner its runs as the
+// cleaner weighs them.
 func (rr *raftRounds) merge() {
+	n := rr.steps
 	for c := rr.tree.PickCompaction(); c != nil && !rr.pause; c = rr.tree.PickCompaction() {
 		c.Run()
 		rr.fail(rr.tree.Install(c))
 		rr.steps++
+	}
+	if !rr.reply {
+		return
+	}
+	if rr.steps > n && rr.tree.StepUnnamed() {
+		rr.l.Reply(rr.id, loop.Reply{Kind: loop.ReplyFull, Owner: rr.owner})
+	}
+	if costs := rr.tree.RunCosts(nil); !reflect.DeepEqual(costs, rr.costs) {
+		rr.costs = costs
+		rr.l.Reply(rr.id, loop.Reply{Kind: loop.ReplyCosts, Owner: rr.owner, Costs: slices.Clone(costs)})
 	}
 }
 
@@ -341,6 +359,9 @@ func (rr *raftRounds) Mail(_ *core.Context, m *loop.Mail, out []core.Action) []c
 			rr.fail(rr.rs.Compact(rr.mark, raftConf))
 		}
 		rr.rs.Rewrite(m.Base)
+		rr.merge()
+	case loop.MailRewrite:
+		rr.rewrites += rr.tree.MarkRewrite(m.Ref.Segment)
 		rr.merge()
 	case loop.MailShare:
 		rr.rs.SetShare(m.Share)

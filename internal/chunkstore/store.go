@@ -1919,7 +1919,7 @@ func (s *Store) housekeep(ctx *core.Context, out *Output) {
 			s.removeShards()
 		}
 		if !s.checkpointing && !s.retryAfter {
-			if due := s.log.CheckpointDue() || s.fullDue(); due || s.stepUnnamed() {
+			if due := s.log.CheckpointDue() || s.fullDue(); due || s.stepUnnamed() || s.raft != nil && s.raft.GoneWaiting() {
 				s.beginCheckpoint(ctx, due, out)
 			}
 		}

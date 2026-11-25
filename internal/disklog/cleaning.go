@@ -106,6 +106,32 @@ func (l *Log) CopyCost(blocks uint64) uint64 {
 	return blocks + header*((blocks+per-1)/per+1) + tail
 }
 
+// RunCost is one run of an index's tree as the cleaner weighs it: its live pieces, whether a
+// merge holds it, and the steps and most extra bytes per step that rewriting it takes.
+type RunCost struct {
+	Pieces []BlobRef
+	Held   bool
+	Steps  int
+	Extra  uint64
+}
+
+// RewriteIn appends to pieces those of every run in costs with a live piece in segment, which a
+// rewrite of each writes again, adds the steps of those no merge holds to steps and raises extra to
+// theirs, and reports whether a merge holds any such run.
+func RewriteIn(costs []RunCost, segment uint32, pieces []BlobRef, steps int, extra uint64) (_ []BlobRef, held bool, _ int, _ uint64) {
+	for _, c := range costs {
+		if !slices.ContainsFunc(c.Pieces, func(p BlobRef) bool { return p.Segment == segment }) {
+			continue
+		}
+		if c.Held {
+			held = true
+			continue
+		}
+		pieces, steps, extra = append(pieces, c.Pieces...), steps+c.Steps, max(extra, c.Extra)
+	}
+	return pieces, held, steps, extra
+}
+
 // RewriteCost is what writing pieces again in steps steps costs the log in blocks at most: the
 // records holding them as they lie now, header blocks included, and the tail that the largest
 // leaves behind in a segment too short for it, since a record never spans two segments; and for

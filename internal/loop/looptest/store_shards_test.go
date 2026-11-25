@@ -2,6 +2,7 @@ package looptest
 
 import (
 	"reflect"
+	"slices"
 	"testing"
 
 	"go.etcd.io/raft/v3/raftpb"
@@ -42,7 +43,12 @@ type storeShards struct {
 }
 
 func newStoreShards(t *testing.T, cfg chunkstore.Config, rounds int) *storeShards {
-	sh := &storeShards{t: t, cfg: cfg, sd: storetest.NewSimDisk(1), rounds: rounds}
+	return newStoreShardsOf(t, cfg, rounds, storetest.DiskBytes)
+}
+
+// newStoreShardsOf is newStoreShards on a disk of the given size.
+func newStoreShardsOf(t *testing.T, cfg chunkstore.Config, rounds int, diskBytes uint64) *storeShards {
+	sh := &storeShards{t: t, cfg: cfg, sd: storetest.NewSimDiskOf(1, diskBytes), rounds: rounds}
 	sh.start()
 	r := storetest.NewRig(t, sh, cfg)
 	r.Opened, r.Mail = sh.opened, sh.mail
@@ -99,6 +105,7 @@ var mailKinds = [...]loop.MailKind{
 	raftshard.MailPiece:        loop.MailPiece,
 	raftshard.MailFlushFailed:  loop.MailFlushFailed,
 	raftshard.MailRun:          loop.MailRun,
+	raftshard.MailRewrite:      loop.MailRewrite,
 }
 
 func (sh *storeShards) mail(m *raftshard.Mail) {
@@ -151,6 +158,8 @@ func (m storeShardsMachine) OnReply(_ *loop.Log, r loop.Reply) {
 		m.sh.r.S.RemoteRuns(r.Owner, r.LSN, r.Refs, r.Bounds)
 	case loop.ReplyDead:
 		m.sh.r.S.RemoteDead(r.Owner, r.Refs)
+	case loop.ReplyCosts:
+		m.sh.r.S.RemoteCosts(r.Owner, r.Costs)
 	case loop.ReplyRemoved:
 		m.sh.r.S.RemoveRemote(r.Owner, r.LSN)
 		m.sh.removed = append(m.sh.removed, r)
@@ -577,4 +586,73 @@ func TestACrashRightAfterAManifestNamesAShardsMergedRunsRestoresThem(t *testing.
 	if got := sh.shards[1].loaded; !got.equal(named) {
 		t.Fatalf("the crash restored runs %v bounded by %+v, where the flush the manifest names named %v bounded by %+v", got.runs, got.bounds, named.runs, named.bounds)
 	}
+}
+
+// TestAnIdleStoreRewritesTheRunsOfAShardOnTheRoundDriver has the Raft shard on each loop flush
+// and merge its tree under due checkpoints, and chunk writes then make more due, until segments
+// that hold only the shards' run pieces are behind the replay floor. The process restarts with the
+// cleaner keeping more segments free than the disk has, the shards making no rounds and nothing
+// writing chunks: no checkpoint is due, and those segments are the only metadata victims that can
+// free room. The cleaner weighs them from the runs each shard replied and mails the shard to
+// rewrite them, and each step asks for a checkpoint, so the rewrites end and the shards report
+// every old piece dead with nothing written but the checkpoints. Their segments free only once a
+// segment header names the manifest after, which chunk writes then open; the log holds none of
+// them, and the storages recover whole.
+func TestAnIdleStoreRewritesTheRunsOfAShardOnTheRoundDriver(t *testing.T) {
+	sh := newStoreShardsOf(t, shardReplay(), 300, 4<<30)
+	sh.r.Settle()
+	var old []disklog.BlobRef
+	for i := 0; len(old) == 0; i++ {
+		if i == 2000 {
+			t.Fatal("no segment behind the replay floor held only the shards' run pieces")
+		}
+		sh.r.Write(storetest.Chunk(0), 0, storetest.Fill(4*core.BlockSize, byte(i)), 0)
+		sh.r.Settle()
+		old = sh.onlyShardPieces()
+	}
+	sh.r.Cfg.CleanFree = 1 << 20
+	sh.restart(0, 1)
+	for _, p := range old {
+		if !slices.Contains(sh.shards[0].gone, p) && !slices.Contains(sh.shards[1].gone, p) {
+			t.Fatalf("idle, the shards rewrote %d and %d runs the cleaner marked and never reported piece %+v dead", sh.shards[0].rewrites, sh.shards[1].rewrites, p)
+		}
+	}
+	log := sh.r.S.Log()
+	m := log.Manifest().LSN
+	for i := 0; log.NamedLSN() < m; i++ {
+		if i == 200 {
+			t.Fatalf("no segment header named the manifest at %d", m)
+		}
+		sh.r.Write(storetest.Chunk(0), 0, storetest.Fill(4*core.BlockSize, byte(i)), 0)
+		sh.r.Settle()
+	}
+	for _, p := range old {
+		if u, _ := log.Usage(p.Segment); u.State != disklog.SegmentFree && u.Newest <= m {
+			t.Fatalf("segment %d of only the shards' old pieces was not freed: %+v", p.Segment, u)
+		}
+		if err := log.PiecesDead([]disklog.BlobRef{p}); err == nil {
+			t.Fatalf("the log still holds piece %+v in a segment of only the shards' pieces", p)
+		}
+	}
+	sh.r.Cfg.CleanFree = 0
+	sh.restart(0, 1)
+}
+
+// onlyShardPieces is the shards' run pieces in segments the cleaner may take that hold no piece
+// of the chunk index or of a manifest.
+func (sh *storeShards) onlyShardPieces() []disklog.BlobRef {
+	log := sh.r.S.Log()
+	index := map[uint32]bool{}
+	for _, p := range sh.r.S.Index().Tree().Pieces(nil) {
+		index[p.Segment] = true
+	}
+	var only []disklog.BlobRef
+	for _, rr := range sh.shards {
+		for _, p := range rr.tree.Pieces(nil) {
+			if !index[p.Segment] && !log.HoldsManifestPiece(p.Segment) && log.Cleanable(p.Segment) {
+				only = append(only, p)
+			}
+		}
+	}
+	return only
 }

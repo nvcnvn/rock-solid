@@ -180,6 +180,7 @@ type raftRig struct {
 	remotePiece []byte
 	remoteSent  int
 	remoteRuns  func() ([]disklog.BlobRef, []disklog.MergeBound)
+	remoteRefs  []disklog.BlobRef
 }
 
 type heldRound struct {
@@ -233,6 +234,9 @@ func (r *raftRig) take() {
 	r.out.Reset()
 	for _, m := range mail {
 		if m.Kind == raftshard.MailFlush || m.Kind == raftshard.MailPiece {
+			if m.Kind == raftshard.MailPiece {
+				r.remoteRefs = append(r.remoteRefs, m.Ref)
+			}
 			if m.Kind == raftshard.MailFlush {
 				r.remoteSent = 0
 				if r.remoteRuns != nil {
@@ -1030,5 +1034,84 @@ func TestAStoreMailsAShardOnTheRoundDriverItsShareAndCheckpoints(t *testing.T) {
 	third := 2 * share / 3
 	if want := []raftshard.Mail{{Kind: raftshard.MailShare, Loop: 2, Shard: 4, Share: third}, {Kind: raftshard.MailShare, Loop: 2, Shard: 5, Share: third}}; !reflect.DeepEqual(r.mail, want) {
 		t.Fatalf("with a third shard the store mailed %+v, want %+v", r.mail, want)
+	}
+}
+
+// A shard on the round driver whose merge left a run out reports that run's pieces dead once the
+// manifest leaving it out is durable. No checkpoint is due and nothing writes, yet the store
+// begins one, so the pieces die once a segment header names its manifest. Its runs as the cleaner
+// weighs them make the cleaner, which found no victim at the durable LSN, look again; they weigh
+// a segment holding the run left, and a victim there mails the shard to rewrite it, but no
+// segment where a merge of the shard holds a run is a victim.
+func TestAShardOnTheRoundDriversDeadPiecesAndRunsReachAnIdleStore(t *testing.T) {
+	r := newRaftRig(t, raftConfig(), raftGeometry, 7)
+	r.s.AddRemote(9, 2, 4)
+	r.remotePiece = fill(core.BlockSize, 9)
+	for i := range 2 {
+		r.s.RemoteFull()
+		r.chunkWrite(chunk(1), fill(core.BlockSize, byte(i)))
+		r.settle()
+	}
+	runs := r.s.raft.RemoteIndexes(nil, r.s.log.DurableLSN())[0].Runs
+	r.remotePiece = nil
+	r.remoteRuns = func() ([]disklog.BlobRef, []disklog.MergeBound) { return runs[1:], nil }
+	r.s.RemoteFull()
+	r.chunkWrite(chunk(1), fill(core.BlockSize, 2))
+	r.settle()
+	pieces := r.remoteRefs
+	if len(pieces) != 4 || pieces[1] != runs[0] || pieces[3] != runs[1] {
+		t.Fatalf("the shard on the round driver holds pieces %v, want those of runs %v", pieces, runs)
+	}
+	dead, kept := slices.Clone(pieces[:2]), slices.Clone(pieces[2:])
+	manifest := r.s.log.Manifest()
+	r.s.RemoteDead(9, dead)
+	r.s.OnLog(&r.ctx, nil, &r.out)
+	r.take()
+	r.settle()
+	if r.s.log.Manifest() == manifest || r.s.raft.GoneWaiting() {
+		t.Fatalf("idle, the store began no checkpoint for the pieces reported dead: manifest %+v, after %+v", r.s.log.Manifest(), manifest)
+	}
+	for n := 0; r.s.log.NamedLSN() < r.s.log.Manifest().LSN; n++ {
+		if n == 200 {
+			t.Fatal("no segment header named the manifest")
+		}
+		r.chunkWrite(chunk(2), fill(core.BlockSize, byte(n)))
+		r.settle()
+	}
+	for _, p := range dead {
+		if err := r.s.log.PiecesDead([]disklog.BlobRef{p}); !errors.Is(err, disklog.ErrMalformed) {
+			t.Fatalf("the log still holds piece %v reported dead", p)
+		}
+	}
+	r.s.cl.tried, r.s.cl.triedAt = true, r.s.log.DurableLSN()
+	r.s.RemoteCosts(9, []disklog.RunCost{{Pieces: kept, Steps: 1, Extra: 100}})
+	if r.s.cleanerIdle() {
+		t.Fatal("the cleaner waits for the durable LSN to move after the shard replied its runs")
+	}
+	seg := kept[0].Segment
+	if p, held, n, x := r.s.raft.RewriteIn(seg, nil, 0, 0); !slices.Equal(p, kept) || held || n != 1 || x != 100 {
+		t.Fatalf("segment %d weighs pieces %v, held %v, %d steps and %d extra bytes, want the run the shard replied", seg, p, held, n, x)
+	}
+	want := []raftshard.Mail{{Kind: raftshard.MailRewrite, Loop: 2, Shard: 4, Ref: disklog.BlobRef{Segment: seg}}}
+	if n := r.s.raft.MarkRewrite(seg); n != 1 || !reflect.DeepEqual(r.s.raft.Mail(nil), want) {
+		t.Fatalf("a victim holding the shard's run marked %d runs, want the shard mailed %+v", n, want)
+	}
+	for n := 0; !r.s.log.Cleanable(seg) || r.s.log.HoldsManifestPiece(seg); n++ {
+		if n == 400 {
+			t.Fatalf("segment %d of the shard's run never became cleanable", seg)
+		}
+		if _, snapshot := r.s.pickVictims(); snapshot {
+			r.s.log.RequestSnapshot()
+		}
+		r.s.RemoteReplay(9, r.s.log.DurableLSN())
+		r.chunkWrite(chunk(2), fill(core.BlockSize, byte(n)))
+		r.settle()
+	}
+	if v, _ := r.s.pickVictims(); !slices.Contains(v, seg) {
+		t.Fatalf("victims %v leave out segment %d of the shard's run", v, seg)
+	}
+	r.s.RemoteCosts(9, []disklog.RunCost{{Pieces: kept[:1], Held: true}, {Pieces: kept[1:], Steps: 1, Extra: 100}})
+	if v, _ := r.s.pickVictims(); slices.Contains(v, seg) {
+		t.Fatalf("victims %v hold segment %d, where a merge of the shard holds a run", v, seg)
 	}
 }

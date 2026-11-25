@@ -65,6 +65,7 @@ type remoteShard struct {
 	runs   []disklog.BlobRef
 	bounds []disklog.MergeBound
 	pieces []disklog.BlobRef
+	costs  []disklog.RunCost
 	flush  *remoteFlush
 }
 
@@ -112,6 +113,9 @@ const (
 	// MailRun is a run the loaded manifest names, its root at Ref and its pieces, root last,
 	// those past Bound's dead ones if a merge bounds it.
 	MailRun
+	// MailRewrite asks the shard to rewrite its runs with a piece in the segment of Ref, a victim
+	// of the cleaner.
+	MailRewrite
 )
 
 // Mail is what the disk's owner sends a shard on the round driver, at Shard on the loop of ID
@@ -389,6 +393,51 @@ func (h *Host) RemoteDead(owner uint32, refs []disklog.BlobRef) {
 		return false
 	})
 }
+
+// RemoteCosts takes the runs of owner's tree, a shard on the round driver, as the cleaner weighs
+// them (loop.ReplyCosts), in place of those it replied before. A reply from a shard no longer
+// known is dropped.
+func (h *Host) RemoteCosts(owner uint32, costs []disklog.RunCost) {
+	if r, ok := h.remoteAt[owner]; ok {
+		h.remote[r].costs = costs
+	}
+}
+
+// RewriteIn adds to the cleaner's weighing of segment, as disklog.RewriteIn does, the runs of the
+// shards on the round driver as they last replied them: a stale reply only misweighs a victim,
+// since the log frees no segment holding a live piece.
+func (h *Host) RewriteIn(segment uint32, pieces []disklog.BlobRef, steps int, extra uint64) (_ []disklog.BlobRef, held bool, _ int, _ uint64) {
+	for i := range h.remote {
+		var hd bool
+		pieces, hd, steps, extra = disklog.RewriteIn(h.remote[i].costs, segment, pieces, steps, extra)
+		held = held || hd
+	}
+	return pieces, held, steps, extra
+}
+
+// MarkRewrite mails each shard on the round driver with a run no merge holds with a piece in
+// segment, as it last replied its runs, to rewrite those runs (MailRewrite), and returns how
+// many there are.
+func (h *Host) MarkRewrite(segment uint32) int {
+	n := 0
+	for i := range h.remote {
+		rs := &h.remote[i]
+		k := 0
+		for _, c := range rs.costs {
+			if !c.Held && slices.ContainsFunc(c.Pieces, func(p disklog.BlobRef) bool { return p.Segment == segment }) {
+				k++
+			}
+		}
+		if k > 0 {
+			n += k
+			h.mail = append(h.mail, Mail{Kind: MailRewrite, Loop: rs.loop, Shard: rs.id, Ref: disklog.BlobRef{Segment: segment}})
+		}
+	}
+	return n
+}
+
+// GoneWaiting reports whether pieces wait for a checkpoint to begin before they can die (Gone).
+func (h *Host) GoneWaiting() bool { return len(h.gone) > 0 }
 
 // BeginFlush asks each shard on the round driver for its part of due checkpoint cp, numbered by
 // its base, a durable LSN: the shard marks its tree with its storage's base and flushes it, one

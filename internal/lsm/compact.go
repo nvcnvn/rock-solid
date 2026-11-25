@@ -403,37 +403,65 @@ func (t *Tree) Pieces(dst []disklog.BlobRef) []disklog.BlobRef {
 }
 
 // RewriteSteps is how many steps rewriting the runs RunsIn lists for segment takes at most, all
-// together, and the most bytes one step writes beside its entry and fragment blocks: a filter
-// partition sized for at most its run's keys and fenced, the root's references to every piece the
-// output may hold, and the bound key its manifest lists. A step holds at least an entry block,
-// which the run's own blocks bound, and short of the last at least StepBytes less a piece.
+// together, and the most bytes one step writes beside its entry and fragment blocks, as runSteps
+// counts them for each run.
 func (t *Tree) RewriteSteps(segment uint32) (steps int, extra uint64) {
-	room := t.cfg.MaxPiece - pieceOverhead
 	for _, r := range t.runs {
 		if r.held || !r.inSegment(segment) {
 			continue
 		}
-		data, filter := 0, 0
-		for _, b := range r.blocks {
-			data += len(b)
-		}
-		for _, p := range r.parts {
-			filter += len(p.enc)
-		}
-		n := max(len(r.blocks), 1)
-		switch {
-		case t.cfg.StepBytes == 0:
-			n = 1
-		case t.cfg.StepBytes > room:
-			n = min(n, data/(t.cfg.StepBytes-room)+1)
-		}
-		part := filter + 2*cacheLineSize + partHdr + partTrailer + filterKeyHdr + filterTrailer + MaxKey
-		written := part/room + 2
-		refs := len(r.pieces) + n*(written+2)
-		steps += n
-		extra = max(extra, uint64(part+written*pieceOverhead+refs*disklog.BlobRefSize+MaxKey))
+		n, x := t.runSteps(r)
+		steps, extra = steps+n, max(extra, x)
 	}
 	return steps, extra
+}
+
+// runSteps is how many steps rewriting r takes at most, and the most bytes one step writes beside
+// its entry and fragment blocks: a filter partition sized for at most its run's keys and fenced,
+// the root's references to every piece the output may hold, and the bound key its manifest lists.
+// A step holds at least an entry block, which the run's own blocks bound, and short of the last at
+// least StepBytes less a piece.
+func (t *Tree) runSteps(r *run) (steps int, extra uint64) {
+	room := t.cfg.MaxPiece - pieceOverhead
+	data, filter := 0, 0
+	for _, b := range r.blocks {
+		data += len(b)
+	}
+	for _, p := range r.parts {
+		filter += len(p.enc)
+	}
+	n := max(len(r.blocks), 1)
+	switch {
+	case t.cfg.StepBytes == 0:
+		n = 1
+	case t.cfg.StepBytes > room:
+		n = min(n, data/(t.cfg.StepBytes-room)+1)
+	}
+	part := filter + 2*cacheLineSize + partHdr + partTrailer + filterKeyHdr + filterTrailer + MaxKey
+	written := part/room + 2
+	refs := len(r.pieces) + n*(written+2)
+	return n, uint64(part + written*pieceOverhead + refs*disklog.BlobRefSize + MaxKey)
+}
+
+// RunCosts appends to dst the tree's runs as the cleaner weighs them for a tree on another loop:
+// each run with a piece, its live pieces and, unless a merge holds it, the steps and extra bytes
+// rewriting it takes, and the pieces each running merge has written, held. disklog.RewriteIn
+// reads a segment's cost from them as RunsIn and RewriteSteps give it.
+func (t *Tree) RunCosts(dst []disklog.RunCost) []disklog.RunCost {
+	for _, r := range t.runs {
+		if len(r.pieces) == 0 {
+			continue
+		}
+		c := disklog.RunCost{Pieces: slices.Clone(r.pieces[r.base:]), Held: r.held}
+		if !r.held {
+			c.Steps, c.Extra = t.runSteps(r)
+		}
+		dst = append(dst, c)
+	}
+	for _, c := range t.merges {
+		dst = append(dst, disklog.RunCost{Pieces: slices.Concat(c.entryRefs, c.fragRefs, c.partRefs, c.tail), Held: true})
+	}
+	return dst
 }
 
 // MarkRewrite marks every run no merge holds that has a live piece in segment for a merge of that

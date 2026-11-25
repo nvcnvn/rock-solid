@@ -65,9 +65,10 @@ func (s *Store) AddRaft(owner uint32, st *raftshard.Storage, sh RaftShard) {
 // under it, a piece at a time (RemotePiece), and waits for its last piece; the runs its flush
 // carries, which its merges change (RemoteRuns), those it writes and their mark of its storage's
 // base join the manifest, and a restart mails them to it before its replay; the pieces its merges
-// leave out die once a checkpoint begun after it reports them ends (RemoteDead). It is called
-// as AddRaft is, before the shard writes a blob, and after Open, before any event, to restore it
-// from the manifest's runs.
+// leave out die once a checkpoint begun after it reports them ends (RemoteDead), and the store
+// begins one while such pieces wait. The cleaner weighs its runs as it replies them (RemoteCosts)
+// and mails it to rewrite those in a victim. It is called as AddRaft is, before the shard writes
+// a blob, and after Open, before any event, to restore it from the manifest's runs.
 func (s *Store) AddRemote(owner uint32, loop int, id uint32) {
 	if s.raft == nil {
 		s.raft = raftshard.NewHost(s.log)
@@ -98,8 +99,18 @@ func (s *Store) RemoteRuns(owner uint32, cp uint64, runs []disklog.BlobRef, boun
 // reported dead once a checkpoint begun after now ends.
 func (s *Store) RemoteDead(owner uint32, refs []disklog.BlobRef) { s.raft.RemoteDead(owner, refs) }
 
-// RemoteFull takes a shard on the round driver's ask for a checkpoint, as raftshard.Rounds.FullDue
-// reports it: full, it applied a commit no checkpoint compacted.
+// RemoteCosts takes the runs of owner's tree, a shard on the round driver, as the cleaner weighs
+// them, replied whenever they change (loop.ReplyCosts): its cost query reads them, and a victim
+// holding a piece of one mails the shard to rewrite it (raftshard.MailRewrite). The cleaner looks
+// for a victim again, though the durable LSN has not moved, as an idle store's never would.
+func (s *Store) RemoteCosts(owner uint32, costs []disklog.RunCost) {
+	s.raft.RemoteCosts(owner, costs)
+	s.cl.tried = false
+}
+
+// RemoteFull takes a shard on the round driver's ask for a due checkpoint: full, it applied a
+// commit no checkpoint compacted, as raftshard.Rounds.FullDue reports it, or its tree installed a
+// merge step no manifest names.
 func (s *Store) RemoteFull() { s.remoteFull = true }
 
 // RemoveRemote forgets owner's shard on the round driver, taken off its loop with every blob of it

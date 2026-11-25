@@ -7399,8 +7399,25 @@ Recovery from manifest and log is under Shard indexes in the disk owner's checkp
   (`TestACrashRightAfterAManifestNamesAShardsMergedRunsRestoresThem`). After a restart, until its
   flush names its runs again, a checkpoint names a shard on the round driver with the bounds the
   loaded manifest named; with the host dropping them on the load it failed
-  (`TestALoadedManifestNamesAShardsRunsWithTheirBounds`). The end-to-end restart is under
-  [Round driver](#round-driver).
+  (`TestALoadedManifestNamesAShardsRunsWithTheirBounds`). The cleaner rewrites the runs of a
+  shard on the round driver in an idle store: after the shards on both loops flush and merge
+  under due checkpoints and chunk writes move the replay floor past segments holding only their
+  run pieces, a restart with the cleaner wanting more free segments than the disk has, the shards
+  making no rounds and nothing writing, has each shard rewrite the runs the cleaner mails it and
+  report every old piece dead, with no checkpoint due; their segments free only once chunk writes
+  open a segment whose header names the manifest after, and the storages recover whole. With the store weighing no
+  shard's runs, or mailing no rewrite, the cleaner marked none, and with the shard not asking for
+  a checkpoint for its steps the rewrite stopped at its first
+  (`TestAnIdleStoreRewritesTheRunsOfAShardOnTheRoundDriver`). Pieces a shard on the round driver
+  reports dead make an idle store begin a checkpoint, and die once a header names its manifest;
+  its runs' table makes a cleaner that found no victim at the durable LSN look again, and weighs
+  and mails a victim holding them, but never picks one where the shard's merge holds a run.
+  Without the checkpoint the manifest never moved, without the look the cleaner stayed idle, and
+  with the shard's held runs ignored it picked the segment
+  (`TestAShardOnTheRoundDriversDeadPiecesAndRunsReachAnIdleStore`). The table weighs every
+  segment as the tree's own `RunsIn` and `RewriteSteps` do, through a rewrite in steps and in a
+  tree restored from a manifest that bounds the run part way; with a running merge's pieces left
+  out, or a bounded run's dead pieces kept, it did not (`TestRewriteMarkedRun`). The end-to-end restart is under [Round driver](#round-driver).
 - **Lagging follower.** A follower behind the compaction index gets a `MsgSnap` built from a point-in-time view of the shard's LSM tree, which never blocks the writer, and catches up from it. A view held open holds back the cleaner (asserted in the LSM tree tests).
 - **Index rebuild.** One index rebuilds from its manifest and the log while the disk's other indexes serve, without restarting the log.
 

@@ -89,8 +89,8 @@ const (
 	// ReplyRemoved says the shard is off its loop for good with every Raft blob of it reported
 	// dead, the newest at LSN, 0 for none.
 	ReplyRemoved
-	// ReplyFull asks for a checkpoint: the shard retains its share and applied a commit no
-	// checkpoint compacted.
+	// ReplyFull asks for a due checkpoint: the shard retains its share and applied a commit no
+	// checkpoint compacted, or its tree installed a merge step no manifest names.
 	ReplyFull
 	// ReplyPiece is the next piece of the shard's flush for checkpoint LSN, Data, Root marking a
 	// run's last; with no Data the flush has written all it has.
@@ -101,10 +101,14 @@ const (
 	// ReplyDead is the pieces, Refs, that the shard's tree no longer names, once the manifest that
 	// leaves them out is durable.
 	ReplyDead
+	// ReplyCosts is the runs of the shard's tree as the cleaner weighs them, Costs, whenever they
+	// change: the owner's cleaner reads a victim's cost from the last it heard, and mails the
+	// shard a MailRewrite for a victim holding a piece of one.
+	ReplyCosts
 )
 
 // Reply is what a shard tells its disk's owner of its blobs, which carry Owner, off the data path;
-// Data, Refs and Bounds are the owner's to keep.
+// Data, Refs, Bounds and Costs are the owner's to keep.
 type Reply struct {
 	Kind   ReplyKind
 	Owner  uint32
@@ -113,6 +117,7 @@ type Reply struct {
 	Root   bool
 	Refs   []disklog.BlobRef
 	Bounds []disklog.MergeBound
+	Costs  []disklog.RunCost
 }
 
 // ReplyMachine is an owner loop's machine that hears its shards' replies (Loop.Reply), after the

@@ -238,10 +238,10 @@ func (s *Store) isVictim(seg uint32) bool {
 // writes, among those whose copy costs less than a segment less the header of the segment it lands
 // in, header blocks and the index entries its moves write included, charging live run pieces at
 // the records of the whole runs a rewrite writes again and what each of its steps writes beside
-// them; a chunk segment's copies must also fit the room the cleaner's lane can reach, and it must
-// hold no header of a live slot write. A segment holding a piece of a manifest recovery may load
-// waits for the next snapshot, which snapshot reports is wanted, and one holding only pieces about
-// to die waits for them.
+// them, a shard on the round driver's runs as it last replied them; a chunk segment's copies must
+// also fit the room the cleaner's lane can reach, and it must hold no header of a live slot write.
+// A segment holding a piece of a manifest recovery may load waits for the next snapshot, which
+// snapshot reports is wanted, and one holding only pieces about to die waits for them.
 func (s *Store) pickVictims() (victims []uint32, snapshot bool) {
 	geo := s.sb.Geometry
 	room := s.log.CleanerRoom()
@@ -265,6 +265,11 @@ func (s *Store) pickVictims() (victims []uint32, snapshot bool) {
 				s.cl.pieces, h = t.RunsIn(seg, s.cl.pieces)
 				n, x := t.RewriteSteps(seg)
 				held, steps, extra = held || h, steps+n, max(extra, x)
+			}
+			if s.raft != nil {
+				var h bool
+				s.cl.pieces, h, steps, extra = s.raft.RewriteIn(seg, s.cl.pieces, steps, extra)
+				held = held || h
 			}
 			if held || len(s.cl.pieces) == 0 && s.log.HoldsPiece(seg) {
 				continue
@@ -315,8 +320,9 @@ func costBenefit(u float64, age uint64) float64 {
 }
 
 // startVictim begins the pass's current victim: a metadata segment marks the runs holding live
-// pieces in it for a rewrite and asks for a snapshot when it holds a manifest's piece, and is
-// freed once nothing it holds is live; a chunk segment's live records are listed for copying.
+// pieces in it for a rewrite, mailing a shard on the round driver to mark its own, and asks for a
+// snapshot when it holds a manifest's piece, and is freed once nothing it holds is live; a chunk
+// segment's live records are listed for copying.
 func (s *Store) startVictim(ctx *core.Context, p *cleanPass) bool {
 	seg := p.victims[p.cur]
 	u, stream := s.log.Usage(seg)
@@ -327,6 +333,9 @@ func (s *Store) startVictim(ctx *core.Context, p *cleanPass) bool {
 		for k := range len(s.shards) + 1 {
 			t, _ := s.tree(k)
 			s.cl.stats.Rewrites += t.MarkRewrite(seg)
+		}
+		if s.raft != nil {
+			s.cl.stats.Rewrites += s.raft.MarkRewrite(seg)
 		}
 		if s.log.Free(ctx, seg, &s.lout) == nil {
 			s.cl.stats.Freed++
