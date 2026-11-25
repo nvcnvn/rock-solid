@@ -182,6 +182,130 @@ func TestADrainOverTheWireIsAnsweredOnceItCommits(t *testing.T) {
 	}
 }
 
+// A pin, an edit and an unpin over the wire are each answered once the table holds the PG as asked: a pin with no disks
+// keeps the PG's members, a pin with disks reorders them too, an unpin keeps them and an edit reorders them unpinned. An
+// edit of an unknown PG or disk, or naming other disks than the members, is refused at once.
+func TestAnEditOverTheWireIsAnsweredOnceItCommits(t *testing.T) {
+	r, pg, a, b := editRun(t)
+	for i, c := range []struct {
+		a     Admin
+		disks []uint32
+		label string
+	}{
+		{Admin{Op: AdminEdit, Pool: 1, Pin: true}, []uint32{a, b}, "a pin"},
+		{Admin{Op: AdminEdit, Pool: 1, Pin: true, Disks: []uint32{b, a}}, []uint32{b, a}, "a pin with disks"},
+		{Admin{Op: AdminEdit, Pool: 1}, []uint32{b, a}, "an unpin"},
+		{Admin{Op: AdminEdit, Pool: 1, Disks: []uint32{a, b}}, []uint32{a, b}, "an edit"},
+	} {
+		req := uint64(i + 2)
+		r.admin(req, c.a)
+		if got := r.answers(); len(got) != 0 {
+			t.Fatalf("%s answered before it committed: %+v", c.label, got)
+		}
+		r.run(StepInterval * 5)
+		e := r.h.Control().Table().Entry(pg)
+		if got := r.answers(); len(got[req]) != 1 || got[req][0].Refused != "" || e.Pinned != c.a.Pin || !slices.Equal(memberDisks(e), c.disks) {
+			t.Fatalf("%s answered %+v, entry %+v", c.label, got, e)
+		}
+	}
+	for i, c := range []struct {
+		a    Admin
+		want string
+	}{
+		{Admin{Op: AdminEdit, Pool: 1, PG: 8, Pin: true}, ErrUnknownPG.Error()},
+		{Admin{Op: AdminEdit, Pool: 1, Disks: []uint32{9}}, ErrUnknownDisk.Error()},
+		{Admin{Op: AdminEdit, Pool: 1, Pin: true, Disks: []uint32{a, 6 - a - b}}, ErrEditMembers.Error()},
+		{Admin{Op: AdminEdit, Pool: 1, Disks: []uint32{b}}, ErrEditMembers.Error()},
+	} {
+		req := uint64(i + 10)
+		r.admin(req, c.a)
+		if got := r.answers(); len(got[req]) != 1 || !strings.Contains(got[req][0].Refused, c.want) {
+			t.Fatalf("%+v answered %+v, want a refusal naming %q", c.a, got, c.want)
+		}
+	}
+}
+
+// An edit that commits overtaken is refused: a reorder another edit in its table undoes, though the PG keeps its disks
+// and pin, and an edit keeping the order of a PG a drain in its table moves. An edit of a moving PG is refused at once.
+func TestAnEditOvertakenInItsTableIsRefused(t *testing.T) {
+	r, _, a, b := editRun(t)
+	r.admin(2, Admin{Op: AdminEdit, Pool: 1, Disks: []uint32{b, a}})
+	r.admin(3, Admin{Op: AdminEdit, Pool: 1, Disks: []uint32{a, b}})
+	r.run(StepInterval * 5)
+	got := r.answers()
+	if len(got[2]) != 1 || !strings.Contains(got[2][0].Refused, "overtook") || len(got[3]) != 1 || got[3][0].Refused != "" {
+		t.Fatalf("two reorders in one table answered %+v", got)
+	}
+	r.activate(chunkstore.Report{ID: 1, Disks: []chunkstore.DiskState{{Log: 0x77}, {Log: 0x78}, {Log: 0x79}}})
+	for i, e := range r.h.Control().Table().Pools[0].PGs {
+		r.admin(uint64(10+i), Admin{Op: AdminEdit, Pool: 1, PG: uint32(i), Disks: memberDisks(&e)})
+	}
+	r.admin(4, Admin{Op: AdminDrain, Disk: a})
+	r.run(StepInterval * 5)
+	got, moved := r.answers(), -1
+	for i, e := range r.h.Control().Table().Pools[0].PGs {
+		an := got[uint64(10+i)]
+		if slices.ContainsFunc(e.Members, func(m chunkstore.Member) bool { return m.Leaving }) {
+			moved = i
+			if len(an) != 1 || !strings.Contains(an[0].Refused, "overtook") {
+				t.Fatalf("an edit of PG %d, which a drain moved, answered %+v", i, an)
+			}
+		} else if len(an) != 1 || an[0].Refused != "" {
+			t.Fatalf("an edit of PG %d answered %+v", i, an)
+		}
+	}
+	if moved < 0 {
+		t.Fatal("the drain moved no PG")
+	}
+	r.admin(5, Admin{Op: AdminEdit, Pool: 1, PG: uint32(moved), Pin: true})
+	if got := r.answers(); len(got[5]) != 1 || !strings.Contains(got[5][0].Refused, ErrPGMoving.Error()) {
+		t.Fatalf("a pin of a moving PG answered %+v", got)
+	}
+}
+
+// editRun is a led host with a rep2 pool of 8 PGs, one disk per failure domain, on disks 1 to 3 of node 2: it returns
+// PG 1.0 and its members.
+func editRun(t *testing.T) (*hostRun, core.PGID, uint32, uint32) {
+	r := newHostRun(t)
+	r.lead()
+	r.report(&NodeReport{Node: 2, Opened: []OpenedDisk{{Device: 1, Log: 0x77, Blocks: 1 << 20}, {Device: 2, Log: 0x78, Blocks: 1 << 20}, {Device: 3, Log: 0x79, Blocks: 1 << 20}}})
+	r.run(StepInterval * 3)
+	s := spec(2, 8)
+	s.FailureDomain = "disk"
+	r.admin(1, Admin{Op: AdminPool, Pool: 1, Spec: s})
+	r.run(StepInterval * 5)
+	r.answers()
+	pg := core.PGID{Pool: 1}
+	ms := memberDisks(r.h.Control().Table().Entry(pg))
+	if len(ms) != 2 {
+		t.Fatalf("PG 1.0 has members %v", ms)
+	}
+	return r, pg, ms[0], ms[1]
+}
+
+// activate sends rp from node 2's loop with every PG of pool 1 activated and recovered at its interval.
+func (r *hostRun) activate(rp chunkstore.Report) {
+	r.t.Helper()
+	tb := r.h.Control().Table()
+	for i, e := range tb.Pools[0].PGs {
+		f := chunkstore.PGReport{PGFields: chunkstore.PGFields{Epoch: tb.Epoch, PG: core.PGID{Pool: 1, Index: uint32(i)}, Interval: e.Interval}, PGCount: uint32(len(tb.Pools[0].PGs))}
+		rp.Activations, rp.Recovered = append(rp.Activations, f), append(rp.Recovered, f)
+	}
+	var m core.Msg
+	if err := chunkstore.Attach(r.pool, &m, chunkstore.AppendReport(nil, &rp), core.NoBuf); err != nil {
+		r.t.Fatal(err)
+	}
+	r.recv(core.NodeID{Node: 2, Loop: 1}, m)
+}
+
+func memberDisks(e *chunkstore.PGEntry) []uint32 {
+	var ds []uint32
+	for _, m := range e.Members {
+		ds = append(ds, m.Disk)
+	}
+	return ds
+}
+
 // A drain change that a race overtakes before it commits is refused with what happened: a drain
 // of a down disk declared lost with it, an undrain of a disk removed with it, and a drain undone
 // by an undrain, which is answered.
@@ -243,16 +367,7 @@ func TestADrainedDiskWithMembersEmptiesAndIsRemoved(t *testing.T) {
 		if n := moving(tb); n > MaxMoves {
 			t.Fatalf("%d moves in flight", n)
 		}
-		rp := chunkstore.Report{ID: 1, Disks: []chunkstore.DiskState{{Log: 0x77}, {Log: 0x78}}}
-		for i, e := range tb.Pools[0].PGs {
-			f := chunkstore.PGReport{PGFields: chunkstore.PGFields{Epoch: tb.Epoch, PG: core.PGID{Pool: 1, Index: uint32(i)}, Interval: e.Interval}, PGCount: uint32(len(tb.Pools[0].PGs))}
-			rp.Activations, rp.Recovered = append(rp.Activations, f), append(rp.Recovered, f)
-		}
-		var m core.Msg
-		if err := chunkstore.Attach(r.pool, &m, chunkstore.AppendReport(nil, &rp), core.NoBuf); err != nil {
-			t.Fatal(err)
-		}
-		r.recv(core.NodeID{Node: 2, Loop: 1}, m)
+		r.activate(chunkstore.Report{ID: 1, Disks: []chunkstore.DiskState{{Log: 0x77}, {Log: 0x78}}})
 		r.report(&node)
 		r.run(StepInterval)
 	}
@@ -481,13 +596,15 @@ func TestAdminCrossesTheWireWhole(t *testing.T) {
 	pool := sim.NewPool(1<<20, 0)
 	full := chunkstore.PoolSpec{Replicas: new(3), MinLive: new(2), Data: new(4), Parity: new(2), EncodeOnWrite: new(true), MaxPerDomain: new(1),
 		Overcommit: new(false), WriteLimit: new(uint8(90)), PGCount: new(uint32(1 << 31)), Sealed: "ec", FailureDomain: "disk", Locality: "node", DiskClass: "nvme"}
-	for _, a := range []Admin{{Op: AdminLost, Disk: 1 << 31}, {Op: AdminRemove, Disk: 1}, {Op: AdminFailed}, {Op: AdminPool, Pool: 7}, {Op: AdminPool, Pool: 1, Spec: full}, {Op: AdminGiveUp, Pool: 1 << 31, PG: 1<<32 - 1, Interval: 1<<32 - 1}, {Op: AdminPG, Pool: 2, PG: 5}, {Op: AdminDrain, Disk: 1<<32 - 1}, {Op: AdminUndrain, Disk: 4}} {
+	for _, a := range []Admin{{Op: AdminLost, Disk: 1 << 31}, {Op: AdminRemove, Disk: 1}, {Op: AdminFailed}, {Op: AdminPool, Pool: 7}, {Op: AdminPool, Pool: 1, Spec: full}, {Op: AdminGiveUp, Pool: 1 << 31, PG: 1<<32 - 1, Interval: 1<<32 - 1}, {Op: AdminPG, Pool: 2, PG: 5}, {Op: AdminDrain, Disk: 1<<32 - 1}, {Op: AdminUndrain, Disk: 4},
+		{Op: AdminEdit, Pool: 1 << 31, PG: 1<<32 - 1, Pin: true}, {Op: AdminEdit, Pool: 3, PG: 2, Disks: []uint32{1<<32 - 1, 1, 7}}} {
 		var m core.Msg
 		if err := EncodeAdmin(pool, 1, 5, &a, &m); err != nil {
 			t.Fatal(err)
 		}
 		got, err := DecodeAdmin(pool, &m)
-		if _, _, tok, _ := Peek(&m); err != nil || tok != 5 || string(appendSpec(nil, &got.Spec)) != string(appendSpec(nil, &a.Spec)) || got.Op != a.Op || got.Disk != a.Disk || got.Pool != a.Pool || got.PG != a.PG || got.Interval != a.Interval {
+		if _, _, tok, _ := Peek(&m); err != nil || tok != 5 || string(appendSpec(nil, &got.Spec)) != string(appendSpec(nil, &a.Spec)) || got.Op != a.Op || got.Disk != a.Disk || got.Pool != a.Pool || got.PG != a.PG || got.Interval != a.Interval ||
+			got.Pin != a.Pin || !slices.Equal(got.Disks, a.Disks) {
 			t.Fatalf("sent %+v, decoded %+v, %v", a, got, err)
 		}
 	}
@@ -511,7 +628,8 @@ func TestAdminCrossesTheWireWhole(t *testing.T) {
 }
 
 func FuzzDecodeAdmin(f *testing.F) {
-	for _, a := range []Admin{{Op: AdminLost, Disk: 2}, {Op: AdminRemove, Disk: 3}, {Op: AdminFailed}, {Op: AdminGiveUp, Pool: 1, PG: 7, Interval: 3}, {Op: AdminPG, Pool: 1, PG: 7}, {Op: AdminDrain, Disk: 4}, {Op: AdminUndrain, Disk: 5}} {
+	for _, a := range []Admin{{Op: AdminLost, Disk: 2}, {Op: AdminRemove, Disk: 3}, {Op: AdminFailed}, {Op: AdminGiveUp, Pool: 1, PG: 7, Interval: 3}, {Op: AdminPG, Pool: 1, PG: 7}, {Op: AdminDrain, Disk: 4}, {Op: AdminUndrain, Disk: 5},
+		{Op: AdminEdit, Pool: 1, PG: 7, Pin: true}, {Op: AdminEdit, Pool: 1, PG: 7, Disks: []uint32{3, 1, 2}}} {
 		addWire(f, func(pool core.BufPool, m *core.Msg) { _ = EncodeAdmin(pool, 1, 4, &a, m) })
 	}
 	fuzzNodeWire(f, func(pool core.BufPool, m *core.Msg) {
@@ -549,4 +667,100 @@ func FuzzDecodeAdminAnswer(f *testing.F) {
 		}
 		return again, true
 	})
+}
+
+// An edit staged while the commit in flight moves its PG is dropped by the next step: neither a reorder nor a pin naming
+// no disk, which would take the members of the table it was staged on, undoes the move.
+func TestAnEditOfAPGMovedInFlightIsDropped(t *testing.T) {
+	r, in := poolRun(t)
+	r.heal(true)
+	r.settle(in)
+	in.Moves = 16
+	if err := r.ctl.Drain(1, true); err != nil {
+		t.Fatal(err)
+	}
+	in.Now = r.now
+	if !r.propose(in) {
+		t.Fatal("nothing proposed")
+	}
+	for i, e := range r.ctl.Table().Pools[0].PGs {
+		ed := chunkstore.Edit{PG: core.PGID{Pool: 1, Index: uint32(i)}, Pinned: i%2 == 1}
+		if i%2 == 0 {
+			ed.Disks = memberDisks(&e)
+			slices.Reverse(ed.Disks)
+		}
+		if err := r.ctl.Edit(ed); err != nil {
+			t.Fatalf("edit %+v: %v", ed, err)
+		}
+	}
+	if a := r.answer(); a.Err != nil || a.Result.FailedCheck >= 0 {
+		t.Fatalf("the drain's commit answered %+v", a)
+	}
+	r.c.agree()
+	r.settle(in)
+	moved := 0
+	for i, e := range r.ctl.Table().Pools[0].PGs {
+		if slices.ContainsFunc(e.Members, func(m chunkstore.Member) bool { return m.Leaving }) {
+			moved++
+			if e.Pinned || !slices.Contains(e.Members, chunkstore.Member{Disk: 1, Leaving: true}) {
+				t.Fatalf("an edit undid the move of PG %d: %+v", i, e)
+			}
+		}
+	}
+	if moved == 0 {
+		t.Fatal("the drain moved no PG")
+	}
+	if len(r.ctl.edits) != 0 {
+		t.Fatalf("edits still staged: %+v", r.ctl.edits)
+	}
+}
+
+// A step its table's budget cuts keeps the edit of a PG it left out, which the next table applies; a commit that fails
+// its checks keeps the edits it took, which the step after the reload applies.
+func TestAnEditWaitsOutACutAndAFailedCommit(t *testing.T) {
+	r := newCtlRun(t)
+	in := &ControlInputs{Disks: disks(0, 1, 2, 3)}
+	for id := range core.PoolID(4) {
+		if err := r.ctl.SetPool(id+1, spec(3, 1<<13), in.Disks); err != nil {
+			t.Fatal(err)
+		}
+		r.step(in)
+	}
+	pg := core.PGID{Pool: 4, Index: 1<<13 - 1}
+	was := memberDisks(r.ctl.Table().Entry(pg))
+	want := slices.Clone(was)
+	slices.Reverse(want)
+	if err := r.ctl.Edit(chunkstore.Edit{PG: pg, Disks: want}); err != nil {
+		t.Fatal(err)
+	}
+	r.fail(1)
+	r.step(in)
+	if got := memberDisks(r.ctl.Table().Entry(pg)); !slices.Equal(got, was) || len(r.ctl.edits) != 1 {
+		t.Fatalf("after the cut table, PG %v has members %v and %d edits staged", pg, got, len(r.ctl.edits))
+	}
+	for r.settle(in) {
+	}
+	if got := memberDisks(r.ctl.Table().Entry(pg)); !slices.Equal(got, want) || len(r.ctl.edits) != 0 {
+		t.Fatalf("PG %v has members %v, %d edits staged", pg, got, len(r.ctl.edits))
+	}
+	stale := r.load(r.l)
+	if err := r.ctl.Drain(4, true); err != nil {
+		t.Fatal(err)
+	}
+	r.settle(in)
+	r.ctl = stale
+	if err := r.ctl.Edit(chunkstore.Edit{PG: pg, Disks: was}); err != nil {
+		t.Fatal(err)
+	}
+	if !r.propose(in) {
+		t.Fatal("nothing proposed")
+	}
+	if a := r.answer(); a.Result.FailedCheck < 0 || len(r.ctl.edits) != 1 {
+		t.Fatalf("a racing commit answered %+v with %d edits staged", a, len(r.ctl.edits))
+	}
+	for r.settle(in) {
+	}
+	if got := memberDisks(r.ctl.Table().Entry(pg)); !slices.Equal(got, was) {
+		t.Fatalf("after the reload, PG %v has members %v", pg, got)
+	}
 }

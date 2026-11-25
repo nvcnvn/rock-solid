@@ -1,6 +1,7 @@
 package chunkstore_test
 
 import (
+	"errors"
 	"slices"
 	"testing"
 
@@ -40,14 +41,12 @@ type ctlGroup struct {
 	ctl     *meta.Control
 	member  meta.Membership
 	token   uint64
-	// waiting is the token of the commit in flight, 0 for none, and sent the edits its step took.
+	// waiting is the token of the commit in flight, 0 for none.
 	waiting uint64
-	sent    []chunkstore.Edit
 	// session is the daemon session Renew started, req its last request, and issuer the leader
 	// lease of its last answer.
 	session, req uint64
 	issuer       meta.Issuer
-	edits        []chunkstore.Edit
 	moves        int
 	leaseID      uint64
 	out          meta.ControlOutput
@@ -239,23 +238,21 @@ func (g *ctlGroup) renew() {
 	}
 }
 
-// propose steps the Control at now, the control plane node's clocks, with the edits and moves
-// queued, and proposes its Txn, unless a commit is in flight; it reports whether it proposed.
+// propose steps the Control at now, the control plane node's clocks, with the moves set, and proposes its Txn, unless a commit is in flight; it reports whether it proposed.
 func (g *ctlGroup) propose(now, raw core.Tick) bool {
 	if g.waiting != 0 {
 		return false
 	}
 	g.token++
 	g.out.Reset()
-	in := meta.ControlInputs{Now: now, Raw: raw, Leased: g.leased(), Disks: g.ctl.AppendDisks(nil), Edits: g.edits, Moves: g.moves}
+	in := meta.ControlInputs{Now: now, Raw: raw, Leased: g.leased(), Disks: g.ctl.AppendDisks(nil), Moves: g.moves}
 	if err := g.ctl.Step(&in, g.token, &g.out); err != nil {
 		g.t.Fatalf("the control plane's step: %v", err)
 	}
 	if !g.out.Propose {
-		g.edits = nil
 		return false
 	}
-	g.waiting, g.sent, g.edits = g.out.Token, g.edits, nil
+	g.waiting = g.out.Token
 	t := g.out.Txn
 	g.call(g.l, func(ctx *core.Context, out *meta.Output) {
 		if err := g.n[g.l].s.Txn(ctx, &t, g.waiting, out); err != nil {
@@ -265,8 +262,7 @@ func (g *ctlGroup) propose(now, raw core.Tick) bool {
 	return true
 }
 
-// answer hands the Control the leader's answer to the commit in flight, once given. A session
-// turn takes no edit, so the edits its step was given wait for the next.
+// answer hands the Control the leader's answer to the commit in flight, once given.
 func (g *ctlGroup) answer() {
 	if g.waiting == 0 {
 		return
@@ -284,10 +280,6 @@ func (g *ctlGroup) answer() {
 	if a.Err != nil || a.Result.FailedCheck >= 0 {
 		g.t.Fatalf("the control plane's commit answered %+v", a)
 	}
-	if !g.out.Push {
-		g.edits = append(g.sent, g.edits...)
-	}
-	g.sent = nil
 }
 
 func (g *ctlGroup) Start(ctx *core.Context, out []core.Action) []core.Action {
@@ -342,8 +334,16 @@ func (g *ctlGroup) Heartbeat(now core.Tick, node uint32, opened []chunkstore.Ope
 
 func (g *ctlGroup) Ask(f chunkstore.PGFields) { g.ctl.Ask(f) }
 
+// Edit stages each edit as the leader's host stages an operator's, and sets the moves. The run edits by the table its
+// replicas were handed, which may be behind the committed one, so an edit the leader refuses for a PG that has moved or
+// changed members since is dropped, as the operator's command would be refused.
 func (g *ctlGroup) Edit(edits []chunkstore.Edit, moves int) {
-	g.edits, g.moves = append(g.edits, edits...), moves
+	for _, ed := range edits {
+		if err := g.ctl.Edit(ed); err != nil && !errors.Is(err, meta.ErrPGMoving) && !errors.Is(err, meta.ErrEditMembers) {
+			g.t.Fatalf("edit %+v: %v", ed, err)
+		}
+	}
+	g.moves = moves
 }
 
 func (g *ctlGroup) Drain(id uint32, on bool) error { return g.ctl.Drain(id, on) }

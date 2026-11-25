@@ -12,7 +12,7 @@ import (
 // messages, its token the request number the command line chose, and its body an op byte and the
 // op's arguments: a disk ID for a declaration, a removal, a drain or an undrain, a pool ID and the pool's spec for a
 // pool, nothing for the failed devices, a pool ID, a PG number and the interval for a give-up, a pool ID and a PG number
-// for a PG's state. A spec is a uvarint whose bit i is set when the i-th of its
+// for a PG's state, and a pool ID, a PG number, a pin byte, a count and each disk ID for an edit. A spec is a uvarint whose bit i is set when the i-th of its
 // optional settings is (replicas, min_live, data, parity, encode_on_write, max_per_domain,
 // overcommit, write_limit, pg_count), each set one as a uvarint in that order, then sealed,
 // failure domain, locality and disk class as strings. The answer carries the command's request as
@@ -29,8 +29,8 @@ const (
 type AdminOp byte
 
 // The operator's commands: declare a disk lost, remove a drained disk, create or change a pool,
-// list the devices nodes left failed, give up a PG's current interval, read a PG's state, and
-// drain a disk or end its drain.
+// list the devices nodes left failed, give up a PG's current interval, read a PG's state,
+// drain a disk or end its drain, and edit, pin or unpin a PG.
 const (
 	AdminLost AdminOp = 1 + iota
 	AdminRemove
@@ -40,10 +40,12 @@ const (
 	AdminPG
 	AdminDrain
 	AdminUndrain
+	AdminEdit
 )
 
 // Admin is an operator's command: Disk for AdminLost, AdminRemove, AdminDrain and AdminUndrain, Pool and Spec for AdminPool,
-// Pool, PG and the PG's current Interval for AdminGiveUp, Pool and PG for AdminPG.
+// Pool, PG and the PG's current Interval for AdminGiveUp, Pool and PG for AdminPG, and for AdminEdit Pool, PG, the
+// member Disks in order, none to keep the PG's members, and whether to Pin it.
 type Admin struct {
 	Op       AdminOp
 	Disk     uint32
@@ -51,6 +53,8 @@ type Admin struct {
 	PG       uint32
 	Interval uint32
 	Spec     chunkstore.PoolSpec
+	Disks    []uint32
+	Pin      bool
 }
 
 // AdminAnswer is the answer to an operator's command: why the leader refused it, empty once it
@@ -76,6 +80,15 @@ func EncodeAdmin(pool core.BufPool, group, request uint64, a *Admin, msg *core.M
 		body = binary.AppendUvarint(binary.AppendUvarint(binary.AppendUvarint(body, uint64(a.Pool)), uint64(a.PG)), uint64(a.Interval))
 	case AdminPG:
 		body = binary.AppendUvarint(binary.AppendUvarint(body, uint64(a.Pool)), uint64(a.PG))
+	case AdminEdit:
+		var pin byte
+		if a.Pin {
+			pin = 1
+		}
+		body = binary.AppendUvarint(append(binary.AppendUvarint(binary.AppendUvarint(body, uint64(a.Pool)), uint64(a.PG)), pin), uint64(len(a.Disks)))
+		for _, d := range a.Disks {
+			body = binary.AppendUvarint(body, uint64(d))
+		}
 	}
 	return encodeBody(pool, group, KindAdmin, request, body, msg)
 }
@@ -99,14 +112,24 @@ func DecodeAdmin(pool core.BufPool, msg *core.Msg) (Admin, error) {
 		d.bad = d.bad || n > math.MaxUint32
 		a.Pool = core.PoolID(n)
 		d.spec(&a.Spec)
-	case AdminGiveUp, AdminPG:
+	case AdminGiveUp, AdminPG, AdminEdit:
 		pool, pg := d.uvarint(), d.uvarint()
 		d.bad = d.bad || pool > math.MaxUint32 || pg > math.MaxUint32
 		a.Pool, a.PG = core.PoolID(pool), uint32(pg)
-		if a.Op == AdminGiveUp {
+		switch a.Op {
+		case AdminGiveUp:
 			k := d.uvarint()
 			d.bad = d.bad || k == 0 || k > math.MaxUint32
 			a.Interval = uint32(k)
+		case AdminEdit:
+			pin := d.byte()
+			d.bad = d.bad || pin > 1
+			a.Pin = pin == 1
+			for n := d.count(); n > 0 && !d.bad; n-- {
+				disk := d.uvarint()
+				d.bad = d.bad || disk > math.MaxUint32
+				a.Disks = append(a.Disks, uint32(disk))
+			}
 		}
 	case AdminFailed:
 	default:

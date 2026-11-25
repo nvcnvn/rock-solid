@@ -511,6 +511,9 @@ func (h *CtlHost) admin(ctx *core.Context, ev *core.Event, request uint64, out *
 	case w.a.Op == AdminGiveUp:
 		pg := core.PGID{Pool: w.a.Pool, Index: w.a.PG}
 		err = wrap(c.GiveUp(ctx.Now, pg, w.a.Interval), "PG %s", pgName(pg))
+	case w.a.Op == AdminEdit:
+		pg := core.PGID{Pool: w.a.Pool, Index: w.a.PG}
+		err = wrap(c.Edit(chunkstore.Edit{PG: pg, Disks: w.a.Disks, Pinned: w.a.Pin}), "PG %s", pgName(pg))
 	default:
 		err = wrap(c.Remove(ctx.Now, w.a.Disk), "disk %d", w.a.Disk)
 	}
@@ -531,8 +534,9 @@ func wrap(err error, format string, arg any) error {
 }
 
 // settle answers each operator's command the Control no longer stages: one that took effect, a
-// pool committed with its settings, a disk gone or its drain committed as asked, with no refusal; one the Control dropped, as a
-// change the committed state refused after a reload, with that.
+// pool committed with its settings, a disk gone or its drain committed as asked, a PG pinned as asked, with no leaving
+// member and the members the edit named in its order, with no refusal; one the Control dropped, as a change the committed state refused after a
+// reload, with that.
 func (h *CtlHost) settle(ctx *core.Context, out *CtlHostOutput) {
 	c := h.ctl
 	h.admins = slices.DeleteFunc(h.admins, func(w adminWait) bool {
@@ -552,6 +556,17 @@ func (h *CtlHost) settle(ctx *core.Context, out *CtlHostOutput) {
 			}
 			if i, ok := slices.BinarySearchFunc(c.pools, w.a.Pool, cmpPool); !ok || c.pools[i].Pool != w.want {
 				refused = fmt.Sprintf("pool %d: the change was dropped before it committed", w.a.Pool)
+			}
+		} else if w.a.Op == AdminEdit {
+			pg := core.PGID{Pool: w.a.Pool, Index: w.a.PG}
+			if slices.ContainsFunc(c.edits, func(ed chunkstore.Edit) bool {
+				return ed.PG == pg && ed.Pinned == w.a.Pin && slices.Equal(ed.Disks, w.a.Disks)
+			}) {
+				return false
+			}
+			e := c.table.Entry(pg)
+			if ms, err := editMembers(e); err != nil || e.Pinned != w.a.Pin || len(w.a.Disks) > 0 && !slices.Equal(ms, w.a.Disks) {
+				refused = fmt.Sprintf("PG %s: the placement rules ignored the edit or another overtook it before it committed", pgName(pg))
 			}
 		} else if on := w.a.Op == AdminDrain; on || w.a.Op == AdminUndrain {
 			switch d := c.disks[w.a.Disk-1]; {

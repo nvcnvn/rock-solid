@@ -402,7 +402,58 @@ var (
 	ErrUnknownPG = errors.New("meta: no such PG")
 	// ErrIntervalMoved reports a give-up of an interval that is neither the PG's current one nor one a give-up records.
 	ErrIntervalMoved = errors.New("meta: the PG's interval moved")
+	// ErrPGMoving reports an edit of a PG with a leaving member.
+	ErrPGMoving = errors.New("meta: the PG has a leaving member")
+	// ErrEditMembers reports an edit naming disks other than the PG's members, in some order.
+	ErrEditMembers = errors.New("meta: an edit must name the PG's members, in some order")
 )
+
+// Edit takes an operator's edit of a PG's member order and pin, which the next table commits unless the PG has moved by
+// then: one naming no disk pins or unpins the PG's members at that step. ErrUnknownPG for a PG the committed table lacks,
+// ErrUnknownDisk for a disk the record lacks or has gone, ErrPGMoving for a PG with a leaving member, ErrEditMembers for
+// disks other than the members. The placement rules may still ignore it, as Next ignores an edit past the pool's failure
+// domains.
+func (c *Control) Edit(ed chunkstore.Edit) error {
+	for _, d := range ed.Disks {
+		if d == 0 || int(d) > len(c.disks) || c.disks[d-1].Gone {
+			return ErrUnknownDisk
+		}
+	}
+	if _, err := c.editOf(ed); err != nil {
+		return err
+	}
+	c.edits = append(c.edits, ed)
+	return nil
+}
+
+// editOf returns ed as Next takes it on the committed table, naming the PG's members if it names no disk.
+func (c *Control) editOf(ed chunkstore.Edit) (chunkstore.Edit, error) {
+	ms, err := editMembers(c.table.Entry(ed.PG))
+	if err != nil {
+		return ed, err
+	}
+	if len(ed.Disks) == 0 {
+		ed.Disks = ms
+	} else if !slices.Equal(slices.Sorted(slices.Values(ed.Disks)), slices.Sorted(slices.Values(ms))) {
+		return ed, ErrEditMembers
+	}
+	return ed, nil
+}
+
+// editMembers returns e's member disks in order: ErrUnknownPG for no entry, ErrPGMoving while a member is leaving.
+func editMembers(e *chunkstore.PGEntry) ([]uint32, error) {
+	if e == nil {
+		return nil, ErrUnknownPG
+	}
+	var ms []uint32
+	for _, m := range e.Members {
+		if m.Leaving {
+			return nil, ErrPGMoving
+		}
+		ms = append(ms, m.Disk)
+	}
+	return ms, nil
+}
 
 // GiveUp takes an operator's give-up at now of PG pg's current interval, interval, and of what it left unfound or, if
 // stopped, every chunk of the PG, which the next Step commits as chunkstore.CheckGiveUp makes it from the committed table,

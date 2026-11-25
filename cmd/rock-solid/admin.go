@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
@@ -36,7 +37,10 @@ const adminUsage = `usage:
   rock-solid disk remove <disk> -ctl node=host:port,...    remove a drained disk
   rock-solid disk failed -ctl node=host:port,...           list the devices nodes left failed at start
   rock-solid pool <pool> -ctl node=host:port,... [settings] create or change a pool
-  rock-solid pg give-up <pool> <pg> -ctl node=host:port,...  give up what a PG's lost disks alone held`
+  rock-solid pg give-up <pool> <pg> -ctl node=host:port,...  give up what a PG's lost disks alone held
+  rock-solid pg edit <pool> <pg> <disk,...> -ctl node=host:port,...    reorder a PG's members, primary first, unpinned
+  rock-solid pg pin <pool> <pg> [<disk,...>] -ctl node=host:port,...   pin a PG, in that order if given
+  rock-solid pg unpin <pool> <pg> -ctl node=host:port,...              unpin a PG`
 
 // runAdmin runs an operator's command line, args after the program's name, and returns its exit
 // code: 0 once the command took effect, 1 when the leader refused it or none answered, 2 for a
@@ -87,6 +91,12 @@ func printDone(stdout io.Writer, a *meta.Admin, an *meta.AdminAnswer) {
 		_, _ = fmt.Fprintf(stdout, "disk %d no longer draining\n", a.Disk)
 	case meta.AdminPool:
 		_, _ = fmt.Fprintf(stdout, "pool %d set\n", a.Pool)
+	case meta.AdminEdit:
+		pin := "unpinned"
+		if a.Pin {
+			pin = "pinned"
+		}
+		_, _ = fmt.Fprintf(stdout, "PG %d.%d %s\n", a.Pool, a.PG, pin)
 	case meta.AdminGiveUp:
 		g := an.GiveUp
 		switch {
@@ -113,8 +123,8 @@ func printDone(stdout io.Writer, a *meta.Admin, an *meta.AdminAnswer) {
 	}
 }
 
-// parseAdmin parses `disk lost|remove|drain|undrain <disk>`, `disk failed`, `pool <pool> [settings]` or `pg give-up <pool> <pg>` with the
-// flags that say where the command goes, before or after the positional arguments.
+// parseAdmin parses `disk lost|remove|drain|undrain <disk>`, `disk failed`, `pool <pool> [settings]`, `pg give-up <pool> <pg>`,
+// `pg edit <pool> <pg> <disks>`, `pg pin <pool> <pg> [<disks>]` or `pg unpin <pool> <pg>` with the flags that say where the command goes, before or after the positional arguments.
 func parseAdmin(args []string) (meta.Admin, adminConfig, error) {
 	var a meta.Admin
 	var cfg adminConfig
@@ -154,8 +164,8 @@ func parseAdmin(args []string) (meta.Admin, adminConfig, error) {
 		if err == nil {
 			a.Spec, err = pool.spec(fs)
 		}
-	case len(pos) == 4 && pos[0] == "pg" && pos[1] == "give-up" && !pooled:
-		a.Op = meta.AdminGiveUp
+	case (len(pos) == 4 || len(pos) == 5) && pos[0] == "pg" && !pooled && pgOps[pos[1]].args[len(pos)-4]:
+		a.Op, a.Pin = pgOps[pos[1]].op, pos[1] == "pin"
 		var id uint32
 		id, err = number(pos[2])
 		a.Pool = core.PoolID(id)
@@ -167,6 +177,15 @@ func parseAdmin(args []string) (meta.Admin, adminConfig, error) {
 				err = fmt.Errorf("PG %q is not a number", pos[3])
 			}
 		}
+		if len(pos) == 5 && err == nil {
+			for d := range strings.SplitSeq(pos[4], ",") {
+				var disk uint32
+				if disk, err = number(d); err != nil {
+					break
+				}
+				a.Disks = append(a.Disks, disk)
+			}
+		}
 	default:
 		err = errors.New("no such command")
 	}
@@ -175,6 +194,13 @@ func parseAdmin(args []string) (meta.Admin, adminConfig, error) {
 
 // diskOps are the commands on one disk, by name.
 var diskOps = map[string]meta.AdminOp{"lost": meta.AdminLost, "remove": meta.AdminRemove, "drain": meta.AdminDrain, "undrain": meta.AdminUndrain}
+
+// pgOps are the commands on one PG, by name, each with whether it takes no disk list and a disk list after the PG.
+var pgOps = map[string]struct {
+	op   meta.AdminOp
+	args [2]bool
+}{"give-up": {meta.AdminGiveUp, [2]bool{true, false}}, "edit": {meta.AdminEdit, [2]bool{false, true}},
+	"pin": {meta.AdminEdit, [2]bool{true, true}}, "unpin": {meta.AdminEdit, [2]bool{true, false}}}
 
 // parseMixed parses fs over args, whose positional arguments may come before, between or after the
 // flags, and returns the positional ones.

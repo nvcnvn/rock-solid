@@ -46,7 +46,7 @@ func members(c *meta.Control) []chunkstore.Member {
 
 // The operator's command line over TCP against a single-voter control plane with two storage
 // node processes: each shard-map group gets a voter on each node, both reporting they hold
-// metadata; a pool created from it places its PGs on the disks the nodes reported; a disk holding
+// metadata; a pool created from it places its PGs on the disks the nodes reported; a PG pinned from it is pinned in the table and unpinned again; a disk holding
 // members, drained, is refused removal until balance has moved them off, then removed; a
 // declaration for an up disk prints the leader's refusal; the device with no valid superblock is
 // printed failed; and once node 3 is killed and its disks' PGs refill, keeping them as leaving
@@ -115,6 +115,15 @@ func TestTheOperatorsCommandLineOverTCP(t *testing.T) {
 		if len(e.Members) != 2 || !slices.ContainsFunc(reported, func(id uint32) bool { return id == e.Members[0].Disk }) ||
 			!slices.ContainsFunc(reported, func(id uint32) bool { return id == e.Members[1].Disk }) {
 			t.Fatalf("PG %d placed on %+v, the disks reported being %v", i, e.Members, reported)
+		}
+	}
+
+	for _, pin := range []string{"pin", "unpin"} {
+		if code, said := admin(p, "pg", pin, "1", "0"); code != 0 || !strings.Contains(said, "PG 1.0 "+pin+"ned") {
+			t.Fatalf("pg %s exited %d: %s", pin, code, said)
+		}
+		if got := onCtl(t, p, func(_ *core.Context, c *meta.Control) bool { return c.Table().Pools[0].PGs[0].Pinned }); got != (pin == "pin") {
+			t.Fatalf("PG 1.0 pinned %v after pg %s", got, pin)
 		}
 	}
 

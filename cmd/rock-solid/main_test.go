@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -72,11 +73,15 @@ func TestParseAdminTakesEachCommand(t *testing.T) {
 		"pool 2 -ctl 1=127.0.0.1:7000 -preset rep2 -pg-count 64": {Op: meta.AdminPool, Pool: 2, Spec: chunkstore.PoolSpec{Replicas: new(2), PGCount: new(uint32(64))}},
 		"pool 3 -ctl 1=127.0.0.1:7000 -overcommit=false -failure-domain disk": {Op: meta.AdminPool, Pool: 3,
 			Spec: chunkstore.PoolSpec{Overcommit: new(false), FailureDomain: "disk"}},
-		"pg give-up 2 0 -ctl 1=127.0.0.1:7000": {Op: meta.AdminGiveUp, Pool: 2},
-		"pg give-up 2 7 -ctl 1=127.0.0.1:7000": {Op: meta.AdminGiveUp, Pool: 2, PG: 7},
+		"pg give-up 2 0 -ctl 1=127.0.0.1:7000":    {Op: meta.AdminGiveUp, Pool: 2},
+		"pg give-up 2 7 -ctl 1=127.0.0.1:7000":    {Op: meta.AdminGiveUp, Pool: 2, PG: 7},
+		"pg edit 2 7 4,1,9 -ctl 1=127.0.0.1:7000": {Op: meta.AdminEdit, Pool: 2, PG: 7, Disks: []uint32{4, 1, 9}},
+		"pg pin 2 7 -ctl 1=127.0.0.1:7000":        {Op: meta.AdminEdit, Pool: 2, PG: 7, Pin: true},
+		"pg pin 2 0 3 -ctl 1=127.0.0.1:7000":      {Op: meta.AdminEdit, Pool: 2, Pin: true, Disks: []uint32{3}},
+		"-ctl 1=127.0.0.1:7000 pg unpin 2 7":      {Op: meta.AdminEdit, Pool: 2, PG: 7},
 	} {
 		a, cfg, err := parseAdmin(strings.Fields(args))
-		if err != nil || a.Op != want.Op || a.Disk != want.Disk || a.Pool != want.Pool || a.PG != want.PG || !reflect.DeepEqual(a.Spec, want.Spec) || cfg.Group != 1 || len(cfg.Ctls) == 0 {
+		if err != nil || a.Op != want.Op || a.Disk != want.Disk || a.Pool != want.Pool || a.PG != want.PG || !reflect.DeepEqual(a.Spec, want.Spec) || a.Pin != want.Pin || !slices.Equal(a.Disks, want.Disks) || cfg.Group != 1 || len(cfg.Ctls) == 0 {
 			t.Errorf("%q parsed as %+v, %+v, %v", args, a, cfg, err)
 		}
 	}
@@ -98,6 +103,13 @@ func TestParseAdminTakesEachCommand(t *testing.T) {
 		"pg give-up 2 x -ctl 1=127.0.0.1:7000",
 		"pg give-up 2 4294967296 -ctl 1=127.0.0.1:7000",
 		"pg give-up 2 1 -ctl 1=127.0.0.1:7000 -replicas 2",
+		"pg give-up 2 1 3 -ctl 1=127.0.0.1:7000",
+		"pg edit 2 1 -ctl 1=127.0.0.1:7000",
+		"pg edit 2 1 3,,4 -ctl 1=127.0.0.1:7000",
+		"pg edit 2 1 0 -ctl 1=127.0.0.1:7000",
+		"pg pin 2 1 3 4 -ctl 1=127.0.0.1:7000",
+		"pg unpin 2 1 3 -ctl 1=127.0.0.1:7000",
+		"pg move 2 1 -ctl 1=127.0.0.1:7000",
 	} {
 		if _, _, err := parseAdmin(strings.Fields(args)); err == nil {
 			t.Errorf("%q taken", args)

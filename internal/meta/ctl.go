@@ -26,14 +26,12 @@ type PoolRecord struct {
 
 // ControlInputs are what a step is computed from beside what the control plane committed and
 // heard: the leader's two clocks and whether it holds its leader lease, each disk's capacity
-// figures as last reported, a pool taking those of its class, and the operator's edits and
-// balance moves.
+// figures as last reported, a pool taking those of its class, and the balance moves.
 type ControlInputs struct {
 	Now    core.Tick
 	Raw    core.Tick
 	Leased bool
 	Disks  []chunkstore.Disk
-	Edits  []chunkstore.Edit
 	Moves  int
 }
 
@@ -96,6 +94,7 @@ type Control struct {
 	drains  []uint32
 	exits   []diskExit
 	giveUps []chunkstore.PGInterval
+	edits   []chunkstore.Edit
 	nodes   []nodeState
 	// stuck is each planned voter this leader has seen up and not holding its plan, and since when.
 	stuck []Halt
@@ -134,16 +133,18 @@ type Control struct {
 	watch       chunkstore.Watcher
 }
 
-// commit is the Txn in flight: the state it gives and how much of the staged reports it took.
+// commit is the Txn in flight: the state it gives, how much of the staged reports and edits it took, and the edits
+// of those it leaves staged, which its table stopped before.
 type commit struct {
-	next             ctlState
-	token            uint64
-	table, mapStaged bool
-	delta            chunkstore.Delta
-	plans            []Group
-	asks, acts, rc   int
-	fenced, session  bool
-	started          []SessionStart
+	next                  ctlState
+	token                 uint64
+	table, mapStaged      bool
+	delta                 chunkstore.Delta
+	plans                 []Group
+	asks, acts, rc, edits int
+	kept                  []chunkstore.Edit
+	fenced, session       bool
+	started               []SessionStart
 }
 
 // NewControl reads the control plane's state from st, the control-plane group's applied state, for
@@ -305,8 +306,9 @@ func splitOf(t *chunkstore.Table, pool core.PoolID) uint64 {
 
 // Step computes the next table and shard map and, with no commit in flight, proposes under token
 // whatever they and the staged pools change, or what the session table owes, the two taking turns.
-// A table holds the PG changes the rest of the Txn leaves room for, keeping every report and ask
-// for the next table, which takes the changes left from where this one stopped; a disk's down mark
+// A table holds the PG changes the rest of the Txn leaves room for, keeping every report and ask,
+// and each operator's edit of a PG it leaves unchanged, for the next table, which takes the changes
+// left from where this one stopped; a disk's down mark
 // commits in the record only with the table that marks its last PG.
 // A staged pool change the committed pool no longer takes, after a reload, is dropped with its
 // error, as are a staged format level SetFormat would now refuse and a staged declaration or
@@ -334,7 +336,14 @@ func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) erro
 	if err != nil {
 		return err
 	}
-	p := &commit{token: token, asks: len(c.asks), acts: len(c.acts), rc: len(c.rcv)}
+	kept, edits := c.edits[:0], []chunkstore.Edit(nil)
+	for _, ed := range c.edits {
+		if x, err := c.editOf(ed); err == nil {
+			kept, edits = append(kept, ed), append(edits, x)
+		}
+	}
+	c.edits = kept
+	p := &commit{token: token, asks: len(c.asks), acts: len(c.acts), rc: len(c.rcv), edits: len(c.edits)}
 	n := &p.next
 	n.pools = c.nextPools()
 	pin := make([]chunkstore.PoolInputs, len(n.pools))
@@ -381,7 +390,7 @@ func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) erro
 	}
 	used, _ := (&Txn{Ops: slices.Concat(c.guards(n.pools), ops, staged)}).Check()
 	var left *core.PGID
-	n.table, _, left = chunkstore.Next(&c.table, &chunkstore.Inputs{Now: in.Now, Pools: pin, Asks: c.asks, Activations: c.table.Reported(nil, c.acts), Recovered: c.table.Reported(nil, c.rcv), Edits: in.Edits, GiveUps: giveUps, Moves: in.Moves,
+	n.table, _, left = chunkstore.Next(&c.table, &chunkstore.Inputs{Now: in.Now, Pools: pin, Asks: c.asks, Activations: c.table.Reported(nil, c.acts), Recovered: c.table.Reported(nil, c.rcv), Edits: edits, GiveUps: giveUps, Moves: in.Moves,
 		Budget: MaxCtlTxnBytes - used - headOps*(len(pin)+len(c.table.Pools)+1), Cost: entryCost, From: c.from})
 	if left != nil {
 		c.from, p.asks, p.acts, p.rc = *left, 0, 0, 0
@@ -391,6 +400,13 @@ func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) erro
 		ops = c.memberOps(ops[:pre], n)
 	}
 	p.delta = chunkstore.MakeDelta(&c.table, &n.table)
+	if left != nil {
+		for _, ed := range c.edits {
+			if !slices.ContainsFunc(p.delta.Entries, func(de chunkstore.DeltaEntry) bool { return de.PG == ed.PG }) {
+				p.kept = append(p.kept, ed)
+			}
+		}
+	}
 	var moved []core.PoolID
 	for _, de := range p.delta.Entries {
 		moved = append(moved, de.PG.Pool)
@@ -403,7 +419,7 @@ func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) erro
 		n.crc = p.delta.CRC
 	}
 	if !p.table && len(ops) == 0 && len(c.staged) == 0 {
-		c.asks, c.acts, c.rcv, c.stagedMap = c.asks[:0], c.acts[:0], c.rcv[:0], nil
+		c.asks, c.acts, c.rcv, c.edits, c.stagedMap = c.asks[:0], c.acts[:0], c.rcv[:0], c.edits[:0], nil
 		c.resendPlans(out)
 		if turn || !c.current {
 			_, err := c.sessionStep(lt, token, true, out)
@@ -536,6 +552,7 @@ func (c *Control) Answer(st *State, a *Answer, out *ControlOutput) error {
 	c.ctlState, c.current = p.next, c.current || p.session
 	c.exits = slices.DeleteFunc(c.exits, func(x diskExit) bool { return c.disks[x.id-1].Gone })
 	c.asks, c.acts, c.rcv = c.asks[p.asks:], c.acts[p.acts:], c.rcv[p.rc:]
+	c.edits = append(p.kept, c.edits[p.edits:]...)
 	if p.table {
 		c.asks = slices.DeleteFunc(c.asks, func(a chunkstore.PGInterval) bool { return splitOf(&c.table, a.PG.Pool) == c.table.Epoch })
 	}
