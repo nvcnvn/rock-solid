@@ -1,8 +1,10 @@
 package uring
 
 import (
+	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore/storetest"
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -48,7 +50,7 @@ func TestAFreedSlotSegmentReadsAsZerosOnAFile(t *testing.T) {
 func (sd *suiteDisk) start() {
 	sd.r, sd.pool = newRing(sd.t, storetest.PoolBytes, 256)
 	var err error
-	if sd.d, err = sd.r.Open(sd.path, false); err != nil {
+	if sd.d, err = openWaiting(sd.r, sd.path); err != nil {
 		sd.t.Fatal(err)
 	}
 	if sd.blocks != 0 {
@@ -95,3 +97,15 @@ func TestTheChunkStoreSuite(t *testing.T) {
 		t.Run(c.Name, func(t *testing.T) { t.Skip("simulator-only: the case injects disk faults") })
 	}
 }
+
+// openWaiting opens path, retrying while a killed process's ring still holds the device's claim.
+func openWaiting(r *Ring, path string) (*Disk, error) {
+	d, err := r.Open(path, false)
+	for deadline := time.Now().Add(openBusyWait); errors.Is(err, unix.EBUSY) && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+		d, err = r.Open(path, false)
+	}
+	return d, err
+}
+
+const openBusyWait = 2 * time.Second

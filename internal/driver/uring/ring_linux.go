@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync/atomic"
-	"time"
 	"unsafe"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -242,7 +241,6 @@ type Disk struct {
 
 // Open opens the file or block device at path for the ring; fua makes it a durability: fua disk,
 // whose writes carry FUA and whose flushes submit nothing. A block device is opened O_EXCL, and
-// Open retries for up to openBusyWait while it is busy.
 func (r *Ring) Open(path string, fua bool) (*Disk, error) {
 	var st unix.Stat_t
 	if err := unix.Stat(path, &st); err != nil {
@@ -252,17 +250,8 @@ func (r *Ring) Open(path string, fua bool) (*Disk, error) {
 	if st.Mode&unix.S_IFMT != unix.S_IFBLK {
 		return r.open(path, flags, fua)
 	}
-	// A killed process's ring keeps the device's O_EXCL claim until the kernel's teardown of the
-	// ring, in a worker and after its in-flight I/O, puts its files; nothing left to wait on.
-	d, err := r.open(path, flags|unix.O_EXCL, fua)
-	for deadline := time.Now().Add(openBusyWait); errors.Is(err, unix.EBUSY) && time.Now().Before(deadline); {
-		time.Sleep(10 * time.Millisecond)
-		d, err = r.open(path, flags|unix.O_EXCL, fua)
-	}
-	return d, err
+	return r.open(path, flags|unix.O_EXCL, fua)
 }
-
-const openBusyWait = 2 * time.Second
 
 func (r *Ring) open(path string, flags int, fua bool) (*Disk, error) {
 	fd, err := unix.Open(path, flags, 0)

@@ -8454,13 +8454,13 @@ RS_URING_DIR=/mnt/rs/u ./uring.test -test.run TestDurableWritesIntoAFileCommitNo
 ```
 
 - A raw device is opened `O_DIRECT` and `O_EXCL` and sized with `BLKGETSIZE64` (its blocks match
-  sysfs's `size`); a second `O_EXCL` open fails with `EBUSY`, and a second ring's `Open` too, after
-  its 2 s of retries, and once the first ring is closed `Open` succeeds at once. That last step
+  sysfs's `size`); a second `O_EXCL` open fails with `EBUSY`, and a second ring's `Open` too, at
+  once, and once the first ring is closed `Open` succeeds at once. That last step
   failed until `Close` unregistered the file table: the kernel drops it with the ring later, in a
   worker, and it held the claim. `TestARawDeviceIsOpenedExclusively`.
-- `Open` waits out a claim that is about to go, such as a killed process's: with no retry, the
-  crash test's first child on `linear` failed to open the device with `EBUSY`, and with
-  `Ring.Open`'s every child of every target opens it. `TestCrashOnARealDisk`.
+- The suite's open waits out a claim that is about to go, such as a killed process's, retrying
+  `EBUSY` for up to 2 s as the daemon does: with no retry, the crash test's first child on `linear`
+  failed to open the device with `EBUSY`, and with it every child of every target opens it. `TestCrashOnARealDisk`.
 - A trim of a raw device is a `BLOCK_URING_CMD_DISCARD` with the header write behind it, in one
   `io_uring_enter` submitting 2: the device's discard count (`/sys/class/block/…/stat`) rises by
   the trim's sectors, the header reads back as zeros, and on this drive so do the blocks after it.

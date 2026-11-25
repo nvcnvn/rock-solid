@@ -1,13 +1,16 @@
 package main
 
 import (
+	"errors"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/driver/tcp"
 	"github.com/nvcnvn/rock-solid/internal/driver/uring"
 	"github.com/nvcnvn/rock-solid/internal/loop"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -70,4 +73,16 @@ func (d loopDriver) Execute(a *core.Action) {
 		return
 	}
 	d.disk.Execute(a)
+}
+
+// openDisk opens a disk for the daemon. A killed process's ring keeps a raw device's O_EXCL
+// claim until the kernel's teardown of the ring, in a worker after its I/O in flight, and the dead
+// process leaves nothing to wait on, so a busy device is retried every 10 ms for up to 2 s.
+func openDisk(r *uring.Ring, path string) (*uring.Disk, error) {
+	d, err := r.Open(path, false)
+	for deadline := time.Now().Add(2 * time.Second); errors.Is(err, unix.EBUSY) && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+		d, err = r.Open(path, false)
+	}
+	return d, err
 }

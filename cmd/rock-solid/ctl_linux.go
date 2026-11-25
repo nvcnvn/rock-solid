@@ -81,7 +81,7 @@ func newCtl(cfg ctlConfig) (_ *ctl, err error) {
 	if p.ring, err = uring.New(p.pool, ringEntries); err != nil {
 		return nil, err
 	}
-	disk, err := p.ring.Open(cfg.Disk, false)
+	disk, err := openDisk(p.ring, cfg.Disk)
 	if err != nil {
 		return nil, err
 	}

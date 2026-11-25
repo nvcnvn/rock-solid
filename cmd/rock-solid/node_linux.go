@@ -100,7 +100,7 @@ func (p *storageNode) add(dm *deviceMachine, path string) error {
 		if nl.ring, err = uring.New(nl.pool, ringEntries); err != nil {
 			return err
 		}
-		if disk, err := nl.ring.Open(path, false); err != nil {
+		if disk, err := openDisk(nl.ring, path); err != nil {
 			log.Printf("device %s: %v", path, err)
 			dm.cfg.Err = err
 			nl.ring.Close()
