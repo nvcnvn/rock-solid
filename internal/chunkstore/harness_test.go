@@ -11,6 +11,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/loop/looptest"
 	"github.com/nvcnvn/rock-solid/internal/lsm"
+	"github.com/nvcnvn/rock-solid/internal/raftshard"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
@@ -373,7 +374,18 @@ func (h *harness) take() {
 		}
 		h.durableAt[r.ID] = r
 	}
+	var asks []raftshard.Mail
+	for _, m := range h.out.Mail {
+		if m.Kind == raftshard.MailFlush || m.Kind == raftshard.MailPiece {
+			asks = append(asks, m)
+		}
+	}
 	h.out.Reset()
+	for _, m := range asks {
+		h.s.RemotePiece(m.Owner, m.Base, nil, false)
+		h.s.OnLog(&h.ctx, nil, &h.out)
+		h.take()
+	}
 }
 
 // step runs the oldest queued action and hands its completion to the store.

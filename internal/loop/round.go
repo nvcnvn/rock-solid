@@ -45,18 +45,32 @@ const (
 	MailCheckpointed
 	// MailShare gives the shard its Share of twice max_replay_bytes in retained entries.
 	MailShare
+	// MailFlush begins a due checkpoint, numbered Base: the shard marks its tree with its
+	// storage's base, begins its flush and replies its first piece (ReplyPiece).
+	MailFlush
+	// MailPiece says the shard's last piece is durable at Ref: it replies its next.
+	MailPiece
+	// MailFlushFailed says the checkpoint failed: the shard's flush fails, and the owner reports
+	// dead the pieces of it that no run holds.
+	MailFlushFailed
+	// MailRun is a run of the shard's tree that the manifest a restart loaded names, its root at
+	// Ref and its pieces in order, root last; every one comes before the restart's first
+	// MailReplayed, and the shard restores its storage's base from them before that.
+	MailRun
 )
 
-// Mail is what a disk's owner sends one of its shards, off the data path; Data is the shard's to
-// keep.
+// Mail is what a disk's owner sends one of its shards, off the data path, Owner the shard's owner
+// key on mail that asks it for a piece; Data and Pieces are the shard's to keep.
 type Mail struct {
-	Shard ShardID
-	Kind  MailKind
-	Ref   disklog.BlobRef
-	Blob  disklog.BlobKind
-	Data  []byte
-	Base  uint64
-	Share uint64
+	Shard  ShardID
+	Kind   MailKind
+	Owner  uint32
+	Ref    disklog.BlobRef
+	Blob   disklog.BlobKind
+	Data   []byte
+	Pieces [][]byte
+	Base   uint64
+	Share  uint64
 }
 
 // ShardID names a shard on its loop.
@@ -76,13 +90,19 @@ const (
 	// ReplyFull asks for a checkpoint: the shard retains its share and applied a commit no
 	// checkpoint compacted.
 	ReplyFull
+	// ReplyPiece is the next piece of the shard's flush for checkpoint LSN, Data, Root marking a
+	// run's last; with no Data the flush has written all it has.
+	ReplyPiece
 )
 
-// Reply is what a shard tells its disk's owner of its blobs, which carry Owner, off the data path.
+// Reply is what a shard tells its disk's owner of its blobs, which carry Owner, off the data path;
+// Data is the owner's to keep.
 type Reply struct {
 	Kind  ReplyKind
 	Owner uint32
 	LSN   uint64
+	Data  []byte
+	Root  bool
 }
 
 // ReplyMachine is an owner loop's machine that hears its shards' replies (Loop.Reply), after the
@@ -264,9 +284,9 @@ func (l *Loop) AddShard(s Shard, lg *Log) ShardID {
 	return ShardID(len(l.shards) - 1)
 }
 
-// RemoveShard takes shard id off l for good, its ID never given again: mail for it is dropped,
-// and its batches in flight are written with no Durable call, their Raft blobs reported dead. It
-// runs on l.
+// RemoveShard takes shard id off l for good, its ID never given again: mail for it is dropped, a
+// checkpoint's ask for its next piece answered with none, and its batches in flight are written
+// with no Durable call, their Raft blobs reported dead. It runs on l.
 func (l *Loop) RemoveShard(id ShardID) {
 	sh := &l.shards[id]
 	sh.s, sh.gone = nil, sh.h.sent
@@ -628,7 +648,7 @@ func (lg *Log) onDisk(ev *core.Event) {
 // drain executes the log's actions, counts its outcomes against the batches they hold, hands
 // every event to the loop's machine if it is a LogMachine, and reports the batches taken and
 // durable; then it hands a LogMachine a nil event after a completion or trim timer, any event, or
-// a shard's reply.
+// a shard's reply, and delivers the mail it sent then, again while shards on the owner reply.
 // An event the round driver does not consume, with no LogMachine to take it, is a broken
 // invariant: something calls the log with nothing to hear its answer.
 func (lg *Log) drain(completion bool) {
@@ -648,10 +668,11 @@ func (lg *Log) drain(completion bool) {
 	completion = completion || len(lg.out.Events) > 0
 	lg.out.Reset()
 	lg.progress()
-	if lg.lm != nil && (completion || lg.replied) {
-		lg.replied = false
+	for lg.lm != nil && (completion || lg.replied) {
+		completion, lg.replied = false, false
 		l.out = lg.lm.OnLog(&l.ctx, lg, nil, l.out[:0])
 		l.execute()
+		lg.progress()
 	}
 }
 
@@ -776,10 +797,16 @@ func (l *Loop) noticed(h *handoff) {
 	clear(h.got)
 }
 
+// deliver hands m to its shard. A removed shard's checkpoint waits on none of its pieces: mail
+// asking it for one gets the reply that its flush has written all it has.
 func (l *Loop) deliver(m *Mail) {
-	if sh := l.shards[m.Shard].s; sh != nil {
-		l.out = sh.Mail(&l.ctx, m, l.out[:0])
+	sh := &l.shards[m.Shard]
+	switch {
+	case sh.s != nil:
+		l.out = sh.s.Mail(&l.ctx, m, l.out[:0])
 		l.execute()
+	case m.Kind == MailFlush || m.Kind == MailPiece:
+		l.reply(sh.h, Reply{Kind: ReplyPiece, Owner: m.Owner, LSN: m.Base})
 	}
 }
 

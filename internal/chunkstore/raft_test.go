@@ -172,8 +172,12 @@ type raftRig struct {
 	delay *core.Rand
 	pumps uint64
 	held  []heldRound
-	// mail is what the store mailed its shards on the round driver.
-	mail []raftshard.Mail
+	// mail is what the store mailed its shards on the round driver, but for a checkpoint's asks
+	// for their pieces, which take answers that they have none, or with remotePiece set a run of
+	// two such pieces each due checkpoint, remoteSent the pieces of the running one sent.
+	mail        []raftshard.Mail
+	remotePiece []byte
+	remoteSent  int
 }
 
 type heldRound struct {
@@ -222,8 +226,26 @@ func (r *raftRig) take() {
 		}
 		r.held = append(r.held, heldRound{d.Owner, d.Round, at})
 	}
-	r.mail = append(r.mail, r.out.Mail...)
+	mail := r.out.Mail
+	r.out.Mail = nil
 	r.out.Reset()
+	for _, m := range mail {
+		if m.Kind == raftshard.MailFlush || m.Kind == raftshard.MailPiece {
+			if m.Kind == raftshard.MailFlush {
+				r.remoteSent = 0
+			}
+			var piece []byte
+			if r.remotePiece != nil && r.remoteSent < 2 {
+				piece = r.remotePiece
+				r.remoteSent++
+			}
+			r.s.RemotePiece(m.Owner, m.Base, piece, piece != nil && r.remoteSent == 2)
+			r.s.OnLog(&r.ctx, nil, &r.out)
+			r.take()
+			continue
+		}
+		r.mail = append(r.mail, m)
+	}
 	r.deliver(r.pumps)
 }
 
@@ -865,6 +887,60 @@ func TestARemovedShardsPiecesStayLiveUntilAManifestLeavesItOut(t *testing.T) {
 	run(run(-1) - 1)
 }
 
+// A shard on the round driver removed part way through its tree's flush under a checkpoint keeps
+// its pieces live through that checkpoint and the next, begun after the removal, whose manifest is
+// the first to leave the shard out: that one reports dead its runs' pieces and those of the flush,
+// written before the removal or after, and once a segment header names its manifest the log holds
+// them no more. The first due checkpoint that wrote its runs begins with nothing durable.
+func TestARemovedRemoteShardsPiecesDieOnceAManifestLeavesItOut(t *testing.T) {
+	r := newRaftRig(t, raftConfig(), raftGeometry, 7)
+	r.s.AddRemote(9, 2, 4)
+	r.remotePiece = fill(core.BlockSize, 9)
+	for i := range 2 {
+		r.s.RemoteFull()
+		r.chunkWrite(chunk(1), fill(core.BlockSize, byte(i)))
+		r.settle()
+	}
+	runs := r.s.raft.RemoteIndexes(nil, r.s.log.DurableLSN())[0].Runs
+	if len(runs) != 2 {
+		t.Fatalf("two due checkpoints left the shard on the round driver runs %v", runs)
+	}
+	busy := func(n int, why string) {
+		if n == settleSteps {
+			t.Fatal(why)
+		}
+		r.write(r.shards[0], 4, 4000)
+		r.step()
+	}
+	r.s.RemoteFull()
+	for n := 0; !r.s.raft.Flushing() || r.remoteSent < 2; n++ {
+		busy(n, "the shard on the round driver never had a piece durable under a due checkpoint")
+	}
+	r.s.RemoveRemote(9, 0)
+	manifest, ended := r.s.log.Manifest(), 0
+	var dead []disklog.BlobRef
+	for n := 0; ended < 2; n++ {
+		busy(n, "the checkpoints running at the removal and after never ended")
+		if m := r.s.log.Manifest(); m != manifest {
+			manifest, ended = m, ended+1
+		}
+		if ended == 1 && r.s.checkpointing {
+			dead = slices.Clone(r.s.removedPieces)
+		}
+	}
+	if len(dead) != 3*2 || !slices.Contains(dead, runs[0]) || !slices.Contains(dead, runs[1]) {
+		t.Fatalf("the checkpoint begun after the removal will report dead %v, want the two pieces of each of runs %v and of the flush", dead, runs)
+	}
+	for n := 0; r.s.log.NamedLSN() < manifest.LSN; n++ {
+		busy(n, "no segment header named the manifest that left the removed shard out")
+	}
+	for _, p := range dead {
+		if err := r.s.log.PiecesDead([]disklog.BlobRef{p}); !errors.Is(err, disklog.ErrMalformed) {
+			t.Fatalf("the log still holds the removed shard's piece %v once a segment header names the manifest that left it out", p)
+		}
+	}
+}
+
 // RemoveRaft refuses an owner the store does not host, or one it is already removing.
 func TestRemoveRaftRefusesAnOwnerNotHosted(t *testing.T) {
 	r := newRaftRig(t, raftConfig(), raftGeometry, 7)
@@ -893,7 +969,7 @@ func TestAStoreMailsAShardOnTheRoundDriverItsShareAndCheckpoints(t *testing.T) {
 	r.chunkWrite(chunk(1), fill(core.BlockSize, 1))
 	r.settle()
 	share := cfg.Log.MaxReplayBytes
-	if want := []raftshard.Mail{{Loop: 2, Shard: 4, Share: share}}; !reflect.DeepEqual(r.mail, want) || r.s.raft.Share(r.s.raftBytes()) != share {
+	if want := []raftshard.Mail{{Kind: raftshard.MailShare, Loop: 2, Shard: 4, Share: share}}; !reflect.DeepEqual(r.mail, want) || r.s.raft.Share(r.s.raftBytes()) != share {
 		t.Fatalf("the store mailed %+v and shares %d, want %+v", r.mail, r.s.raft.Share(r.s.raftBytes()), want)
 	}
 	for i := range 2 {
@@ -902,7 +978,7 @@ func TestAStoreMailsAShardOnTheRoundDriverItsShareAndCheckpoints(t *testing.T) {
 		r.s.RemoteFull()
 		r.chunkWrite(chunk(2), fill(core.BlockSize, byte(i)))
 		r.settle()
-		if len(r.mail) != 1 || !r.mail[0].Checkpointed || r.mail[0].Loop != 2 || r.mail[0].Shard != 4 || r.mail[0].Base != before || r.s.lastBase <= before {
+		if len(r.mail) != 1 || r.mail[0].Kind != raftshard.MailCheckpointed || r.mail[0].Loop != 2 || r.mail[0].Shard != 4 || r.mail[0].Base != before || r.s.lastBase <= before {
 			t.Fatalf("asked for checkpoint %d after a manifest of base %d, the store mailed %+v and wrote one of base %d", i, before, r.mail, r.s.lastBase)
 		}
 	}
@@ -919,7 +995,7 @@ func TestAStoreMailsAShardOnTheRoundDriverItsShareAndCheckpoints(t *testing.T) {
 	r.chunkWrite(chunk(3), fill(core.BlockSize, 3))
 	r.settle()
 	third := 2 * share / 3
-	if want := []raftshard.Mail{{Loop: 2, Shard: 4, Share: third}, {Loop: 2, Shard: 5, Share: third}}; !reflect.DeepEqual(r.mail, want) {
+	if want := []raftshard.Mail{{Kind: raftshard.MailShare, Loop: 2, Shard: 4, Share: third}, {Kind: raftshard.MailShare, Loop: 2, Shard: 5, Share: third}}; !reflect.DeepEqual(r.mail, want) {
 		t.Fatalf("with a third shard the store mailed %+v, want %+v", r.mail, want)
 	}
 }

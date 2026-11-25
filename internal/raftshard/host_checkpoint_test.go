@@ -557,7 +557,7 @@ func TestARestartMailsAShardOnTheRoundDriverItsLiveRounds(t *testing.T) {
 	r.remote = []uint32{6}
 	r.crash(5)
 	mail := r.host.Mail(nil)
-	if len(mail) < 2 || !mail[len(mail)-1].End {
+	if len(mail) < 2 || mail[len(mail)-1].Kind != MailRecovered {
 		t.Fatalf("mail %+v ends with no end of the replay", mail)
 	}
 	base := st6.Base()
@@ -567,10 +567,10 @@ func TestARestartMailsAShardOnTheRoundDriverItsLiveRounds(t *testing.T) {
 	}
 	rs := NewRounds(6, st, r.host.Log.MaxBlobBytes())
 	for _, m := range mail[:len(mail)-1] {
-		if m.Loop != 1 || m.Shard != 0 || m.End || m.Ref.LSN <= from {
+		if m.Loop != 1 || m.Shard != 0 || m.Kind != MailReplayed || m.Ref.LSN <= from {
 			t.Fatalf("mail %+v for shard 6, whose replay LSN is %d", m, from)
 		}
-		if err := rs.Replay(m.Ref, m.Kind, m.Data); err != nil {
+		if err := rs.Replay(m.Ref, m.Blob, m.Data); err != nil {
 			t.Fatal(err)
 		}
 	}

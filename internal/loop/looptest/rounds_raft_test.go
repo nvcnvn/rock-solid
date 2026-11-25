@@ -1,6 +1,8 @@
 package looptest
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"testing"
 
@@ -9,58 +11,146 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/loop"
+	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/raftshard"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
 // raftRounds is a Raft shard's log on the round driver, as its replica drives it: each round holds
-// a few entries and a hard state committing them, its storage takes it once durable, and every
-// third round compacts to the commit of the round before, as a checkpoint would. A due
-// checkpoint's mail compacts it to its commit, as its runs would record, and rewrites what holds
-// the replay floor back. With reply it tells the disk's owner its replay LSN as it moves, and
-// asks for a checkpoint when full.
+// a few entries and a hard state committing them, its storage takes it once durable and its state
+// machine, a tree putting each entry's head under its index mod raftKeys, applies it. With
+// selfCompact every third round compacts to the commit of the round before, as a checkpoint
+// would. With reply it tells the disk's owner its replay LSN as it moves, asks for a checkpoint
+// when full, and flushes its tree under each due checkpoint, marked with its storage's base; once
+// the checkpoint's manifest is durable it compacts to the index it applied at the mark and
+// rewrites what holds the replay floor back. A restart restores it from the runs the owner mails.
 type raftRounds struct {
-	l     *loop.Loop
-	id    loop.ShardID
-	owner uint32
-	reply bool
-	pool  core.BufPool
-	st    *raftshard.Storage
-	rs    *raftshard.Rounds
-	round raftshard.Round
-	flush uint64
-	done  uint64
-	left  int
-	err   error
+	l           *loop.Loop
+	id          loop.ShardID
+	owner       uint32
+	reply       bool
+	selfCompact bool
+	pool        core.BufPool
+	maxBlob     uint64
+	st          *raftshard.Storage
+	rs          *raftshard.Rounds
+	round       raftshard.Round
+	flush       uint64
+	done        uint64
+	left        int
+	err         error
+	// tree is the state machine, applied the index it applied, mark the index it had applied
+	// when the running checkpoint marked it, cp that checkpoint's number, and restored says a
+	// restart restored it from the runs mailed before its replay.
+	tree     *lsm.Tree
+	applied  uint64
+	mark, cp uint64
+	restored bool
+	flushes  int
 	// refs are the places of every blob told durable, dead those reported dead; recovered says
 	// a restart's replay ended.
 	refs, dead []disklog.BlobRef
 	recovered  bool
-	// rewrote counts the rounds of Rounds' own made durable, checkpointed the due checkpoints
-	// mailed, and shares are the shares mailed.
+	// rewrote counts the rounds of Rounds' own made durable, flushes the due checkpoints that
+	// asked for its tree, checkpointed those mailed durable, and shares are the shares mailed.
 	rewrote, checkpointed int
 	shares                []uint64
 }
 
 func newRaftRounds(l *loop.Loop, pool core.BufPool, lg *loop.Log, log *disklog.Log, rounds int) *raftRounds {
-	return addRaftRounds(l, pool, lg, 7, log.MaxBlobBytes(), rounds, raftpb.SnapshotMetadata{})
+	rr := addRaftRounds(l, pool, lg, 7, log.MaxBlobBytes(), 0)
+	rr.selfCompact, rr.left = true, rounds
+	if rounds > 0 {
+		rr.next()
+	}
+	return rr
 }
 
-// addRaftRounds puts on l a shard whose blobs carry owner, its storage on base, as its runs would
-// restore it, and makes its first of rounds rounds.
-func addRaftRounds(l *loop.Loop, pool core.BufPool, lg *loop.Log, owner uint32, maxBlob uint64, rounds int, base raftpb.SnapshotMetadata) *raftRounds {
+// addRaftRounds puts on l a shard whose blobs carry owner, its storage empty, and makes its first
+// of rounds rounds.
+func addRaftRounds(l *loop.Loop, pool core.BufPool, lg *loop.Log, owner uint32, maxBlob uint64, rounds int) *raftRounds {
 	st := raftshard.NewStorage()
-	if base.Index > 0 {
-		if err := st.ApplySnapshot(raftpb.Snapshot{Metadata: base}); err != nil {
-			panic(err)
-		}
+	tree, err := lsm.New(lsm.Config{MaxPiece: raftPiece, Check: true})
+	if err != nil {
+		panic(err)
 	}
-	rr := &raftRounds{l: l, owner: owner, pool: pool, st: st, rs: raftshard.NewRounds(owner, st, maxBlob), left: rounds}
+	rr := &raftRounds{l: l, owner: owner, pool: pool, maxBlob: maxBlob, st: st, rs: raftshard.NewRounds(owner, st, maxBlob), left: rounds, tree: tree}
 	rr.id = l.AddShard(rr, lg)
 	if rounds > 0 {
 		rr.next()
 	}
 	return rr
+}
+
+// raftPiece is a shard's tree's largest piece, small so that a flush writes several.
+const raftPiece = 1024
+
+// raftKeys is how many keys a shard's state machine holds.
+const raftKeys = 40
+
+var (
+	raftMark = []byte{0}
+	raftConf = raftpb.ConfState{Voters: []uint64{1}}
+)
+
+func raftKey(i uint64) []byte { return []byte(fmt.Sprintf("k%03d", i%raftKeys)) }
+
+// apply applies the committed entries past the applied index.
+func (rr *raftRounds) apply() {
+	last, _ := rr.st.LastIndex()
+	commit := min(rr.st.HardState().Commit, last)
+	if commit <= rr.applied {
+		return
+	}
+	ents, err := rr.st.Entries(rr.applied+1, commit+1, 1<<62)
+	if err != nil {
+		panic(err)
+	}
+	for _, e := range ents {
+		if err := rr.tree.Put(raftKey(e.Index), e.Data[:64]); err != nil {
+			panic(err)
+		}
+	}
+	rr.applied = commit
+}
+
+// fail records the shard's first error.
+func (rr *raftRounds) fail(err error) {
+	if err != nil && rr.err == nil {
+		rr.err = err
+	}
+}
+
+// piece replies the tree flush's next piece for the running checkpoint, or none once it is all
+// written.
+func (rr *raftRounds) piece() {
+	buf := make([]byte, raftPiece)
+	n, root, err := rr.tree.NextPiece(buf)
+	rr.fail(err)
+	r := loop.Reply{Kind: loop.ReplyPiece, Owner: rr.owner, LSN: rr.cp, Root: root}
+	if n > 0 {
+		r.Data = buf[:n]
+	}
+	rr.l.Reply(rr.id, r)
+}
+
+// restore makes the base the mark in the loaded runs records its storage's base, once, before the
+// replay: Rounds keeps a storage already on its base.
+func (rr *raftRounds) restore() {
+	if rr.restored {
+		return
+	}
+	rr.restored = true
+	v, ok := rr.tree.Get(raftMark)
+	if !ok {
+		return
+	}
+	rr.applied = binary.BigEndian.Uint64(v)
+	md := raftpb.SnapshotMetadata{Index: binary.BigEndian.Uint64(v[8:]), Term: binary.BigEndian.Uint64(v[16:]), ConfState: raftConf}
+	if md.Index > 0 {
+		rr.fail(rr.st.ApplySnapshot(raftpb.Snapshot{Metadata: md}))
+	}
+	rr.rs = raftshard.NewRounds(rr.owner, rr.st, rr.maxBlob)
 }
 
 func (rr *raftRounds) next() {
@@ -69,7 +159,7 @@ func (rr *raftRounds) next() {
 	last, _ := rr.st.LastIndex()
 	ents := make([]raftpb.Entry, 3)
 	for i := range ents {
-		ents[i] = raftpb.Entry{Index: last + 1 + uint64(i), Term: 1, Data: make([]byte, 1000)}
+		ents[i] = raftpb.Entry{Index: last + 1 + uint64(i), Term: 1, Data: binary.LittleEndian.AppendUint64(make([]byte, 0, 1000), last+1+uint64(i))[:1000]}
 	}
 	rr.round = raftshard.Round{Entries: ents, HardState: raftpb.HardState{Term: 1, Vote: 1, Commit: last + 3}}
 	rr.rs.Write(rr.flush, &rr.round)
@@ -103,10 +193,9 @@ func (rr *raftRounds) Durable(ctx *core.Context, err error, refs []disklog.BlobR
 	rr.st.Append(rr.round.Entries)
 	rr.st.SetHardState(rr.round.HardState)
 	rr.st.Took(round)
-	if round%3 == 0 && before > rr.st.Base().Index {
-		if err := rr.rs.Compact(before, raftpb.ConfState{Voters: []uint64{1}}); err != nil {
-			rr.err = err
-		}
+	rr.apply()
+	if rr.selfCompact && round%3 == 0 && before > rr.st.Base().Index {
+		rr.fail(rr.rs.Compact(before, raftConf))
 	}
 	rr.bury()
 	if rr.left > 0 {
@@ -142,19 +231,41 @@ func (rr *raftRounds) remove() {
 
 func (rr *raftRounds) Mail(_ *core.Context, m *loop.Mail, out []core.Action) []core.Action {
 	switch m.Kind {
+	case loop.MailRun:
+		rr.fail(rr.tree.LoadRun(m.Ref, m.Pieces))
 	case loop.MailReplayed:
-		if err := rr.rs.Replay(m.Ref, m.Blob, m.Data); err != nil && rr.err == nil {
-			rr.err = err
-		}
+		rr.restore()
+		rr.fail(rr.rs.Replay(m.Ref, m.Blob, m.Data))
 	case loop.MailRecovered:
+		rr.restore()
 		rr.rs.Replayed()
+		rr.apply()
 		rr.recovered = true
+	case loop.MailFlush:
+		rr.flushes++
+		rr.cp, rr.mark = m.Base, rr.applied
+		b := rr.st.Base()
+		v := binary.BigEndian.AppendUint64(nil, rr.applied)
+		v = binary.BigEndian.AppendUint64(v, b.Index)
+		v = binary.BigEndian.AppendUint64(v, b.Term)
+		if was, _ := rr.tree.Get(raftMark); !bytes.Equal(was, v) {
+			rr.fail(rr.tree.Put(raftMark, v))
+		}
+		_, err := rr.tree.BeginFlush()
+		rr.fail(err)
+		rr.piece()
+	case loop.MailPiece:
+		rr.fail(rr.tree.PieceDurable(m.Ref))
+		rr.piece()
+	case loop.MailFlushFailed:
+		rr.tree.FlushFailed()
 	case loop.MailCheckpointed:
 		rr.checkpointed++
-		if c := rr.st.HardState().Commit; c > rr.st.Base().Index {
-			if err := rr.rs.Compact(c, raftpb.ConfState{Voters: []uint64{1}}); err != nil && rr.err == nil {
-				rr.err = err
-			}
+		if dead, err := rr.tree.CheckpointDone(); err != nil || len(dead) > 0 {
+			rr.fail(fmt.Errorf("a flush's checkpoint done with %v, %d pieces dead", err, len(dead)))
+		}
+		if rr.mark > rr.st.Base().Index {
+			rr.fail(rr.rs.Compact(rr.mark, raftConf))
 		}
 		rr.rs.Rewrite(m.Base)
 	case loop.MailShare:

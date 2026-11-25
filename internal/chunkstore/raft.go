@@ -61,8 +61,11 @@ func (s *Store) AddRaft(owner uint32, st *raftshard.Storage, sh RaftShard) {
 // index stops the store rather than rebuilding it under the driver. Output's Mail also tells it
 // its share of twice max_replay_bytes as the shards on the disk come and go, and each due
 // checkpoint whose manifest is durable, after which it compacts and writes again what holds the
-// replay floor back (raftshard.Rounds.Rewrite). It is called as AddRaft is, before the shard
-// writes a blob.
+// replay floor back (raftshard.Rounds.Rewrite). Each due checkpoint asks it to flush its tree
+// under it, a piece at a time (RemotePiece), and waits for its last piece; its runs and their
+// mark of its storage's base join the manifest, and a restart mails them to it before its
+// replay. It is called as AddRaft is, before the shard writes a blob, and after Open, before
+// any event, to restore it from the manifest's runs.
 func (s *Store) AddRemote(owner uint32, loop int, id uint32) {
 	if s.raft == nil {
 		s.raft = raftshard.NewHost(s.log)
@@ -73,6 +76,13 @@ func (s *Store) AddRemote(owner uint32, loop int, id uint32) {
 // RemoteReplay takes the replay LSN owner's shard on the round driver reported: a restart needs
 // none of its blobs at or before lsn.
 func (s *Store) RemoteReplay(owner uint32, lsn uint64) { s.raft.RemoteReplay(owner, lsn) }
+
+// RemotePiece takes the next piece owner's shard on the round driver replied for checkpoint cp
+// (loop.ReplyPiece), data, root marking a run's last, or with no data the end of its flush; the
+// store writes it under the checkpoint and mails the shard its place once durable.
+func (s *Store) RemotePiece(owner uint32, cp uint64, data []byte, root bool) {
+	s.raft.RemotePiece(owner, cp, data, root)
+}
 
 // RemoteFull takes a shard on the round driver's ask for a checkpoint, as raftshard.Rounds.FullDue
 // reports it: full, it applied a commit no checkpoint compacted.
@@ -153,7 +163,8 @@ func (s *Store) stepUnnamed() bool {
 // carries, that of the last due checkpoint that ended, and leaves out a shard none named: its rounds
 // all follow that checkpoint's base, where the replay floor stays.
 // Either names each shard on the round driver with the replay LSN it last reported, as its rounds
-// may predate any checkpoint's base.
+// may predate any checkpoint's base, and the runs the newest manifest names; a due one asks it to
+// flush its tree (beginRemote) once the log has begun the checkpoint.
 func (s *Store) beginShards(ctx *core.Context, due bool, durable uint64, idx []disklog.CheckpointIndex) ([]disklog.CheckpointIndex, error) {
 	if s.raft == nil {
 		return idx, nil
@@ -196,8 +207,9 @@ func (s *Store) beginShards(ctx *core.Context, due bool, durable uint64, idx []d
 }
 
 // shardsCheckpointed ends each shard tree's flush once the manifest is durable, reports the
-// pieces it made dead and compacts each shard to the index its tree was marked at; after a due
-// one, it mails each shard on the round driver to do the same.
+// pieces it made dead, those of removed shards' trees included, and compacts each shard to the
+// index its tree was marked at; after a due one, it mails each shard on the round driver that
+// flushed under it to do the same.
 func (s *Store) shardsCheckpointed(ctx *core.Context, out *Output) {
 	for i := range s.cpShards {
 		r := &s.shards[i]
@@ -218,9 +230,11 @@ func (s *Store) shardsCheckpointed(ctx *core.Context, out *Output) {
 	}
 	s.piecesDead(s.removedPieces)
 	s.removedPieces = s.removedPieces[:0]
-	if s.cpBase != 0 {
+	if s.raft != nil {
 		s.raft.Checkpointed(s.lastBase)
 		out.Mail = s.raft.Mail(out.Mail)
+	}
+	if s.cpBase != 0 {
 		s.lastBase, s.cpBase = s.cpBase, 0
 	}
 }
@@ -230,7 +244,24 @@ func (s *Store) shardFlushesFailed() {
 		s.piecesDead(s.shards[i].sh.Tree().FlushFailed())
 		s.shards[i].cpNamed = false
 	}
+	if s.raft != nil {
+		s.piecesDead(s.raft.FlushFailed(nil))
+	}
 	s.cpBase = 0
+}
+
+// beginRemote asks each shard on the round driver to flush its tree under the due checkpoint the
+// log has just begun, and takes the pieces of removed shards' trees, which that checkpoint leaves
+// out, as dead once it ends.
+func (s *Store) beginRemote(due bool, out *Output) {
+	if s.raft == nil {
+		return
+	}
+	s.removedPieces = s.raft.Gone(s.removedPieces)
+	if due {
+		s.raft.BeginFlush(s.cpBase)
+		out.Mail = s.raft.Mail(out.Mail)
+	}
 }
 
 // restoreShards restores each hosted shard the loaded manifest names from the runs its tree

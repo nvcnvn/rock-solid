@@ -256,8 +256,11 @@ type flushWait struct {
 	chunks []core.ChunkID
 }
 
+// loadingRun is a run a restart loads into tree, or for owner's shard on the round driver, with
+// tree nil.
 type loadingRun struct {
-	tree *lsm.Tree
+	tree  *lsm.Tree
+	owner uint32
 	// bound is the merge bound the manifest holds on the run, whose pieces up to bound.Dead are dead and never read.
 	bound *disklog.MergeBound
 	refs  []disklog.BlobRef
@@ -366,9 +369,11 @@ type Store struct {
 	retryAfter    bool
 	// pieceWait is a flush whose next piece waits for a pool buffer, tried again on every call.
 	pieceWait bool
-	// pieceTree is the tree whose pieces the checkpoint writes, as tree numbers it.
-	pieceTree int
-	idx       []disklog.CheckpointIndex
+	// pieceTree is the tree whose pieces the checkpoint writes, as tree numbers it; piecesDone says
+	// every tree's are written, the checkpoint waiting for the shards on the round driver.
+	pieceTree  int
+	piecesDone bool
+	idx        []disklog.CheckpointIndex
 
 	// raft hosts the Raft shards on the disk, shards in the order their trees checkpoint, the
 	// first cpShards in the running checkpoint, removing the owners of those RemoveRaft removes
@@ -1899,12 +1904,17 @@ func (s *Store) housekeep(ctx *core.Context, out *Output) {
 				s.stop(ctx, err, out)
 				return
 			}
+			if err := s.raft.WritePieces(ctx, &s.lout); err != nil {
+				s.stop(ctx, err, out)
+				return
+			}
 			s.raft.MailShares(s.raftBytes())
 			out.Mail = s.raft.Mail(out.Mail)
 		}
 		if s.pieceWait {
 			s.nextPiece(ctx, out)
 		}
+		s.endCheckpoint(ctx, out)
 		if !s.checkpointing {
 			s.removeShards()
 		}
@@ -1961,7 +1971,7 @@ func (s *Store) logEvent(ctx *core.Context, ev *disklog.Event, out *Output) {
 	case disklog.CheckpointFailed:
 		s.piecesDead(s.ix.Tree().FlushFailed())
 		s.shardFlushesFailed()
-		s.checkpointing, s.inPiece, s.piecesOut, s.retryAfter, s.pieceWait = false, false, 0, true, false
+		s.checkpointing, s.inPiece, s.piecesOut, s.retryAfter, s.pieceWait, s.piecesDone = false, false, 0, true, false, false
 	case disklog.ManifestLoaded:
 		s.manifestLoaded(ctx)
 	case disklog.BlobRead:
@@ -2513,7 +2523,8 @@ func (s *Store) beginCheckpoint(ctx *core.Context, due bool, out *Output) {
 		s.shardFlushesFailed()
 		return
 	}
-	s.checkpointing, s.pieceTree = true, 0
+	s.checkpointing, s.pieceTree, s.piecesDone = true, 0, false
+	s.beginRemote(due, out)
 	s.nextPiece(ctx, out)
 }
 
@@ -2544,9 +2555,8 @@ func (s *Store) nextPiece(ctx *core.Context, out *Output) {
 	}
 	if length == 0 {
 		ctx.Pool.Free(buf)
-		if err := s.log.EndCheckpoint(ctx, &s.lout); err != nil {
-			s.stop(ctx, err, out)
-		}
+		s.piecesDone = true
+		s.endCheckpoint(ctx, out)
 		return
 	}
 	if w := tree.PieceWorker(); w > 0 {
@@ -2561,6 +2571,18 @@ func (s *Store) nextPiece(ctx *core.Context, out *Output) {
 	}
 	s.inPiece = true
 	s.piecesOut++
+}
+
+// endCheckpoint ends the running checkpoint once its trees on this loop and the shards on the
+// round driver have handed the log all their pieces.
+func (s *Store) endCheckpoint(ctx *core.Context, out *Output) {
+	if !s.piecesDone || s.raft != nil && s.raft.Flushing() {
+		return
+	}
+	s.piecesDone = false
+	if err := s.log.EndCheckpoint(ctx, &s.lout); err != nil {
+		s.stop(ctx, err, out)
+	}
 }
 
 // MergeDue returns the index's next merge step, whose Run may go to its merge worker off the
@@ -2699,13 +2721,15 @@ func (s *Store) manifestLoaded(ctx *core.Context) {
 			tree := s.ix.Tree()
 			if k := s.shardOf(mi.Owner); k >= 0 {
 				tree = s.shards[k].sh.Tree()
+			} else if s.raft != nil && s.raft.Remote(mi.Owner) {
+				tree = nil
 			} else if mi.Owner != indexOwnerID {
 				continue
 			} else {
 				s.replayLSN = mi.ReplayLSN
 			}
 			for _, root := range mi.Runs {
-				l := &loadingRun{tree: tree, got: map[disklog.BlobRef][]byte{}}
+				l := &loadingRun{tree: tree, owner: mi.Owner, got: map[disklog.BlobRef][]byte{}}
 				if k := slices.IndexFunc(mi.Bounds, func(b disklog.MergeBound) bool { return b.Run == root }); k >= 0 {
 					l.bound = &mi.Bounds[k]
 				}
@@ -2753,7 +2777,9 @@ func (s *Store) blobRead(ctx *core.Context, ev *disklog.Event) {
 		}
 		pieces = append(pieces, l.root)
 		var err error
-		if l.bound != nil {
+		if l.tree == nil {
+			s.raft.LoadedRun(l.owner, append(l.refs, root), pieces)
+		} else if l.bound != nil {
 			err = l.tree.LoadBoundedRun(*l.bound, pieces)
 		} else {
 			err = l.tree.LoadRun(root, pieces)

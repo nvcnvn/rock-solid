@@ -7350,8 +7350,16 @@ Recovery from manifest and log is under Shard indexes in the disk owner's checkp
   of the due one before; a step checkpoint mails nothing, and a third shard has both mailed the
   new share, a third (`TestAStoreMailsAShardOnTheRoundDriverItsShareAndCheckpoints`). Asked from
   the `Mail` of a shard on either loop, the device loop's or another's, an idle store, which
-  nothing else wakes, takes the checkpoint and mails both shards
-  (`TestAFullShardGetsACheckpointFromAnIdleStore`). The store knowing two shards before their loop
+  nothing else wakes, takes the checkpoint, has both shards flush their trees under it and mails
+  both; the shard on the device loop does so alone too, the round trips of its pieces then the
+  only events. The owner not delivering the mail it sends at the nil event of a reply, or not
+  handing it another while shards on its loop reply, left the checkpoint waiting for good
+  (`TestAFullShardGetsACheckpointFromAnIdleStore`). Each shard, its tree flushed under due
+  checkpoints and compacted to the index it applied at its mark as each manifest is mailed
+  durable, restarts after the last compaction with no checkpoint since: it restores its state
+  and its storage's base from the runs the manifest names and then its rounds from the log, equal
+  to its state before. The manifest naming no runs for it lost its state, and the checkpoint
+  ending before its pieces left it none (`TestAShardOnTheRoundDriverRestoresFromItsRunsAfterItCompacts`). Restarted, checkpointed and restarted again, it recovers its state: the owner keeps the runs the loaded manifest named for the checkpoints after, and with them dropped the second restart lost the state (`TestAShardOnTheRoundDriverKeepsItsLoadedRunsAcrossASecondRestart`). The store knowing two shards before their loop
   adds them, the shares it mails as they change wait on the loop, the newest standing for the one
   before, and reach the first once added (`TestMailForAShardNotYetOnItsLoopWaitsForIt`). The shard on the
   other loop, removed with a round in flight, and then the one on the device loop: the store hears each removal with the
@@ -7359,7 +7367,19 @@ Recovery from manifest and log is under Shard indexes in the disk owner's checkp
   shard until checkpoints move the floor past it; a new shard given the first owner then restarts
   with its own rounds alone (`TestARemovedShardsOwnerOnTheRoundDriverWaitsForTheFloor`). A
   removed shard that reports a replay LSN or its removal again panics, since either could reach
-  a new shard given its owner (`TestARemovedShardRepliesNothingMore`). The end-to-end restart is
+  a new shard given its owner (`TestARemovedShardRepliesNothingMore`). The shard on the other
+  loop, taken off it part way through its tree's flush and its removal heard by the store only
+  after the next checkpoint, as its loop holds the reply while backpressure holds its batches:
+  both checkpoints, which ask it for pieces it can no longer reply, end, the loop answering on its
+  behalf; without that answer the first never ended
+  (`TestARemovedShardsRunsStayLiveUntilAManifestLeavesItOut`). A shard on the round driver
+  removed part way through its flush keeps its pieces, its runs' and the flush's written before
+  and after the removal, until the checkpoint begun after the removal ends, which reports them
+  dead, and the log holds them no more once a segment header names its manifest; reporting them
+  dead at the removal or at the end of the checkpoint running then, losing the flush's pieces, or
+  never reporting them failed it, and so did mailing `MailCheckpointed` only after a checkpoint
+  begun with something durable, which lost the first flush's run
+  (`TestARemovedRemoteShardsPiecesDieOnceAManifestLeavesItOut`). The end-to-end restart is
   under [Round driver](#round-driver).
 - **Lagging follower.** A follower behind the compaction index gets a `MsgSnap` built from a point-in-time view of the shard's LSM tree, which never blocks the writer, and catches up from it. A view held open holds back the cleaner (asserted in the LSM tree tests).
 - **Index rebuild.** One index rebuilds from its manifest and the log while the disk's other indexes serve, without restarting the log.
