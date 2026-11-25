@@ -42,7 +42,7 @@ type Hand struct {
 
 // Output is what a call into the node asks of its loop: actions; session tables to hand
 // replicas; a placement table or delta to hand every replica, with SetTable or ApplyDelta; the
-// committed disk membership to hand every device; whether the node moved to another
+// committed disk membership and the pools' grants outstanding to hand every device; whether the node moved to another
 // control-plane voter, Ctl, which every replica then reports to with SetAuthority; and the
 // metadata replicas to delete, each of which its last report showed had learned its removal.
 type Output struct {
@@ -51,6 +51,7 @@ type Output struct {
 	Table   *chunkstore.Table
 	Delta   *chunkstore.Delta
 	Disks   []meta.DiskAddr
+	Grants  []meta.PoolGrant
 	Moved   bool
 	Ctl     core.NodeID
 	Deletes []meta.ReplicaRef
@@ -64,7 +65,7 @@ func (o *Output) Reset() {
 // Clone is o without its actions, copied whole, since its table, delta and membership alias the
 // node's buffers, which the next message overwrites; false when it holds nothing for a device.
 func (o *Output) Clone() (Output, bool) {
-	c := Output{Disks: slices.Clone(o.Disks), Moved: o.Moved, Ctl: o.Ctl}
+	c := Output{Disks: slices.Clone(o.Disks), Grants: slices.Clone(o.Grants), Moved: o.Moved, Ctl: o.Ctl}
 	for _, h := range o.Hands {
 		h.Table.Live = slices.Clone(h.Table.Live)
 		c.Hands = append(c.Hands, h)
@@ -124,7 +125,7 @@ type Node struct {
 	placed  chunkstore.Table
 	delta   chunkstore.Delta
 	epoch   uint64
-	disks   []meta.DiskAddr
+	disks   meta.Membership
 	// metas are the metadata replicas as the loop last reported them, and dels a delete received.
 	metas []meta.ReplicaReport
 	dels  []meta.ReplicaRef
@@ -318,11 +319,11 @@ func (n *Node) recv(ctx *core.Context, ev *core.Event, out *Output) {
 		}
 		return
 	case meta.KindDisks:
-		if n.disks, err = meta.DecodeDisks(ctx.Pool, &ev.Msg, n.disks); err == nil {
-			out.Disks = n.disks
+		if err = meta.DecodeDisks(ctx.Pool, &ev.Msg, &n.disks); err == nil {
+			out.Disks, out.Grants = n.disks.Disks, n.disks.Grants
 			for i := range n.reps {
 				r := &n.reps[i]
-				r.runs = r.runs || slices.ContainsFunc(n.disks, func(a meta.DiskAddr) bool { return a.Log == r.log })
+				r.runs = r.runs || slices.ContainsFunc(n.disks.Disks, func(a meta.DiskAddr) bool { return a.Log == r.log })
 			}
 		}
 		return

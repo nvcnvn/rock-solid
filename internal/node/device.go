@@ -199,10 +199,11 @@ func (d *Device) flush(out *DeviceOutput) {
 	d.sout.Reset()
 }
 
-// Disks takes the committed membership: the replica starts as the disk named for the device's
-// log, once the store serves, and learns the loop of every disk. One that starts on a table older
-// than a delta dropped before it ran fetches the whole table.
-func (d *Device) Disks(ctx *core.Context, ds []meta.DiskAddr, out *DeviceOutput) {
+// Disks takes the committed membership and the pools' grants outstanding, gs: the replica starts
+// as the disk named for the device's log, once the store serves, and learns the loop, size, log
+// reserve and fill of every disk and the grants. One that starts on a table older than a delta
+// dropped before it ran fetches the whole table.
+func (d *Device) Disks(ctx *core.Context, ds []meta.DiskAddr, gs []meta.PoolGrant, out *DeviceOutput) {
 	if d.phase != opened {
 		return
 	}
@@ -212,7 +213,7 @@ func (d *Device) Disks(ctx *core.Context, ds []meta.DiskAddr, out *DeviceOutput)
 			return
 		}
 		d.rep = chunkstore.NewReplica(chunkstore.ReplicaConfig{Disk: ds[i].Disk, Seed: d.rng.Uint64(), Start: d.start, Log: d.log, Restarted: d.restarted}, d.st)
-		d.addrs(ds)
+		TakeMembership(ctx, d.rep, ds, gs)
 		if d.hasAuth {
 			d.rep.SetAuthority(ctx, d.auth, &d.rout)
 		}
@@ -224,14 +225,22 @@ func (d *Device) Disks(ctx *core.Context, ds []meta.DiskAddr, out *DeviceOutput)
 		}
 		out.Fetch = out.Fetch || d.table.Epoch < d.dropped
 	} else {
-		d.addrs(ds)
+		TakeMembership(ctx, d.rep, ds, gs)
 	}
 	d.take(ctx, out)
 }
 
-func (d *Device) addrs(ds []meta.DiskAddr) {
+// TakeMembership hands rep each disk's loop, size, log reserve and fill, and the pools' grants, from the leader's answer to a node's report.
+func TakeMembership(ctx *core.Context, rep *chunkstore.Replica, ds []meta.DiskAddr, gs []meta.PoolGrant) {
 	for _, a := range ds {
-		d.rep.SetAddr(a.Disk, a.At)
+		rep.SetAddr(a.Disk, a.At)
+		rep.SetDisk(a.Disk, a.Blocks, a.Reserve)
+		if a.Filled {
+			rep.MemberFill(ctx, a.Disk, a.Live)
+		}
+	}
+	for _, g := range gs {
+		rep.SetGrants(g.Pool, g.Grant)
 	}
 }
 
@@ -276,7 +285,7 @@ func (d *Device) Take(ctx *core.Context, o *Output, out *DeviceOutput) {
 		d.Authority(ctx, o.Ctl, out)
 	}
 	if o.Disks != nil {
-		d.Disks(ctx, o.Disks, out)
+		d.Disks(ctx, o.Disks, o.Grants, out)
 	}
 	for i := range o.Hands {
 		if o.Hands[i].Device == d.cfg.Device {

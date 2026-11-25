@@ -491,21 +491,21 @@ func TestAFencePushesTheSessionTableToEveryNodeHeardFrom(t *testing.T) {
 }
 
 // A node's report is answered with the committed membership: a disk it reports is named, with its
-// log and the loop the report names for it, only once the record holding it commits, and no
-// longer once a report leaves it out.
+// log, the loop the report names for it and the size and log reserve it reports, only once the
+// record holding it commits, and no longer once a report leaves it out.
 func TestAReportIsAnsweredWithTheCommittedDisks(t *testing.T) {
 	r := newHostRun(t)
 	r.lead()
-	nr := NodeReport{Node: hostNode.Node, Opened: []OpenedDisk{{Device: 1, Log: 0x55, Blocks: 1 << 20, Loop: 4}}}
+	nr := NodeReport{Node: hostNode.Node, Opened: []OpenedDisk{{Device: 1, Log: 0x55, Blocks: 1 << 20, Reserve: 64, Loop: 4}}}
 	disksSent := func() []DiskAddr {
 		var got []DiskAddr
 		for _, a := range r.sent {
 			if _, k, _, _ := Peek(&a.Msg); k == KindDisks && a.Peer == hostNode {
-				ds, err := DecodeDisks(r.pool, &a.Msg, nil)
-				if err != nil {
+				var m Membership
+				if err := DecodeDisks(r.pool, &a.Msg, &m); err != nil {
 					t.Fatal(err)
 				}
-				got = ds
+				got = m.Disks
 			}
 			free(&core.Context{Pool: r.pool}, &a.Msg)
 		}
@@ -518,7 +518,7 @@ func TestAReportIsAnsweredWithTheCommittedDisks(t *testing.T) {
 	}
 	r.run(StepInterval * 3)
 	r.report(&nr)
-	want := []DiskAddr{{Disk: 1, Log: 0x55, At: core.NodeID{Node: hostNode.Node, Loop: 4}}}
+	want := []DiskAddr{{Disk: 1, Log: 0x55, At: core.NodeID{Node: hostNode.Node, Loop: 4}, Blocks: 1 << 20, Reserve: 64}}
 	if got := disksSent(); !slices.Equal(got, want) {
 		t.Fatalf("after the record commits the report got %+v, want %+v", got, want)
 	}
@@ -533,7 +533,7 @@ func TestAReportIsAnsweredWithTheCommittedDisks(t *testing.T) {
 	replaced.Opened = append(replaced.Opened, OpenedDisk{Device: 2, Log: 0x55, Blocks: 1 << 20, Loop: 5})
 	r.failing = true
 	r.report(&replaced)
-	want = []DiskAddr{{Disk: 2, Log: 0x66, At: core.NodeID{Node: hostNode.Node, Loop: 4}}}
+	want = []DiskAddr{{Disk: 2, Log: 0x66, At: core.NodeID{Node: hostNode.Node, Loop: 4}, Blocks: 1 << 20}}
 	if got := disksSent(); !slices.Equal(got, want) {
 		t.Fatalf("a gone disk's log reported again got %+v, want %+v", got, want)
 	}

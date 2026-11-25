@@ -30,7 +30,9 @@ func newRun(t *testing.T, seed uint64, devices ...uint64) *run {
 		ds = append(ds, meta.DiskAddr{Disk: uint32(i + 1), Log: d << 8})
 	}
 	if len(ds) != 0 {
-		r.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeDisks(pool, group, ds, m) })
+		r.from(ctl, func(pool core.BufPool, m *core.Msg) error {
+			return meta.EncodeDisks(pool, group, &meta.Membership{Disks: ds}, m)
+		})
 	}
 	return r
 }
@@ -581,7 +583,9 @@ func TestARemovedReplicaGetsNoTableAndLeavesTheReport(t *testing.T) {
 		t.Fatalf("the device opened again, its log not yet named, reported %+v", nr)
 	}
 	ds := []meta.DiskAddr{{Disk: 1, Log: 10 << 8}, {Disk: 3, Log: 0x99}}
-	r.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeDisks(pool, group, ds, m) })
+	r.from(ctl, func(pool core.BufPool, m *core.Msg) error {
+		return meta.EncodeDisks(pool, group, &meta.Membership{Disks: ds}, m)
+	})
 	if nr := r.report(); nr.Sessions != 0 {
 		t.Fatalf("the device opened again, its log named, reported %+v", nr)
 	}
@@ -590,11 +594,15 @@ func TestARemovedReplicaGetsNoTableAndLeavesTheReport(t *testing.T) {
 func TestTheDiskMembershipIsHandedOn(t *testing.T) {
 	r := newRun(t, 1, 10)
 	ds := []meta.DiskAddr{{Disk: 1, Log: 10 << 8, At: core.NodeID{Node: 4, Loop: 2}}, {Disk: 2, Log: 7, At: core.NodeID{Node: 5}}}
-	r.from(core.NodeID{Node: 5}, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeDisks(pool, group, ds, m) })
+	r.from(core.NodeID{Node: 5}, func(pool core.BufPool, m *core.Msg) error {
+		return meta.EncodeDisks(pool, group, &meta.Membership{Disks: ds}, m)
+	})
 	if r.out.Disks != nil {
 		t.Fatal("took a membership from a node that is no voter")
 	}
-	r.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeDisks(pool, group, ds, m) })
+	r.from(ctl, func(pool core.BufPool, m *core.Msg) error {
+		return meta.EncodeDisks(pool, group, &meta.Membership{Disks: ds}, m)
+	})
 	if !slices.Equal(r.out.Disks, ds) {
 		t.Fatalf("handed %+v", r.out.Disks)
 	}
@@ -634,14 +642,18 @@ func TestADeleteReachesOnlyAReplicaThatLearnedItsRemoval(t *testing.T) {
 func TestACloneOutlivesTheNodesBuffers(t *testing.T) {
 	r := newRun(t, 1, 10)
 	ds := []meta.DiskAddr{{Disk: 1, Log: 10 << 8, At: core.NodeID{Node: 4, Loop: 2}}}
-	r.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeDisks(pool, group, ds, m) })
+	r.from(ctl, func(pool core.BufPool, m *core.Msg) error {
+		return meta.EncodeDisks(pool, group, &meta.Membership{Disks: ds}, m)
+	})
 	disks, ok := r.out.Clone()
 	pg := chunkstore.PGEntry{Members: []chunkstore.Member{{Disk: 1}}, Interval: 1}
 	tbl := chunkstore.Table{Epoch: 4, Pools: []chunkstore.PoolTable{{ID: 1, Replicas: 1, MinLive: 1, PGs: []chunkstore.PGEntry{pg}}}}
 	r.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeTable(pool, group, &tbl, m) })
 	placed, _ := r.out.Clone()
 	ds2 := []meta.DiskAddr{{Disk: 2, Log: 7}}
-	r.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeDisks(pool, group, ds2, m) })
+	r.from(ctl, func(pool core.BufPool, m *core.Msg) error {
+		return meta.EncodeDisks(pool, group, &meta.Membership{Disks: ds2}, m)
+	})
 	tbl.Epoch, tbl.Pools[0].PGs[0].Members[0].Disk = 5, 2
 	r.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeTable(pool, group, &tbl, m) })
 	if !ok || !slices.Equal(disks.Disks, []meta.DiskAddr{{Disk: 1, Log: 10 << 8, At: core.NodeID{Node: 4, Loop: 2}}}) {
@@ -668,7 +680,7 @@ func TestADevicesOutputFeedsTheNode(t *testing.T) {
 		t.Fatalf("the device opened was handed %+v", r.out.Hands)
 	}
 	r.from(ctl, func(pool core.BufPool, m *core.Msg) error {
-		return meta.EncodeDisks(pool, group, []meta.DiskAddr{{Disk: 1, Log: 10 << 8}}, m)
+		return meta.EncodeDisks(pool, group, &meta.Membership{Disks: []meta.DiskAddr{{Disk: 1, Log: 10 << 8}}}, m)
 	})
 	r.out.Reset()
 	r.n.Take(&r.ctx, 10, &DeviceOutput{Ask: 1, Fetch: true, Held: 3, Epoch: 2}, &r.out)

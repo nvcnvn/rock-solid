@@ -962,3 +962,40 @@ func grantRoomBreaksWithin(t *testing.T, n uint64, pl grantPlants) bool {
 	}
 	return false
 }
+
+// The leader's answer to a node's report carries each disk's size and log reserve as its node
+// reported them, 0 for a disk whose node has not, its fill while both of the leader's clocks show
+// less than FillFresh since its heartbeat, and each pool's grants outstanding.
+func TestTheMembershipCarriesFreshFillsAndTheGrants(t *testing.T) {
+	r := roomy(t, 2)
+	r.rounds(1, []uint64{mib(256), mib(128)}, make([]uint64, 2))
+	r.event(0, chunkstore.AppendReport(nil, &chunkstore.Report{ID: 1, Disks: []chunkstore.DiskState{{Log: logOf(0), Fill: gb(400)}}}))
+	var m Membership
+	answer := func(disk uint32) DiskAddr {
+		t.Helper()
+		r.ctl.Membership(r.at(), &m, func(d *DiskEntry) (core.NodeID, bool) { return core.NodeID{Node: d.Node}, true })
+		i := slices.IndexFunc(m.Disks, func(a DiskAddr) bool { return a.Disk == disk })
+		if i < 0 {
+			t.Fatalf("the answer has no disk %d: %+v", disk, m.Disks)
+		}
+		return m.Disks[i]
+	}
+	r.tick(FillFresh - 1)
+	if a := answer(1); !a.Filled || a.Live != gb(400) || a.Blocks != gb(1000) || a.Reserve != 8*mib(64) {
+		t.Fatalf("disk 1 answered as %+v", a)
+	}
+	if want := []PoolGrant{{Pool: 1, Grant: r.Granted()}}; want[0].Grant == 0 || !slices.Equal(m.Grants, want) {
+		t.Fatalf("the answer carries grants %+v, want %+v", m.Grants, want)
+	}
+	if a := answer(2); a.Blocks != 0 || a.Reserve != 0 {
+		t.Fatalf("disk 2, whose node reported no size, answered as %+v", a)
+	}
+	r.now++
+	if answer(1).Filled {
+		t.Fatal("a fill FillFresh old on CLOCK_BOOTTIME was passed on")
+	}
+	r.now, r.raw = r.now-1, r.raw+1
+	if answer(1).Filled {
+		t.Fatal("a fill FillFresh old on CLOCK_MONOTONIC_RAW was passed on")
+	}
+}

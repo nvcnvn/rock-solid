@@ -904,7 +904,7 @@ func runFaultsOn(t *testing.T, seed uint64, clients, writes int, plant *faultPla
 	for range 2_000_000 {
 		if c.quiet() && !f.peering && !down() || !c.step() {
 			calm := len(f.heals) == 0 && f.crashes == [3]core.Tick{} && !f.peering && len(c.asks) == f.asked && !down()
-			if calm && f.marked() && (!busy() && f.recovered() && c.inactive() == nil || idle >= 60) {
+			if calm && f.marked() && (!busy() && f.recovered() && c.inactive() == nil && !c.askOpen() || idle >= 60) {
 				break
 			}
 			f.tend(true)
@@ -964,7 +964,7 @@ func TestReplicatedWritesSurviveFaults(t *testing.T) {
 // A recovery write that leaves out the blocks covered when it read its source, not when it was
 // ordered (the epoch change model's neg-recovery-covers-at-read), puts a source's block over a
 // write ordered in between, and two disks then hold different bytes under one version, checked
-// alone, at 12 of the first 300 seeds on the real control plane.
+// alone, at 16 of the first 300 seeds on the real control plane.
 func TestPlantedRecoveryBugBreaksTheFaultRun(t *testing.T) {
 	if _, err := runFaultsOn(t, 24, 2, 24, &faultPlant{invOneVersion, func(c *rcluster) { c.replicaPlants.coverAtRead = true }}, false, true); err == nil {
 		t.Fatalf("seed 24 kept %q", invOneVersion)
@@ -973,17 +973,17 @@ func TestPlantedRecoveryBugBreaksTheFaultRun(t *testing.T) {
 
 // Each planted peering bug breaks its invariant, checked alone, at a seed of the first 300 on the
 // real control plane, as the epoch change model's counterexample for it does: a restarted primary
-// that never asks for a new interval (neg-restart-no-ask) leaves its PG unactivated (3 of 300); a
+// that never asks for a new interval (neg-restart-no-ask) leaves its PG unactivated (6 of 300); a
 // member logging a version out of order (neg-log-out-of-order), here as writes sent again newest
-// first after a reconnect, leaves a member mapping other bytes once recovery settles (17 of 300); a
+// first after a reconnect, leaves a member mapping other bytes once recovery settles (14 of 300); a
 // version decided by its own interval's members after a later interval kept it
-// (neg-decide-by-own-interval, 6 of 300) and a primary activating before every member persisted its
-// missing list (neg-activate-before-durable, 42 of 300) each drop a write the primary answered; a
+// (neg-decide-by-own-interval, 5 of 300) and a primary activating before every member persisted its
+// missing list (neg-activate-before-durable, 43 of 300) each drop a write the primary answered; a
 // later peering that clears a missing-list entry recovery has not done (neg-peering-clears-missing)
-// leaves a member mapping other bytes once recovery settles (14 of 300); a primary that holds a
+// leaves a member mapping other bytes once recovery settles (20 of 300); a primary that holds a
 // write to a chunk it called unfound rather than answering it (neg-write-on-unfound) still holds it
-// once the run settles (13 of 300); and a primary whose interval a failed version ended that never
-// asks for the next (neg-never-ask) still leads it once the run settles (122 of 300). A restarted
+// once the run settles (8 of 300); and a primary whose interval a failed version ended that never
+// asks for the next (neg-never-ask) still leads it once the run settles (120 of 300). A restarted
 // member that never asks (neg-member-no-ask) keeps its replayed writes gated, unmapped, once
 // recovery settles at 1 of the stand-in authority's first 500 seeds and none of the real control
 // plane's first 300, so it runs on the stand-in.
@@ -997,8 +997,8 @@ func TestPlantedPeeringBugsBreakTheFaultRun(t *testing.T) {
 		{"no ask after a restart", 26, false, faultPlant{invActivates, func(c *rcluster) { c.replicaPlants.neverAsk = true }}},
 		{"no ask after a member's restart", 410, true, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.memberNoAsk = true }}},
 		{"logged out of order", 13, false, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.resendNewestFirst = true }}},
-		{"decided by its own interval", 3, false, faultPlant{invMappedAnswers, func(c *rcluster) { c.replicaPlants.ownInterval = true }}},
-		{"activated before lists are durable", 2, false, faultPlant{invMappedAnswers, func(c *rcluster) { c.replicaPlants.activateEarly = true }}},
+		{"decided by its own interval", 50, false, faultPlant{invMappedAnswers, func(c *rcluster) { c.replicaPlants.ownInterval = true }}},
+		{"activated before lists are durable", 0, false, faultPlant{invMappedAnswers, func(c *rcluster) { c.replicaPlants.activateEarly = true }}},
 		{"missing entry cleared", 24, false, faultPlant{invRecovered, func(c *rcluster) { c.replicaPlants.relistNever, c.storePlants.clearListed = true, true }}},
 		{"a write held on an unfound chunk", 8, false, faultPlant{invHeldOrdered, func(c *rcluster) { c.replicaPlants.writeOnUnfound = true }}},
 		{"no ask after a failed version", 3, false, faultPlant{invAsks, func(c *rcluster) { c.replicaPlants.neverAskOnFail = true }}},

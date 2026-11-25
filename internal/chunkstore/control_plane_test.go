@@ -46,8 +46,14 @@ type ControlPlane interface {
 	// naming pool with what it asks, holds, has buffered and has flushed in all, in blocks; it
 	// returns the grant the answer carries, false if unanswered.
 	Renew(now, raw core.Tick, pool core.PoolID, ask, held, buffered, flushed uint64) (uint64, bool)
-	// Granted is the grants the leader counts outstanding on pool, which its heartbeat replies carry.
+	// Granted is the grants the leader counts outstanding on pool, which its answers to node reports carry.
 	Granted(pool core.PoolID) uint64
+	// Membership writes into msg the leader's answer at now and raw to a node's report, as its host sends it.
+	Membership(now, raw core.Tick, pool core.BufPool, msg *core.Msg) error
+	// TakeMembership hands r the disks' addresses, sizes and fills and the pools' grants that a
+	// membership answer in msg carries, as a node hands its devices, and frees msg; false, leaving
+	// msg, for another message.
+	TakeMembership(ctx *core.Context, msg *core.Msg, r *Replica) bool
 }
 
 // ControlTimer is the timer the real control plane steps on.
@@ -83,7 +89,8 @@ func realControl(t *testing.T, a *authority, nodes int) Table {
 
 // attach starts the control plane's node, which every replica but a.late's heartbeats from each start. A
 // heartbeat stands for its node's report too, naming the log the replica runs and any other a's
-// opened gives the node. A replica's asks, activations and recovered reports go to it over the
+// opened gives the node, and the control plane answers it with the membership, which the replica
+// takes as its node would. A replica's asks, activations and recovered reports go to it over the
 // network, as its node sends them.
 func (a *authority) attach(c *rcluster) {
 	var rp Report
@@ -102,6 +109,10 @@ func (a *authority) attach(c *rcluster) {
 					if err := a.cp.Heartbeat(ctx.Now, node, append([]OpenedLog{{Log: rp.Disks[0].Log, Blocks: size.Blocks, Reserve: size.Reserve}}, a.opened[node]...)); err != nil {
 						a.refused = append(a.refused, err)
 					}
+					act := core.Action{Kind: core.ActNetSend, Peer: ev.Peer}
+					if a.cp.Membership(ctx.Now, ctx.Raw, ctx.Pool, &act.Msg) == nil {
+						out = append(out, act)
+					}
 				}
 			}
 			return a.cp.OnEvent(ctx, ev, out)
@@ -109,6 +120,9 @@ func (a *authority) attach(c *rcluster) {
 	})
 	c.s.Node(c.auth.Node).Call(c.auth, func(ctx *core.Context, out []core.Action) []core.Action { return a.cp.Start(ctx, out) })
 	c.reporting, c.forward = true, a.forward
+	c.intake = func(ctx *core.Context, d int, ev *core.Event) bool {
+		return ev.Kind == core.EvNetRecv && c.reps[d] != nil && a.cp.TakeMembership(ctx, &ev.Msg, c.reps[d])
+	}
 	for k := range c.reps {
 		if !a.late[k] {
 			a.join(k)
@@ -276,9 +290,7 @@ func (a *authority) publish(c *rcluster) {
 	for n := range c.reps {
 		if c.s.Node(uint32(n)).Up() {
 			c.call(n, func(ctx *core.Context, rep *Replica, out *ReplicaOutput) {
-				for k, id := range c.ids {
-					rep.SetAddr(id, core.NodeID{Node: uint32(k)})
-				}
+				c.address(rep)
 				rep.SetTable(ctx, next, out)
 			})
 		}

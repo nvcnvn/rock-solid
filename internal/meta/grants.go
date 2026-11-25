@@ -7,6 +7,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/lease"
 )
 
 // Space grants are design.md's "Space grants" in "Client design".
@@ -68,12 +69,12 @@ type flushAt struct {
 	blocks uint64
 }
 
-// diskFill is what the leader heard of a disk: its live blocks, in all and by pool, and when, and
-// its size and log reserve in blocks from its node's report.
+// diskFill is what the leader heard of a disk: its live blocks, in all and by pool, and when on
+// both clocks, and its size and log reserve in blocks from its node's report.
 type diskFill struct {
 	live, blocks, reserve uint64
 	pools                 []chunkstore.PoolLive
-	at                    core.Tick
+	at, atRaw             core.Tick
 	heard                 bool
 }
 
@@ -94,8 +95,8 @@ type grantPlants struct {
 	unheardZero, dropLapsed, noGapCap, shrinkAtOnce bool
 }
 
-// Granted is the total of grants the leader counts outstanding on pool id, which every heartbeat
-// reply to a storage node carries for write_limit admission.
+// Granted is the total of grants the leader counts outstanding on pool id, which its answer to a
+// node's report carries for write_limit admission and recovery's room check.
 func (c *Control) Granted(id core.PoolID) uint64 { return c.counted(id, 0) }
 
 // Capacity is pool id's capacity figures and conditions as of the last Step, false before the
@@ -329,12 +330,12 @@ func (c *Control) level(id core.PoolID, target uint64) uint64 {
 	return lo
 }
 
-// fill takes a disk heartbeat's fills at now.
-func (c *Control) fill(now core.Tick, rp *chunkstore.Report) {
+// fill takes a disk heartbeat's fills at t.
+func (c *Control) fill(t lease.Time, rp *chunkstore.Report) {
 	for _, s := range rp.Disks {
 		if id := c.diskOfLog(s.Log); id != 0 {
 			f := c.diskFill(id)
-			f.live, f.pools, f.at, f.heard = s.Fill, append(f.pools[:0], s.Pools...), now, true
+			f.live, f.pools, f.at, f.atRaw, f.heard = s.Fill, append(f.pools[:0], s.Pools...), t.Boot, t.Raw, true
 		}
 	}
 }
@@ -349,6 +350,30 @@ func (c *Control) AppendDisks(dst []chunkstore.Disk) []chunkstore.Disk {
 		}
 	}
 	return dst
+}
+
+// FillFresh is how recently, on both its clocks, the leader must have heard a disk's fill to pass
+// it on in its answer to a node's report: two of the disk's heartbeats.
+const FillFresh = core.Tick(2_000_000)
+
+// Membership sets m to the leader's answer to a node's report at t: each committed disk not gone
+// that at gives a loop, with the size and log reserve its node last reported and the fill its
+// heartbeat gave within FillFresh, and each committed pool's grants outstanding.
+func (c *Control) Membership(t lease.Time, m *Membership, at func(d *DiskEntry) (core.NodeID, bool)) {
+	m.Disks, m.Grants = m.Disks[:0], m.Grants[:0]
+	for i := range c.disks {
+		d := &c.disks[i]
+		loop, ok := at(d)
+		if d.Gone || !ok {
+			continue
+		}
+		f := c.diskFill(d.ID)
+		fresh := f.heard && t.Boot-min(f.at, t.Boot) < FillFresh && t.Raw-min(f.atRaw, t.Raw) < FillFresh
+		m.Disks = append(m.Disks, DiskAddr{Disk: d.ID, Log: d.Log, At: loop, Blocks: f.blocks, Reserve: f.reserve, Live: f.live, Filled: fresh})
+	}
+	for _, pg := range c.pgrants {
+		m.Grants = append(m.Grants, PoolGrant{Pool: pg.id, Grant: c.Granted(pg.id)})
+	}
 }
 
 func (c *Control) diskOfLog(log uint64) uint32 {

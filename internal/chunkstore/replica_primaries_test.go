@@ -236,9 +236,7 @@ func (r *primaryRun) publish() {
 			continue
 		}
 		c.call(n, func(ctx *core.Context, rep *Replica, out *ReplicaOutput) {
-			for k, id := range c.ids {
-				rep.SetAddr(id, core.NodeID{Node: uint32(k)})
-			}
+			c.address(rep)
 			rep.SetTable(ctx, next, out)
 		})
 	}
@@ -591,12 +589,12 @@ func (r *primaryRun) recover() {
 	}
 }
 
-// settled steps the cluster, the authority answering asks and recording activations, until every led PG is active and nothing but periodic timers is pending.
+// settled steps the cluster, the authority answering asks and recording activations, until every led PG is active with no ask of its primary unanswered and nothing but periodic timers is pending.
 func (r *primaryRun) settled() {
 	c := r.c
 	for range 1_000_000 {
 		r.tend()
-		if c.active() && c.quiet() {
+		if c.active() && c.quiet() && !c.askOpen() {
 			return
 		}
 		if !c.step() {

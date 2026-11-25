@@ -304,11 +304,13 @@ type Replica struct {
 	waitAt    core.Tick
 }
 
-// diskInfo is what a replica knows of a disk: its size and log reserve, its live blocks as it last reported them and, as a member of PGs this disk leads, its acknowledgment latencies since the last heartbeat and when it was last reported for a wait past member_timeout.
+// diskInfo is what a replica knows of a disk: its size and log reserve, its live blocks as it last reported them, and when it last acknowledged a write with them on both clocks, and, as a member of PGs this disk leads, its acknowledgment latencies since the last heartbeat and when it was last reported for a wait past member_timeout.
 type diskInfo struct {
-	blocks  uint64
-	reserve uint64
-	live    uint64
+	blocks   uint64
+	reserve  uint64
+	live     uint64
+	ackedAt  core.Tick
+	ackedRaw core.Tick
 	// copied is the live blocks the disk summed afresh for the last recovery write it acknowledged, at copiedAt.
 	copied   uint64
 	copiedAt core.Tick
@@ -352,9 +354,12 @@ func (r *Replica) pool(id core.PoolID) *poolInfo {
 	return &r.pools[len(r.pools)-1]
 }
 
-// SetDisk records a disk's size and its log's reserve in blocks, as the membership record publishes them.
+// SetDisk records a disk's size and its log's reserve in blocks, as the leader last heard them from the disk's node; a size of 0, not yet reported to that leader, changes nothing.
 func (r *Replica) SetDisk(disk uint32, blocks, reserve uint64) {
 	d := r.disk(disk)
+	if blocks == 0 || d.blocks == blocks && d.reserve == reserve {
+		return
+	}
 	d.blocks, d.reserve = blocks, reserve
 	r.roomFreed()
 }
@@ -365,15 +370,28 @@ func (r *Replica) noteFill(ctx *core.Context, disk uint32, fill uint64, recover 
 	if fill < d.live {
 		r.roomFreed()
 	}
-	d.live = fill
+	d.live, d.ackedAt, d.ackedRaw = fill, max(ctx.Now, 1), ctx.Raw
 	if recover {
 		d.copied, d.copiedAt = fill, max(ctx.Now, 1)
 	}
 }
 
-// MemberFill records the live blocks a member disk reported on its heartbeat.
-func (r *Replica) MemberFill(disk uint32, live uint64) {
+// fillHeld is how long the live blocks a member acknowledged a write with outrank a lower fill its
+// heartbeat relays, which can be older: longer than the oldest fill the leader passes on
+// (meta.FillFresh), with the sum's 100 ms and the messages' delays. The leader cuts at FillFresh on
+// the faster of its clocks and the replica holds until both of its own show fillHeld, so a slew
+// only shortens the one or lengthens the other, and with either raw clock up to 4% off, 1.6 s is
+// left for the heartbeat's and the answer's transit. A fill relayed lower within it, if taken,
+// would restart copies it stopped, every answer.
+const fillHeld = core.Tick(4_000_000)
+
+// MemberFill records the live blocks a member disk reported on its heartbeat, as the leader relays
+// them, but no lower than it acknowledged a write with until both clocks show fillHeld since.
+func (r *Replica) MemberFill(ctx *core.Context, disk uint32, live uint64) {
 	d := r.disk(disk)
+	if d.ackedAt != 0 && (ctx.Now-min(d.ackedAt, ctx.Now) < fillHeld || ctx.Raw-min(d.ackedRaw, ctx.Raw) < fillHeld) {
+		live = max(live, d.live)
+	}
 	if live < d.live {
 		r.roomFreed()
 	}
@@ -383,7 +401,7 @@ func (r *Replica) MemberFill(disk uint32, live uint64) {
 // SetPool records a pool's settings; a pool never set takes each disk's default write_limit.
 func (r *Replica) SetPool(id core.PoolID, p Pool) { r.pool(id).pool = p }
 
-// SetGrants records the space grants outstanding on a pool, in blocks, as the leader's heartbeat reply carries them.
+// SetGrants records the space grants outstanding on a pool, in blocks, as the leader's answer to a node's report carries them.
 func (r *Replica) SetGrants(id core.PoolID, blocks uint64) {
 	p := r.pool(id)
 	if blocks < p.grants {

@@ -97,21 +97,14 @@ func (x *grantRoom) most() uint64 {
 	return m
 }
 
-// renew sends the session's heartbeat asking for ask, holding x.g and as much buffered, hands every
-// replica not lost the pool's grants outstanding, as the leader's heartbeat replies carry them, and
-// notes whether the pool is Stuck.
+// renew sends the session's heartbeat asking for ask, holding x.g and as much buffered, and notes
+// whether the pool is Stuck. The replicas learn the grants outstanding from the leader's answers to
+// their nodes' reports.
 func (x *grantRoom) renew(ask uint64) uint64 {
 	now, raw := x.a.now()
 	g, ok := x.a.cp.Renew(now, raw, testPool, ask, x.g, x.g, 0)
 	if !ok {
 		x.t.Fatalf("the session heartbeat at %d s went unanswered", x.c.s.Time()/1_000_000)
-	}
-	for n := range x.c.reps {
-		if !x.r.isolated[x.c.ids[n]] {
-			x.c.call(n, func(ctx *core.Context, rep *Replica, out *ReplicaOutput) {
-				rep.SetGrants(testPool, x.a.cp.Granted(testPool))
-			})
-		}
 	}
 	cond, ok := x.a.cp.Conditions(testPool)
 	x.stuck = x.stuck || ok && len(cond.Stuck) > 0

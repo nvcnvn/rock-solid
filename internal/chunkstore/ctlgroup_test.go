@@ -12,6 +12,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/loop/looptest"
 	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/meta"
+	"github.com/nvcnvn/rock-solid/internal/node"
 	"github.com/nvcnvn/rock-solid/internal/raftshard"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
@@ -37,6 +38,7 @@ type ctlGroup struct {
 	work    []ctlWork
 	l       int
 	ctl     *meta.Control
+	member  meta.Membership
 	token   uint64
 	// waiting is the token of the commit in flight, 0 for none, and sent the edits its step took.
 	waiting uint64
@@ -421,3 +423,22 @@ func (g *ctlGroup) Renew(now, raw core.Tick, pool core.PoolID, ask, held, buffer
 }
 
 func (g *ctlGroup) Granted(pool core.PoolID) uint64 { return g.ctl.Granted(pool) }
+
+func (g *ctlGroup) Membership(now, raw core.Tick, pool core.BufPool, msg *core.Msg) error {
+	g.ctl.Membership(lease.Time{Boot: now, Raw: raw}, &g.member, func(d *meta.DiskEntry) (core.NodeID, bool) { return core.NodeID{Node: d.Node}, true })
+	return meta.EncodeDisks(pool, ctlGroupID, &g.member, msg)
+}
+
+func (g *ctlGroup) TakeMembership(ctx *core.Context, msg *core.Msg, r *chunkstore.Replica) bool {
+	if _, k, _, ok := meta.Peek(msg); !ok || k != meta.KindDisks {
+		return false
+	}
+	var m meta.Membership
+	if meta.DecodeDisks(ctx.Pool, msg, &m) == nil {
+		node.TakeMembership(ctx, r, m.Disks, m.Grants)
+	}
+	if msg.Buf != core.NoBuf {
+		ctx.Pool.Free(msg.Buf)
+	}
+	return true
+}

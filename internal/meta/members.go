@@ -190,7 +190,7 @@ func (c *Control) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) 
 				return out
 			}
 			if chunkstore.DecodeReport(frame, data, &c.rep) == nil {
-				c.fill(ctx.Now, &c.rep)
+				c.fill(t, &c.rep)
 				c.watch.Hear(&c.table, c.rep.Leads)
 				c.Report(&c.rep)
 			}

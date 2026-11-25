@@ -149,7 +149,7 @@ func TestADeviceWithNoValidSuperblockFailsUntouched(t *testing.T) {
 		t.Fatal("a failed device was written")
 	}
 	r.out.Reset()
-	r.d.Disks(&r.ctx, []meta.DiskAddr{{Disk: 1, Log: 0}}, &r.out)
+	r.d.Disks(&r.ctx, []meta.DiskAddr{{Disk: 1, Log: 0}}, nil, &r.out)
 	if r.d.Replica() != nil {
 		t.Fatal("a failed device runs a replica")
 	}
@@ -206,12 +206,12 @@ func TestTheReplicaStartsAsTheDiskTheMembershipNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.d.OnEvent(&r.ctx, &ev, &r.out)
-	r.d.Disks(&r.ctx, []meta.DiskAddr{{Disk: 4, Log: r.opened.Log + 1}}, &r.out)
+	r.d.Disks(&r.ctx, []meta.DiskAddr{{Disk: 4, Log: r.opened.Log + 1}}, nil, &r.out)
 	if r.d.Replica() != nil || len(r.out.Actions) != 0 || r.out.Held != 0 {
 		t.Fatalf("a replica ran before the membership named its log: %+v", r.out)
 	}
 	member := core.NodeID{Node: 6, Loop: 2}
-	r.d.Disks(&r.ctx, []meta.DiskAddr{{Disk: 4, Log: r.opened.Log + 1, At: member}, {Disk: 5, Log: r.opened.Log, At: core.NodeID{Node: 4, Loop: 3}}}, &r.out)
+	r.d.Disks(&r.ctx, []meta.DiskAddr{{Disk: 4, Log: r.opened.Log + 1, At: member}, {Disk: 5, Log: r.opened.Log, At: core.NodeID{Node: 4, Loop: 3}}}, nil, &r.out)
 	if r.d.Replica() == nil || r.out.Held != 3 || r.out.Epoch != 2 {
 		t.Fatalf("the replica started holding sessions %d, epoch %d", r.out.Held, r.out.Epoch)
 	}
@@ -238,7 +238,9 @@ func TestAnUnnamedDeviceDoesNotPinTheReport(t *testing.T) {
 	r.n.Opened(meta.OpenedDisk{Device: 1, Log: a.opened.Log}, &r.out)
 	r.n.Opened(meta.OpenedDisk{Device: 2, Log: b.opened.Log}, &r.out)
 	ds := []meta.DiskAddr{{Disk: 1, Log: a.opened.Log}}
-	r.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeDisks(pool, group, ds, m) })
+	r.from(ctl, func(pool core.BufPool, m *core.Msg) error {
+		return meta.EncodeDisks(pool, group, &meta.Membership{Disks: ds}, m)
+	})
 	named := slices.Clone(r.out.Disks)
 	hs := r.table(0, chunkstore.SessionTable{Version: 5, Next: 9})
 	for dev, h := range hs {
@@ -248,7 +250,7 @@ func TestAnUnnamedDeviceDoesNotPinTheReport(t *testing.T) {
 		}
 		run.out.Reset()
 		run.d.Hand(&run.ctx, &h, &run.out)
-		run.d.Disks(&run.ctx, named, &run.out)
+		run.d.Disks(&run.ctx, named, nil, &run.out)
 		if run.d.Replica() != nil {
 			r.n.Held(dev, run.out.Held)
 			r.n.HeldEpoch(dev, run.out.Epoch)
@@ -277,7 +279,7 @@ func TestARestartedReplicasAskGoesToItsAuthority(t *testing.T) {
 	}
 	r.out.Reset()
 	r.d.Authority(&r.ctx, ctl, &r.out)
-	r.d.Disks(&r.ctx, []meta.DiskAddr{{Disk: 5, Log: r.opened.Log, At: core.NodeID{Node: 4, Loop: 3}}}, &r.out)
+	r.d.Disks(&r.ctx, []meta.DiskAddr{{Disk: 5, Log: r.opened.Log, At: core.NodeID{Node: 4, Loop: 3}}}, nil, &r.out)
 	pg := chunkstore.PGEntry{Members: []chunkstore.Member{{Disk: 5}}, Interval: 2, Activated: 2}
 	r.d.Table(&r.ctx, &chunkstore.Table{Epoch: 3, Pools: []chunkstore.PoolTable{{ID: 1, Replicas: 1, MinLive: 1, PGs: []chunkstore.PGEntry{pg}}}}, &r.out)
 	var asks []chunkstore.PGFields
@@ -375,7 +377,9 @@ func TestOnlyTheAnswerToItsFetchSettlesAWaitingWrite(t *testing.T) {
 		n.out.Reset()
 		n.n.Take(&n.ctx, 7, &DeviceOutput{Opened: d.opened}, &n.out)
 		ds := []meta.DiskAddr{{Disk: 5, Log: d.opened.Log, At: core.NodeID{Node: 4, Loop: 3}}}
-		n.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeDisks(pool, group, ds, m) })
+		n.from(ctl, func(pool core.BufPool, m *core.Msg) error {
+			return meta.EncodeDisks(pool, group, &meta.Membership{Disks: ds}, m)
+		})
 		toDevice(n, d)
 		tbl := chunkstore.Table{Epoch: 2, Pools: []chunkstore.PoolTable{{ID: 1, Replicas: 1, MinLive: 1,
 			PGs: []chunkstore.PGEntry{{Members: []chunkstore.Member{{Disk: 5}}, Interval: 1, Activated: 1}}}}}
@@ -436,7 +440,7 @@ func TestADeviceReportsToTheVoterItStartsWith(t *testing.T) {
 	r.take()
 	r.settle()
 	r.out.Reset()
-	r.d.Disks(&r.ctx, []meta.DiskAddr{{Disk: 5, Log: r.opened.Log}}, &r.out)
+	r.d.Disks(&r.ctx, []meta.DiskAddr{{Disk: 5, Log: r.opened.Log}}, nil, &r.out)
 	if !slices.ContainsFunc(r.out.Actions, func(a core.Action) bool { return a.Kind == core.ActNetSend && a.Peer == ctl }) {
 		t.Fatal("the replica reported to no authority")
 	}
@@ -461,7 +465,9 @@ func TestAReplicaStartedBehindADroppedDeltaFetchesTheTable(t *testing.T) {
 	n.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeDelta(pool, group, &dl, m) })
 	toDevice(n, d)
 	ds := []meta.DiskAddr{{Disk: 5, Log: d.opened.Log, At: core.NodeID{Node: 4, Loop: 3}}}
-	n.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeDisks(pool, group, ds, m) })
+	n.from(ctl, func(pool core.BufPool, m *core.Msg) error {
+		return meta.EncodeDisks(pool, group, &meta.Membership{Disks: ds}, m)
+	})
 	o, _ := n.out.Clone()
 	d.out.Reset()
 	d.d.Take(&d.ctx, &o, &d.out)
@@ -489,7 +495,9 @@ func TestALostTableFetchIsMadeUpBeforeAWriteIsAcknowledged(t *testing.T) {
 	n.out.Reset()
 	n.n.Take(&n.ctx, 7, &DeviceOutput{Opened: d.opened}, &n.out)
 	ds := []meta.DiskAddr{{Disk: 5, Log: d.opened.Log, At: core.NodeID{Node: 4, Loop: 3}}}
-	n.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeDisks(pool, group, ds, m) })
+	n.from(ctl, func(pool core.BufPool, m *core.Msg) error {
+		return meta.EncodeDisks(pool, group, &meta.Membership{Disks: ds}, m)
+	})
 	toDevice(n, d)
 	n.table(0, chunkstore.SessionTable{Version: 1, Next: 6, Live: []uint64{5}})
 	toDevice(n, d)
@@ -539,5 +547,44 @@ func TestALostTableFetchIsMadeUpBeforeAWriteIsAcknowledged(t *testing.T) {
 	d.settle()
 	if rps := write(2); len(rps) != 1 || rps[0].Status != chunkstore.StatusOK {
 		t.Fatalf("a write after the retry's table answered %+v", rps)
+	}
+}
+
+// The membership hands the replica each disk's size and fill and each pool's grants outstanding,
+// which admission counts: a plain write to a PG whose other member, disk 6, would pass write_limit
+// with its share of the grants is refused for space.
+func TestTheMembershipGivesAdmissionTheDisksAndGrants(t *testing.T) {
+	d := newDevRun(t, sim.NewDisk(devBlocks))
+	d.start(1)
+	d.settle()
+	n := newRun(t, 1)
+	n.out.Reset()
+	n.n.Take(&n.ctx, 7, &DeviceOutput{Opened: d.opened}, &n.out)
+	m := meta.Membership{Disks: []meta.DiskAddr{{Disk: 5, Log: d.opened.Log, At: core.NodeID{Node: 4, Loop: 3}},
+		{Disk: 6, Log: 0x66, At: core.NodeID{Node: 5}, Blocks: 1000, Live: 300, Filled: true}}, Grants: []meta.PoolGrant{{Pool: 1, Grant: 300}}}
+	n.from(ctl, func(pool core.BufPool, msg *core.Msg) error { return meta.EncodeDisks(pool, group, &m, msg) })
+	toDevice(n, d)
+	n.table(0, chunkstore.SessionTable{Version: 1, Next: 6, Live: []uint64{5}})
+	toDevice(n, d)
+	tbl := chunkstore.Table{Epoch: 2, Pools: []chunkstore.PoolTable{{ID: 1, Replicas: 2, MinLive: 1,
+		PGs: []chunkstore.PGEntry{{Members: []chunkstore.Member{{Disk: 5}, {Disk: 6, Mark: chunkstore.MarkDown}}, Interval: 1, Activated: 1}}}}}
+	n.from(ctl, func(pool core.BufPool, msg *core.Msg) error { return meta.EncodeTable(pool, group, &tbl, msg) })
+	toDevice(n, d)
+
+	u := chunkstore.Update{Kind: chunkstore.KindWrite, ID: 1, PG: chunkstore.PGFields{Epoch: 2, PG: core.PGID{Pool: 1}, Interval: 1},
+		Session: 5, Incarnation: 1, Chunk: core.ChunkID{Volume: 1, Inode: 7}, Len: core.BlockSize}
+	ev := core.Event{Kind: core.EvNetRecv, Peer: client}
+	ev.Msg.Len = uint16(copy(ev.Msg.Body[:], chunkstore.AppendUpdate(nil, &u)))
+	buf, err := d.ctx.Pool.AllocZeroed(core.BlockSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev.Msg.Buf = buf
+	d.out.Reset()
+	d.d.OnEvent(&d.ctx, &ev, &d.out)
+	d.take()
+	d.settle()
+	if rps := d.replies(); len(rps) != 1 || rps[0].Status != chunkstore.StatusNoSpace {
+		t.Fatalf("a write past write_limit on disk 6 answered %+v", rps)
 	}
 }

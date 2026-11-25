@@ -519,6 +519,37 @@ func TestRecoveryCountsAMemberAtItsFreshRecoveryFill(t *testing.T) {
 	})
 }
 
+// A fill the leader relays from a member's heartbeat can be older than the member's last
+// acknowledgment, so until both clocks show fillHeld after it a lower relayed fill does not lower it,
+// and a higher one raises it; past fillHeld the relayed fill is the newer and is taken.
+func TestARelayedFillDoesNotUndercutARecentAcknowledgment(t *testing.T) {
+	c := admitCluster(t, 90)
+	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
+		r.noteFill(ctx, 3, 900, false)
+		r.MemberFill(ctx, 3, 100)
+		if got := r.disks[3].live; got != 900 {
+			t.Errorf("a relayed fill of 100 just after an acknowledgment of 900 left %d", got)
+		}
+		r.MemberFill(ctx, 3, 950)
+		if got := r.disks[3].live; got != 950 {
+			t.Errorf("a relayed fill of 950 left %d", got)
+		}
+		slewed := *ctx
+		slewed.Now += fillHeld
+		r.MemberFill(&slewed, 3, 100)
+		if got := r.disks[3].live; got != 950 {
+			t.Errorf("a relayed fill of 100 fillHeld after the acknowledgment on CLOCK_BOOTTIME alone left %d", got)
+		}
+	})
+	c.runFor(fillHeld)
+	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
+		r.MemberFill(ctx, 3, 100)
+		if got := r.disks[3].live; got != 100 {
+			t.Errorf("a relayed fill of 100 fillHeld after the acknowledgment left %d", got)
+		}
+	})
+}
+
 // A member acknowledges a recovery write with its live blocks summed afresh, not with its sum from
 // up to fillEvery before, which misses the copies it took since.
 func TestARecoveryAckCarriesAFreshFill(t *testing.T) {
@@ -562,10 +593,37 @@ func TestACopyStoppedForRoomStartsOnceTheTargetsFillFalls(t *testing.T) {
 		if l := &r.leads[r.lead(pg0)]; !l.roomless || len(r.recs) != 0 {
 			t.Fatalf("copying onto disk 3 a block short of a chunk's room: roomless %v, %d copies", l.roomless, len(r.recs))
 		}
-		r.MemberFill(3, 0)
+		r.MemberFill(ctx, 3, 0)
 		r.recoverWork(ctx, out)
 		if len(r.recs) != 1 {
 			t.Fatalf("%d copies once disk 3 reported a fill of 0", len(r.recs))
+		}
+	})
+}
+
+// A replica that started after a control-plane failover, before the new leader heard a target's
+// node report its size, has no size for it: the copy waits for the size rather than going unchecked,
+// and starts once the leader's answer carries it.
+func TestACopyToADiskOfUnknownSizeWaitsForItsSize(t *testing.T) {
+	c := admitCluster(t, 90)
+	ch := chunkIn(pg0, 4, 0)
+	c.publish(c.next(func(t *Table) { mark(t, pg0, 3, MarkDown) }), true)
+	c.writeWhole(pg0, ch, 0, 2, 3)
+	c.reps[0].plant.noRecovery = true
+	c.publish(c.next(func(t *Table) { mark(t, pg0, 3, MarkUp) }), true)
+	c.settle()
+	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
+		r.disks[3].blocks, r.disks[3].reserve = 0, 0
+		r.SetDisk(3, 0, 0)
+		r.plant.noRecovery = false
+		r.recoverWork(ctx, out)
+		if l := &r.leads[r.lead(pg0)]; !l.roomless || len(r.recs) != 0 {
+			t.Fatalf("copying onto disk 3 of unknown size: roomless %v, %d copies", l.roomless, len(r.recs))
+		}
+		r.SetDisk(3, 1000*core.BlocksPerChunk, 0)
+		r.recoverWork(ctx, out)
+		if len(r.recs) != 1 {
+			t.Fatalf("%d copies once disk 3's size came", len(r.recs))
 		}
 	})
 }

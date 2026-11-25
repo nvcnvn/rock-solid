@@ -26,7 +26,7 @@ func admitCluster(t *testing.T, limit uint8) *rcluster {
 }
 
 func (c *rcluster) xFills(live uint64) {
-	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.MemberFill(3, live) })
+	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.MemberFill(ctx, 3, live) })
 }
 
 func (c *rcluster) status(id core.RequestID) Status {
@@ -99,7 +99,7 @@ func TestEachPoolChecksItsOwnLimit(t *testing.T) {
 		for d := range uint32(3) {
 			r.SetDisk(d+1, 1000, 0)
 		}
-		r.MemberFill(3, 920)
+		r.MemberFill(ctx, 3, 920)
 	})
 	p1 := c.write(pg0, chunkIn(pg0, 4, 0), 0, []byte{1})
 	pg := core.PGID{Pool: testPool + 1}
@@ -343,9 +343,19 @@ func runLimit(t *testing.T, seed uint64, plant string) error {
 			r.chunks = append(r.chunks, chunkIn(core.PGID{Pool: testPool, Index: i}, 4, k))
 		}
 	}
+	d.a.sizes = map[uint32]OpenedLog{}
 	for n := range c.reps {
 		r.blocks[n] = (c.reps[n].Store().Log().LiveBlocks()+limitRoom)*100/90 + 1
 		r.mapped[n] = make([]uint64, len(r.chunks))
+		d.a.sizes[uint32(n)] = OpenedLog{Blocks: r.blocks[n], Reserve: r.reserve}
+	}
+	// The leader hears the sizes now, as the nodes' next reports would, so that no answer it sends
+	// the replicas gives a disk the size the start reported.
+	now, _ := d.a.now()
+	for n := range c.reps {
+		if err := d.a.cp.Heartbeat(now, uint32(n), []OpenedLog{{Log: c.logs[n], Blocks: r.blocks[n], Reserve: r.reserve}}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if planted {
 		c.replicaPlants.admitPastLimit = true

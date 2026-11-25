@@ -95,6 +95,21 @@ func (c *rcluster) inactive() error {
 	return nil
 }
 
+// askOpen reports whether a running primary asked for the interval after one its table still has.
+func (c *rcluster) askOpen() bool {
+	for n, r := range c.reps {
+		if !c.s.Node(uint32(n)).Up() {
+			continue
+		}
+		for _, l := range r.leads {
+			if _, e := c.table.entry(l.pg); l.asking && l.asked && e != nil && e.Interval == l.interval {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // stillAsking is the first running primary of c's table still leading the interval of a PG a failed version ended: it never asked
 // for the next, or its ask was never answered.
 func (c *rcluster) stillAsking() error {

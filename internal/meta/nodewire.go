@@ -20,7 +20,9 @@ import (
 // leader it knows: a presence byte, then its node and loop. A session start's token is its
 // request and it has no body; its answer, once the start commits, carries the request as its token
 // and the session's ID as its body. The disk membership, the leader's answer to a report, is a
-// count and, in rising disk ID order, each disk's ID, log, and the node and loop that own it.
+// count and, in rising disk ID order, each disk's ID, log, the node and loop that own it, its size
+// and log reserve, and its live blocks plus one, 0 for none, then a count and, in rising pool ID
+// order, each pool's ID and grants outstanding.
 // A replica's asks for new intervals are a count and each ask's epoch, pool, PG index and interval,
 // with no token. The leader's answer that a node delete metadata replicas is a count and each
 // replica's group and ID, with no token.
@@ -39,11 +41,23 @@ const (
 	KindDelete       byte = 0x4f
 )
 
-// DiskAddr is a disk of the committed membership record: its ID, its log, and the loop that owns it.
+// Membership is the leader's answer to a node's report: the committed disks, and each pool's
+// grants outstanding in blocks.
+type Membership struct {
+	Disks  []DiskAddr
+	Grants []PoolGrant
+}
+
+// DiskAddr is a disk of the committed membership record: its ID, its log, the loop that owns it,
+// its size and log reserve in blocks, 0 until its node reports them, and, if Filled, its live
+// blocks as its last heartbeat to the leader gave them.
 type DiskAddr struct {
-	Disk uint32
-	Log  uint64
-	At   core.NodeID
+	Disk            uint32
+	Log             uint64
+	At              core.NodeID
+	Blocks, Reserve uint64
+	Live            uint64
+	Filled          bool
 }
 
 // encodeBody frames body as a message of kind into msg, or returns the pool's error.
@@ -317,39 +331,61 @@ func DecodeStarted(pool core.BufPool, msg *core.Msg) (uint64, error) {
 	return id, nil
 }
 
-// EncodeDisks writes the disk membership ds, in rising disk ID order, into msg, or returns the
-// pool's error.
-func EncodeDisks(pool core.BufPool, group uint64, ds []DiskAddr, msg *core.Msg) error {
-	body := binary.AppendUvarint(nil, uint64(len(ds)))
-	for _, d := range ds {
+// EncodeDisks writes the membership m, its disks in rising ID order and its pools in rising ID
+// order, into msg, or returns the pool's error.
+func EncodeDisks(pool core.BufPool, group uint64, m *Membership, msg *core.Msg) error {
+	body := binary.AppendUvarint(nil, uint64(len(m.Disks)))
+	for _, d := range m.Disks {
+		var fill uint64
+		if d.Filled {
+			fill = d.Live + 1
+		}
 		body = binary.AppendUvarint(binary.AppendUvarint(body, uint64(d.Disk)), d.Log)
 		body = binary.AppendUvarint(binary.AppendUvarint(body, uint64(d.At.Node)), uint64(d.At.Loop))
+		body = binary.AppendUvarint(binary.AppendUvarint(binary.AppendUvarint(body, d.Blocks), d.Reserve), fill)
+	}
+	body = binary.AppendUvarint(body, uint64(len(m.Grants)))
+	for _, g := range m.Grants {
+		body = binary.AppendUvarint(binary.AppendUvarint(body, uint64(g.Pool)), g.Grant)
 	}
 	return encodeBody(pool, group, KindDisks, 0, body, msg)
 }
 
-// DecodeDisks decodes a disk membership message into dst; one that does not decode, has a token,
-// or whose disk IDs are not nonzero and rising, is ErrMalformed.
-func DecodeDisks(pool core.BufPool, msg *core.Msg, dst []DiskAddr) ([]DiskAddr, error) {
-	dst = dst[:0]
+// DecodeDisks decodes a disk membership message into m, reusing its slices; one that does not
+// decode, has a token, or whose disk IDs are not nonzero and rising or pool IDs not rising, is
+// ErrMalformed.
+func DecodeDisks(pool core.BufPool, msg *core.Msg, m *Membership) error {
+	m.Disks, m.Grants = m.Disks[:0], m.Grants[:0]
 	b, err := untokened(pool, KindDisks, msg)
 	if err != nil {
-		return dst, err
+		return err
 	}
 	d := decoder{b: b}
 	last := uint64(0)
 	for n := d.count(); n > 0; n-- {
 		id, log, node, loop := d.uvarint(), d.uvarint(), d.uvarint(), d.uvarint()
+		blocks, reserve, fill := d.uvarint(), d.uvarint(), d.uvarint()
 		if id <= last || id > 0xffffffff || node > 0xffffffff || loop > 0xffffffff {
-			return dst[:0], ErrMalformed
+			d.bad = true
+			break
 		}
 		last = id
-		dst = append(dst, DiskAddr{Disk: uint32(id), Log: log, At: core.NodeID{Node: uint32(node), Loop: uint32(loop)}})
+		m.Disks = append(m.Disks, DiskAddr{Disk: uint32(id), Log: log, At: core.NodeID{Node: uint32(node), Loop: uint32(loop)},
+			Blocks: blocks, Reserve: reserve, Live: fill - min(fill, 1), Filled: fill != 0})
+	}
+	for n, first := d.count(), true; n > 0 && !d.bad; n, first = n-1, false {
+		id, grant := d.uvarint(), d.uvarint()
+		if id > 0xffffffff || !first && id <= uint64(m.Grants[len(m.Grants)-1].Pool) {
+			d.bad = true
+			break
+		}
+		m.Grants = append(m.Grants, PoolGrant{Pool: core.PoolID(id), Grant: grant})
 	}
 	if d.bad || len(d.b) != 0 {
-		return dst[:0], ErrMalformed
+		m.Disks, m.Grants = m.Disks[:0], m.Grants[:0]
+		return ErrMalformed
 	}
-	return dst, nil
+	return nil
 }
 
 // EncodeDelete writes the leader's answer that a node delete each replica of rs into msg, or

@@ -77,6 +77,8 @@ type rcluster struct {
 	auth      core.NodeID
 	reporting bool
 	forward   func(d int, out *ReplicaOutput)
+	// intake, when set, takes an event in place of disk d's replica, which it reports.
+	intake func(ctx *core.Context, d int, ev *core.Event) bool
 	// hist, once set, records every client write, punch and read.
 	hist *chunkHist
 	// updated is the chunk of each write and punch the client sent.
@@ -189,6 +191,9 @@ func newRClusterOnDisks(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Co
 				if ev.Kind == core.EvPeerLost {
 					c.lost[[2]core.NodeID{c.loops[d], ev.Peer}]++
 				}
+				if c.intake != nil && c.intake(ctx, d, ev) {
+					return acts
+				}
 				if c.onEvent != nil {
 					c.onEvent(d, ev, false)
 					defer c.onEvent(d, ev, true)
@@ -242,9 +247,7 @@ func newRClusterOnDisks(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Co
 				c.reps[d] = NewReplica(ReplicaConfig{Disk: c.ids[d], Seed: seed, Start: lease.Now(ctx), Log: c.logs[d], Restarted: !fresh}, st)
 				c.reps[d].plant = c.replicaPlants
 				c.sessionAsks[d] = 0
-				for k := range disks {
-					c.reps[d].SetAddr(c.ids[k], core.NodeID{Node: uint32(k)})
-				}
+				c.address(c.reps[d])
 				acts = append(acts, sout.Actions...)
 				if first && !c.reporting {
 					return acts
@@ -572,5 +575,20 @@ func TestAWriteCommitsOnEveryMemberAndIsAcknowledged(t *testing.T) {
 	}
 	if got := c.readNow(pg0, ch, 100, 5); string(got) != "heLLo" {
 		t.Fatalf("merged read %q", got)
+	}
+}
+
+// unsized is the size the tests give a disk whose size a replica has not learned: no write or copy
+// reaches it, as if the disk had no limit.
+const unsized = uint64(1) << 48
+
+// address hands rep every disk's loop and, for each disk whose size it has not learned, unsized,
+// since a replica copies nothing to a disk of unknown size.
+func (c *rcluster) address(rep *Replica) {
+	for k, id := range c.ids {
+		rep.SetAddr(id, core.NodeID{Node: uint32(k)})
+		if rep.disk(id).blocks == 0 {
+			rep.SetDisk(id, unsized, 0)
+		}
 	}
 }

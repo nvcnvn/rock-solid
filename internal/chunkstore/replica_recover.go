@@ -300,13 +300,18 @@ func (r *Replica) startRecovery(ctx *core.Context, i, j int, out *ReplicaOutput)
 // reserve plus (1 + k) × the grants outstanding on their pools free after one more chunk, counting
 // the copies in flight to each at a chunk each and its live blocks as last reported, which a member
 // sums afresh for each recovery write it acknowledges: copying stops short of the room the grants
-// promised, whatever the leader saw when it granted them. A chunk a client write waits on is copied
-// regardless, since stopping it would hold that write.
+// promised, whatever the leader saw when it granted them. A disk whose size the replica has not
+// learned has no room until it does. A chunk a client write waits on is copied regardless, since
+// stopping it would hold that write.
 func (r *Replica) noRoom(ctx *core.Context, e *PGEntry, targets uint8) uint8 {
 	var no uint8
 	for s, m := range e.Members {
 		d := r.disk(m.Disk)
-		if s >= maxMembers || targets&(1<<s) == 0 || d.blocks == 0 {
+		if s >= maxMembers || targets&(1<<s) == 0 {
+			continue
+		}
+		if d.blocks == 0 {
+			no |= 1 << s
 			continue
 		}
 		live := r.copyFill(ctx, m.Disk)

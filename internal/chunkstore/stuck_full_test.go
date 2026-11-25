@@ -11,7 +11,8 @@ import (
 
 // P23 on the real control plane: a rep3 PG on three of four disks loses a member, declared lost, and
 // its refill copies onto the fourth until the copies would pass its log reserve, which its node
-// reports and the primary's recovery gate keeps, before the copy ends. The leader raises Stuck on
+// reports and the leader's answers to the nodes' reports hand the primary's recovery gate, before
+// the copy ends. The leader raises Stuck on
 // the PG from its own record of when the PG last copied. A fifth disk joining takes the full
 // member's place with no edit: placement parks the full member beside it before any recovered
 // report, and Stuck clears once the new disk copies.
@@ -42,9 +43,6 @@ func TestARefillStoppedAtALogReserveGoesStuck(t *testing.T) {
 	a.late = map[int]bool{added: true, added + 1: true}
 	size := OpenedLog{Blocks: uint64(geo.SegmentCount) * uint64(geo.SegmentBlocks), Reserve: uint64(geo.SegmentCount-24) * uint64(geo.SegmentBlocks)}
 	a.sizes = map[uint32]OpenedLog{full - 1: size}
-	for k := range c.reps {
-		c.call(k, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.SetDisk(full, size.Blocks, size.Reserve) })
-	}
 	a.attach(c)
 	r := &soleRun{c: c, a: a, isolated: map[uint32]bool{}, acked: map[core.ChunkID]uint64{}}
 	stuck := func() bool {

@@ -83,7 +83,7 @@ type CtlHost struct {
 	starting []starter
 	// admins are the operator's commands the Control took and the host has not yet answered.
 	admins  []adminWait
-	addrs   []DiskAddr
+	member  Membership
 	sout    Output
 	cout    ControlOutput
 	answers []Answer
@@ -440,22 +440,23 @@ func (h *CtlHost) deleted(ctx *core.Context, refs []ReplicaRef, out *CtlHostOutp
 	h.fail(h.disk.Write(ctx, ctlOwner, deletionRound, &h.deletion, &h.lout), out)
 }
 
-// sendDisks answers a node's report with the committed membership: each disk not gone that its
+// sendDisks answers a node's report with the membership: each committed disk not gone that its
 // node's last report opened, at the loop that report names for it, so the node learns its own
-// disks' IDs and its replicas the loops of their members.
+// disks' IDs and its replicas the loops, sizes and fills of their members, and the pools' grants.
 func (h *CtlHost) sendDisks(ctx *core.Context, to core.NodeID, out *CtlHostOutput) {
-	h.addrs = h.addrs[:0]
-	for _, d := range h.ctl.disks {
+	h.ctl.Membership(lease.Now(ctx), &h.member, func(d *DiskEntry) (core.NodeID, bool) {
 		i, ok := slices.BinarySearchFunc(h.nodes, d.Node, func(n heardNode, id uint32) int { return cmp.Compare(n.at.Node, id) })
-		if !ok || d.Gone {
-			continue
+		if !ok {
+			return core.NodeID{}, false
 		}
-		if j := slices.IndexFunc(h.nodes[i].loops, func(l diskLoop) bool { return l.log == d.Log }); j >= 0 {
-			h.addrs = append(h.addrs, DiskAddr{Disk: d.ID, Log: d.Log, At: core.NodeID{Node: d.Node, Loop: h.nodes[i].loops[j].loop}})
+		j := slices.IndexFunc(h.nodes[i].loops, func(l diskLoop) bool { return l.log == d.Log })
+		if j < 0 {
+			return core.NodeID{}, false
 		}
-	}
+		return core.NodeID{Node: d.Node, Loop: h.nodes[i].loops[j].loop}, true
+	})
 	a := core.Action{Kind: core.ActNetSend, Peer: to, Reply: true}
-	if EncodeDisks(ctx.Pool, h.group, h.addrs, &a.Msg) == nil {
+	if EncodeDisks(ctx.Pool, h.group, &h.member, &a.Msg) == nil {
 		out.Actions = append(out.Actions, a)
 	}
 }
