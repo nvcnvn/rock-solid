@@ -26,9 +26,12 @@ TVer(k, n) == k * TBase + n
 TIvOfV(v) == v \div TBase
 TCnt(v) == v % TBase
 
-\* No traced run injects a disk fault, so MemberFail has no budget and a member's
-\* refusal of a version of its interval has no step.
-TPlanSet == {[free |-> FALSE, m |-> TPlan, w |-> TWrites, f |-> {"restart", "format", "ownfail", "lateask"},
+\* No traced run injects a disk fault, so the one MemberFail a trace takes is an
+\* unready line, a refusal while the member's store replays its log after a
+\* restart: a refusal of a version of its interval by a store that serves, an
+\* mfail line, has no step. That no step, not UnchangedIntervalAccepts, which
+\* a budget for "mfail" leaves silent on refusals, is what rejects one.
+TPlanSet == {[free |-> FALSE, m |-> TPlan, w |-> TWrites, f |-> {"restart", "format", "ownfail", "lateask", "mfail"},
               t |-> 0, k |-> 100000, s |-> 100000]}
 TMaint == [p \in TPG |-> FALSE]
 TRates == [n \in TNode |-> {1000}]
@@ -174,7 +177,7 @@ Line(l) ==
     \/ /\ l.k = "maydeliver"
        /\ \/ UNCHANGED vars
           \/ \E m \in {x \in rm : x.to = ddisk[l.n] /\ x.c = l.c /\ x.v = l.v} : Deliver(m)
-    \/ /\ l.k = "mfail"
+    \/ /\ l.k = "unready"
        /\ \E m \in {x \in rm : x.to = ddisk[l.n] /\ x.c = l.c /\ x.v = l.v} : MemberFail(m)
     \/ /\ l.k = "gone"
        /\ \E m \in {x \in rm : dhost[x.to] = l.n /\ x.c = l.c /\ x.v = l.v} :

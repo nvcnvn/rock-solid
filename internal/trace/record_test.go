@@ -60,7 +60,7 @@ var everyName = []string{
 	"1000255 2 output pass=81 Format disk=5",
 	"1000256 2 output pass=82 Lost disk=5",
 	"1000255 2 output pass=81 Accepted chunk=9 version=4294967297",
-	"1000255 2 output pass=81 MemberFail chunk=9 version=4294967297 gone=1 recover=0",
+	"1000255 2 output pass=81 MemberFail chunk=9 version=4294967297 gone=1 recover=0 unready=0",
 	"1000255 2 output pass=81 PastInterval pg=1 interval=3 minlive=2",
 	"1000255 2 output pass=81 Fail chunk=9 version=4294967297",
 	"1000255 2 output pass=81 Listed disk=2 chunk=9 version=4294967297",

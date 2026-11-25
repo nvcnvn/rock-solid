@@ -120,7 +120,7 @@ cover() {
 			prev = cur; cur = ""; n++
 		}
 		BEGIN {
-			split("fold Fold renew Renew adopt Adopt send Send order Order logged Deliver ownlogged OwnLogged committed Answer maydeliver Deliver mfail MemberFail " \
+			split("fold Fold renew Renew adopt Adopt send Send order Order logged Deliver ownlogged OwnLogged committed Answer maydeliver Deliver unready MemberFail " \
 				"gone GoneRefuses gonerecover GoneRefusesRecovery mayfail OwnFail restart Restart format Format recovered Recover recoveredlate Recover mayrecover Recover " \
 				"reported ReportRecovered ask AskNext restartask RestartAsk peer Peer activate Activate plan.mark MarkDisk " \
 				"plan.replace Replace plan.rotate Rotate plan.add Add plan.remove Remove plan.stay Stay plan.drop Drop plan.refill Refill " \

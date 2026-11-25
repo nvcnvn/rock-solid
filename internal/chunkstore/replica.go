@@ -1387,10 +1387,14 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 	}
 	recover := u.Kind == KindRecover
 	gone := e != nil && (!slices.ContainsFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk && m.Mark == MarkUp }) || r.plant.goneWhileUp && u.Version&15 == 7)
-	refuse := e == nil || newer || r.st.Sessions().Fenced(u.Session) && !r.plant.memberNoFence || u.PG.Interval != e.Interval && !r.sameMembersAt(e, u.PG.Interval) || r.plant.sendEpoch && u.PG.Epoch != r.table.Epoch || gone ||
-		slices.ContainsFunc(r.failed, func(f failedVer) bool {
-			return f.chunk == u.Chunk && uint32(f.version>>32) == u.PG.Interval && (f.version == u.Version || f.version < u.Version && !r.plant.logPastFailed || recover)
-		})
+	failed := slices.IndexFunc(r.failed, func(f failedVer) bool {
+		return f.chunk == u.Chunk && uint32(f.version>>32) == u.PG.Interval && (f.version == u.Version || f.version < u.Version && !r.plant.logPastFailed || recover)
+	})
+	unready := r.unready()
+	if failed >= 0 {
+		unready |= r.failed[failed].unready
+	}
+	refuse := e == nil || newer || r.st.Sessions().Fenced(u.Session) && !r.plant.memberNoFence || u.PG.Interval != e.Interval && !r.sameMembersAt(e, u.PG.Interval) || r.plant.sendEpoch && u.PG.Epoch != r.table.Epoch || gone || failed >= 0
 	if !refuse && (recover || u.Version <= r.st.Newest(u.Chunk)) {
 		if j := slices.IndexFunc(r.reqs, func(q storeReq) bool {
 			return q.kind == reqMember && q.chunk == u.Chunk && q.version == u.Version && q.recover == recover
@@ -1400,7 +1404,7 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 			return
 		}
 		if !recover || r.listedIn(u.Chunk) == 0 {
-			r.noteFailed(failedVer{pg: u.PG.PG, chunk: u.Chunk, version: u.Version})
+			r.noteFailed(failedVer{pg: u.PG.PG, chunk: u.Chunk, version: u.Version, unready: unready})
 			refuse = true
 		}
 	}
@@ -1413,8 +1417,8 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 			if recover {
 				rec = 1
 			}
-			out.note(trace.OutMemberFail, u.Chunk.Hash(), u.Version, reason, rec, 0)
-			r.noteFailed(failedVer{pg: u.PG.PG, chunk: u.Chunk, version: u.Version})
+			out.note(trace.OutMemberFail, u.Chunk.Hash(), u.Version, reason, rec, unready)
+			r.noteFailed(failedVer{pg: u.PG.PG, chunk: u.Chunk, version: u.Version, unready: unready})
 		}
 		freeBuf(ctx, ev.Msg.Buf)
 		rp := r.refusal(u.PG.PG)
@@ -1467,15 +1471,26 @@ type dup struct {
 	msgID core.RequestID
 }
 
+// unready is a member refusal's trace field: 1 while the store is not serving, as while it replays its log after a
+// restart, rebuilds its index or is stopped by a disk fault.
+func (r *Replica) unready() uint64 {
+	if r.st.Serving() {
+		return 0
+	}
+	return 1
+}
+
 // failedVer is a version of a chunk a member failed to log, after which it refuses the chunk's later versions in that interval.
 type failedVer struct {
 	pg      core.PGID
 	chunk   core.ChunkID
 	version uint64
+	// unready is the trace field of the refusal that failed the version, which the later refusals it causes carry.
+	unready uint64
 }
 
 func (r *Replica) noteFailed(f failedVer) {
-	if !slices.Contains(r.failed, f) {
+	if !slices.ContainsFunc(r.failed, func(g failedVer) bool { return g.pg == f.pg && g.chunk == f.chunk && g.version == f.version }) {
 		r.failed = append(r.failed, f)
 	}
 }
@@ -1892,8 +1907,8 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 			if q.recover {
 				rec = 1
 			}
-			out.note(trace.OutMemberFail, q.chunk.Hash(), q.version, 0, rec, 0)
-			r.noteFailed(failedVer{pg: q.pg, chunk: q.chunk, version: q.version})
+			out.note(trace.OutMemberFail, q.chunk.Hash(), q.version, 0, rec, r.unready())
+			r.noteFailed(failedVer{pg: q.pg, chunk: q.chunk, version: q.version, unready: r.unready()})
 		} else if q.recover {
 			out.note(trace.OutRecovered, q.chunk.Hash(), rp.Version, uint64(q.source), uint64(q.interval), 0)
 		} else {

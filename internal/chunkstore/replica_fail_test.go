@@ -1,6 +1,7 @@
 package chunkstore
 
 import (
+	"bytes"
 	"errors"
 	"math"
 	"slices"
@@ -9,6 +10,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/sim"
+	"github.com/nvcnvn/rock-solid/internal/trace"
 )
 
 // replicaWrite sends disk node+1 a primary's whole-block write of block 0 of ch at version v, as if from its primary.
@@ -363,20 +365,45 @@ func TestAMemberThatRefusesAVersionRefusesTheLaterOnes(t *testing.T) {
 	}
 }
 
-// Disk 2 restarts and gets 1.1 while its store still recovers: it refuses it.
+// Disk 2 restarts and gets 1.1 and then 1.2 while its store still recovers, and 1.3 once it serves: it refuses all three,
+// and their trace records say the store was not serving when the first failed, the one member refusal a traced run's
+// restart causes.
 func TestARecoveringMemberRefusesWrites(t *testing.T) {
 	c := newRCluster(t, rtable(4, 2))
 	ch := chunkIn(pg0, 4, 0)
+	c.conformBegin()
 	c.s.CrashRandom(1)
 	for !c.s.Node(1).Up() && c.step() {
 	}
-	if c.reps[1].Store().Serving() {
-		t.Fatal("the store serves as it restarts")
+	for _, v := range []uint64{MakeVersion(1, 1), MakeVersion(1, 2)} {
+		if c.reps[1].Store().Serving() {
+			t.Fatal("the store serves as it restarts")
+		}
+		w := c.replicaWrite(1, ch, v)
+		c.until(w)
+		if rp := c.reply(w); rp.Status != StatusRefused {
+			t.Fatalf("answered %+v", rp)
+		}
 	}
-	w := c.replicaWrite(1, ch, MakeVersion(1, 1))
-	c.settle()
+	for !c.reps[1].Store().Serving() && c.step() {
+	}
+	w := c.replicaWrite(1, ch, MakeVersion(1, 3))
+	c.until(w)
 	if rp := c.reply(w); rp.Status != StatusRefused {
-		t.Fatalf("answered %+v", rp)
+		t.Fatalf("answered %+v once serving", rp)
+	}
+	var unready []uint64
+	for line := range bytes.Lines(c.s.Trace()) {
+		r, err := trace.Parse(bytes.TrimSuffix(line, []byte("\n")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Name == trace.OutMemberFail {
+			unready = append(unready, r.Fields[4])
+		}
+	}
+	if !slices.Equal(unready, []uint64{1, 1, 1}) {
+		t.Fatalf("member refusals' unready fields %v, want [1 1 1]", unready)
 	}
 }
 

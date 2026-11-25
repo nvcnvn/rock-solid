@@ -627,6 +627,8 @@ func (g *gen) run(recs []trace.Record) {
 			kind := "mfail"
 			if r.Fields[2] != 0 {
 				kind = "gone"
+			} else if r.Fields[4] != 0 {
+				kind = "unready"
 			}
 			if r.Fields[3] != 0 {
 				kind += "recover"

@@ -131,7 +131,7 @@ const (
 	OutLost
 	// OutAccepted, a member taking a version into its store: chunk version.
 	OutAccepted
-	// OutMemberFail, a member refusing a version or failing to log it: chunk version gone recover, gone when the node's disk is no up member of the interval, so a formatted disk's successor, recover for a recovery write.
+	// OutMemberFail, a member refusing a version or failing to log it: chunk version gone recover unready, gone when the node's disk is no up member of the interval, so a formatted disk's successor, recover for a recovery write, unready when its store is not serving, as while it replays its log after a restart.
 	OutMemberFail
 	// OutRecovering, a disk's store taking a recovery write: chunk source interval version, the version it is logged under. A crash can leave it durable with no OutRecovered.
 	OutRecovering
@@ -288,7 +288,7 @@ var schemas = [numNames]schema{
 	OutFormat:         {"Format", KindOutput, []field{fDisk}},
 	OutLost:           {"Lost", KindOutput, []field{fDisk}},
 	OutAccepted:       {"Accepted", KindOutput, []field{fChunk, fVer}},
-	OutMemberFail:     {"MemberFail", KindOutput, []field{fChunk, fVer, {"gone", typeBool}, {"recover", typeBool}}},
+	OutMemberFail:     {"MemberFail", KindOutput, []field{fChunk, fVer, {"gone", typeBool}, {"recover", typeBool}, {"unready", typeBool}}},
 	OutRecovering:     {"Recovering", KindOutput, []field{fChunk, {"source", typeNum}, fIv, fVer}},
 	OutPast:           {"PastInterval", KindOutput, []field{fPG, fIv, {"minlive", typeNum}}},
 	OutFail:           {"Fail", KindOutput, []field{fChunk, fVer}},
