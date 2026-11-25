@@ -7330,10 +7330,31 @@ Recovery from manifest and log is under Shard indexes in the disk owner's checkp
   write thirty rounds each, and then, the shards idle, the due checkpoints and merge steps of
   chunk writes, name both with the replay LSN each reported: the replay floor moves, yet after
   every step stays before the oldest blob either still needs, though the index's replay LSN
-  passes it, and a restart recovers both storages whole; leaving them out of the due or the merge
-  steps' checkpoints moved the floor past a live blob
-  (`TestCheckpointsNameTheShardsOnTheRoundDriver`). The shard on the other loop, removed with a
-  round in flight, and then the one on the device loop: the store hears each removal with the
+  passes it; idle, each compacts on the mail of a due checkpoint's durable manifest and writes its
+  hard state again, so the floor passes every blob it held when it went idle; and a restart
+  recovers both storages whole. Leaving them out of the due or the merge steps' checkpoints moved
+  the floor past a live blob, and without the mail, the compaction on it or the rewrite the floor
+  stayed at an idle shard's oldest round (`TestCheckpointsNameTheShardsOnTheRoundDriver`). Idle,
+  its oldest round compacted and holding its newest hard state, a `raftshard.Rounds` writes that
+  hard state again in a round of its own, which the replica is never told of, whose durability
+  kills the old round and moves its replay LSN, the replica's next round waiting behind it;
+  holding entries past its commit, it writes every entry again at most four blobs a `Ready`, a
+  compaction waiting until the rewrite has read them, and the blobs left replay into the storage
+  it holds; a rewrite whose batch fails stops there, its durable blobs dead, the waiting
+  compaction done, and the old round live and replaying into the storage, until a later
+  `Rewrite` (`TestRoundsRewriteWhatHoldsTheFloorBack`). It is full once it retains the share its
+  owner mailed, never before one arrives, and asks for a checkpoint once per commit it applied
+  while full (`TestRoundsAreFullAtTheShareTheOwnerMailed`). The store mails a shard on the round
+  driver beside a hosted one half of twice `max_replay_bytes`, the hosted one's share too; asked
+  for a checkpoint, it takes one though none is due, and mails its durable manifest with the base
+  of the due one before; a step checkpoint mails nothing, and a third shard has both mailed the
+  new share, a third (`TestAStoreMailsAShardOnTheRoundDriverItsShareAndCheckpoints`). Asked from
+  the `Mail` of a shard on either loop, the device loop's or another's, an idle store, which
+  nothing else wakes, takes the checkpoint and mails both shards
+  (`TestAFullShardGetsACheckpointFromAnIdleStore`). The store knowing two shards before their loop
+  adds them, the shares it mails as they change wait on the loop, the newest standing for the one
+  before, and reach the first once added (`TestMailForAShardNotYetOnItsLoopWaitsForIt`). The shard on the
+  other loop, removed with a round in flight, and then the one on the device loop: the store hears each removal with the
   LSN of its newest blob, the round in flight's for the first, and gives neither owner to a new
   shard until checkpoints move the floor past it; a new shard given the first owner then restarts
   with its own rounds alone (`TestARemovedShardsOwnerOnTheRoundDriverWaitsForTheFloor`). A

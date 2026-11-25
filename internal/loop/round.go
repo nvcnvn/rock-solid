@@ -2,6 +2,7 @@ package loop
 
 import (
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -38,6 +39,12 @@ const (
 	MailRewrite
 	// MailRecovered ends the replay: every MailReplayed of the restart came before it.
 	MailRecovered
+	// MailCheckpointed says the manifest of a due checkpoint is durable, Base the base of the due
+	// manifest before it: the shard compacts to what the checkpoint recorded for it, and writes
+	// again what it keeps at or before Base, so its rounds hold the replay floor back no longer.
+	MailCheckpointed
+	// MailShare gives the shard its Share of twice max_replay_bytes in retained entries.
+	MailShare
 )
 
 // Mail is what a disk's owner sends one of its shards, off the data path; Data is the shard's to
@@ -48,6 +55,8 @@ type Mail struct {
 	Ref   disklog.BlobRef
 	Blob  disklog.BlobKind
 	Data  []byte
+	Base  uint64
+	Share uint64
 }
 
 // ShardID names a shard on its loop.
@@ -64,6 +73,9 @@ const (
 	// ReplyRemoved says the shard is off its loop for good with every Raft blob of it reported
 	// dead, the newest at LSN, 0 for none.
 	ReplyRemoved
+	// ReplyFull asks for a checkpoint: the shard retains its share and applied a commit no
+	// checkpoint compacted.
+	ReplyFull
 )
 
 // Reply is what a shard tells its disk's owner of its blobs, which carry Owner, off the data path.
@@ -74,7 +86,8 @@ type Reply struct {
 }
 
 // ReplyMachine is an owner loop's machine that hears its shards' replies (Loop.Reply), after the
-// dead blobs each reported before; it only records them, so it takes no actions.
+// dead blobs each reported before; it only records them, so it takes no actions, and acts on them
+// at the nil event a LogMachine gets next.
 type ReplyMachine interface {
 	OnReply(lg *Log, r Reply)
 }
@@ -82,9 +95,9 @@ type ReplyMachine interface {
 // LogMachine is an owner loop's machine that calls into its logs besides the round driver, as a
 // chunk store's reads, a checkpoint or the cleaner do: it gets every event of each log the loop
 // owns once the round driver has counted its own tickets, and ignores the tickets it did not
-// submit; after each disk completion or trim timer a log takes, and after the events of any
-// other call into it, it gets a nil ev, as a machine that drives its log itself looks at it after
-// every call.
+// submit; after each disk completion or trim timer a log takes, after the events of any other
+// call into it, and by the end of a pass in which a shard replied, it gets a nil ev, as a machine
+// that drives its log itself looks at it after every call.
 type LogMachine interface {
 	OnLog(ctx *core.Context, lg *Log, ev *disklog.Event, out []core.Action) []core.Action
 }
@@ -113,6 +126,7 @@ type Log struct {
 	copies  []core.IOBuf
 	dead    []disklog.BlobRef
 	replies []Reply
+	replied bool
 	// unburied are the Raft blobs reported dead while no log is served, which the next log served,
 	// the one recovery replayed them into, takes.
 	unburied []disklog.BlobRef
@@ -236,7 +250,8 @@ func (l *Loop) logOf(io core.IOID) *Log {
 }
 
 // AddShard puts s on l, its records going to lg. When s is l's first shard on lg it makes their
-// handoff, so it runs before l and lg's owner start; otherwise it runs on l.
+// handoff, so it runs before l and lg's owner start; otherwise it runs on l. Mail that came for
+// the ID it returns before it, which l held, reaches s by the end of the pass.
 func (l *Loop) AddShard(s Shard, lg *Log) ShardID {
 	h := lg.handoffs[l.cfg.ID]
 	if h == nil {
@@ -245,6 +260,7 @@ func (l *Loop) AddShard(s Shard, lg *Log) ShardID {
 		l.handoffs = append(l.handoffs, h)
 	}
 	l.shards = append(l.shards, shard{s: s, h: h})
+	l.added = len(l.held) > 0
 	return ShardID(len(l.shards) - 1)
 }
 
@@ -332,6 +348,7 @@ func (h *handoff) wait() bool {
 // logs this loop owns, held since the pass began, start the rounds the pass filled: its machine's
 // own records share them with the hand-offs.
 func (l *Loop) endRounds() {
+	l.unhold()
 	for _, lg := range l.logs {
 		lg.takeQueued()
 	}
@@ -417,8 +434,9 @@ func (l *Loop) handoff(ev *core.Event) {
 }
 
 // Send hands m to its shard on the loop of ID to, which takes it at the end of the owner's pass
-// if it is the owner, else on its next pass; it runs on lg's owner, and m.Data becomes the
-// shard's, the caller keeping no hold on it.
+// if it is the owner, else on its next pass, or holds it until it adds the shard; it runs on lg's
+// owner, and m.Data becomes the shard's, the caller keeping no hold on it. A loop with no shard on
+// lg has none added after the loops start, so mail to it is a broken invariant of the caller.
 func (lg *Log) Send(to int, m Mail) {
 	h := lg.handoffs[to]
 	if h == nil {
@@ -501,6 +519,7 @@ func (lg *Log) reply(r Reply) {
 		panic(fmt.Sprintf("loop: a shard replied %+v to disk %d's owner, which is not a ReplyMachine", r, lg.disk))
 	}
 	lg.rm.OnReply(lg, r)
+	lg.replied = true
 }
 
 func (lg *Log) bury(refs []disklog.BlobRef) {
@@ -608,7 +627,8 @@ func (lg *Log) onDisk(ev *core.Event) {
 
 // drain executes the log's actions, counts its outcomes against the batches they hold, hands
 // every event to the loop's machine if it is a LogMachine, and reports the batches taken and
-// durable; then it hands a LogMachine a nil event after a completion or trim timer, or any event.
+// durable; then it hands a LogMachine a nil event after a completion or trim timer, any event, or
+// a shard's reply.
 // An event the round driver does not consume, with no LogMachine to take it, is a broken
 // invariant: something calls the log with nothing to hear its answer.
 func (lg *Log) drain(completion bool) {
@@ -628,7 +648,8 @@ func (lg *Log) drain(completion bool) {
 	completion = completion || len(lg.out.Events) > 0
 	lg.out.Reset()
 	lg.progress()
-	if lg.lm != nil && completion {
+	if lg.lm != nil && (completion || lg.replied) {
+		lg.replied = false
 		l.out = lg.lm.OnLog(&l.ctx, lg, nil, l.out[:0])
 		l.execute()
 	}
@@ -710,7 +731,7 @@ func (lg *Log) wake(h *handoff) {
 }
 
 // noticed tells the shards of h's newly durable batches the outcome and frees their buffers, then
-// hands its shards the owner's mail.
+// hands its shards the owner's mail, holding the mail for an ID not yet added.
 func (l *Loop) noticed(h *handoff) {
 	d := h.durable.Load()
 	for ; h.noticed < d; h.noticed++ {
@@ -744,16 +765,50 @@ func (l *Loop) noticed(h *handoff) {
 	h.mu.Lock()
 	h.got, h.mail = h.mail, h.got[:0]
 	h.mu.Unlock()
+	l.unhold()
 	for i := range h.got {
-		m := &h.got[i]
-		sh := l.shards[m.Shard].s
-		if sh == nil {
-			continue
+		if m := &h.got[i]; int(m.Shard) < len(l.shards) {
+			l.deliver(m)
+		} else {
+			l.hold(m)
 		}
+	}
+	clear(h.got)
+}
+
+func (l *Loop) deliver(m *Mail) {
+	if sh := l.shards[m.Shard].s; sh != nil {
 		l.out = sh.Mail(&l.ctx, m, l.out[:0])
 		l.execute()
 	}
-	clear(h.got)
+}
+
+// hold keeps m until its shard is added. A share or checkpoint mail supersedes the one before it,
+// so l holds at most one of each per ID besides a restart's replay.
+func (l *Loop) hold(m *Mail) {
+	if m.Kind == MailShare || m.Kind == MailCheckpointed {
+		l.held = slices.DeleteFunc(l.held, func(o Mail) bool { return o.Shard == m.Shard && o.Kind == m.Kind })
+	}
+	l.held = append(l.held, *m)
+}
+
+// unhold hands each shard added since l held its mail that mail, in arrival order.
+func (l *Loop) unhold() {
+	if !l.added {
+		return
+	}
+	l.added = false
+	keep := 0
+	for i := range l.held {
+		if int(l.held[i].Shard) < len(l.shards) {
+			l.deliver(&l.held[i])
+			continue
+		}
+		l.held[keep] = l.held[i]
+		keep++
+	}
+	clear(l.held[keep:])
+	l.held = l.held[:keep]
 }
 
 // buryRemoved reports dead the Raft blobs among refs, a removed shard's durable records, which it

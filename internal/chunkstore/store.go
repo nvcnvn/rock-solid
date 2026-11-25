@@ -374,13 +374,14 @@ type Store struct {
 	// first cpShards in the running checkpoint, removing the owners of those RemoveRaft removes
 	// once it ends, removedPieces the pieces of their trees, dead once a checkpoint begun after the
 	// removal ends; lastBase is the base of the last manifest a due checkpoint wrote, cpBase that
-	// of the one running.
+	// of the one running; remoteFull says a shard on the round driver asked for a checkpoint.
 	raft             *raftshard.Host
 	shards           []raftShard
 	cpShards         int
 	removing         []uint32
 	removedPieces    []disklog.BlobRef
 	lastBase, cpBase uint64
+	remoteFull       bool
 
 	loading map[disklog.BlobRef]*loadingRun
 	pieceOf map[disklog.BlobRef]disklog.BlobRef
@@ -1898,6 +1899,8 @@ func (s *Store) housekeep(ctx *core.Context, out *Output) {
 				s.stop(ctx, err, out)
 				return
 			}
+			s.raft.MailShares(s.raftBytes())
+			out.Mail = s.raft.Mail(out.Mail)
 		}
 		if s.pieceWait {
 			s.nextPiece(ctx, out)

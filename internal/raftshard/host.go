@@ -43,26 +43,33 @@ type Host struct {
 }
 
 // remoteShard is a shard on the round driver: its owner, its loop and ShardID there, the LSN at
-// or before which a restart's replay skips its blobs, and the replay LSN a checkpoint names it
-// with, at or before every blob of it a restart still needs.
+// or before which a restart's replay skips its blobs, the replay LSN a checkpoint names it with,
+// at or before every blob of it a restart still needs, and the share it was last mailed, 0 for
+// none.
 type remoteShard struct {
 	owner  uint32
 	loop   int
 	id     uint32
 	from   uint64
 	replay uint64
+	share  uint64
 }
 
-// Mail is what a restart's replay sends a shard on the round driver, at Shard on the loop of ID
-// Loop: a blob of it past its replay LSN, at Ref, of kind Kind and bytes Data, or, with End, the
-// end of the replay.
+// Mail is what the disk's owner sends a shard on the round driver, at Shard on the loop of ID
+// Loop: a blob of it a restart's replay found past its replay LSN, at Ref, of kind Kind and bytes
+// Data; with End, the end of the replay; with Checkpointed, that the manifest of a due checkpoint
+// is durable, Base the base of the due manifest before it; or with Share, its share of twice
+// max_replay_bytes in entries.
 type Mail struct {
-	Loop  int
-	Shard uint32
-	End   bool
-	Ref   disklog.BlobRef
-	Kind  disklog.BlobKind
-	Data  []byte
+	Loop         int
+	Shard        uint32
+	End          bool
+	Checkpointed bool
+	Base         uint64
+	Share        uint64
+	Ref          disklog.BlobRef
+	Kind         disklog.BlobKind
+	Data         []byte
 }
 
 type retiredOwner struct {
@@ -78,7 +85,8 @@ type retiredOwner struct {
 // the entry payload bytes of its rounds written and not yet taken into its storage, landed its
 // rounds durable and not yet taken, with their payload bytes, done its newest round reported
 // durable, rw its full rewrite going out, if one is, and cut the compaction, with its
-// configuration, waiting for that rewrite to read the entries it drops (0 for none).
+// configuration, waiting for that rewrite to read the entries it drops (0 for none); kickedAt is
+// the commit at which fullDue last found it full, if kicked.
 type hosted struct {
 	owner     uint32
 	st        *Storage
@@ -97,6 +105,8 @@ type hosted struct {
 	rw        *rewriting
 	cut       uint64
 	cutConf   raftpb.ConfState
+	kicked    bool
+	kickedAt  uint64
 }
 
 type landedRound struct{ round, bytes uint64 }
@@ -251,6 +261,49 @@ func (h *Host) Mail(dst []Mail) []Mail {
 	clear(h.mail)
 	h.mail = h.mail[:0]
 	return dst
+}
+
+// Checkpointed mails each shard on the round driver that the manifest of a due checkpoint is
+// durable, base the base of the due manifest before it: the shard compacts to what that checkpoint
+// recorded of it, and writes again what it keeps at or before base, as Rewrite does for a hosted
+// shard when the next checkpoint begins.
+func (h *Host) Checkpointed(base uint64) {
+	for _, rs := range h.remote {
+		h.mail = append(h.mail, Mail{Loop: rs.loop, Shard: rs.id, Checkpointed: true, Base: base})
+	}
+}
+
+// Share is each shard's share of total, divided among the shards hosted and on the round driver.
+func (h *Host) Share(total uint64) uint64 {
+	return total / uint64(max(1, len(h.shards)+len(h.remote)))
+}
+
+// MailShares mails each shard on the round driver its share of total, as Share divides it, when
+// that differs from the share it was mailed last.
+func (h *Host) MailShares(total uint64) {
+	share := h.Share(total)
+	for i := range h.remote {
+		if rs := &h.remote[i]; rs.share != share {
+			rs.share = share
+			h.mail = append(h.mail, Mail{Loop: rs.loop, Shard: rs.id, Share: share})
+		}
+	}
+}
+
+// FullDue reports whether owner's shard, which applied index applied, retains share or more and
+// applied a commit FullDue has not reported for it yet: a checkpoint then compacts what it can,
+// and none more is taken for it until its commit moves.
+func (h *Host) FullDue(owner uint32, applied, share uint64) bool {
+	return h.shard(owner).fullDue(applied, share)
+}
+
+func (hd *hosted) fullDue(applied, share uint64) bool {
+	c := hd.st.HardState().Commit
+	if hd.kicked && hd.kickedAt == c || applied < c || hd.retained() < share {
+		return false
+	}
+	hd.kicked, hd.kickedAt = true, c
+	return true
 }
 
 func (h *Host) shard(owner uint32) *hosted {
@@ -418,33 +471,21 @@ func (h *Host) Retry(ctx *core.Context, out *disklog.Output) error {
 // rewriteBlobs in flight, and once its last is out, the compaction that waited for it.
 func (h *Host) step(ctx *core.Context, hd *hosted, out *disklog.Output) error {
 	for rw := hd.rw; rw != nil && hd.inflight < rewriteBlobs; rw = hd.rw {
-		k := min(rw.left, h.Log.MaxBlobBytes()-1)
-		buf, err := ctx.Pool.Alloc(int(k + 1))
+		it, err := hd.nextRewrite(ctx.Pool, h.Log.MaxBlobBytes())
 		if errors.Is(err, core.ErrPoolExhausted) {
 			return nil
 		}
 		if err != nil {
 			return err
 		}
-		b := ctx.Pool.Bytes(buf)[:k+1]
-		b[0] = 0
-		if !rw.begun {
-			b[0] = 1
-		}
-		rw.fill(hd.st, b[1:])
-		rw.begun, rw.left = true, rw.left-k
-		kind := disklog.BlobRaftEntries
-		if rw.left == 0 {
-			kind = disklog.BlobRaftState
-		}
-		t, err := h.Log.Submit(ctx, disklog.Hot, disklog.Item{Entry: disklog.BlobEntry(kind, hd.owner, k+1), Buf: buf}, out)
+		t, err := h.Log.Submit(ctx, disklog.Hot, it, out)
 		if err != nil {
-			ctx.Pool.Free(buf)
+			ctx.Pool.Free(it.Buf)
 			return err
 		}
 		f := flight{ticket: t, owner: hd.owner, after: h.Log.DurableLSN()}
-		if rw.left == 0 {
-			f.sum, hd.rw = rw.sum, nil
+		if hd.rw == nil {
+			f.sum = rw.sum
 		}
 		hd.inflight++
 		h.flights = append(h.flights, f)
@@ -455,6 +496,29 @@ func (h *Host) step(ctx *core.Context, hd *hosted, out *disklog.Output) error {
 	i := hd.cut
 	hd.cut = 0
 	return h.Compact(hd.owner, i, hd.cutConf)
+}
+
+// nextRewrite cuts the next blob of hd's full rewrite, of at most maxBlob bytes, into a buffer
+// from pool, and drops the rewrite once its last blob is cut.
+func (hd *hosted) nextRewrite(pool core.BufPool, maxBlob uint64) (disklog.Item, error) {
+	rw := hd.rw
+	k := min(rw.left, maxBlob-1)
+	buf, err := pool.Alloc(int(k + 1))
+	if err != nil {
+		return disklog.Item{}, err
+	}
+	b := pool.Bytes(buf)[:k+1]
+	b[0] = 0
+	if !rw.begun {
+		b[0] = 1
+	}
+	rw.fill(hd.st, b[1:])
+	rw.begun, rw.left = true, rw.left-k
+	kind := disklog.BlobRaftEntries
+	if rw.left == 0 {
+		kind, hd.rw = disklog.BlobRaftState, nil
+	}
+	return disklog.Item{Entry: disklog.BlobEntry(kind, hd.owner, k+1), Buf: buf}, nil
 }
 
 // close makes the blobs since the last whole round one round, appending to dead the blobs that
@@ -693,26 +757,41 @@ func (h *Host) RemoteIndexes(dst []disklog.CheckpointIndex, durable uint64) []di
 func (h *Host) Rewrite(ctx *core.Context, lsn uint64, out *disklog.Output) error {
 	for k := range h.shards {
 		hd := &h.shards[k]
-		if hd.newest < 0 || hd.rw != nil || hd.refs[0].LSN > lsn || hd.inflight > 0 || hd.wait != 0 {
+		if hd.rw != nil || hd.inflight > 0 || hd.wait != 0 {
 			continue
 		}
-		newest := &hd.rounds[hd.newest]
-		switch {
-		case hd.rounds[0].last > newest.state.Commit:
-			if hd.st.took == hd.done {
-				hd.rw = newRewriting(hd.st, newest)
-				if err := h.step(ctx, hd, out); err != nil {
-					return err
-				}
+		r, ok := hd.rewrite(lsn)
+		if hd.rw != nil {
+			if err := h.step(ctx, hd, out); err != nil {
+				return err
 			}
-		case hd.newest == 0 && hd.rounds[0].last <= hd.compacted:
-			r := Round{HardState: newest.state, Removed: newest.removed, Deleted: newest.deleted}
+		}
+		if ok {
 			if _, err := h.submit(ctx, hd, 0, &r, out); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+// rewrite decides what of hd, with no round of its own in flight or waiting and no full rewrite
+// going out, a checkpoint whose last manifest's base is lsn writes again: a round of its hard
+// state, returned, or a full rewrite, which it starts in hd.rw.
+func (hd *hosted) rewrite(lsn uint64) (Round, bool) {
+	if hd.newest < 0 || hd.refs[0].LSN > lsn {
+		return Round{}, false
+	}
+	newest := &hd.rounds[hd.newest]
+	switch {
+	case hd.rounds[0].last > newest.state.Commit:
+		if hd.st.took == hd.done {
+			hd.rw = newRewriting(hd.st, newest)
+		}
+	case hd.newest == 0 && hd.rounds[0].last <= hd.compacted:
+		return Round{HardState: newest.state, Removed: newest.removed, Deleted: newest.deleted}, true
+	}
+	return Round{}, false
 }
 
 // Reusable reports whether owner may be given to a new shard: no shard holds it, hosted or on the

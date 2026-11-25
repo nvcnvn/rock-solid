@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"testing"
 
@@ -171,6 +172,8 @@ type raftRig struct {
 	delay *core.Rand
 	pumps uint64
 	held  []heldRound
+	// mail is what the store mailed its shards on the round driver.
+	mail []raftshard.Mail
 }
 
 type heldRound struct {
@@ -219,6 +222,7 @@ func (r *raftRig) take() {
 		}
 		r.held = append(r.held, heldRound{d.Owner, d.Round, at})
 	}
+	r.mail = append(r.mail, r.out.Mail...)
 	r.out.Reset()
 	r.deliver(r.pumps)
 }
@@ -874,4 +878,48 @@ func TestRemoveRaftRefusesAnOwnerNotHosted(t *testing.T) {
 		t.Fatalf("removing an owner twice: %v", err)
 	}
 	r.take()
+}
+
+// A store hosting a shard and knowing one on the round driver mails the latter its share, half of
+// twice max_replay_bytes, which the hosted one is full at too. Asked for a checkpoint by it, the
+// store takes one at its next pump, though no checkpoint is due, and mails it the durable manifest
+// with the base of the due one before; the next names the base of that one, and a step checkpoint
+// mails nothing. A third shard on the round driver makes the store mail both the new share, a
+// third.
+func TestAStoreMailsAShardOnTheRoundDriverItsShareAndCheckpoints(t *testing.T) {
+	cfg := raftConfig()
+	r := newRaftRig(t, cfg, raftGeometry, 5)
+	r.s.AddRemote(9, 2, 4)
+	r.chunkWrite(chunk(1), fill(core.BlockSize, 1))
+	r.settle()
+	share := cfg.Log.MaxReplayBytes
+	if want := []raftshard.Mail{{Loop: 2, Shard: 4, Share: share}}; !reflect.DeepEqual(r.mail, want) || r.s.raft.Share(r.s.raftBytes()) != share {
+		t.Fatalf("the store mailed %+v and shares %d, want %+v", r.mail, r.s.raft.Share(r.s.raftBytes()), want)
+	}
+	for i := range 2 {
+		r.mail = r.mail[:0]
+		before := r.s.lastBase
+		r.s.RemoteFull()
+		r.chunkWrite(chunk(2), fill(core.BlockSize, byte(i)))
+		r.settle()
+		if len(r.mail) != 1 || !r.mail[0].Checkpointed || r.mail[0].Loop != 2 || r.mail[0].Shard != 4 || r.mail[0].Base != before || r.s.lastBase <= before {
+			t.Fatalf("asked for checkpoint %d after a manifest of base %d, the store mailed %+v and wrote one of base %d", i, before, r.mail, r.s.lastBase)
+		}
+	}
+	r.mail = r.mail[:0]
+	manifest := r.s.Log().Manifest()
+	r.s.beginCheckpoint(&r.ctx, false, &r.out)
+	r.take()
+	r.chunkWrite(chunk(2), fill(core.BlockSize, 2))
+	r.settle()
+	if r.s.Log().Manifest() == manifest || len(r.mail) != 0 {
+		t.Fatalf("a step checkpoint wrote manifest %+v after %+v and mailed %+v", r.s.Log().Manifest(), manifest, r.mail)
+	}
+	r.s.AddRemote(10, 2, 5)
+	r.chunkWrite(chunk(3), fill(core.BlockSize, 3))
+	r.settle()
+	third := 2 * share / 3
+	if want := []raftshard.Mail{{Loop: 2, Shard: 4, Share: third}, {Loop: 2, Shard: 5, Share: third}}; !reflect.DeepEqual(r.mail, want) {
+		t.Fatalf("with a third shard the store mailed %+v, want %+v", r.mail, want)
+	}
 }

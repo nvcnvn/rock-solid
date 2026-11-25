@@ -1,6 +1,7 @@
 package raftshard
 
 import (
+	"errors"
 	"maps"
 	"reflect"
 	"slices"
@@ -8,6 +9,7 @@ import (
 
 	"go.etcd.io/raft/v3/raftpb"
 
+	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
@@ -201,5 +203,212 @@ func TestRoundsPanicOnABrokenCallOrder(t *testing.T) {
 			}()
 			cases[name]()
 		})
+	}
+}
+
+// landed takes items as the log would land them, each at the next LSN, freeing their buffers.
+func landed(pool core.BufPool, items []disklog.Item, lsn *uint64) []landedBlob {
+	var out []landedBlob
+	for _, it := range items {
+		*lsn++
+		out = append(out, landedBlob{disklog.BlobRef{Segment: 1, Block: uint32(*lsn), LSN: *lsn}, it.Entry.BlobKind, slices.Clone(pool.Bytes(it.Buf)[:it.Entry.Length])})
+		pool.Free(it.Buf)
+	}
+	return out
+}
+
+// TestRoundsRewriteWhatHoldsTheFloorBack checks Rewrite on a shard of the round driver. Idle, its
+// oldest round compacted and holding its newest hard state, it writes that hard state again in a
+// round of its own, which the replica is not told of and which kills the old round. Holding
+// entries past its commit, it writes every entry again a few blobs a Ready, the replica's next
+// round and a compaction waiting behind; once the rewrite is durable every earlier blob is dead,
+// and the blobs left replay into the storage it holds.
+func TestRoundsRewriteWhatHoldsTheFloorBack(t *testing.T) {
+	pool := sim.NewPool(1<<20, 0)
+	var lsn uint64
+	write := func(rs *Rounds, st *Storage, round uint64, rd Round) []landedBlob {
+		t.Helper()
+		rs.Write(round, &rd)
+		items, err := rs.Ready(pool, nil)
+		if err != nil || len(items) == 0 {
+			t.Fatalf("round %d: %d blobs, %v", round, len(items), err)
+		}
+		out := landed(pool, items, &lsn)
+		if got, err := rs.Durable(nil, refsOf(out)); err != nil || got != round {
+			t.Fatalf("Durable named round %d of %d: %v", got, round, err)
+		}
+		st.Append(rd.Entries)
+		st.SetHardState(rd.HardState)
+		st.Took(round)
+		return out
+	}
+	t.Run("idle", func(t *testing.T) {
+		st := NewStorage()
+		rs := NewRounds(3, st, 600)
+		old := write(rs, st, 1, Round{Entries: entries(1, 2, 1, 100), HardState: raftpb.HardState{Term: 1, Vote: 1, Commit: 2}})
+		if rs.Rewrite(lsn); rs.HasReady() {
+			t.Fatal("a shard whose round holds uncompacted entries rewrote its hard state")
+		}
+		if err := rs.Compact(2, raftpb.ConfState{Voters: []uint64{1}}); err != nil {
+			t.Fatal(err)
+		}
+		if rs.Rewrite(old[0].ref.LSN - 1); rs.HasReady() {
+			t.Fatal("a shard whose oldest round follows the base rewrote its hard state")
+		}
+		rs.Rewrite(lsn)
+		items, err := rs.Ready(pool, nil)
+		if err != nil || len(items) == 0 {
+			t.Fatalf("the rewrite gave %d blobs: %v", len(items), err)
+		}
+		rs.Write(2, &Round{HardState: raftpb.HardState{Term: 2, Vote: 1, Commit: 2}})
+		if rs.HasReady() {
+			t.Fatal("the replica's round was ready beside the rewrite in flight")
+		}
+		rw := landed(pool, items, &lsn)
+		if got, err := rs.Durable(nil, refsOf(rw)); err != nil || got != 0 {
+			t.Fatalf("the rewrite's Durable named round %d: %v", got, err)
+		}
+		if dead := rs.Dead(nil); !reflect.DeepEqual(dead, refsOf(old)) {
+			t.Fatalf("the rewrite killed %v, want the old round's %v", dead, refsOf(old))
+		}
+		if got, ok := rs.ReplayLSN(); !ok || got != rw[0].ref.LSN-1 {
+			t.Fatalf("ReplayLSN reported %d, %v; want %d", got, ok, rw[0].ref.LSN-1)
+		}
+		if !rs.HasReady() {
+			t.Fatal("the replica's round did not follow the rewrite")
+		}
+	})
+	t.Run("full", func(t *testing.T) {
+		st := NewStorage()
+		rs := NewRounds(3, st, 100)
+		old := write(rs, st, 1, Round{Entries: entries(1, 3, 1, 300), HardState: raftpb.HardState{Term: 1, Vote: 1}})
+		rs.Rewrite(lsn)
+		var rw []landedBlob
+		for n := 0; rs.HasReady(); n++ {
+			items, err := rs.Ready(pool, nil)
+			if err != nil || len(items) == 0 || len(items) > rewriteBlobs {
+				t.Fatalf("Ready %d of the rewrite gave %d blobs: %v", n, len(items), err)
+			}
+			if n == 0 {
+				rs.Write(2, &Round{HardState: raftpb.HardState{Term: 1, Vote: 1, Commit: 2}})
+				if err := rs.Compact(2, raftpb.ConfState{Voters: []uint64{1}}); err != nil || st.Base().Index != 0 {
+					t.Fatalf("a compaction during the rewrite compacted to %d: %v", st.Base().Index, err)
+				}
+			}
+			out := landed(pool, items, &lsn)
+			rw = append(rw, out...)
+			if got, err := rs.Durable(nil, refsOf(out)); err != nil || got != 0 {
+				t.Fatalf("the rewrite's Durable named round %d: %v", got, err)
+			}
+			if rs.hd.rw == nil {
+				break
+			}
+		}
+		if len(rw) <= rewriteBlobs || st.Base().Index != 2 {
+			t.Fatalf("the rewrite went out in %d blobs, the compaction to %d", len(rw), st.Base().Index)
+		}
+		if dead := rs.Dead(nil); !reflect.DeepEqual(dead, refsOf(old)) {
+			t.Fatalf("the rewrite killed %v, want the old round's %v", dead, refsOf(old))
+		}
+		again := NewStorage()
+		r2 := NewRounds(3, again, 100)
+		for _, b := range rw {
+			if err := r2.Replay(b.ref, b.kind, b.data); err != nil {
+				t.Fatal(err)
+			}
+		}
+		r2.Replayed()
+		want, _ := st.Entries(3, 4, ^uint64(0))
+		got, _ := again.Entries(3, 4, ^uint64(0))
+		if again.HardState() != st.HardState() || !reflect.DeepEqual(got, want) {
+			t.Fatalf("the rewrite replays to %+v and %v, the storage holds %+v and %v", again.HardState(), got, st.HardState(), want)
+		}
+		items, err := rs.Ready(pool, nil)
+		if err != nil || len(items) == 0 {
+			t.Fatalf("the replica's round after the rewrite gave %d blobs: %v", len(items), err)
+		}
+		if got, err := rs.Durable(nil, refsOf(landed(pool, items, &lsn))); err != nil || got != 2 {
+			t.Fatalf("Durable named round %d of 2: %v", got, err)
+		}
+	})
+	t.Run("failed", func(t *testing.T) {
+		st := NewStorage()
+		rs := NewRounds(3, st, 100)
+		old := write(rs, st, 1, Round{Entries: entries(1, 3, 1, 300), HardState: raftpb.HardState{Term: 1, Vote: 1}})
+		rs.Rewrite(lsn)
+		items, err := rs.Ready(pool, nil)
+		if err != nil || len(items) == 0 {
+			t.Fatalf("the rewrite gave %d blobs: %v", len(items), err)
+		}
+		first := landed(pool, items, &lsn)
+		if _, err := rs.Durable(nil, refsOf(first)); err != nil {
+			t.Fatal(err)
+		}
+		if err := rs.Compact(2, raftpb.ConfState{Voters: []uint64{1}}); err != nil {
+			t.Fatal(err)
+		}
+		items, err = rs.Ready(pool, nil)
+		if err != nil || len(items) == 0 {
+			t.Fatalf("the rewrite's second Ready gave %d blobs: %v", len(items), err)
+		}
+		landed(pool, items, &lsn)
+		failed := errors.New("disk failed")
+		if got, err := rs.Durable(failed, nil); got != 0 || !errors.Is(err, failed) {
+			t.Fatalf("the failed rewrite's Durable named round %d: %v", got, err)
+		}
+		if rs.HasReady() || st.Base().Index != 2 {
+			t.Fatalf("after its batch failed the rewrite went on %v, the compaction it held went to %d", rs.HasReady(), st.Base().Index)
+		}
+		if dead := rs.Dead(nil); !reflect.DeepEqual(dead, refsOf(first)) {
+			t.Fatalf("the failed rewrite killed %v, want its own %v", dead, refsOf(first))
+		}
+		again := NewStorage()
+		r2 := NewRounds(3, again, 100)
+		for _, b := range old {
+			if err := r2.Replay(b.ref, b.kind, b.data); err != nil {
+				t.Fatal(err)
+			}
+		}
+		r2.Replayed()
+		want, _ := st.Entries(3, 4, ^uint64(0))
+		got, _ := again.Entries(3, 4, ^uint64(0))
+		if again.HardState() != st.HardState() || !reflect.DeepEqual(got, want) {
+			t.Fatalf("the old round replays to %+v and %v, the storage holds %+v and %v", again.HardState(), got, st.HardState(), want)
+		}
+		if rs.Rewrite(lsn); !rs.HasReady() {
+			t.Fatal("a later Rewrite did not write the round again")
+		}
+	})
+}
+
+// TestRoundsAreFullAtTheShareTheOwnerMailed checks a shard of the round driver takes no new
+// entries once it retains the share its disk's owner mailed, and none before one is mailed, and
+// asks for a checkpoint once for each commit it applied while full.
+func TestRoundsAreFullAtTheShareTheOwnerMailed(t *testing.T) {
+	st := NewStorage()
+	rs := NewRounds(3, st, 600)
+	st.Append(entries(1, 4, 1, 100))
+	st.SetHardState(raftpb.HardState{Term: 1, Vote: 1, Commit: 3})
+	if rs.Full() || rs.FullDue(3) {
+		t.Fatal("a shard no share was mailed to was full")
+	}
+	rs.SetShare(401)
+	if rs.Full() || rs.FullDue(3) {
+		t.Fatalf("a shard retaining %d of its share 401 was full", rs.Retained())
+	}
+	rs.SetShare(400)
+	switch {
+	case !rs.Full():
+		t.Fatalf("a shard retaining %d of its share 400 was not full", rs.Retained())
+	case rs.FullDue(2):
+		t.Fatal("a full shard asked for a checkpoint before it applied its commit")
+	case !rs.FullDue(3):
+		t.Fatal("a full shard that applied its commit asked for no checkpoint")
+	case rs.FullDue(3):
+		t.Fatal("a full shard asked twice for a checkpoint at one commit")
+	}
+	st.SetHardState(raftpb.HardState{Term: 1, Vote: 1, Commit: 4})
+	if !rs.FullDue(4) {
+		t.Fatal("a full shard that applied a new commit asked for no checkpoint")
 	}
 }

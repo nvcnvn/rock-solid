@@ -15,8 +15,10 @@ import (
 
 // raftRounds is a Raft shard's log on the round driver, as its replica drives it: each round holds
 // a few entries and a hard state committing them, its storage takes it once durable, and every
-// third round compacts to the commit of the round before, as a checkpoint would. With reply it
-// tells the disk's owner its replay LSN as it moves.
+// third round compacts to the commit of the round before, as a checkpoint would. A due
+// checkpoint's mail compacts it to its commit, as its runs would record, and rewrites what holds
+// the replay floor back. With reply it tells the disk's owner its replay LSN as it moves, and
+// asks for a checkpoint when full.
 type raftRounds struct {
 	l     *loop.Loop
 	id    loop.ShardID
@@ -34,6 +36,10 @@ type raftRounds struct {
 	// a restart's replay ended.
 	refs, dead []disklog.BlobRef
 	recovered  bool
+	// rewrote counts the rounds of Rounds' own made durable, checkpointed the due checkpoints
+	// mailed, and shares are the shares mailed.
+	rewrote, checkpointed int
+	shares                []uint64
 }
 
 func newRaftRounds(l *loop.Loop, pool core.BufPool, lg *loop.Log, log *disklog.Log, rounds int) *raftRounds {
@@ -82,17 +88,22 @@ func (rr *raftRounds) Ready(items []disklog.Item) []disklog.Item {
 
 func (rr *raftRounds) Durable(ctx *core.Context, err error, refs []disklog.BlobRef, out []core.Action) []core.Action {
 	round, err := rr.rs.Durable(err, refs)
-	if err != nil || round != rr.flush {
+	if err != nil || round != 0 && round != rr.flush {
 		rr.err = fmt.Errorf("round %d durable with %v, %d in flight", round, err, rr.flush)
 		return out
 	}
 	rr.refs = append(rr.refs, refs...)
+	if round == 0 {
+		rr.rewrote++
+		rr.bury()
+		return out
+	}
 	rr.done = round
 	before, _ := rr.st.LastIndex()
 	rr.st.Append(rr.round.Entries)
 	rr.st.SetHardState(rr.round.HardState)
 	rr.st.Took(round)
-	if round%3 == 0 {
+	if round%3 == 0 && before > rr.st.Base().Index {
 		if err := rr.rs.Compact(before, raftpb.ConfState{Voters: []uint64{1}}); err != nil {
 			rr.err = err
 		}
@@ -111,6 +122,12 @@ func (rr *raftRounds) bury() {
 	}
 	if lsn, ok := rr.rs.ReplayLSN(); ok && rr.reply {
 		rr.l.Reply(rr.id, loop.Reply{Kind: loop.ReplyReplay, Owner: rr.owner, LSN: lsn})
+	}
+	if rr.reply && rr.rs.FullDue(rr.st.HardState().Commit) {
+		rr.l.Reply(rr.id, loop.Reply{Kind: loop.ReplyFull, Owner: rr.owner})
+	}
+	if rr.rs.HasReady() {
+		rr.l.Mark(rr.id)
 	}
 }
 
@@ -132,6 +149,17 @@ func (rr *raftRounds) Mail(_ *core.Context, m *loop.Mail, out []core.Action) []c
 	case loop.MailRecovered:
 		rr.rs.Replayed()
 		rr.recovered = true
+	case loop.MailCheckpointed:
+		rr.checkpointed++
+		if c := rr.st.HardState().Commit; c > rr.st.Base().Index {
+			if err := rr.rs.Compact(c, raftpb.ConfState{Voters: []uint64{1}}); err != nil && rr.err == nil {
+				rr.err = err
+			}
+		}
+		rr.rs.Rewrite(m.Base)
+	case loop.MailShare:
+		rr.rs.SetShare(m.Share)
+		rr.shares = append(rr.shares, m.Share)
 	}
 	rr.bury()
 	return out

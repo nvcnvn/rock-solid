@@ -118,11 +118,14 @@ type Loop struct {
 	iov     [maxIOV]unix.Iovec
 	stopped atomic.Bool
 	// shards, handoffs and logs are the round driver's: the shards on this loop, their hand-offs
-	// to each disk's owner, and the logs this loop owns.
+	// to each disk's owner, and the logs this loop owns; held is the mail for IDs not yet added,
+	// in arrival order, and added says a shard was added since it was last looked at.
 	shards   []shard
 	handoffs []*handoff
 	logs     []*Log
 	unposted int
+	held     []Mail
+	added    bool
 }
 
 type conn struct {

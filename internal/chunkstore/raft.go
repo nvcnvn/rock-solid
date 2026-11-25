@@ -27,8 +27,8 @@ type RaftShard interface {
 }
 
 // raftShard is a hosted shard, the index and configuration a running checkpoint compacts it to,
-// the replay LSN the last due checkpoint that ended named it with, if one did, the one a running
-// due checkpoint names it with, and the commit at the last checkpoint begun for it full, if one was.
+// the replay LSN the last due checkpoint that ended named it with, if one did, and the one a
+// running due checkpoint names it with.
 type raftShard struct {
 	owner    uint32
 	st       *raftshard.Storage
@@ -39,8 +39,6 @@ type raftShard struct {
 	named    bool
 	cpReplay uint64
 	cpNamed  bool
-	kicked   bool
-	kickedAt uint64
 }
 
 // AddRaft hosts the Raft shard whose blobs carry owner and whose storage is st: after Format or
@@ -60,8 +58,11 @@ func (s *Store) AddRaft(owner uint32, st *raftshard.Storage, sh RaftShard) {
 // AddRemote knows the shard whose blobs carry owner as shard id on the round driver of loop,
 // which writes its rounds to this store's log: a restart's replay hands its blobs to Output's
 // Mail, every checkpoint names it with the replay LSN it reports (RemoteReplay), and a broken
-// index stops the store rather than rebuilding it under the driver. It is called as AddRaft is,
-// before the shard writes a blob.
+// index stops the store rather than rebuilding it under the driver. Output's Mail also tells it
+// its share of twice max_replay_bytes as the shards on the disk come and go, and each due
+// checkpoint whose manifest is durable, after which it compacts and writes again what holds the
+// replay floor back (raftshard.Rounds.Rewrite). It is called as AddRaft is, before the shard
+// writes a blob.
 func (s *Store) AddRemote(owner uint32, loop int, id uint32) {
 	if s.raft == nil {
 		s.raft = raftshard.NewHost(s.log)
@@ -72,6 +73,10 @@ func (s *Store) AddRemote(owner uint32, loop int, id uint32) {
 // RemoteReplay takes the replay LSN owner's shard on the round driver reported: a restart needs
 // none of its blobs at or before lsn.
 func (s *Store) RemoteReplay(owner uint32, lsn uint64) { s.raft.RemoteReplay(owner, lsn) }
+
+// RemoteFull takes a shard on the round driver's ask for a checkpoint, as raftshard.Rounds.FullDue
+// reports it: full, it applied a commit no checkpoint compacted.
+func (s *Store) RemoteFull() { s.remoteFull = true }
 
 // RemoveRemote forgets owner's shard on the round driver, taken off its loop with every blob of it
 // reported dead, the newest at lsn: its owner goes to no new shard while that blob can replay.
@@ -191,7 +196,8 @@ func (s *Store) beginShards(ctx *core.Context, due bool, durable uint64, idx []d
 }
 
 // shardsCheckpointed ends each shard tree's flush once the manifest is durable, reports the
-// pieces it made dead and compacts each shard to the index its tree was marked at.
+// pieces it made dead and compacts each shard to the index its tree was marked at; after a due
+// one, it mails each shard on the round driver to do the same.
 func (s *Store) shardsCheckpointed(ctx *core.Context, out *Output) {
 	for i := range s.cpShards {
 		r := &s.shards[i]
@@ -213,6 +219,8 @@ func (s *Store) shardsCheckpointed(ctx *core.Context, out *Output) {
 	s.piecesDead(s.removedPieces)
 	s.removedPieces = s.removedPieces[:0]
 	if s.cpBase != 0 {
+		s.raft.Checkpointed(s.lastBase)
+		out.Mail = s.raft.Mail(out.Mail)
 		s.lastBase, s.cpBase = s.cpBase, 0
 	}
 }
@@ -249,17 +257,28 @@ func (s *Store) restoreShards(m *disklog.Manifest) error {
 // as lost messages, and as a leader it refuses proposals as overloaded. Its committed entries are
 // never dropped; a checkpoint compacts what it applied.
 func (s *Store) RaftFull(owner uint32) bool {
-	return s.raft.Retained(owner) >= 2*s.cfg.Log.MaxReplayBytes/uint64(len(s.shards))
+	return s.raft.Retained(owner) >= s.raft.Share(s.raftBytes())
 }
+
+// raftBytes is what the shards on the disk, hosted and on the round driver, share of retained
+// entries: twice max_replay_bytes.
+func (s *Store) raftBytes() uint64 { return 2 * s.cfg.Log.MaxReplayBytes }
 
 // fullDue reports whether a full shard applied a commit no checkpoint begun for it saw, and records
 // that commit: one checkpoint compacts what it applied, and another would compact nothing more
-// until its commit moves, as a follower's whose leader is gone does not.
+// until its commit moves, as a follower's whose leader is gone does not. A shard on the round
+// driver asks through RemoteFull.
 func (s *Store) fullDue() bool {
+	if s.raft == nil {
+		return false
+	}
+	if s.remoteFull {
+		s.remoteFull = false
+		return true
+	}
+	share := s.raft.Share(s.raftBytes())
 	for i := range s.shards {
-		r := &s.shards[i]
-		if c := r.st.HardState().Commit; (!r.kicked || r.kickedAt != c) && r.sh.Applied() >= c && s.RaftFull(r.owner) {
-			r.kicked, r.kickedAt = true, c
+		if r := &s.shards[i]; s.raft.FullDue(r.owner, r.sh.Applied(), share) {
 			return true
 		}
 	}

@@ -91,10 +91,15 @@ func (sh *storeShards) start() {
 
 func (sh *storeShards) mail(m *raftshard.Mail) {
 	kind := loop.MailReplayed
-	if m.End {
+	switch {
+	case m.End:
 		kind = loop.MailRecovered
+	case m.Checkpointed:
+		kind = loop.MailCheckpointed
+	case m.Share != 0:
+		kind = loop.MailShare
 	}
-	sh.lg.Send(m.Loop, loop.Mail{Shard: loop.ShardID(m.Shard), Kind: kind, Ref: m.Ref, Blob: m.Kind, Data: m.Data})
+	sh.lg.Send(m.Loop, loop.Mail{Shard: loop.ShardID(m.Shard), Kind: kind, Ref: m.Ref, Blob: m.Kind, Data: m.Data, Base: m.Base, Share: m.Share})
 }
 
 func (sh *storeShards) Pool() core.BufPool     { return sh.sd.Pool() }
@@ -132,6 +137,8 @@ func (m storeShardsMachine) OnReply(_ *loop.Log, r loop.Reply) {
 	switch r.Kind {
 	case loop.ReplyReplay:
 		m.sh.r.S.RemoteReplay(r.Owner, r.LSN)
+	case loop.ReplyFull:
+		m.sh.r.S.RemoteFull()
 	case loop.ReplyRemoved:
 		m.sh.r.S.RemoveRemote(r.Owner, r.LSN)
 		m.sh.removed = append(m.sh.removed, r)
@@ -212,7 +219,9 @@ func smallReplay() chunkstore.Config {
 // device loop and on another loop write rounds, and then, the shards idle, chunk writes make more
 // due and merge steps run: each checkpoint, due or a merge step's, names both with the replay LSN
 // they reported, so the replay floor moves yet never passes the oldest blob either still needs,
-// though the index's replay LSN does, and a restart recovers each storage whole.
+// though the index's replay LSN does. Idle, each shard compacts as due checkpoints' manifests are
+// mailed durable and writes its hard state again, so the floor passes every blob it held when it
+// went idle; and a restart recovers each storage whole.
 func TestCheckpointsNameTheShardsOnTheRoundDriver(t *testing.T) {
 	cfg := storetest.Config()
 	cfg.Log.MaxReplayBytes = 64 << 10
@@ -232,12 +241,66 @@ func TestCheckpointsNameTheShardsOnTheRoundDriver(t *testing.T) {
 	if sh.r.S.Log().ReplayFloor() == 0 {
 		t.Fatal("no checkpoint moved the replay floor")
 	}
+	var idle [2]uint64
+	for i, rr := range sh.shards {
+		idle[i] = rr.refs[len(rr.refs)-1].LSN
+	}
 	for i := range 400 {
 		sh.r.Write(storetest.Chunk(uint32(i%8)), 0, storetest.Fill(core.BlockSize, byte(i)), 0)
 		for step() {
 		}
 	}
+	for i, rr := range sh.shards {
+		if floor := sh.r.S.Log().ReplayFloor(); floor < idle[i] || rr.rewrote == 0 {
+			t.Fatalf("idle shard %d rewrote %d rounds and holds the replay floor at %d, at or before its blob at %d", i, rr.rewrote, floor, idle[i])
+		}
+	}
 	sh.restart(0, 1)
+}
+
+// TestAFullShardGetsACheckpointFromAnIdleStore makes the Raft shard on each loop full with a
+// share mail, so that it asks its idle store for a checkpoint from its Mail: the store, which no
+// event wakes otherwise, takes one and mails both shards its manifest, for the shard on the device
+// loop as for the one on another loop.
+func TestAFullShardGetsACheckpointFromAnIdleStore(t *testing.T) {
+	for i, name := range []string{"another loop", "the device loop"} {
+		t.Run(name, func(t *testing.T) {
+			sh := newStoreShards(t, storetest.Config(), 3)
+			sh.r.Settle()
+			rr := sh.shards[i]
+			before := [2]int{sh.shards[0].checkpointed, sh.shards[1].checkpointed}
+			sh.lg.Send(i, loop.Mail{Shard: rr.id, Kind: loop.MailShare, Share: 1})
+			sh.loops[1].Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: 1})
+			sh.r.Settle()
+			for k, o := range sh.shards {
+				if o.checkpointed != before[k]+1 {
+					t.Fatalf("shard %d was mailed %d checkpoints after shard %d asked, %d before", k, o.checkpointed, i, before[k])
+				}
+			}
+		})
+	}
+}
+
+// TestMailForAShardNotYetOnItsLoopWaitsForIt has the store learn of two shards on another loop
+// before that loop adds them, as a node registers a shard with its store first, and chunk writes
+// make it mail each its share as it changes: the mail waits on the loop, the newest share standing
+// for the one before, and reaches the first shard once its loop adds it.
+func TestMailForAShardNotYetOnItsLoopWaitsForIt(t *testing.T) {
+	sh := newStoreShards(t, storetest.Config(), 3)
+	sh.r.Settle()
+	for i, owner := range []uint32{2001, 2002} {
+		sh.r.S.AddRemote(owner, 0, uint32(1+i))
+		sh.r.Write(storetest.Chunk(uint32(i)), 0, storetest.Fill(core.BlockSize, byte(i)), 0)
+		sh.r.Settle()
+	}
+	l := sh.loops[0]
+	late := addRaftRounds(l, l.Context().Pool, sh.lg, 2001, sh.maxBlob, 0, raftpb.SnapshotMetadata{})
+	l.Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: 1})
+	sh.r.Settle()
+	shares := sh.shards[0].shares
+	if want := shares[len(shares)-1:]; late.id != 1 || !reflect.DeepEqual(late.shares, want) {
+		t.Fatalf("shard %d added late was mailed the shares %v, want %v of the %v its loop's first shard was", late.id, late.shares, want, shares)
+	}
 }
 
 // TestARemovedShardsOwnerOnTheRoundDriverWaitsForTheFloor removes the Raft shard on another loop
