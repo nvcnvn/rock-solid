@@ -6,13 +6,15 @@
 # alone.
 #   scripts/models.sh [ci|deep|heavy|sim|fetch] [model | model/config.cfg ...]
 # ci (the default) runs the ci and negative configurations, each failing past CI_LIMIT seconds
-# (default 300); deep runs the deep ones, each failing past DEEP_LIMIT (default 8100); heavy runs
-# the heavy ones, each failing past 12 hours; sim runs TLC's random simulation of each model's ci
-# configurations at depth 100, splitting SIM_SECONDS (default 3600) per model evenly among them,
-# each with a fresh seed, printed for replay. fetch only downloads TLC. sim skips FairSpec configurations: TLC 1.7.4's
-# -simulate reports a liveness violation wherever a trace reaches a terminal state. A
-# model/config.cfg argument runs that configuration alone. TLC uses WORKERS (default 4) workers and
-# a heap of HEAP (default 4g).
+# (default 600, the budget on an M4 Pro; the gate workflow's runners, about 3 times slower, get
+# 2000); deep runs the deep ones, each failing past DEEP_LIMIT (default 8100; the nightly runners
+# get 19800); heavy runs the heavy ones, a deep configuration past those budgets, each failing past
+# 12 hours, on the M4 Pro at milestones and never in CI; sim runs TLC's random simulation of each
+# model's ci configurations at depth 100, splitting SIM_SECONDS (default 3600) per model evenly
+# among them, each with a fresh seed, printed for replay. fetch only downloads TLC. sim skips
+# FairSpec configurations: TLC 1.7.4's -simulate reports a liveness violation wherever a trace
+# reaches a terminal state. A model/config.cfg argument runs that configuration alone. TLC uses
+# WORKERS (default 4) workers and a heap of HEAP (default 4g).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -29,7 +31,7 @@ fi
 mode=${1:-ci}
 shift || true
 case $mode in
-ci) limit=${CI_LIMIT:-300} ;;
+ci) limit=${CI_LIMIT:-600} ;;
 deep) limit=${DEEP_LIMIT:-8100} ;;
 heavy) limit=43200 ;;
 sim) ;;

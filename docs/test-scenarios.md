@@ -2930,8 +2930,8 @@ planted by hand.
 
 Every seeded property test, one whose property must hold seed by seed, takes its seeds from
 `internal/sim/seeds` (`seeds.Run(t, first, n, f)`), and `scripts/seeds.sh` runs those in its list
-over thousands of seeds. CI's `go` workflow runs it at the seeds in its list on every push and
-pull request, beside `scripts/lint.sh` and `go test ./...` ([Testing
+over thousands of seeds. The `gate` workflow runs it at the seeds in its list on every change,
+split by test name over 12 jobs, beside `scripts/lint.sh` and `go test ./...` ([Testing
 strategy](design.md#testing-strategy)), and every item runs it before review ([build
 checklist](build-checklist.md)).
 Tests that check something across a fixed range keep their range: that two seeds give different
@@ -3308,7 +3308,7 @@ are a pattern derived from (chunk, version, block), so any extent can be checked
 
   | Run | What it checks | Command | Budget |
   | --- | --- | --- | --- |
-  | `ci` | Exhaustive: safety properties, and liveness with a time bound written as an invariant over the model's clocks | `scripts/models.sh ci`, with the negative variants, each of which stops at its first counterexample | Under 5 minutes with 4 workers on the M4 Pro; past `CI_LIMIT` (300 s by default, 1,000 s in CI) the run fails |
+  | `ci` | Exhaustive: safety properties, and liveness with a time bound written as an invariant over the model's clocks | `scripts/models.sh ci`, with the negative variants, each of which stops at its first counterexample | Under 10 minutes with 4 workers on the M4 Pro; past `CI_LIMIT` (600 s by default, 2,000 s in CI) the run fails |
   | `deep` | Exhaustive, with one more node, chunk, crash or term, plus the unbounded liveness properties | `scripts/models.sh deep`, recorded at each milestone; nightly CI runs it once per change to its spec, configuration or TLC version, and no item waits for it | 2 hours 15 minutes on the M4 Pro; past `DEEP_LIMIT` (8,100 s by default, 19,800 s in CI) the run fails |
   | `heavy` | As `deep`, for a configuration past `deep`'s budget | `scripts/models.sh heavy` on the M4 Pro at milestones; never in CI | 12 hours, after which the run fails |
   | Simulation | `-simulate`, depth 100, a fresh seed printed for replay | `scripts/models.sh sim`, splitting `SIM_SECONDS` (3,600 by default) per model evenly among its `ci` configurations but those under `FairSpec` | About 1 hour per model, nightly |
@@ -4306,8 +4306,8 @@ next milestone's run, which is also the twins' first.
 | Voter replacement | `ci-live` | [Voter replacement model](#voter-replacement-model) | 24 | 2,923 | 3 s |
 | Voter replacement | `ci-live-moved` | [Voter replacement model](#voter-replacement-model) | 27 | 54,991 | 57 s |
 | Voter replacement | `ci-lease` | [Voter replacement model](#voter-replacement-model) | 25 | 385,484 | 72 s |
-| Voter replacement | `ci-halt` | [Voter replacement model](#voter-replacement-model) | 23 | 1,242,444 | 224 s, 76 s under the 300 s limit, which a loaded machine can take |
-| Voter replacement | `ci-restart` | [Voter replacement model](#voter-replacement-model) | 23 | 1,006,988 | 208 s, 92 s under the 300 s limit |
+| Voter replacement | `ci-halt` | [Voter replacement model](#voter-replacement-model) | 23 | 1,242,444 | 224 s |
+| Voter replacement | `ci-restart` | [Voter replacement model](#voter-replacement-model) | 23 | 1,006,988 | 208 s |
 | Voter replacement | `ci-halt-live` | [Voter replacement model](#voter-replacement-model) | 24 | 6,135 | 5 s |
 | Voter replacement | `ci-die-live` | [Voter replacement model](#voter-replacement-model) | 25 | 13,193 | 9 s |
 | Voter replacement | `ci-leave-die-live` | [Voter replacement model](#voter-replacement-model) | 25 | 59,651 | 158 s, 1 worker |
@@ -4524,8 +4524,8 @@ and `RUN='TestPeeringKeepsAcknowledgedWritesAcrossPrimaries|^TestConformReplacem
 COUNT=1 scripts/conform.sh` replays it. On a pull request that changes the epoch or voter model, its trace spec,
 `internal/chunkstore`, `internal/lease`, `internal/raftshard`, `internal/trace`, `tools/tracedata`,
 `tools/votersdata` or the script, it runs 40 seeds of each model with the scripted traces, and the plants,
-and a failure there is a discrepancy to settle before the change merges. `scripts/gate-branch.sh` runs
-the local default, the epoch model's scripted and sweep traces and 50 seeds of the voter model's, on a branch that touches those paths. A plant run fails as each model's [traces can fail](#traces-can-fail-in-the-epoch-models-check) section says.
+and a failure there is a discrepancy to settle before the change merges; the `gate` workflow runs the same on
+a push that touches those paths. `scripts/gate-branch.sh` runs the local default, the epoch model's scripted and sweep traces and 50 seeds of the voter model's, on a branch that touches those paths. A plant run fails as each model's [traces can fail](#traces-can-fail-in-the-epoch-models-check) section says.
 
 `refillSoleHolder` is not in `conformPlants`: the primary-change run is too short for a member merely down to go missing, so a refill of one appears only in `scripted-refill`, and a `Stay` only in `scripted-stay`, and `TestPlantedPeeringBugsBreakTheOracle` breaks the rule through the simulator's invariant.
 
@@ -4914,35 +4914,37 @@ a trace gives no data or no verdict, or one of those 11 passes; the other 7 may 
 
 ## Models in CI
 
-The runs of [TLA+ and TLC](#tla-and-tlc), scheduled by the `models` workflow in
-`.github/workflows/models.yml` on GitHub's hosted runners ([Continuous integration](design.md#testing-strategy)). A first
-job lists the models, their `ci` and negative configurations and their `deep` configurations, and
-every other job runs once per item of one of those lists (a matrix), each on its own runner. The
-runner checks a `ci` configuration 2.7 to 3.2 times slower than the M4 Pro the budgets are measured
-on, and a `deep` one 2.0 to 2.4 times slower, so the workflow sets its own limits.
+The runs of [TLA+ and TLC](#tla-and-tlc) on GitHub's hosted runners ([Continuous
+integration](design.md#testing-strategy)), each job a matrix item on its own runner. The runner
+checks a `ci` configuration 2.7 to 3.2 times slower than the M4 Pro the budgets are measured on,
+and a `deep` one 2.0 to 2.4 times slower, so the workflows set their own limits.
 
-- On every push or pull request that changes `models/`, `scripts/models.sh`, which holds the TLC
-  pin, or the workflow, and on no other change, one job per `ci` or negative configuration runs
-  `scripts/models.sh ci` on it with `CI_LIMIT` 1,000. The configurations run side by side: run one
-  after another, they take hours.
+- The `gate` workflow (`.github/workflows/gate.yml`), on every change, hashes each `ci` and
+  negative configuration with its model's spec and the TLC version and checksum lines of
+  `scripts/models.sh`. A configuration whose hash has a pass cached by a push to main or a
+  `gate/` branch is skipped and named in the run's summary; each other one gets a job that runs
+  `scripts/models.sh ci` on it with `CI_LIMIT` 2,000 and, if it passes, caches its result line
+  under the hash. A pull request's passes go to its own cache scope, so they skip nothing else. The
+  configurations run side by side: run one after another, they take hours.
 - A rule removed from a spec, with no negative configuration changed, fails some configuration's
   job: a `ci` configuration or a negative variant fails and its trace is printed.
-- A configuration past 1,000 s on the runner fails its job. `ci-restarts` holds three plans and
-  `ci-restarts-moved` the fourth, since together they passed the 300 s budget on the M4 Pro.
-- Nightly, and when started by hand, one job per model runs `scripts/models.sh sim` with
-  `SIM_SECONDS` 3,600, split evenly among the model's `ci` configurations but those under
-  `FairSpec`, and prints every seed; a failing seed's printed replay reproduces its trace.
-- Nightly, and when started by hand, one job per `deep` configuration hashes the model's spec, the
-  configuration and the TLC version and checksum lines of `scripts/models.sh`. If the job cache
-  holds a pass under that hash, the job prints the pass's result line and stops; otherwise it runs
-  `scripts/models.sh deep` on the configuration with `DEEP_LIMIT` 19,800, 5.5 of the job's 6
-  hours, and, if it passes, stores its result line in the cache under the hash and in the run's
-  summary, from which it goes into the [Model-to-simulator map](#model-to-simulator-map)'s results
-  table. A TLC bump therefore reruns every `deep` configuration, and a spec change every one of its
-  model's. A failed run stores nothing and runs again the next night.
+- A configuration past 2,000 s on the runner fails its job; one past 600 s on the M4 Pro is split,
+  as `ci-restarts` holds three plans and `ci-restarts-moved` the fourth, or its largest constant
+  moves to `deep`.
+- Nightly, and when started by hand, the `models` workflow (`.github/workflows/models.yml`) runs
+  one job per model of `scripts/models.sh sim` with `SIM_SECONDS` 3,600, split evenly among the
+  model's `ci` configurations but those under `FairSpec`, and prints every seed; a failing seed's
+  printed replay reproduces its trace.
+- Nightly, and when started by hand, the same workflow hashes each `deep` configuration the same
+  way. If the job cache holds a pass under that hash, the job prints the pass's result line and
+  stops; otherwise it runs `scripts/models.sh deep` on the configuration with `DEEP_LIMIT` 19,800,
+  5.5 of the job's 6 hours, and, if it passes, stores its result line in the cache under the hash
+  and in the run's summary, from which it goes into the [Model-to-simulator
+  map](#model-to-simulator-map)'s results table. A failed run stores nothing and runs again the
+  next night.
+- A TLC bump therefore reruns every configuration, and a spec change every one of its model's.
 - No job runs a `heavy` configuration.
-- GitHub evicts a cache entry unused for 7 days. Each nightly run reads every pass, so a pass is
-  lost only when the nightly runs stop for a week, and its configuration then runs again.
+- GitHub evicts a cache entry unused for 7 days, and its configuration then runs again.
 
 ## Wire messages
 

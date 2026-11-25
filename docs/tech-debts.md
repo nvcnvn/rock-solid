@@ -76,12 +76,12 @@
 - **Remove when:** a second index shares a disk (Shard indexes in the disk owner's checkpoint) and the log can replay its records to one index while it keeps appending.
 
 ## Version pin: GitHub Actions and Java 17 in CI
-- **Where:** each `uses:` in `.github/workflows/go.yml`, `models.yml` and `maelstrom.yml`, pinned to a commit with its release in a trailing comment; `java-version` of `actions/setup-java` (Temurin 17) in `models.yml` and `maelstrom.yml`
-- **Why:** a release tag can be moved to other code, so a tag would let an action's owner change what runs with this repository's token; a commit cannot change. TLC's speed depends on the JVM, and the 300 s `ci` budget and the [model-to-simulator map](test-scenarios.md#model-to-simulator-map)'s wall times were measured on Java 17, which TLC 1.7.4 runs on.
+- **Where:** each `uses:` in `.github/workflows/`, pinned to a commit with its release in a trailing comment; `java-version` of `actions/setup-java` (Temurin 17) in `gate.yml`, `models.yml`, `conform.yml` and `maelstrom.yml`
+- **Why:** a release tag can be moved to other code, so a tag would let an action's owner change what runs with this repository's token; a commit cannot change. TLC's speed depends on the JVM, and the 600 s `ci` budget and the [model-to-simulator map](test-scenarios.md#model-to-simulator-map)'s wall times were measured on Java 17, which TLC 1.7.4 runs on.
 - **Remove when:** never removed, only bumped. Bump an action to a release at least two weeks old, and Java only with a `ci` run of every model whose times are compared with the map's.
 
 ## Workaround: `go test -p 3` in CI
-- **Where:** the `test` job in `.github/workflows/go.yml`
+- **Where:** the `test` job in `.github/workflows/gate.yml`
 - **Why:** `internal/chunkstore`'s tests peak near 4.3 GB resident ([invariant checker](test-scenarios.md#invariant-checker)), and Go's default runs as many packages at once as the runner has CPUs, 4, so three at a time keeps a runner's 16 GB clear of the heaviest packages running together.
 - **Remove when:** the heaviest test package peaks under 3 GB, or the runner has 32 GB.
 

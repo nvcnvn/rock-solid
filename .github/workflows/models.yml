@@ -1,10 +1,7 @@
 name: models
 
+# The nightly runs; the gate workflow checks the ci and negative configurations of each change.
 on:
-  push:
-    paths: [models/**, scripts/models.sh, .github/workflows/models.yml]
-  pull_request:
-    paths: [models/**, scripts/models.sh, .github/workflows/models.yml]
   schedule:
     - cron: "17 2 * * *"
   workflow_dispatch:
@@ -25,7 +22,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       models: ${{ steps.list.outputs.models }}
-      configs: ${{ steps.list.outputs.configs }}
       deep: ${{ steps.list.outputs.deep }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -33,32 +29,9 @@ jobs:
         working-directory: models
         run: |
           echo "models=$(ls | jq -Rnc '[inputs]')" >>"$GITHUB_OUTPUT"
-          echo "configs=$(ls -- */ci*.cfg */neg-*.cfg | jq -Rnc '[inputs]')" >>"$GITHUB_OUTPUT"
           echo "deep=$(ls -- */deep*.cfg | jq -Rnc '[inputs]')" >>"$GITHUB_OUTPUT"
 
-  # One job per configuration: the runner checks about 3 times slower than the M4 Pro the 300 s
-  # budget is set on, and the configurations run serially take hours.
-  ci:
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
-    needs: plan
-    strategy:
-      fail-fast: false
-      matrix:
-        config: ${{ fromJSON(needs.plan.outputs.configs) }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
-        with:
-          distribution: temurin
-          java-version: "17"
-      - run: scripts/models.sh ci "$CONFIG"
-        env:
-          CONFIG: ${{ matrix.config }}
-          CI_LIMIT: 1000
-
   sim:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     needs: plan
     strategy:
       fail-fast: false
@@ -79,7 +52,6 @@ jobs:
   # One job per deep configuration, since one may take 5.5 hours here and a job at most 6. A pass is
   # a cache entry keyed on the spec, the configuration and the TLC pin, holding the result line.
   deep:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     needs: plan
     strategy:
       fail-fast: false

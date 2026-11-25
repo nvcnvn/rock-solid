@@ -22,6 +22,12 @@ on:
       first:
         description: First seed (default rotates daily)
         required: false
+  workflow_call:
+    inputs:
+      scripted:
+        description: Run a pull request's seeds, as the gate workflow does
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
@@ -63,9 +69,10 @@ jobs:
       - id: seeds
         env:
           INPUT_FIRST: ${{ inputs.first }}
-        # A pull request runs seeds 0 to 39 with the scripted traces; a nightly run sweeps new ones.
+          SCRIPTED: ${{ inputs.scripted }}
+        # A pull request or the gate runs seeds 0 to 39 with the scripted traces; a nightly run sweeps new ones.
         run: |
-          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+          if [ "$GITHUB_EVENT_NAME" = pull_request ] || [ "$SCRIPTED" = true ]; then
             printf 'first=0\ncount=40\nrun=TestConform|^%s$\n' "$RUN" >>"$GITHUB_OUTPUT"
             exit
           fi

@@ -40,6 +40,16 @@
 - A new `neg-*.cfg` gets a row in `scripts/model-rules.tsv`, naming its Go plant and test, or the
   unticked checklist item that owes them.
 
+## Gate
+- A change reaches main only through a passing `gate` workflow run on its exact commit: push it as
+  `gate/<name>` (`git push origin HEAD:gate/<name>`) and watch the final `gate` job.
+  `scripts/gate-branch.sh` is the offline fallback when GitHub Actions is unavailable.
+- A job on the self-hosted runner runs only on `push`, `schedule` or `workflow_dispatch`, never on
+  `pull_request`, and says so in its `if:`.
+- Model budgets: a `ci` or negative configuration passes within 600 s on an M4 Pro and gets 2,000 s
+  on a GitHub runner; a `deep` one 8,100 s and 19,800 s. Past `deep`'s budget a configuration is
+  `heavy`, run on the M4 Pro at milestones and never in CI.
+
 ## Comments
 - Default to no comments. Write code whose names and structure make intent clear.
 - Only comment a constraint the code cannot express: a workaround for an external bug,

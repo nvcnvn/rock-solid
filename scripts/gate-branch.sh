@@ -1,5 +1,8 @@
 #!/bin/bash
-# Gates a branch or commit in a fresh worktree at its tip: the TLC ci runs of the models it touches,
+# The offline fallback for when GitHub Actions is unavailable. The gate is the gate workflow
+# (.github/workflows/gate.yml): push the commit as gate/<name> and watch its final job, gate:
+#   git push origin HEAD:gate/<name> && gh run watch
+# This script gates a branch or commit in a fresh worktree at its tip: the TLC ci runs of the models it touches,
 # go test and seeds.sh over the packages it changes and every package that imports them (everything
 # with --full or --merge), the same go test of the packages with Linux-only tests in Docker (skipped
 # with RS_GATE_NO_LINUX=1), conform.sh when it touches a path the conform workflow watches, and lint.sh.

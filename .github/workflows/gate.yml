@@ -1,0 +1,181 @@
+# The gate: every check a change must pass before it reaches main. The final job, gate, passes only
+# when every other job passed or was skipped; push a change as gate/<name> and watch it:
+#   git push origin HEAD:gate/<name> && gh run watch
+# scripts/gate-branch.sh runs the same checks offline. Nightly runs are in models.yml and conform.yml.
+name: gate
+
+on:
+  push:
+    branches: [main, gate/**]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: gate-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - run: scripts/lint.sh
+        env:
+          MODEL_GATE_BASE: ${{ github.event.pull_request.base.sha || (github.ref == 'refs/heads/main' && github.event.before) || '' }}
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      # internal/chunkstore alone peaks near 4.3 GB, so three packages at a time keep within the
+      # runner's 16 GB.
+      - run: go test -p 3 -timeout 30m ./...
+      - run: scripts/raft-tests.sh
+      - run: |
+          for seed in 2 3; do
+            RS_CRASH_SEED=$seed go test -count=1 -run '^TestCrashOnARealDisk$' ./internal/driver/uring/
+          done
+
+  # scripts/seeds.sh split by test name across the shards, so each ends well inside a job's hour; a
+  # name listed in two packages runs in both.
+  seeds:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - env:
+          SHARD: ${{ strategy.job-index }}
+          SHARDS: ${{ strategy.job-total }}
+        run: |
+          names=$(awk '/^internal\/[^ ]+ Test[^ ]+ [0-9]+$/ && !seen[$2]++ { print $2 }' scripts/seeds.sh |
+            awk -v i="$SHARD" -v n="$SHARDS" '(NR - 1) % n == i')
+          [ -z "$names" ] || scripts/seeds.sh $names
+
+  # Lists the ci and negative configurations to check: those with no pass cached under the hash of
+  # their model's spec, the configuration and the TLC pin, as the nightly deep job keys its passes.
+  # Only passes saved by a push to main or gate/** count; a pull request's go to its own scope.
+  plan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      models: ${{ steps.list.outputs.models }}
+      conform: ${{ steps.conform.outputs.conform }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: list
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh cache list --key models-ci- --limit 10000 --json key,ref \
+            -q '.[] | select(.ref == "refs/heads/main" or (.ref | startswith("refs/heads/gate/"))) | .key' >passed
+          pin=$(grep -E '^(version|sha256)=' scripts/models.sh)
+          for c in $(cd models && ls -- */ci*.cfg */neg-*.cfg); do
+            sum=$({ cat "models/${c%%/*}"/*.tla "models/$c"; echo "$pin"; } | sha256sum)
+            key=models-ci-${c/\//-}-${sum%% *}
+            if grep -qxF "$key" passed; then
+              echo "skip $c: a pass is cached" >>"$GITHUB_STEP_SUMMARY"
+            else
+              jq -nc --arg config "$c" --arg key "$key" '{$config, $key}'
+            fi
+          done | jq -sc . >todo
+          echo "$(jq length todo) configurations to check, $(grep -c '^skip' "$GITHUB_STEP_SUMMARY" || true) skipped" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "models=$(cat todo)" >>"$GITHUB_OUTPUT"
+      # conform runs when the change touches a path in conform.yml's list, as in scripts/gate-branch.sh.
+      - id: conform
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || (github.ref == 'refs/heads/main' && github.event.before) || '' }}
+        run: |
+          base=$BASE
+          git cat-file -e "$base^{commit}" 2>/dev/null || base=$(git merge-base origin/main HEAD)
+          [ "$base" != "$(git rev-parse HEAD)" ] || base=HEAD^
+          changed=$(git diff --name-only "$base" HEAD)
+          while read -r g; do
+            while read -r f; do
+              [[ -n $f && $f == $g ]] && echo conform=true >>"$GITHUB_OUTPUT" && exit 0
+            done <<<"$changed"
+          done < <(sed -n '/^    paths:/,/^  [a-z]/s/^      - //p' .github/workflows/conform.yml)
+          echo conform=false >>"$GITHUB_OUTPUT"
+
+  # One job per configuration: the configurations run one after another take hours. A ci
+  # configuration takes at most 600 s on the M4 Pro and the runner checks about 3 times slower.
+  # ponytail: a matrix holds at most 256 jobs; past that many configurations to check, split the
+  # list across two jobs.
+  models:
+    needs: plan
+    if: needs.plan.outputs.models != '[]'
+    name: models (${{ matrix.config }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.models) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - run: |
+          scripts/models.sh ci "$CONFIG" | tee models.log
+          mkdir passed
+          grep '^ok ' models.log >passed/result
+        env:
+          CONFIG: ${{ matrix.config }}
+          CI_LIMIT: 2000
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: passed
+          key: ${{ matrix.key }}
+
+  conform:
+    needs: plan
+    if: needs.plan.outputs.conform == 'true' && github.event_name != 'pull_request'
+    uses: ./.github/workflows/conform.yml
+    with:
+      scripted: true
+
+  gate:
+    if: always()
+    needs: [lint, test, seeds, plan, models, conform]
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "$RESULTS"
+          for r in $RESULTS; do
+            [ "$r" = success ] || [ "$r" = skipped ] || exit 1
+          done
