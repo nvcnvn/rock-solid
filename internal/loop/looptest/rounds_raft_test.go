@@ -55,14 +55,15 @@ type raftRounds struct {
 	// pause stops its tree's merges, steps counts the merge steps it installed, gone the pieces
 	// it reported its tree no longer names, sets the runs each flush's manifest names, moved the
 	// number of the last flush that carried other runs than the flush before it named, root says
-	// the piece it replied last is a run's root, and loaded is the runs a restart mailed it.
-	pause  bool
-	steps  int
-	gone   []disklog.BlobRef
-	sets   []runSet
-	moved  int
-	root   bool
-	loaded runSet
+	// the piece it replied last is a run's root, ended that it replied its flush's end, and loaded
+	// is the runs a restart mailed it.
+	pause       bool
+	steps       int
+	gone        []disklog.BlobRef
+	sets        []runSet
+	moved       int
+	root, ended bool
+	loaded      runSet
 	// refs are the places of every blob told durable, dead those reported dead; recovered says
 	// a restart's replay ended.
 	refs, dead []disklog.BlobRef
@@ -75,6 +76,24 @@ type raftRounds struct {
 	// last as the cleaner weighs them.
 	rewrites int
 	costs    []disklog.RunCost
+	// sizes draws each round's entries, 1 to 8 of 64 to 8,000 bytes, where nil makes 3 of 1,000,
+	// and top is the last index proposed. bounded proposes only while not full, as a replica
+	// refuses proposals then, dropping the rest of a burst (refused counts those), and late
+	// holds the rounds told durable in landed until act hands them to the storage. wrote is
+	// the entry bytes proposed, and replayed the oldest LSN a restart's replay mailed it.
+	sizes           *core.Rand
+	top             uint64
+	bounded, late   bool
+	refused         int
+	landed          []landedRound
+	wrote, replayed uint64
+	atRecovery      shardState
+}
+
+// landedRound is a round told durable that the storage has not taken.
+type landedRound struct {
+	n  uint64
+	rd raftshard.Round
 }
 
 func newRaftRounds(l *loop.Loop, pool core.BufPool, lg *loop.Log, log *disklog.Log, rounds int) *raftRounds {
@@ -148,7 +167,7 @@ func (rr *raftRounds) piece() {
 	n, root, err := rr.tree.NextPiece(buf)
 	rr.fail(err)
 	r := loop.Reply{Kind: loop.ReplyPiece, Owner: rr.owner, LSN: rr.cp, Root: root}
-	rr.root = root
+	rr.root, rr.ended = root, n == 0
 	if n > 0 {
 		r.Data = buf[:n]
 	}
@@ -225,16 +244,71 @@ func (rr *raftRounds) restore() {
 }
 
 func (rr *raftRounds) next() {
+	if rr.bounded && rr.rs.Full() {
+		rr.refused++
+		rr.left = 0
+		return
+	}
 	rr.left--
 	rr.flush++
 	last, _ := rr.st.LastIndex()
-	ents := make([]raftpb.Entry, 3)
-	for i := range ents {
-		ents[i] = raftpb.Entry{Index: last + 1 + uint64(i), Term: 1, Data: binary.LittleEndian.AppendUint64(make([]byte, 0, 1000), last+1+uint64(i))[:1000]}
+	last = max(last, rr.top)
+	n, size := 3, 1000
+	if rr.sizes != nil {
+		n, size = 1+int(rr.sizes.Below(8)), 64+int(rr.sizes.Below(7937))
 	}
-	rr.round = raftshard.Round{Entries: ents, HardState: raftpb.HardState{Term: 1, Vote: 1, Commit: last + 3}}
+	ents := make([]raftpb.Entry, n)
+	for i := range ents {
+		ents[i] = raftpb.Entry{Index: last + 1 + uint64(i), Term: 1, Data: binary.LittleEndian.AppendUint64(make([]byte, 0, size), last+1+uint64(i))[:size]}
+	}
+	rr.top = last + uint64(n)
+	rr.wrote += uint64(n * size)
+	rr.round = raftshard.Round{Entries: ents, HardState: raftpb.HardState{Term: 1, Vote: 1, Commit: rr.top}}
 	rr.rs.Write(rr.flush, &rr.round)
 	rr.l.Mark(rr.id)
+}
+
+// act, on the shard's loop, hands the storage the rounds late held back and proposes the next
+// round of its burst if none is queued or in flight.
+func (rr *raftRounds) act() {
+	rr.take()
+	if rr.left > 0 && rr.done == rr.flush {
+		rr.next()
+	}
+}
+
+// take hands the storage the rounds told durable, as the replica does, and applies them.
+func (rr *raftRounds) take() {
+	for _, l := range rr.landed {
+		before, _ := rr.st.LastIndex()
+		rr.st.Append(l.rd.Entries)
+		rr.st.SetHardState(l.rd.HardState)
+		rr.st.Took(l.n)
+		rr.apply()
+		if rr.selfCompact && l.n%3 == 0 && before > rr.st.Base().Index {
+			rr.fail(rr.rs.Compact(before, raftConf))
+		}
+	}
+	rr.landed = rr.landed[:0]
+	rr.bury()
+}
+
+// held is the entry bytes of the rounds proposed that the storage has not taken: queued, in
+// flight or held back.
+func (rr *raftRounds) held() uint64 {
+	var n uint64
+	add := func(rd *raftshard.Round) {
+		for _, e := range rd.Entries {
+			n += uint64(len(e.Data))
+		}
+	}
+	if rr.flush > rr.done {
+		add(&rr.round)
+	}
+	for i := range rr.landed {
+		add(&rr.landed[i].rd)
+	}
+	return n
 }
 
 func (rr *raftRounds) HasReady() bool { return rr.rs.HasReady() }
@@ -260,15 +334,12 @@ func (rr *raftRounds) Durable(ctx *core.Context, err error, refs []disklog.BlobR
 		return out
 	}
 	rr.done = round
-	before, _ := rr.st.LastIndex()
-	rr.st.Append(rr.round.Entries)
-	rr.st.SetHardState(rr.round.HardState)
-	rr.st.Took(round)
-	rr.apply()
-	if rr.selfCompact && round%3 == 0 && before > rr.st.Base().Index {
-		rr.fail(rr.rs.Compact(before, raftConf))
+	rr.landed = append(rr.landed, landedRound{round, rr.round})
+	if rr.late {
+		rr.bury()
+	} else {
+		rr.take()
 	}
-	rr.bury()
 	if rr.left > 0 {
 		rr.next()
 	}
@@ -311,13 +382,16 @@ func (rr *raftRounds) Mail(_ *core.Context, m *loop.Mail, out []core.Action) []c
 			rr.fail(rr.tree.LoadRun(m.Ref, m.Pieces))
 		}
 	case loop.MailReplayed:
+		if rr.replayed == 0 {
+			rr.replayed = m.Ref.LSN
+		}
 		rr.restore()
 		rr.fail(rr.rs.Replay(m.Ref, m.Blob, m.Data))
 	case loop.MailRecovered:
 		rr.restore()
 		rr.rs.Replayed()
 		rr.apply()
-		rr.recovered = true
+		rr.recovered, rr.atRecovery = true, rr.state()
 		rr.merge()
 	case loop.MailFlush:
 		rr.flushes++

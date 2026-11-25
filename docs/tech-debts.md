@@ -43,7 +43,7 @@
 ## Workaround: a restored Raft snapshot's data in its round and memtable
 - **Where:** `AppendRound`, `Storage.Replay` and `Storage.TakeBaseData` in `internal/raftshard`; `walkSnapshot` in `internal/meta/state.go` and the restore in `meta.NewShard`
 - **Why:** a follower that restores a snapshot must keep it across a crash, and its data belongs in sorted runs of the shard's LSM tree, named by the disk owner's checkpoint, with only its index, term and configuration in the round ([Raft shard](design.md#metadata-layer-metastore)). No checkpoint names a disk owner's shard's runs yet, and the control-plane host's names a restored snapshot's keys only once its next checkpoint flushes them, so the state machine changes the snapshot's keys in place in its tree's memtable, and the round's record carries the snapshot's data too, cut across as many blobs as it takes. A replay holds that data in memory until the round's last blob arrives and then keeps it in the storage beside the base it made, and a restarted shard restores its state from it before Raft hands over the entries after the base.
-- **Remove when:** Shard indexes in the disk owner's checkpoint writes a restored snapshot as runs its manifest names and restores a shard from them; then the round's record drops the data and the storage keeps none.
+- **Remove when:** a disk owner's shard writes a restored snapshot as runs its manifest names and restores from them, which comes with MetaStore shards on a storage node, the first host of such a shard outside `CtlHost`; then the round's record drops the data and the storage keeps none.
 
 ## Version pin: TLC 1.7.4
 - **Where:** `version` and `sha256` in `scripts/models.sh`, which downloads the TLC jar into `~/.cache/rock-solid` (`$XDG_CACHE_HOME` when set) and checks it against the checksum
@@ -72,8 +72,8 @@
 
 ## Workaround: an index rebuild restarts the whole log
 - **Where:** `indexBroken` and `drain` in `internal/chunkstore/store.go`
-- **Why:** a rebuild reloads the runs the newest named manifest lists and replays the log after them through recovery, which only runs on a log that is not appending, so the store stops, closes its log and recovers it again, where the design rebuilds one index while the disk's other indexes serve ([The LSM tree](design.md#on-disk-format)). The chunk index is a disk's only index until MetaStore shards share it.
-- **Remove when:** a second index shares a disk (Shard indexes in the disk owner's checkpoint) and the log can replay its records to one index while it keeps appending.
+- **Why:** a rebuild reloads the runs the newest named manifest lists and replays the log after them through recovery, which only runs on a log that is not appending, so the store stops, closes its log and recovers it again, where the design rebuilds one index while the disk's other indexes serve ([The LSM tree](design.md#on-disk-format)). A store whose disk hosts Raft shards stops instead of rebuilding.
+- **Remove when:** the log can replay its records to one index while it keeps appending and the disk's other indexes serve (Shard indexes through failures).
 
 ## Version pin: GitHub Actions and Java 17 in CI
 - **Where:** each `uses:` in `.github/workflows/`, pinned to a commit with its release in a trailing comment; `java-version` of `actions/setup-java` (Temurin 17) in `gate.yml`, `models.yml`, `conform.yml` and `maelstrom.yml`

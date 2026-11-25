@@ -1,6 +1,7 @@
 package looptest
 
 import (
+	"fmt"
 	"reflect"
 	"slices"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/loop"
 	"github.com/nvcnvn/rock-solid/internal/raftshard"
 	"github.com/nvcnvn/rock-solid/internal/sim"
+	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
 
 // storeShards runs a store of configuration cfg on a device loop, ID 1, that owns its log, with a
@@ -22,7 +24,8 @@ import (
 // restore from the runs the store mails them, when the store opens, their merges paused with
 // pause. removed is the ReplyRemoved replies the store heard, reusable whether it found each
 // one's owner reusable at once, and manifests the newest durable manifest's LSN as the store mailed
-// the shard on loop 1 each MailCheckpointed.
+// the shard on loop 1 each MailCheckpointed. sizes, bounded and late are each shard's, as
+// raftRounds has them, and seed the simulator's.
 type storeShards struct {
 	t         *testing.T
 	cfg       chunkstore.Config
@@ -40,6 +43,13 @@ type storeShards struct {
 	removed   []loop.Reply
 	reusable  []bool
 	manifests []uint64
+	sizes     *core.Rand
+	bounded   bool
+	late      bool
+	seed      uint64
+	// fds is the descriptors of the newest ring, which the test's cleanup closes: a cleanup
+	// holding the ring would keep its pool live for the whole test, over every seed.
+	fds *[2]int
 }
 
 func newStoreShards(t *testing.T, cfg chunkstore.Config, rounds int) *storeShards {
@@ -48,7 +58,12 @@ func newStoreShards(t *testing.T, cfg chunkstore.Config, rounds int) *storeShard
 
 // newStoreShardsOf is newStoreShards on a disk of the given size.
 func newStoreShardsOf(t *testing.T, cfg chunkstore.Config, rounds int, diskBytes uint64) *storeShards {
-	sh := &storeShards{t: t, cfg: cfg, sd: storetest.NewSimDiskOf(1, diskBytes), rounds: rounds}
+	return (&storeShards{t: t, cfg: cfg, sd: storetest.NewSimDiskOf(1, diskBytes), rounds: rounds, seed: 1}).format()
+}
+
+// format formats the store and adds its shards.
+func (sh *storeShards) format() *storeShards {
+	t, cfg := sh.t, sh.cfg
 	sh.start()
 	r := storetest.NewRig(t, sh, cfg)
 	r.Opened, r.Mail = sh.opened, sh.mail
@@ -63,20 +78,21 @@ func (sh *storeShards) opened(st *chunkstore.Store) {
 	}
 	for i, l := range sh.loops {
 		sh.shards[i] = addRaftRounds(l, l.Context().Pool, sh.lg, 1001+uint32(i), sh.maxBlob, sh.rounds)
-		sh.shards[i].reply, sh.shards[i].pause = true, sh.pause
+		rr := sh.shards[i]
+		rr.reply, rr.pause, rr.sizes, rr.bounded, rr.late = true, sh.pause, sh.sizes, sh.bounded, sh.late
 		st.AddRemote(1001+uint32(i), i, uint32(sh.shards[i].id))
 		l.Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: 1})
 	}
 }
 
 func (sh *storeShards) start() {
-	sh.s = sim.New(1, sim.Settings{PoolBytes: 1 << 20})
+	sh.s = sim.New(sh.seed, sim.Settings{PoolBytes: 1 << 20})
 	node := sh.s.AddNode(sim.DefaultClock, nil, func(*sim.Node) {})
 	sh.pool = sh.sd.Pool()
 	for i := range sh.loops {
 		k := NewKernel(sh.s, node.ID())
 		if i == 0 {
-			sh.loops[i] = loop.New(loop.Config{Node: node.ID(), ID: 0, Pool: sim.NewPool(1<<20, 0)}, k, &proposer{}, &diskDriver{})
+			sh.loops[i] = loop.New(loop.Config{Node: node.ID(), ID: 0, Pool: sim.NewPool(1<<20, 0)}, k, actMachine{sh}, &diskDriver{})
 			Add(node, k, sh.loops[i])
 			continue
 		}
@@ -84,7 +100,15 @@ func (sh *storeShards) start() {
 		if err != nil {
 			sh.t.Fatal(err)
 		}
-		sh.t.Cleanup(dr.Close)
+		if sh.ring != nil {
+			sh.ring.Close()
+		}
+		if sh.fds == nil {
+			fds := new([2]int)
+			sh.t.Cleanup(func() { (&Disk{fds: *fds}).Close() })
+			sh.fds = fds
+		}
+		*sh.fds = dr.fds
 		l := loop.New(loop.Config{Node: node.ID(), ID: 1, Pool: sh.pool}, k, storeShardsMachine{sh}, diskDriver{dr})
 		if err := l.AttachDisk(dr); err != nil {
 			sh.t.Fatal(err)
@@ -93,6 +117,12 @@ func (sh *storeShards) start() {
 		sh.lg = l.AttachLog(nil, sh.cfg.Log, chunkstore.FirstLogIO, chunkstore.EndLogIO, 2)
 		AddWithDisk(node, k, l, dr)
 	}
+}
+
+// close closes the newest ring, which the test's cleanup then leaves alone.
+func (sh *storeShards) close() {
+	sh.ring.Close()
+	*sh.fds = [2]int{-1, -1}
 }
 
 // mailKinds is the loop's kind of each raftshard.MailKind.
@@ -137,8 +167,31 @@ func (sh *storeShards) Step(r *storetest.Rig) bool {
 type storeShardsMachine struct{ sh *storeShards }
 
 func (m storeShardsMachine) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
+	if ev.Kind == core.EvTimer && ev.Timer == actTimer {
+		m.sh.shards[1].act()
+		return out
+	}
 	m.sh.r.OnEvent(ctx, ev)
 	return out
+}
+
+// actTimer is the event act posts to a shard's loop.
+const actTimer core.TimerID = 1 << 20
+
+// actMachine runs loop 0, whose shard acts on actTimer.
+type actMachine struct{ sh *storeShards }
+
+func (m actMachine) OnEvent(_ *core.Context, ev *core.Event, out []core.Action) []core.Action {
+	if ev.Kind == core.EvTimer && ev.Timer == actTimer {
+		m.sh.shards[0].act()
+	}
+	return out
+}
+
+// act adds rounds rounds to shard i's burst and has it act on its loop.
+func (sh *storeShards) act(i, rounds int) {
+	sh.shards[i].left += rounds
+	sh.loops[i].Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: actTimer})
 }
 
 func (m storeShardsMachine) OnLog(ctx *core.Context, _ *loop.Log, ev *disklog.Event, out []core.Action) []core.Action {
@@ -181,18 +234,44 @@ func (sh *storeShards) storages() (out [2]shardState) {
 		if rr.err != nil {
 			sh.t.Fatalf("shard %d: %v", i, rr.err)
 		}
-		first, _ := rr.st.FirstIndex()
-		last, _ := rr.st.LastIndex()
-		ents, err := rr.st.Entries(first, last+1, 1<<62)
-		if err != nil {
-			sh.t.Fatal(err)
-		}
-		out[i] = shardState{hs: rr.st.HardState(), first: first, last: last, ents: ents, applied: rr.applied}
-		for k := range uint64(raftKeys) {
-			out[i].state[k], _ = rr.tree.Get(raftKey(k))
-		}
+		out[i] = rr.state()
 	}
 	return out
+}
+
+func (rr *raftRounds) state() shardState {
+	first, _ := rr.st.FirstIndex()
+	last, _ := rr.st.LastIndex()
+	ents, err := rr.st.Entries(first, last+1, 1<<62)
+	rr.fail(err)
+	out := shardState{hs: rr.st.HardState(), first: first, last: last, ents: ents, applied: rr.applied}
+	for k := range uint64(raftKeys) {
+		out.state[k], _ = rr.tree.Get(raftKey(k))
+	}
+	return out
+}
+
+// after is b once its storage takes round rd and its state machine applies it.
+func (b shardState) after(rd *raftshard.Round) shardState {
+	b.hs, b.ents, b.applied = rd.HardState, append(slices.Clip(b.ents), rd.Entries...), rd.HardState.Commit
+	b.last = rd.Entries[len(rd.Entries)-1].Index
+	for _, e := range rd.Entries {
+		b.state[e.Index%raftKeys] = e.Data[:64]
+	}
+	return b
+}
+
+// sameAs reports how a, a recovered shard's state, differs from b, its state before: its hard
+// state, its entries up to the same last index from the first b held, or from an older base its
+// runs recorded, and its state at the same applied index.
+func (a shardState) sameAs(b shardState) error {
+	if a.hs != b.hs || a.first > b.first || a.last != b.last || !slices.EqualFunc(a.ents[b.first-a.first:], b.ents, func(x, y raftpb.Entry) bool { return reflect.DeepEqual(x, y) }) {
+		return fmt.Errorf("recovered %+v and entries %d to %d, held %+v and %d to %d", a.hs, a.first, a.last, b.hs, b.first, b.last)
+	}
+	if a.applied != b.applied || !reflect.DeepEqual(a.state, b.state) {
+		return fmt.Errorf("recovered its state at %d, held it at %d", a.applied, b.applied)
+	}
+	return nil
 }
 
 // restart ends the process and recovers the store, its shards making no new rounds, and checks
@@ -205,15 +284,11 @@ func (sh *storeShards) restart(shards ...int) {
 	sh.r.Restart()
 	after := sh.storages()
 	for _, i := range shards {
-		a, b := after[i], before[i]
 		if !sh.shards[i].recovered {
 			sh.t.Fatalf("shard %d was never told the replay ended", i)
 		}
-		if a.hs != b.hs || a.first > b.first || a.last != b.last || !reflect.DeepEqual(a.ents[b.first-a.first:], b.ents) {
-			sh.t.Fatalf("shard %d recovered %+v and entries %d to %d, held %+v and %d to %d", i, a.hs, a.first, a.last, b.hs, b.first, b.last)
-		}
-		if a.applied != b.applied || !reflect.DeepEqual(a.state, b.state) {
-			sh.t.Fatalf("shard %d recovered its state at %d, held it at %d", i, a.applied, b.applied)
+		if err := after[i].sameAs(before[i]); err != nil {
+			sh.t.Fatalf("shard %d %v", i, err)
 		}
 	}
 }
@@ -655,4 +730,230 @@ func (sh *storeShards) onlyShardPieces() []disklog.BlobRef {
 		}
 	}
 	return only
+}
+
+// crash cuts the power, unflushed writes landing as rnd says, and recovers the store, its shards
+// making no new rounds. It reports how a shard's state when its replay ended differs from its
+// state before the crash, or from that state and the round it had in flight, which may land.
+func (sh *storeShards) crash(rnd *core.Rand) error {
+	before := sh.storages()
+	var flying [2]*raftshard.Round
+	for i, rr := range sh.shards {
+		if rr.flush > rr.done {
+			flying[i] = &rr.round
+		}
+	}
+	sh.sd.Crash(rnd)
+	sh.r.Reopen()
+	sh.r.Settle()
+	for i, rr := range sh.shards {
+		if !rr.recovered {
+			return fmt.Errorf("shard %d was never told the replay ended", i)
+		}
+		b := before[i]
+		if flying[i] != nil && rr.atRecovery.hs != b.hs {
+			b = b.after(flying[i])
+		}
+		if err := rr.atRecovery.sameAs(b); err != nil {
+			return fmt.Errorf("shard %d %w", i, err)
+		}
+	}
+	return nil
+}
+
+// crashCounts is what a crash run of shards on the round driver did: restarts that restored a
+// shard on a compacted base, and those whose replay began past a blob it reported dead before;
+// merge steps its shards installed, and runs they rewrote as the cleaner marked them; segments the
+// cleaner freed that held a Raft blob, or a run piece, reported dead; and phases, each shard at
+// each crash by its phase.
+type crashCounts struct {
+	restored, skipped, steps, rewrites, freedBlobs, freedPieces int
+	phases                                                      [3]int
+}
+
+// phase is where the shard's part of a checkpoint stands: 0 with no flush of it running, 1 with
+// a piece of it in flight, 2 with every piece durable and the manifest not yet mailed durable.
+func (rr *raftRounds) phase() int {
+	switch {
+	case rr.flushes == rr.checkpointed:
+		return 0
+	case !rr.ended:
+		return 1
+	}
+	return 2
+}
+
+func (c *crashCounts) add(r crashCounts) {
+	c.restored, c.skipped, c.steps, c.rewrites = c.restored+r.restored, c.skipped+r.skipped, c.steps+r.steps, c.rewrites+r.rewrites
+	c.freedBlobs, c.freedPieces = c.freedBlobs+r.freedBlobs, c.freedPieces+r.freedPieces
+	for i := range c.phases {
+		c.phases[i] += r.phases[i]
+	}
+}
+
+// shardCrashRun has the Raft shards on both loops make ops bursts of 1 to 4 rounds of seed's
+// sizes, or chunk writes, a third of the time, stepping up to 29 times after each, and crashes the
+// process every 50, a third of the time once it settles. The disk's 256 KiB segments are large
+// enough that rewriting a shard's runs frees room, and the cleaner wants all but 8 free.
+func shardCrashRun(t *testing.T, seed uint64, ops int) (c crashCounts) {
+	cfg := storetest.Config()
+	cfg.Log.MaxReplayBytes = 64 << 10
+	const diskBytes = 1 << 30
+	geo, err := disklog.GeometryFor(diskBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.CleanFree = int(geo.SegmentCount) - 8
+	sh := (&storeShards{t: t, cfg: cfg, sd: storetest.NewSimDiskOf(1, diskBytes), seed: seed, sizes: core.NewRand(^seed)}).format()
+	rnd := core.NewRand(seed)
+	var inv sim.Invariants
+	var recovered error
+	inv.Register("a shard recovered from manifest and log equals its state before the crash", func() error { return recovered })
+	dead, gone := map[uint32]bool{}, map[uint32]bool{}
+	var seen [2][2]int
+	note := func() {
+		for i, rr := range sh.shards {
+			for _, ref := range rr.dead[seen[i][0]:] {
+				dead[ref.Segment] = true
+			}
+			for _, ref := range rr.gone[seen[i][1]:] {
+				gone[ref.Segment] = true
+			}
+			seen[i] = [2]int{len(rr.dead), len(rr.gone)}
+		}
+		log := sh.r.S.Log()
+		for _, f := range []struct {
+			segs map[uint32]bool
+			n    *int
+		}{{dead, &c.freedBlobs}, {gone, &c.freedPieces}} {
+			for seg := range f.segs {
+				if u, _ := log.Usage(seg); u.State == disklog.SegmentFree {
+					*f.n++
+					delete(f.segs, seg)
+				}
+			}
+		}
+	}
+	for op := range ops {
+		if rnd.Below(3) == 0 {
+			sh.r.Write(storetest.Chunk(uint32(rnd.Below(8))), 0, storetest.Fill(int(1+rnd.Below(4))*core.BlockSize, byte(op)), 0)
+		} else {
+			sh.act(int(rnd.Below(2)), 1+int(rnd.Below(4)))
+		}
+		for range rnd.Below(30) {
+			sh.r.Step()
+		}
+		note()
+		if op%50 != 49 {
+			continue
+		}
+		if rnd.Below(3) == 0 {
+			sh.r.Settle()
+			note()
+		}
+		old := sh.shards
+		for _, rr := range old {
+			c.phases[rr.phase()]++
+		}
+		recovered, seen = sh.crash(rnd), [2][2]int{}
+		if err := inv.Check(); err != nil {
+			t.Fatalf("crash after op %d: %v", op, err)
+		}
+		for i, rr := range sh.shards {
+			c.steps, c.rewrites = c.steps+old[i].steps, c.rewrites+old[i].rewrites
+			if rr.atRecovery.first > 1 {
+				c.restored++
+			}
+			if len(old[i].dead) > 0 && (rr.replayed == 0 || rr.replayed > old[i].dead[0].LSN) {
+				c.skipped++
+			}
+		}
+	}
+	sh.r.Settle()
+	note()
+	for _, rr := range sh.shards {
+		c.steps, c.rewrites = c.steps+rr.steps, c.rewrites+rr.rewrites
+	}
+	sh.storages()
+	sh.close()
+	return c
+}
+
+// [property] Raft shards on the round driver, on the device loop and on another, make bursts of
+// rounds beside chunk writes while due checkpoints flush their trees and their merges' steps and
+// mail them to compact, and the cleaner frees segments and marks their runs to rewrite, and the
+// process crashes every 50 bursts or writes with unflushed writes landing at random. Each
+// recovered shard, restored from its manifest's runs and base and replayed from its replay LSN,
+// equals its state before the crash with or without the round it had in flight. Over the seeds
+// restarts restore compacted bases and replay past blobs reported dead, a shard is at crashes
+// with no flush of it running, with a piece in flight and with every piece durable and the
+// manifest not yet mailed durable, the shards merge and rewrite runs the cleaner marked, and the
+// cleaner frees segments that held their dead blobs and dead run pieces.
+func TestShardsOnTheRoundDriverCheckpointCompactAndRecover(t *testing.T) {
+	var c crashCounts
+	seeds.Run(t, 0, 4, func(seed uint64) {
+		c.add(shardCrashRun(t, seed, 1000))
+	})
+	t.Logf("%+v", c)
+	if c.restored == 0 || c.skipped == 0 || c.steps == 0 || c.rewrites == 0 || c.freedBlobs == 0 || c.freedPieces == 0 || slices.Contains(c.phases[:], 0) {
+		t.Fatalf("over the seeds: %+v", c)
+	}
+}
+
+// shardBoundRun has the Raft shards on both loops make bursts of 1 to 6 rounds of seed's sizes,
+// each proposed only while the shard is not full, beside chunk writes, ops times, with each round
+// told durable reaching its storage only when the test has the shard act, and checks at every
+// step that each retains at most its share of twice max_replay_bytes and a round: its storage's
+// entries and those of the rounds it proposed that its storage has not taken.
+func shardBoundRun(t *testing.T, seed uint64, ops int) {
+	cfg := storetest.Config()
+	cfg.Log.MaxReplayBytes = 256 << 10
+	sh := (&storeShards{t: t, cfg: cfg, sd: storetest.NewSimDiskOf(1, storetest.DiskBytes), seed: seed, sizes: core.NewRand(^seed), bounded: true, late: true}).format()
+	rnd := core.NewRand(seed)
+	share := cfg.Log.MaxReplayBytes
+	const round = 8 * 8000
+	bounded := func(op int) {
+		for i, rr := range sh.shards {
+			if n := len(rr.shares); n > 0 && rr.shares[n-1] != share {
+				t.Fatalf("op %d: shard %d was mailed shares %v, not %d", op, i, rr.shares, share)
+			}
+			if b := rr.st.Bytes() + rr.held(); b > share+round {
+				t.Fatalf("op %d: shard %d retains %d bytes, past its share %d and a round", op, i, b, share)
+			}
+		}
+	}
+	for op := range ops {
+		switch rnd.Below(4) {
+		case 0:
+			sh.r.Write(storetest.Chunk(uint32(rnd.Below(8))), 0, storetest.Fill(int(1+rnd.Below(4))*core.BlockSize, byte(op)), 0)
+		case 1:
+			sh.act(int(rnd.Below(2)), 0)
+		default:
+			sh.act(int(rnd.Below(2)), 1+int(rnd.Below(6)))
+		}
+		for range rnd.Below(30) {
+			sh.r.Step()
+			bounded(op)
+		}
+	}
+	sh.act(0, 0)
+	sh.act(1, 0)
+	sh.r.Settle()
+	bounded(ops)
+	for i, rr := range sh.shards {
+		if rr.err != nil || rr.refused == 0 || rr.wrote < 4*share {
+			t.Fatalf("shard %d proposed %d bytes, refused %d bursts while full, err %v", i, rr.wrote, rr.refused, rr.err)
+		}
+	}
+	if !sh.r.S.Serving() {
+		t.Fatalf("the store stopped: %v", sh.r.S.Err())
+	}
+	sh.close()
+}
+
+// [property] Raft shards on the round driver, on the device loop and on another, retain at most
+// their share of twice max_replay_bytes and a round under bursts of proposals, rounds told
+// durable reaching their storage late, and chunk writes beside them.
+func TestShardsOnTheRoundDriverRetainAtMostTheirShare(t *testing.T) {
+	seeds.Run(t, 0, 4, func(seed uint64) { shardBoundRun(t, seed, 600) })
 }
