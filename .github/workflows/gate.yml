@@ -112,7 +112,7 @@ jobs:
           done | jq -sc . >todo
           echo "$(jq length todo) configurations to check, $(grep -c '^skip' "$GITHUB_STEP_SUMMARY" || true) skipped" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "models=$(cat todo)" >>"$GITHUB_OUTPUT"
-      # conform runs when the change touches a path in conform.yml's list, as in scripts/gate-branch.sh.
+      # conform runs when the change touches a path in scripts/conform-paths, as in scripts/gate-branch.sh.
       - id: conform
         env:
           BASE: ${{ github.event.pull_request.base.sha || (github.ref == 'refs/heads/main' && github.event.before) || '' }}
@@ -125,7 +125,7 @@ jobs:
             while read -r f; do
               [[ -n $f && $f == $g ]] && echo conform=true >>"$GITHUB_OUTPUT" && exit 0
             done <<<"$changed"
-          done < <(sed -n '/^    paths:/,/^  [a-z]/s/^      - //p' .github/workflows/conform.yml)
+          done <scripts/conform-paths
           echo conform=false >>"$GITHUB_OUTPUT"
 
   # One job per configuration: the configurations run one after another take hours. A ci

@@ -5,7 +5,7 @@
 # This script gates a branch or commit in a fresh worktree at its tip: the TLC ci runs of the models it touches,
 # go test and seeds.sh over the packages it changes and every package that imports them (everything
 # with --full or --merge), the same go test of the packages with Linux-only tests in Docker (skipped
-# with RS_GATE_NO_LINUX=1), conform.sh when it touches a path the conform workflow watches, and lint.sh.
+# with RS_GATE_NO_LINUX=1), conform.sh when it touches a path in scripts/conform-paths, and lint.sh.
 #   scripts/gate-branch.sh [--plan] [--full] [--merge] <branch-or-commit>
 # The change is the diff from the tip's merge base with main, or from its parent for a commit already
 # on main. --plan prints the steps and runs none. --merge fast-forwards the clean main checkout to the
@@ -92,7 +92,7 @@ while read -r g; do
 	while read -r f; do
 		[[ -n $f && $f == $g ]] && conform=1
 	done <<<"$changed"
-done < <(sed -n '/^    paths:/,/^  [a-z]/s/^      - //p' .github/workflows/conform.yml)
+done <scripts/conform-paths
 
 steps=()
 skips=()

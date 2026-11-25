@@ -1,20 +1,6 @@
 name: conform
 
 on:
-  pull_request:
-    paths:
-      - models/epoch/epoch.tla
-      - models/epoch/trace_epoch.*
-      - models/voters/voters.tla
-      - models/voters/trace_voters.*
-      - internal/chunkstore/**
-      - internal/lease/**
-      - internal/raftshard/**
-      - internal/trace/**
-      - tools/tracedata/**
-      - tools/votersdata/**
-      - scripts/conform.sh
-      - .github/workflows/conform.yml
   schedule:
     - cron: "47 3 * * *"
   workflow_dispatch:
@@ -25,7 +11,7 @@ on:
   workflow_call:
     inputs:
       scripted:
-        description: Run a pull request's seeds, as the gate workflow does
+        description: Run seeds 0 to 39 with the scripted traces, as the gate workflow does
         type: boolean
         default: false
 
@@ -41,20 +27,23 @@ defaults:
     shell: bash
 
 env:
-  RUN: TestPeeringKeepsAcknowledgedWritesAcrossPrimaries|^TestConformReplacementSeeds$
+  RUN: ^TestPeeringKeepsAcknowledgedWritesAcrossPrimaries$|^TestConformReplacementSeeds$
   COUNT: "500"
   PLANT_COUNT: "40"
-  # A slow lane: a trace that gives no verdict in 400 s locally gets 20 minutes here.
+  # The SYS-2 runs a trace about half as fast as the M4 Pro: one that gives no verdict in 400 s there
+  # gets 20 minutes here. Its runner has 8 threads and 20 GB: 6 traces of 2 GB heap at once.
   TLC_SECONDS: "1200"
-  JOBS: "3"
+  JOBS: "6"
 
 jobs:
+  # On the SYS-2, never for a pull request: a fork's code must not run on it.
   traces:
+    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
         mode: [sweep, plants]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, sys2]
     timeout-minutes: 340
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -70,10 +59,10 @@ jobs:
         env:
           INPUT_FIRST: ${{ inputs.first }}
           SCRIPTED: ${{ inputs.scripted }}
-        # A pull request or the gate runs seeds 0 to 39 with the scripted traces; a nightly run sweeps new ones.
+        # The gate runs seeds 0 to 39 with the scripted traces; a nightly run sweeps new ones.
         run: |
-          if [ "$GITHUB_EVENT_NAME" = pull_request ] || [ "$SCRIPTED" = true ]; then
-            printf 'first=0\ncount=40\nrun=TestConform|^%s$\n' "$RUN" >>"$GITHUB_OUTPUT"
+          if [ "$SCRIPTED" = true ]; then
+            printf 'first=0\ncount=40\nrun=TestConform|%s\n' "$RUN" >>"$GITHUB_OUTPUT"
             exit
           fi
           first=$INPUT_FIRST

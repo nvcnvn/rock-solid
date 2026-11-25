@@ -1,8 +1,8 @@
 #!/bin/bash
 # Spec conformance: runs the simulator's conformance traces and has TLC 1.7.4 check each is a behavior
 # of its model ("Spec conformance" in docs/test-scenarios.md): a trace named voters-* of models/voters/voters.tla,
-# any other of models/epoch/epoch.tla. Not part of lint; the conform workflow runs it nightly and on a pull
-# request that changes the epoch or voter protocol.
+# any other of models/epoch/epoch.tla. Not part of lint; the conform workflow runs it nightly, and the gate
+# workflow for a change to a path in scripts/conform-paths.
 #   scripts/conform.sh                  every trace of TestConform*, or of the test RUN names, seeded
 #                                       ones over COUNT seeds from FIRST (default 0): by default 10 of
 #                                       the epoch model's, 50 of the voter model's
@@ -234,8 +234,10 @@ each() {
 }
 
 if [ "${1:-}" = plants ]; then
+	# The plants' 40 seeds take 450 s of go test on the M4 Pro and past go test's default 10 minutes on a
+	# hosted runner.
 	rm -f "$tmp"/traces/*
-	CONFORM_DIR=$tmp/traces CONFORM_PLANTS=${PLANTS:-} GOMEMLIMIT=4GiB go test -p 4 ./internal/chunkstore -run '^TestPlantsKeepTraces$' \
+	CONFORM_DIR=$tmp/traces CONFORM_PLANTS=${PLANTS:-} GOMEMLIMIT=4GiB go test -p 4 -timeout 60m ./internal/chunkstore -run '^TestPlantsKeepTraces$' \
 		-seeds.first "${FIRST:-0}" -seeds "${COUNT:-10}"
 	go build -o "$tmp/tracedata" ./tools/tracedata
 	seeds=$(seq "${FIRST:-0}" $((${FIRST:-0} + ${COUNT:-10} - 1)))
@@ -297,7 +299,7 @@ if [ "${1:-}" = plants ]; then
 		fi
 	done
 	rm -f "$tmp"/traces/*
-	CONFORM_DIR=$tmp/traces GOMEMLIMIT=4GiB go test -count=1 ./internal/raftshard -run '^TestVoterPlantsKeepTraces$'
+	CONFORM_DIR=$tmp/traces GOMEMLIMIT=4GiB go test -count=1 -timeout 60m ./internal/raftshard -run '^TestVoterPlantsKeepTraces$'
 	go build -o "$tmp/votersdata" ./tools/votersdata
 	each plain "$tmp"/traces/voters-*.trace
 	# The voter plants whose trace TLC rejects at the planted step; the others may pass.
@@ -350,9 +352,9 @@ fi
 
 if [ $# -eq 0 ]; then
 	rm -f "$tmp"/traces/*
-	CONFORM_DIR=$tmp/traces GOMEMLIMIT=4GiB go test -run "${RUN:-TestConform}" ./internal/chunkstore \
+	CONFORM_DIR=$tmp/traces GOMEMLIMIT=4GiB go test -timeout 60m -run "${RUN:-TestConform}" ./internal/chunkstore \
 		-seeds.first "${FIRST:-0}" -seeds "${COUNT:-10}"
-	CONFORM_DIR=$tmp/traces GOMEMLIMIT=4GiB go test -run "${RUN:-TestConform}" ./internal/raftshard \
+	CONFORM_DIR=$tmp/traces GOMEMLIMIT=4GiB go test -timeout 60m -run "${RUN:-TestConform}" ./internal/raftshard \
 		-seeds.first "${FIRST:-0}" -seeds "${COUNT:-50}"
 	set -- "$tmp"/traces/*.trace
 fi

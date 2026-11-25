@@ -1,0 +1,12 @@
+models/epoch/epoch.tla
+models/epoch/trace_epoch.*
+models/voters/voters.tla
+models/voters/trace_voters.*
+internal/chunkstore/**
+internal/lease/**
+internal/raftshard/**
+internal/trace/**
+tools/tracedata/**
+tools/votersdata/**
+scripts/conform.sh
+.github/workflows/conform.yml
