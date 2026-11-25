@@ -259,8 +259,10 @@ func TestChangedSegmentsSurviveAFailedCheckpoint(t *testing.T) {
 
 func TestEditSizeDoesNotGrowWithTheDisk(t *testing.T) {
 	var sizes []int
+	cfg := testConfig(0)
+	cfg.NoTrim = true
 	for _, disk := range []uint64{gib, 1 << 40} {
-		h := formatted(t, disk, testConfig(0))
+		h := formatted(t, disk, cfg)
 		h.put(disklog.Hot, h.write(0, 3, 1))
 		first := h.checkpointRuns(nil, 20)
 		for i := range 5 {

@@ -528,7 +528,9 @@ func TestRecoverFlushesBeforeReportingRecovered(t *testing.T) {
 }
 
 func TestRecoverRejectsAnImplausibleHeaderLength(t *testing.T) {
-	h := newHarness(t, 256*gib, 64<<20, testConfig(0))
+	cfg := testConfig(0)
+	cfg.NoTrim = true
+	h := newHarness(t, 256*gib, 64<<20, cfg)
 	h.run()
 	for i := range 3 {
 		h.put(disklog.Hot, h.chunkWrite(uint32(i), 0, 1, uint64(i+1)))
