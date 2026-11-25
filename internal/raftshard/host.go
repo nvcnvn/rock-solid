@@ -52,8 +52,9 @@ type Host struct {
 // remoteShard is a shard on the round driver: its owner, its loop and ShardID there, the LSN at
 // or before which a restart's replay skips its blobs, the replay LSN a checkpoint names it with,
 // at or before every blob of it a restart still needs, and the share it was last mailed, 0 for
-// none; runs are the roots of its tree's runs that the newest manifest names, pieces every piece
-// of them, and flush its part of the running due checkpoint, if it has one.
+// none; runs are the roots of its tree's runs that the newest manifest names, with their merge
+// bounds, pieces every live piece of its tree, and flush its part of the running due checkpoint,
+// if it has one.
 type remoteShard struct {
 	owner  uint32
 	loop   int
@@ -62,19 +63,24 @@ type remoteShard struct {
 	replay uint64
 	share  uint64
 	runs   []disklog.BlobRef
+	bounds []disklog.MergeBound
 	pieces []disklog.BlobRef
 	flush  *remoteFlush
 }
 
 // remoteFlush is a shard on the round driver's part of a due checkpoint: the piece it replied
 // that waits for the log, if any, root if that is a run's last, the pieces written and the roots
-// among them, and done once it has written all it has.
+// among them, done once it has written all it has, and named once it has named the runs its
+// flush carries, with their bounds.
 type remoteFlush struct {
-	next   []byte
-	root   bool
-	pieces []disklog.BlobRef
-	roots  []disklog.BlobRef
-	done   bool
+	next    []byte
+	root    bool
+	pieces  []disklog.BlobRef
+	roots   []disklog.BlobRef
+	done    bool
+	named   bool
+	carried []disklog.BlobRef
+	bounds  []disklog.MergeBound
 }
 
 type remotePiece struct {
@@ -103,13 +109,14 @@ const (
 	MailPiece
 	// MailFlushFailed says the checkpoint failed.
 	MailFlushFailed
-	// MailRun is a run the loaded manifest names, its root at Ref and its pieces, root last.
+	// MailRun is a run the loaded manifest names, its root at Ref and its pieces, root last,
+	// those past Bound's dead ones if a merge bounds it.
 	MailRun
 )
 
 // Mail is what the disk's owner sends a shard on the round driver, at Shard on the loop of ID
 // Loop, Owner its owner key on mail that asks it for a piece: a blob at Ref of kind Blob and bytes
-// Data, or a run's Pieces, as Kind says.
+// Data, or a run's Pieces and Bound, as Kind says.
 type Mail struct {
 	Kind   MailKind
 	Loop   int
@@ -121,6 +128,7 @@ type Mail struct {
 	Blob   disklog.BlobKind
 	Data   []byte
 	Pieces [][]byte
+	Bound  *disklog.MergeBound
 }
 
 type retiredOwner struct {
@@ -323,7 +331,8 @@ func (h *Host) Mail(dst []Mail) []Mail {
 // Checkpointed mails each shard on the round driver that flushed under the running due checkpoint
 // that its manifest is durable, naming the runs it wrote, base the base of the due manifest before
 // it: the shard compacts to what its mark recorded, and writes again what it keeps at or before
-// base, as Rewrite does for a hosted shard when the next checkpoint begins.
+// base, as Rewrite does for a hosted shard when the next checkpoint begins; its tree then
+// reports the pieces the manifest left out (RemoteDead).
 func (h *Host) Checkpointed(base uint64) {
 	h.cp = 0
 	for i := range h.remote {
@@ -331,9 +340,54 @@ func (h *Host) Checkpointed(base uint64) {
 		if rs.flush == nil {
 			continue
 		}
-		rs.runs, rs.pieces, rs.flush = append(rs.runs, rs.flush.roots...), append(rs.pieces, rs.flush.pieces...), nil
+		rs.keep(rs.flush)
 		h.mail = append(h.mail, Mail{Kind: MailCheckpointed, Loop: rs.loop, Shard: rs.id, Base: base})
 	}
+}
+
+// keep makes what f wrote, and the runs it named as carried, rs's runs, as a manifest naming them
+// does, and ends f.
+func (rs *remoteShard) keep(f *remoteFlush) {
+	if f.named {
+		rs.runs, rs.bounds = f.carried, f.bounds
+	}
+	rs.runs, rs.pieces, rs.flush = append(slices.Clip(rs.runs), f.roots...), append(rs.pieces, f.pieces...), nil
+}
+
+// RemoteRuns takes the runs, with bounds, that owner's shard on the round driver replied its flush
+// for checkpoint cp carries (loop.ReplyRuns), before its first piece, and has the checkpoint's
+// manifest name them in place of the runs the newest manifest named, as its merges since may have
+// replaced some. A reply for a checkpoint no longer running, or from a shard no longer known, is
+// stale and dropped.
+func (h *Host) RemoteRuns(owner uint32, cp uint64, runs []disklog.BlobRef, bounds []disklog.MergeBound) {
+	r, ok := h.remoteAt[owner]
+	if !ok || cp != h.cp || h.remote[r].flush == nil {
+		return
+	}
+	if err := h.Log.CheckpointRuns(owner, runs, bounds); err != nil {
+		panic(fmt.Sprintf("raftshard: shard %d named runs %v, bounds %v, for checkpoint %d: %v", owner, runs, bounds, cp, err))
+	}
+	f := h.remote[r].flush
+	f.named, f.carried, f.bounds = true, runs, bounds
+}
+
+// RemoteDead takes the pieces owner's shard on the round driver replied its tree no longer names
+// (loop.ReplyDead), once the manifest that leaves them out is durable: they are dead once a
+// checkpoint begun after now ends (Gone), as no later manifest names them. A reply from a shard no
+// longer known is dropped, as its removal took every piece of its for Gone.
+func (h *Host) RemoteDead(owner uint32, refs []disklog.BlobRef) {
+	r, ok := h.remoteAt[owner]
+	if !ok {
+		return
+	}
+	rs := &h.remote[r]
+	rs.pieces = slices.DeleteFunc(rs.pieces, func(p disklog.BlobRef) bool {
+		if slices.Contains(refs, p) {
+			h.gone = append(h.gone, p)
+			return true
+		}
+		return false
+	})
 }
 
 // BeginFlush asks each shard on the round driver for its part of due checkpoint cp, numbered by
@@ -438,7 +492,7 @@ func (h *Host) FlushFailed(dead []disklog.BlobRef) []disklog.BlobRef {
 			continue
 		}
 		if f.done {
-			rs.runs, rs.pieces = append(rs.runs, f.roots...), append(rs.pieces, f.pieces...)
+			rs.keep(f)
 		} else {
 			dead = append(dead, f.pieces...)
 		}
@@ -465,10 +519,10 @@ func (h *Host) Remote(owner uint32) bool {
 // LoadedRun takes a run of owner's tree, a shard on the round driver, that the manifest a restart
 // loaded names: refs its pieces in order and root last, pieces their bytes. It mails the run to
 // the shard, before any blob the replay mails it.
-func (h *Host) LoadedRun(owner uint32, refs []disklog.BlobRef, pieces [][]byte) {
+func (h *Host) LoadedRun(owner uint32, refs []disklog.BlobRef, pieces [][]byte, bound *disklog.MergeBound) {
 	rs := &h.remote[h.remoteShard(owner)]
 	rs.pieces = append(rs.pieces, refs...)
-	h.mail = append(h.mail, Mail{Kind: MailRun, Loop: rs.loop, Shard: rs.id, Ref: refs[len(refs)-1], Pieces: pieces})
+	h.mail = append(h.mail, Mail{Kind: MailRun, Loop: rs.loop, Shard: rs.id, Ref: refs[len(refs)-1], Pieces: pieces, Bound: bound})
 }
 
 // Share is each shard's share of total, divided among the shards hosted and on the round driver.
@@ -903,7 +957,8 @@ func (hd *hosted) recovered(dead []disklog.BlobRef) []disklog.BlobRef {
 func (h *Host) Loaded(m *disklog.Manifest) {
 	for _, ix := range m.Indexes {
 		if r, ok := h.remoteAt[ix.Owner]; ok {
-			h.remote[r].from, h.remote[r].replay, h.remote[r].runs = ix.ReplayLSN, ix.ReplayLSN, slices.Clone(ix.Runs)
+			rs := &h.remote[r]
+			rs.from, rs.replay, rs.runs, rs.bounds = ix.ReplayLSN, ix.ReplayLSN, slices.Clone(ix.Runs), slices.Clone(ix.Bounds)
 		}
 		if k, ok := h.at[ix.Owner]; ok {
 			hd := &h.shards[k]
@@ -943,7 +998,7 @@ func (h *Host) Indexes(dst []disklog.CheckpointIndex, durable uint64) []disklog.
 // before the shard marks its tree is at or before every round its mark's base leaves live.
 func (h *Host) RemoteIndexes(dst []disklog.CheckpointIndex, durable uint64) []disklog.CheckpointIndex {
 	for _, rs := range h.remote {
-		dst = append(dst, disklog.CheckpointIndex{Owner: rs.owner, ReplayLSN: min(rs.replay, durable), Runs: rs.runs})
+		dst = append(dst, disklog.CheckpointIndex{Owner: rs.owner, ReplayLSN: min(rs.replay, durable), Runs: rs.runs, Bounds: rs.bounds})
 	}
 	return dst
 }

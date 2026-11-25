@@ -2778,7 +2778,7 @@ func (s *Store) blobRead(ctx *core.Context, ev *disklog.Event) {
 		pieces = append(pieces, l.root)
 		var err error
 		if l.tree == nil {
-			s.raft.LoadedRun(l.owner, append(l.refs, root), pieces)
+			s.raft.LoadedRun(l.owner, append(l.refs, root), pieces, l.bound)
 		} else if l.bound != nil {
 			err = l.tree.LoadBoundedRun(*l.bound, pieces)
 		} else {

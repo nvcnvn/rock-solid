@@ -1101,16 +1101,13 @@ func (l *Log) beginCheckpoint(indexes []CheckpointIndex, steps bool) error {
 	}
 	m := Manifest{BaseLSN: l.durableLSN, NextSeq: nextSeq, Indexes: make([]ManifestIndex, len(indexes))}
 	for i, ix := range indexes {
-		if ix.ReplayLSN > l.durableLSN || slices.ContainsFunc(indexes[:i], func(o CheckpointIndex) bool { return o.Owner == ix.Owner }) ||
-			slices.ContainsFunc(ix.Runs, func(r BlobRef) bool { return r.Segment == 0 || r.LSN > l.durableLSN }) ||
-			hasDuplicate(ix.Runs) || !validBounds(ix.Runs, ix.Bounds) {
+		if ix.ReplayLSN > l.durableLSN || slices.ContainsFunc(indexes[:i], func(o CheckpointIndex) bool { return o.Owner == ix.Owner }) {
 			return ErrMalformed
 		}
-		var bounds []MergeBound
-		for _, b := range ix.Bounds {
-			bounds = append(bounds, MergeBound{Run: b.Run, Key: slices.Clone(b.Key), Dead: b.Dead})
+		m.Indexes[i] = ManifestIndex{Owner: ix.Owner, ReplayLSN: ix.ReplayLSN}
+		if !m.Indexes[i].carry(ix.Runs, ix.Bounds, l.durableLSN) {
+			return ErrMalformed
 		}
-		m.Indexes[i] = ManifestIndex{Owner: ix.Owner, ReplayLSN: ix.ReplayLSN, Runs: slices.Clone(ix.Runs), Bounds: bounds}
 	}
 	m.Segments = l.usageRows()
 	cp := &checkpoint{manifest: m, changed: slices.Clone(l.changed), trims: l.trims.waiting}
@@ -1154,6 +1151,37 @@ func (l *Log) HoldsManifestPiece(segment uint32) bool {
 		}
 	}
 	return l.cp != nil && in(l.cp.earlier)
+}
+
+// CheckpointRuns makes owner's index in the running checkpoint name runs, durable at its base,
+// with bounds, in place of those its begin named, as a tree on another loop tells what its flush
+// carries only once the checkpoint has begun; it must come before any piece of owner's.
+func (l *Log) CheckpointRuns(owner uint32, runs []BlobRef, bounds []MergeBound) error {
+	if l.cp == nil || l.cp.ended {
+		return ErrNoCheckpoint
+	}
+	i := l.cpIndex(owner)
+	if i < 0 {
+		return ErrUnknownOwner
+	}
+	if slices.ContainsFunc(l.cp.pending, func(p pendingPiece) bool { return p.index == i }) ||
+		!l.cp.manifest.Indexes[i].carry(runs, bounds, l.cp.manifest.BaseLSN) {
+		return ErrMalformed
+	}
+	return nil
+}
+
+// carry makes ix name copies of runs, durable at base, and bounds, and reports whether they are
+// well formed; ix is unchanged when they are not.
+func (ix *ManifestIndex) carry(runs []BlobRef, bounds []MergeBound, base uint64) bool {
+	if slices.ContainsFunc(runs, func(r BlobRef) bool { return r.Segment == 0 || r.LSN > base }) || hasDuplicate(runs) || !validBounds(runs, bounds) {
+		return false
+	}
+	ix.Runs, ix.Bounds = slices.Clone(runs), nil
+	for _, b := range bounds {
+		ix.Bounds = append(ix.Bounds, MergeBound{Run: b.Run, Key: slices.Clone(b.Key), Dead: b.Dead})
+	}
+	return true
 }
 
 // CheckpointPiece queues an index's next run piece of length bytes on the metadata stream; root marks a run's last piece, the one the manifest names.

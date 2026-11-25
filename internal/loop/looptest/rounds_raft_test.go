@@ -2,8 +2,10 @@ package looptest
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/binary"
 	"fmt"
+	"slices"
 	"testing"
 
 	"go.etcd.io/raft/v3/raftpb"
@@ -23,7 +25,8 @@ import (
 // would. With reply it tells the disk's owner its replay LSN as it moves, asks for a checkpoint
 // when full, and flushes its tree under each due checkpoint, marked with its storage's base; once
 // the checkpoint's manifest is durable it compacts to the index it applied at the mark and
-// rewrites what holds the replay floor back. A restart restores it from the runs the owner mails.
+// rewrites what holds the replay floor back; its tree then merges its runs in steps, which the
+// next due checkpoint writes. A restart restores it from the runs the owner mails.
 type raftRounds struct {
 	l           *loop.Loop
 	id          loop.ShardID
@@ -47,6 +50,17 @@ type raftRounds struct {
 	mark, cp uint64
 	restored bool
 	flushes  int
+	// pause stops its tree's merges, steps counts the merge steps it installed, gone the pieces
+	// it reported its tree no longer names, sets the runs each flush's manifest names, moved the
+	// number of the last flush that carried other runs than the flush before it named, root says
+	// the piece it replied last is a run's root, and loaded is the runs a restart mailed it.
+	pause  bool
+	steps  int
+	gone   []disklog.BlobRef
+	sets   []runSet
+	moved  int
+	root   bool
+	loaded runSet
 	// refs are the places of every blob told durable, dead those reported dead; recovered says
 	// a restart's replay ended.
 	refs, dead []disklog.BlobRef
@@ -70,7 +84,7 @@ func newRaftRounds(l *loop.Loop, pool core.BufPool, lg *loop.Log, log *disklog.L
 // of rounds rounds.
 func addRaftRounds(l *loop.Loop, pool core.BufPool, lg *loop.Log, owner uint32, maxBlob uint64, rounds int) *raftRounds {
 	st := raftshard.NewStorage()
-	tree, err := lsm.New(lsm.Config{MaxPiece: raftPiece, Check: true})
+	tree, err := lsm.New(lsm.Config{MaxPiece: raftPiece, StepBytes: raftPiece, Check: true})
 	if err != nil {
 		panic(err)
 	}
@@ -83,7 +97,7 @@ func addRaftRounds(l *loop.Loop, pool core.BufPool, lg *loop.Log, owner uint32, 
 }
 
 // raftPiece is a shard's tree's largest piece, small so that a flush writes several.
-const raftPiece = 1024
+const raftPiece = 2048
 
 // raftKeys is how many keys a shard's state machine holds.
 const raftKeys = 40
@@ -128,10 +142,49 @@ func (rr *raftRounds) piece() {
 	n, root, err := rr.tree.NextPiece(buf)
 	rr.fail(err)
 	r := loop.Reply{Kind: loop.ReplyPiece, Owner: rr.owner, LSN: rr.cp, Root: root}
+	rr.root = root
 	if n > 0 {
 		r.Data = buf[:n]
 	}
 	rr.l.Reply(rr.id, r)
+}
+
+// runSet is the runs of a shard's tree a manifest names, by their roots, with the merge bounds on
+// some of them.
+type runSet struct {
+	runs   []disklog.BlobRef
+	bounds []disklog.MergeBound
+}
+
+// equal reports whether s and o name the same runs and bounds, in any order.
+func (s runSet) equal(o runSet) bool {
+	byRef := func(a, b disklog.BlobRef) int {
+		return cmp.Or(cmp.Compare(a.LSN, b.LSN), cmp.Compare(a.Entry, b.Entry))
+	}
+	byRun := func(a, b disklog.MergeBound) int { return byRef(a.Run, b.Run) }
+	sr, or := slices.SortedFunc(slices.Values(s.runs), byRef), slices.SortedFunc(slices.Values(o.runs), byRef)
+	sb, ob := slices.SortedFunc(slices.Values(s.bounds), byRun), slices.SortedFunc(slices.Values(o.bounds), byRun)
+	return slices.Equal(sr, or) && slices.EqualFunc(sb, ob, func(a, b disklog.MergeBound) bool {
+		return a.Run == b.Run && a.Dead == b.Dead && bytes.Equal(a.Key, b.Key)
+	})
+}
+
+// named is the runs the newest manifest it was mailed durable names.
+func (rr *raftRounds) named() runSet {
+	if rr.checkpointed == 0 {
+		return runSet{}
+	}
+	return rr.sets[rr.checkpointed-1]
+}
+
+// merge installs each merge step its tree has due, as a merge worker would, for the next due
+// checkpoint to write.
+func (rr *raftRounds) merge() {
+	for c := rr.tree.PickCompaction(); c != nil && !rr.pause; c = rr.tree.PickCompaction() {
+		c.Run()
+		rr.fail(rr.tree.Install(c))
+		rr.steps++
+	}
 }
 
 // restore makes the base the mark in the loaded runs records its storage's base, once, before the
@@ -232,7 +285,13 @@ func (rr *raftRounds) remove() {
 func (rr *raftRounds) Mail(_ *core.Context, m *loop.Mail, out []core.Action) []core.Action {
 	switch m.Kind {
 	case loop.MailRun:
-		rr.fail(rr.tree.LoadRun(m.Ref, m.Pieces))
+		rr.loaded.runs = append(rr.loaded.runs, m.Ref)
+		if m.Bound != nil {
+			rr.loaded.bounds = append(rr.loaded.bounds, *m.Bound)
+			rr.fail(rr.tree.LoadBoundedRun(*m.Bound, m.Pieces))
+		} else {
+			rr.fail(rr.tree.LoadRun(m.Ref, m.Pieces))
+		}
 	case loop.MailReplayed:
 		rr.restore()
 		rr.fail(rr.rs.Replay(m.Ref, m.Blob, m.Data))
@@ -241,6 +300,7 @@ func (rr *raftRounds) Mail(_ *core.Context, m *loop.Mail, out []core.Action) []c
 		rr.rs.Replayed()
 		rr.apply()
 		rr.recovered = true
+		rr.merge()
 	case loop.MailFlush:
 		rr.flushes++
 		rr.cp, rr.mark = m.Base, rr.applied
@@ -253,21 +313,35 @@ func (rr *raftRounds) Mail(_ *core.Context, m *loop.Mail, out []core.Action) []c
 		}
 		_, err := rr.tree.BeginFlush()
 		rr.fail(err)
+		set := runSet{runs: slices.Clone(rr.tree.CarriedRuns()), bounds: slices.Clone(rr.tree.Bounds())}
+		if len(rr.sets) > 0 && !set.equal(rr.sets[len(rr.sets)-1]) {
+			rr.moved = len(rr.sets) + 1
+		}
+		rr.sets = append(rr.sets, set)
+		rr.l.Reply(rr.id, loop.Reply{Kind: loop.ReplyRuns, Owner: rr.owner, LSN: rr.cp, Refs: set.runs, Bounds: set.bounds})
 		rr.piece()
 	case loop.MailPiece:
 		rr.fail(rr.tree.PieceDurable(m.Ref))
+		if rr.root {
+			set := &rr.sets[len(rr.sets)-1]
+			set.runs = append(slices.Clip(set.runs), m.Ref)
+		}
 		rr.piece()
 	case loop.MailFlushFailed:
 		rr.tree.FlushFailed()
 	case loop.MailCheckpointed:
 		rr.checkpointed++
-		if dead, err := rr.tree.CheckpointDone(); err != nil || len(dead) > 0 {
-			rr.fail(fmt.Errorf("a flush's checkpoint done with %v, %d pieces dead", err, len(dead)))
+		dead, err := rr.tree.CheckpointDone()
+		rr.fail(err)
+		if len(dead) > 0 {
+			rr.gone = append(rr.gone, dead...)
+			rr.l.Reply(rr.id, loop.Reply{Kind: loop.ReplyDead, Owner: rr.owner, Refs: dead})
 		}
 		if rr.mark > rr.st.Base().Index {
 			rr.fail(rr.rs.Compact(rr.mark, raftConf))
 		}
 		rr.rs.Rewrite(m.Base)
+		rr.merge()
 	case loop.MailShare:
 		rr.rs.SetShare(m.Share)
 		rr.shares = append(rr.shares, m.Share)

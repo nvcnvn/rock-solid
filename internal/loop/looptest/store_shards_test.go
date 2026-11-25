@@ -18,23 +18,27 @@ import (
 // storeShards runs a store of configuration cfg on a device loop, ID 1, that owns its log, with a
 // Raft shard on the round driver of that loop and one on a producer loop, ID 0, both known to the
 // store, which hears their replies; each new process starts its loops, and its shards empty, to
-// restore from the runs the store mails them, when the store opens. removed is the ReplyRemoved replies the
-// store heard, and reusable whether it found each one's owner reusable at once.
+// restore from the runs the store mails them, when the store opens, their merges paused with
+// pause. removed is the ReplyRemoved replies the store heard, reusable whether it found each
+// one's owner reusable at once, and manifests the newest durable manifest's LSN as the store mailed
+// the shard on loop 1 each MailCheckpointed.
 type storeShards struct {
-	t        *testing.T
-	cfg      chunkstore.Config
-	sd       *storetest.SimDisk
-	pool     core.BufPool
-	s        *sim.Scheduler
-	ring     *Disk
-	loops    [2]*loop.Loop
-	lg       *loop.Log
-	r        *storetest.Rig
-	maxBlob  uint64
-	rounds   int
-	shards   [2]*raftRounds
-	removed  []loop.Reply
-	reusable []bool
+	t         *testing.T
+	cfg       chunkstore.Config
+	sd        *storetest.SimDisk
+	pool      core.BufPool
+	s         *sim.Scheduler
+	ring      *Disk
+	loops     [2]*loop.Loop
+	lg        *loop.Log
+	r         *storetest.Rig
+	maxBlob   uint64
+	rounds    int
+	shards    [2]*raftRounds
+	pause     bool
+	removed   []loop.Reply
+	reusable  []bool
+	manifests []uint64
 }
 
 func newStoreShards(t *testing.T, cfg chunkstore.Config, rounds int) *storeShards {
@@ -53,7 +57,7 @@ func (sh *storeShards) opened(st *chunkstore.Store) {
 	}
 	for i, l := range sh.loops {
 		sh.shards[i] = addRaftRounds(l, l.Context().Pool, sh.lg, 1001+uint32(i), sh.maxBlob, sh.rounds)
-		sh.shards[i].reply = true
+		sh.shards[i].reply, sh.shards[i].pause = true, sh.pause
 		st.AddRemote(1001+uint32(i), i, uint32(sh.shards[i].id))
 		l.Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: 1})
 	}
@@ -98,7 +102,10 @@ var mailKinds = [...]loop.MailKind{
 }
 
 func (sh *storeShards) mail(m *raftshard.Mail) {
-	sh.lg.Send(m.Loop, loop.Mail{Shard: loop.ShardID(m.Shard), Kind: mailKinds[m.Kind], Owner: m.Owner, Ref: m.Ref, Blob: m.Blob, Data: m.Data, Pieces: m.Pieces, Base: m.Base, Share: m.Share})
+	if m.Kind == raftshard.MailCheckpointed && m.Loop == 1 {
+		sh.manifests = append(sh.manifests, sh.r.S.Log().Manifest().LSN)
+	}
+	sh.lg.Send(m.Loop, loop.Mail{Shard: loop.ShardID(m.Shard), Kind: mailKinds[m.Kind], Owner: m.Owner, Ref: m.Ref, Blob: m.Blob, Data: m.Data, Pieces: m.Pieces, Base: m.Base, Share: m.Share, Bound: m.Bound})
 }
 
 func (sh *storeShards) Pool() core.BufPool     { return sh.sd.Pool() }
@@ -140,6 +147,10 @@ func (m storeShardsMachine) OnReply(_ *loop.Log, r loop.Reply) {
 		m.sh.r.S.RemoteFull()
 	case loop.ReplyPiece:
 		m.sh.r.S.RemotePiece(r.Owner, r.LSN, r.Data, r.Root)
+	case loop.ReplyRuns:
+		m.sh.r.S.RemoteRuns(r.Owner, r.LSN, r.Refs, r.Bounds)
+	case loop.ReplyDead:
+		m.sh.r.S.RemoteDead(r.Owner, r.Refs)
 	case loop.ReplyRemoved:
 		m.sh.r.S.RemoveRemote(r.Owner, r.LSN)
 		m.sh.removed = append(m.sh.removed, r)
@@ -469,4 +480,101 @@ func TestAShardOnTheRoundDriverKeepsItsLoadedRunsAcrossASecondRestart(t *testing
 		t.Fatalf("no checkpoint after the restart: %d, %d", sh.shards[1].checkpointed, before)
 	}
 	sh.restart(0, 1)
+}
+
+// TestAShardOnTheRoundDriverMergesItsRuns has the Raft shard on each loop merge its tree's runs in
+// steps on its own loop as due checkpoints flush them, until a manifest names a merge part way,
+// where both shards stop, and chunk writes then make more checkpoints due: each manifest names the
+// runs the shard's flush carries, so every piece its merges left out is dead in the log once a
+// checkpoint begun after its report ends, and a restart mails it the runs, and bounds, that the
+// newest manifest it was mailed durable named, and recovers each storage whole.
+func TestAShardOnTheRoundDriverMergesItsRuns(t *testing.T) {
+	sh := newStoreShards(t, shardReplay(), 40)
+	for sh.shards[0].named().bounds == nil && sh.shards[1].named().bounds == nil {
+		if !sh.r.Step() {
+			t.Fatal("no manifest named a merge part way")
+		}
+	}
+	var gone []disklog.BlobRef
+	sh.pause = true
+	for _, rr := range sh.shards {
+		rr.pause, rr.left = true, 0
+	}
+	sh.r.Settle()
+	for i, rr := range sh.shards {
+		if rr.steps == 0 || len(rr.gone) == 0 || rr.tree.Runs() >= rr.flushes {
+			t.Fatalf("shard %d installed %d merge steps, reported %d pieces dead and holds %d runs after %d flushes", i, rr.steps, len(rr.gone), rr.tree.Runs(), rr.flushes)
+		}
+		gone = append(gone, rr.gone...)
+	}
+	before, log := sh.shards[1].checkpointed, sh.r.S.Log()
+	var reported uint64
+	for i := 0; reported == 0 || log.NamedLSN() < reported; i++ {
+		if i == 200 {
+			t.Fatalf("chunk writes made %d checkpoints, and no segment header named the manifest at %d", sh.shards[1].checkpointed-before, reported)
+		}
+		sh.r.Write(storetest.Chunk(uint32(i%8)), 0, storetest.Fill(4*core.BlockSize, byte(i)), 0)
+		sh.r.Settle()
+		if reported == 0 && sh.shards[1].checkpointed >= before+2 {
+			reported = log.Manifest().LSN
+		}
+	}
+	for _, p := range gone {
+		if err := log.PiecesDead([]disklog.BlobRef{p}); err == nil {
+			t.Fatalf("the log still holds piece %+v a merge left out", p)
+		}
+	}
+	named := [2]runSet{sh.shards[0].named(), sh.shards[1].named()}
+	if named[0].bounds == nil && named[1].bounds == nil {
+		t.Fatal("no manifest names a merge part way")
+	}
+	sh.restart(0, 1)
+	for i, rr := range sh.shards {
+		if !rr.loaded.equal(named[i]) {
+			t.Fatalf("shard %d was mailed runs %v bounded by %+v, the manifest it was mailed durable named %v bounded by %+v", i, rr.loaded.runs, rr.loaded.bounds, named[i].runs, named[i].bounds)
+		}
+	}
+}
+
+// TestACrashRightAfterAManifestNamesAShardsMergedRunsRestoresThem has the Raft shard on each loop
+// merge its tree's runs as due checkpoints flush them, and stops both shards once a flush carries
+// other runs than the manifest before named: the process crashes as soon as a segment header
+// names that flush's manifest, before any later manifest is durable, and the restart mails each
+// shard exactly the runs, and bounds, its flush named in it.
+func TestACrashRightAfterAManifestNamesAShardsMergedRunsRestoresThem(t *testing.T) {
+	sh := newStoreShards(t, shardReplay(), 40)
+	rr := sh.shards[1]
+	for rr.moved == 0 || rr.moved != len(rr.sets) {
+		if !sh.r.Step() {
+			t.Fatal("no flush carried other runs than the manifest before named")
+		}
+	}
+	sh.pause, sh.rounds = true, 0
+	for _, s := range sh.shards {
+		s.pause, s.left = true, 0
+	}
+	for rr.checkpointed < rr.moved {
+		if !sh.r.Step() {
+			t.Fatalf("the checkpoint of flush %d never ended", rr.moved)
+		}
+	}
+	log, m := sh.r.S.Log(), sh.manifests[rr.moved-1]
+	for i := 0; log.NamedLSN() < m; i++ {
+		if log.Manifest().LSN != m {
+			t.Fatalf("a manifest at %d was durable before a segment header named the one at %d", log.Manifest().LSN, m)
+		}
+		if !sh.r.Step() {
+			sh.r.Write(storetest.Chunk(uint32(i%8)), 0, storetest.Fill(4*core.BlockSize, byte(i)), 0)
+		}
+	}
+	if log.Manifest().LSN != m {
+		t.Fatalf("a manifest at %d was durable as a segment header named the one at %d", log.Manifest().LSN, m)
+	}
+	named := rr.sets[rr.moved-1]
+	sh.r.D.Restart()
+	sh.r.Reopen()
+	sh.r.Settle()
+	if got := sh.shards[1].loaded; !got.equal(named) {
+		t.Fatalf("the crash restored runs %v bounded by %+v, where the flush the manifest names named %v bounded by %+v", got.runs, got.bounds, named.runs, named.bounds)
+	}
 }

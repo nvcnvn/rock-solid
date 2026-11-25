@@ -1,10 +1,12 @@
 package raftshard
 
 import (
+	"reflect"
 	"testing"
 
 	"go.etcd.io/raft/v3/raftpb"
 
+	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
@@ -620,5 +622,19 @@ func TestAShardOnTheRoundDriverIsNamedBeforeItsFirstReport(t *testing.T) {
 	r.crash(5)
 	if got := r.remoteReplayLSN(6); got != reported {
 		t.Fatalf("after a restart shard 6 is named with %d before it reports, the manifest's %d", got, reported)
+	}
+}
+
+// TestALoadedManifestNamesAShardsRunsWithTheirBounds loads a manifest naming shard 6's run with
+// a merge bound: until the shard's flush names its runs again, a checkpoint names that run with its
+// bound, or a crash after it would load the run whole, dead pieces included.
+func TestALoadedManifestNamesAShardsRunsWithTheirBounds(t *testing.T) {
+	h := NewHost(nil)
+	h.AddRemote(6, 1, 0)
+	run := disklog.BlobRef{Segment: 2, Block: 3, LSN: 4}
+	bounds := []disklog.MergeBound{{Run: run, Key: []byte("k"), Dead: 1}}
+	h.Loaded(&disklog.Manifest{Indexes: []disklog.ManifestIndex{{Owner: 6, ReplayLSN: 5, Runs: []disklog.BlobRef{run}, Bounds: bounds}}})
+	if ix := h.RemoteIndexes(nil, 9)[0]; !reflect.DeepEqual(ix.Bounds, bounds) {
+		t.Fatalf("after a load shard 6 is named with bounds %+v, want %+v", ix.Bounds, bounds)
 	}
 }

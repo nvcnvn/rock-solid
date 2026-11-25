@@ -7379,8 +7379,26 @@ Recovery from manifest and log is under Shard indexes in the disk owner's checkp
   dead at the removal or at the end of the checkpoint running then, losing the flush's pieces, or
   never reporting them failed it, and so did mailing `MailCheckpointed` only after a checkpoint
   begun with something durable, which lost the first flush's run
-  (`TestARemovedRemoteShardsPiecesDieOnceAManifestLeavesItOut`). The end-to-end restart is
-  under [Round driver](#round-driver).
+  (`TestARemovedRemoteShardsPiecesDieOnceAManifestLeavesItOut`). A shard on the round driver
+  whose merge since the last manifest left one of its runs bounded and the other out names the
+  runs its flush carries: that checkpoint's manifest names them, the merge bound and the run the
+  flush wrote, and so does a checkpoint begun before its next flush; with the owner ignoring the
+  reply, or keeping the old bounds, it failed (`TestAShardOnTheRoundDriverNamesTheRunsItsFlushCarries`).
+  The shards on both loops merge their runs in steps on their own loops until a manifest names a
+  merge part way, then stop, and chunk writes make more checkpoints due: every piece their merges
+  left out is gone from the log once a segment header names a manifest begun after their reports,
+  and a restart mails each the runs, and bounds, its newest named manifest names; with the owner
+  dropping nothing on the report a merged-away piece stayed live, and with the bounds left off the
+  mail a bounded run failed to load (`TestAShardOnTheRoundDriverMergesItsRuns`). The process
+  crashing as soon as a segment header names the manifest of a flush that carried other runs than
+  the manifest before, before any later manifest is durable, restores exactly the runs and bounds
+  that flush named; with the owner recording the shard's runs without rewriting the running
+  manifest, the restart got the runs the manifest before named, without the bounds
+  (`TestACrashRightAfterAManifestNamesAShardsMergedRunsRestoresThem`). After a restart, until its
+  flush names its runs again, a checkpoint names a shard on the round driver with the bounds the
+  loaded manifest named; with the host dropping them on the load it failed
+  (`TestALoadedManifestNamesAShardsRunsWithTheirBounds`). The end-to-end restart is under
+  [Round driver](#round-driver).
 - **Lagging follower.** A follower behind the compaction index gets a `MsgSnap` built from a point-in-time view of the shard's LSM tree, which never blocks the writer, and catches up from it. A view held open holds back the cleaner (asserted in the LSM tree tests).
 - **Index rebuild.** One index rebuilds from its manifest and the log while the disk's other indexes serve, without restarting the log.
 

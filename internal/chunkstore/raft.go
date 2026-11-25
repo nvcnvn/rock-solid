@@ -62,10 +62,12 @@ func (s *Store) AddRaft(owner uint32, st *raftshard.Storage, sh RaftShard) {
 // its share of twice max_replay_bytes as the shards on the disk come and go, and each due
 // checkpoint whose manifest is durable, after which it compacts and writes again what holds the
 // replay floor back (raftshard.Rounds.Rewrite). Each due checkpoint asks it to flush its tree
-// under it, a piece at a time (RemotePiece), and waits for its last piece; its runs and their
-// mark of its storage's base join the manifest, and a restart mails them to it before its
-// replay. It is called as AddRaft is, before the shard writes a blob, and after Open, before
-// any event, to restore it from the manifest's runs.
+// under it, a piece at a time (RemotePiece), and waits for its last piece; the runs its flush
+// carries, which its merges change (RemoteRuns), those it writes and their mark of its storage's
+// base join the manifest, and a restart mails them to it before its replay; the pieces its merges
+// leave out die once a checkpoint begun after it reports them ends (RemoteDead). It is called
+// as AddRaft is, before the shard writes a blob, and after Open, before any event, to restore it
+// from the manifest's runs.
 func (s *Store) AddRemote(owner uint32, loop int, id uint32) {
 	if s.raft == nil {
 		s.raft = raftshard.NewHost(s.log)
@@ -83,6 +85,18 @@ func (s *Store) RemoteReplay(owner uint32, lsn uint64) { s.raft.RemoteReplay(own
 func (s *Store) RemotePiece(owner uint32, cp uint64, data []byte, root bool) {
 	s.raft.RemotePiece(owner, cp, data, root)
 }
+
+// RemoteRuns takes the runs, with merge bounds, that owner's shard on the round driver replied its
+// flush for checkpoint cp carries (loop.ReplyRuns), before its first piece: the manifest names
+// them, in place of those the newest manifest named, and the roots its pieces write.
+func (s *Store) RemoteRuns(owner uint32, cp uint64, runs []disklog.BlobRef, bounds []disklog.MergeBound) {
+	s.raft.RemoteRuns(owner, cp, runs, bounds)
+}
+
+// RemoteDead takes the pieces owner's shard on the round driver replied its tree no longer names
+// (loop.ReplyDead), its merges' inputs once a durable manifest names their output: they are
+// reported dead once a checkpoint begun after now ends.
+func (s *Store) RemoteDead(owner uint32, refs []disklog.BlobRef) { s.raft.RemoteDead(owner, refs) }
 
 // RemoteFull takes a shard on the round driver's ask for a checkpoint, as raftshard.Rounds.FullDue
 // reports it: full, it applied a commit no checkpoint compacted.

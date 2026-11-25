@@ -174,10 +174,12 @@ type raftRig struct {
 	held  []heldRound
 	// mail is what the store mailed its shards on the round driver, but for a checkpoint's asks
 	// for their pieces, which take answers that they have none, or with remotePiece set a run of
-	// two such pieces each due checkpoint, remoteSent the pieces of the running one sent.
+	// two such pieces each due checkpoint, remoteSent the pieces of the running one sent, and
+	// with remoteRuns set the runs and bounds a flush names as carried before its first piece.
 	mail        []raftshard.Mail
 	remotePiece []byte
 	remoteSent  int
+	remoteRuns  func() ([]disklog.BlobRef, []disklog.MergeBound)
 }
 
 type heldRound struct {
@@ -233,6 +235,10 @@ func (r *raftRig) take() {
 		if m.Kind == raftshard.MailFlush || m.Kind == raftshard.MailPiece {
 			if m.Kind == raftshard.MailFlush {
 				r.remoteSent = 0
+				if r.remoteRuns != nil {
+					runs, bounds := r.remoteRuns()
+					r.s.RemoteRuns(m.Owner, m.Base, runs, bounds)
+				}
 			}
 			var piece []byte
 			if r.remotePiece != nil && r.remoteSent < 2 {
@@ -938,6 +944,33 @@ func TestARemovedRemoteShardsPiecesDieOnceAManifestLeavesItOut(t *testing.T) {
 		if err := r.s.log.PiecesDead([]disklog.BlobRef{p}); !errors.Is(err, disklog.ErrMalformed) {
 			t.Fatalf("the log still holds the removed shard's piece %v once a segment header names the manifest that left it out", p)
 		}
+	}
+}
+
+// TestAShardOnTheRoundDriverNamesTheRunsItsFlushCarries has a shard on the round driver, whose
+// merge since the last manifest left one of its two runs bounded and the other out, name the runs
+// its flush carries: the checkpoint's manifest names those and the run its flush writes, and so
+// does a checkpoint begun before its next flush, merge bound included.
+func TestAShardOnTheRoundDriverNamesTheRunsItsFlushCarries(t *testing.T) {
+	r := newRaftRig(t, raftConfig(), raftGeometry, 7)
+	r.s.AddRemote(9, 2, 4)
+	r.remotePiece = fill(core.BlockSize, 9)
+	for i := range 2 {
+		r.s.RemoteFull()
+		r.chunkWrite(chunk(1), fill(core.BlockSize, byte(i)))
+		r.settle()
+	}
+	runs := r.s.raft.RemoteIndexes(nil, r.s.log.DurableLSN())[0].Runs
+	bound := disklog.MergeBound{Run: runs[1], Key: []byte("k"), Dead: 1}
+	r.remoteRuns = func() ([]disklog.BlobRef, []disklog.MergeBound) {
+		return runs[1:], []disklog.MergeBound{bound}
+	}
+	r.s.RemoteFull()
+	r.chunkWrite(chunk(1), fill(core.BlockSize, 2))
+	r.settle()
+	ix := r.s.raft.RemoteIndexes(nil, r.s.log.DurableLSN())[0]
+	if len(ix.Runs) != 2 || ix.Runs[0] != runs[1] || ix.Runs[1] == runs[0] || !reflect.DeepEqual(ix.Bounds, []disklog.MergeBound{bound}) {
+		t.Fatalf("after a flush that carried %v bounded by %+v, the shard is named with runs %v and bounds %+v", runs[1:], bound, ix.Runs, ix.Bounds)
 	}
 }
 

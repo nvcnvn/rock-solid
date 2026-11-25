@@ -54,8 +54,9 @@ const (
 	// dead the pieces of it that no run holds.
 	MailFlushFailed
 	// MailRun is a run of the shard's tree that the manifest a restart loaded names, its root at
-	// Ref and its pieces in order, root last; every one comes before the restart's first
-	// MailReplayed, and the shard restores its storage's base from them before that.
+	// Ref and its pieces in order, root last, those past Bound's dead ones if a merge bounds it;
+	// every one comes before the restart's first MailReplayed, and the shard restores its
+	// storage's base from them before that.
 	MailRun
 )
 
@@ -71,6 +72,7 @@ type Mail struct {
 	Pieces [][]byte
 	Base   uint64
 	Share  uint64
+	Bound  *disklog.MergeBound
 }
 
 // ShardID names a shard on its loop.
@@ -93,16 +95,24 @@ const (
 	// ReplyPiece is the next piece of the shard's flush for checkpoint LSN, Data, Root marking a
 	// run's last; with no Data the flush has written all it has.
 	ReplyPiece
+	// ReplyRuns names the runs, Refs, with merge Bounds, that the shard's flush for checkpoint LSN
+	// carries, before its first ReplyPiece: the manifest names them and the roots its pieces write.
+	ReplyRuns
+	// ReplyDead is the pieces, Refs, that the shard's tree no longer names, once the manifest that
+	// leaves them out is durable.
+	ReplyDead
 )
 
 // Reply is what a shard tells its disk's owner of its blobs, which carry Owner, off the data path;
-// Data is the owner's to keep.
+// Data, Refs and Bounds are the owner's to keep.
 type Reply struct {
-	Kind  ReplyKind
-	Owner uint32
-	LSN   uint64
-	Data  []byte
-	Root  bool
+	Kind   ReplyKind
+	Owner  uint32
+	LSN    uint64
+	Data   []byte
+	Root   bool
+	Refs   []disklog.BlobRef
+	Bounds []disklog.MergeBound
 }
 
 // ReplyMachine is an owner loop's machine that hears its shards' replies (Loop.Reply), after the
