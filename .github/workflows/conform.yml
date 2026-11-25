@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       first:
-        description: First seed (default rotates daily)
+        description: First sweep seed (default rotates daily)
         required: false
   workflow_call:
     inputs:
@@ -29,7 +29,12 @@ defaults:
 env:
   RUN: ^TestPeeringKeepsAcknowledgedWritesAcrossPrimaries$|^TestConformReplacementSeeds$
   COUNT: "500"
+  # Plants run from seed 0: conform.sh fails a caught plant that fires on none of seeds 0 to 39, the
+  # nightly run's 40, which take 1 h 47 m on the SYS-2. The gate's 10 take about a quarter of that;
+  # every caught plant is rejected on one of them, and one that stops firing there gives no evidence
+  # instead of failing until that night.
   PLANT_COUNT: "40"
+  GATE_PLANT_COUNT: "10"
   # The SYS-2 runs a trace about half as fast as the M4 Pro: one that gives no verdict in 400 s there
   # gets 20 minutes here. Its runner has 8 threads and 20 GB: 6 traces of 2 GB heap at once.
   TLC_SECONDS: "1200"
@@ -84,8 +89,8 @@ jobs:
       - name: plants
         if: matrix.mode == 'plants'
         env:
-          FIRST: ${{ steps.seeds.outputs.first }}
-          COUNT: ${{ env.PLANT_COUNT }}
+          FIRST: "0"
+          COUNT: ${{ inputs.scripted && env.GATE_PLANT_COUNT || env.PLANT_COUNT }}
         run: |
           echo "Plants on seeds $FIRST to $((FIRST + COUNT - 1))" | tee -a "$GITHUB_STEP_SUMMARY"
           scripts/conform.sh plants 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"

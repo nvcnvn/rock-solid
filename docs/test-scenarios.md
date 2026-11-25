@@ -4519,12 +4519,12 @@ Not yet run, and owed by the [checklist](build-checklist.md): `TestReplicatedWri
 
 The `conform` workflow runs this check nightly on a window of 500 seeds that moves each day, from seed
 40 up, of the primary-change run and of the voter model's replacement run, with 20 minutes per trace
-where a local run gives 400 s, and the plants over the window's first 40. A failure names its seed,
+where a local run gives 400 s, and the plants over seeds 0 to 39. A failure names its seed,
 and `RUN='^TestPeeringKeepsAcknowledgedWritesAcrossPrimaries$|^TestConformReplacementSeeds$' FIRST=<seed>
 COUNT=1 scripts/conform.sh` replays it. The real-group runs' traces (`real-primaries-<seed>`) are not in it. For a change to
 the epoch or voter model, its trace spec, `internal/chunkstore`, `internal/lease`, `internal/raftshard`, `internal/trace`,
 `tools/tracedata`, `tools/votersdata` or the script (`scripts/conform-paths`), the `gate` workflow runs 40 seeds of
-each model with the scripted traces, and the plants, and a failure there is a discrepancy to settle before the change
+each model with the scripted traces, and the plants over seeds 0 to 9, each caught plant rejected on one of them, and a failure there is a discrepancy to settle before the change
 merges. Both run on the SYS-2 runner, so a pull request's gate skips them. `scripts/gate-branch.sh` runs the local default, the epoch model's scripted and sweep traces and 50 seeds of the voter model's, on a branch that touches those paths. A plant run fails as each model's [traces can fail](#traces-can-fail-in-the-epoch-models-check) section says.
 
 `refillSoleHolder` is not in `conformPlants`: the primary-change run is too short for a member merely down to go missing, so a refill of one appears only in `scripted-refill`, and a `Stay` only in `scripted-stay`, and `TestPlantedPeeringBugsBreakTheOracle` breaks the rule through the simulator's invariant.
