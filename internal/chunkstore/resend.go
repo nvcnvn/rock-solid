@@ -1,6 +1,7 @@
 package chunkstore
 
 import (
+	"bytes"
 	"encoding/binary"
 	"math/bits"
 	"slices"
@@ -151,4 +152,33 @@ func (x *Index) writer(e *disklog.Entry) {
 		}
 		return true
 	})
+}
+
+// forget removes chunk c's entries of versions above above from intervals before before, at
+// every PG count of the pool's table, where its disk stops holding those versions: a give-up
+// drops them all, and a decision marker listing the chunk those above the version it keeps, which
+// covers a recovery's rewrite, since only a listed chunk is recovered. ponytail: scans the PG's whole table at each PG count, which only these
+// rare steps pay; index entries by chunk too if a PG's outstanding writes grow large.
+func (x *Index) forget(pool core.PoolID, c core.ChunkID, above uint64, before uint32) {
+	lowest, ok := x.lowestLevel(pool)
+	if !ok || x.plant != nil && x.plant.writerAtLog {
+		return
+	}
+	var dead [][]byte
+	for l := uint(lowest); l < 32; l++ {
+		x.lo = x.resendPrefix(x.lo[:0], pool, uint8(l), core.PGIndexOf(c.Hash(), 1<<l))
+		x.tree.Iter(&x.it)
+		for ok := x.it.SeekGE(x.lo); ok && bytes.HasPrefix(x.it.Key(), x.lo); ok = x.it.Next() {
+			k, v := x.it.Key(), x.it.Value()
+			if len(k) != resendKeySize || len(v) != resendValueSize || core.ChunkIDFromBytes([core.ChunkIDSize]byte(v)) != c {
+				continue
+			}
+			if ver := binary.LittleEndian.Uint64(v[core.ChunkIDSize:]); ver > above && intervalOf(ver) < before {
+				dead = append(dead, bytes.Clone(k))
+			}
+		}
+	}
+	for _, k := range dead {
+		x.must(x.tree.Delete(k))
+	}
 }

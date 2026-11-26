@@ -365,6 +365,7 @@ func (x *Index) Apply(ev *disklog.Event) error {
 		case disklog.EntryDropped:
 			if ch, _ := x.Chunk(e.Pool, e.Chunk); !ch.after(e.Interval) {
 				x.drop(e.Pool, e.Chunk)
+				x.forget(e.Pool, e.Chunk, 0, math.MaxUint32)
 			}
 		}
 	}
@@ -380,8 +381,16 @@ func (x *Index) decide(e *disklog.Entry) {
 			return false
 		}
 		ch, _ := x.Chunk(m.Pool, m.Chunk)
+		recovered := ch.Recovered
 		ch.Listed, ch.ListedIn, ch.Image = m.Version, m.Interval, m.Kind == disklog.EntryImage
 		x.putChunk(m.Pool, m.Chunk, ch)
+		above := m.Version
+		if recovered > m.Version {
+			// The decision drops the chunk's recovery, and with it the versions the recovery
+			// brought; the index keeps no interval it was logged in, so all earlier ones go.
+			above = 0
+		}
+		x.forget(m.Pool, m.Chunk, above, m.Interval)
 		return true
 	})
 	k := x.decisionKey(e.Pool, e.Owner, pgs)

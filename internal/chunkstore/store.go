@@ -281,7 +281,8 @@ type loadingRun struct {
 
 type plants struct {
 	// writerAtLog puts a gated version's writer into the resend table once logged rather than once
-	// mapped, so a version peering drops keeps its entry.
+	// mapped, and removes no entry where its version goes, so a version peering drops keeps its
+	// entry (the epoch change model's KeepDroppedIds).
 	writerAtLog bool
 	// trimOnAnswer has a disk trim a write's entry once it maps the write's version, whether or not
 	// its client heard the answer; noWatermark trims a session's entries and keeps no watermark.

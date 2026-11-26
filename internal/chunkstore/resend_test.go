@@ -297,3 +297,50 @@ func TestAFailedWriteLeavesNoResendEntry(t *testing.T) {
 		t.Fatalf("the failed write's request names %#x", got)
 	}
 }
+
+// A disk's resend table names a version only while the disk holds it: a client write's entry
+// goes when a decision marker lists the chunk at a version below it, when the marker drops a
+// recovery that brought the chunk, along with every version of an earlier interval, and when a
+// give-up drops the chunk. A resend answered from the entry would acknowledge a version no disk
+// may hold, so it must find none and be ordered again.
+func TestAResendEntryGoesWithItsVersion(t *testing.T) {
+	c := chunk(1)
+	writer := func(v, req uint64) disklog.Entry {
+		e := disklog.WriterEntry(1, c, v, 1, 7, 1, req, 1)
+		e.Last = true
+		return e
+	}
+	resent := func(x *Index, req uint64) uint64 {
+		v, _ := x.Resent(1, c, 1, 7, 1, req)
+		return v
+	}
+	t.Run("decision marker", func(t *testing.T) {
+		x := newIndex(t)
+		apply(t, x, record(1, writer(1<<32|1, 3), writer(1<<32|2, 4)))
+		apply(t, x, record(2, disklog.MissingEntry(1, c, 1<<32|1, 2), disklog.DecisionEntry(1, 0, 1, 2)))
+		if got := resent(x, 4); got != 0 {
+			t.Fatalf("the dropped 1.2's request names %#x", got)
+		}
+		if got := resent(x, 3); got != 1<<32|1 {
+			t.Fatalf("the kept 1.1's request names %#x", got)
+		}
+	})
+	t.Run("dropped recovery", func(t *testing.T) {
+		x := newIndex(t)
+		apply(t, x, record(1, writer(1<<32|1, 3)))
+		apply(t, x, record(2, disklog.MissingEntry(1, c, 1<<32|1, 2), disklog.DecisionEntry(1, 0, 1, 2)))
+		apply(t, x, record(3, disklog.RecoveredEntry(1, c, 2<<32|1, 2)))
+		apply(t, x, record(4, disklog.MissingEntry(1, c, 1<<32|1, 3), disklog.DecisionEntry(1, 0, 1, 3)))
+		if got := resent(x, 3); got != 0 {
+			t.Fatalf("1.1's request names %#x after its recovery was dropped", got)
+		}
+	})
+	t.Run("give-up", func(t *testing.T) {
+		x := newIndex(t)
+		apply(t, x, record(1, writer(1<<32|1, 3)))
+		apply(t, x, record(2, disklog.DroppedEntry(1, c, 1)))
+		if got := resent(x, 3); got != 0 {
+			t.Fatalf("the dropped chunk's request names %#x", got)
+		}
+	})
+}
