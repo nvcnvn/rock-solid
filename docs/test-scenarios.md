@@ -9335,16 +9335,39 @@ completion up, and appends them to the run's history file, `history` beside the 
 From [Daemon restart and upgrade](design.md#daemon-restart-and-upgrade) and the FUSE restart and
 handoff spikes.
 
-- Golden frames for each opcode the item names, request and reply, taken from the spikes' `rawfs.c`
-  and `hofs.c` exchanges on Linux 6.18 (FUSE 7.45); a reply echoes the request's 64-bit `unique`,
-  bit 63 included, as a resent request carries it.
-- `inval_inode`, `inval_entry` and `NOTIFY_RESEND` encode as the kernel reads them.
-- Saved `INIT` parameters round-trip, and two that differ in any negotiated field compare unequal.
-- A truncated header, a length that disagrees with the frame, an unknown opcode and a name without
-  its terminating zero are errors, never panics. **[property]** Fuzz every decoder.
-- A `WRITE`'s data stays in its pool buffer, at the offset the kernel put it.
-- **Benchmarks:** decoding a `WRITE` and encoding its reply, decoding a `LOOKUP` and encoding its
-  entry; 0 allocations each.
+- Golden frames for each opcode the item names, request and reply, and for the three
+  notifications, built by `internal/fuseproto/testdata/golden.c` from the structs of Linux
+  6.18.44's `linux/fuse.h` (FUSE 7.45), so the codec's offsets are checked against the kernel's
+  header rather than against themselves. Their values are the spikes' `rawfs.c` and `hofs.c`
+  exchanges: a resent `LOOKUP` of `hang1` and `MKDIR` of `mkhangdir`, their `unique` built from
+  `FUSE_UNIQUE_RESEND`, `FOPEN_DIRECT_IO` opens, 128 KiB `max_write`. Every request decodes to its
+  fields, every reply echoes the request's 64-bit `unique` whole, and `inval_inode`, `inval_entry`
+  and `NOTIFY_RESEND` encode byte for byte (`TestGoldenRequestsDecode`, `TestGoldenRepliesEncode`).
+  The resent requests carry `UniqueResend` over their identity
+  (`TestResentRequestsCarryUniqueResend`), and the `READDIRPLUS` reply holds names of 8 and 16
+  bytes, which take no padding. A `SETXATTR`'s value, which holds zero bytes, stays in its frame
+  after its name, and the body is the 8-byte one a mount without `FUSE_SETXATTR_EXT` gets.
+- A `CREATE` carrying the supplementary-groups extension decodes as one without it, the
+  extension cut off by the header's `total_extlen`; an `INIT` of 16 bytes, an older kernel's,
+  decodes without `flags2`.
+- Saved `INIT` parameters round-trip, and changing any one field of the kernel's offer or the
+  daemon's answer gives parameters that decode to the change and compare unequal
+  (`TestParamsRoundTripAndDifferInEveryField`).
+- A truncated header, a length that disagrees with the frame or with `total_extlen`, an unknown
+  opcode, a name without its terminating zero, bytes after a name, a `WRITE` or `SETXATTR` whose data
+  disagrees with its size, a `BATCH_FORGET` count past the frame and every fixed body one byte short or long
+  are errors with the header still decoded, so the request can be answered `ENOSYS` or `EIO`,
+  never panics (`TestMalformedFramesAreErrors`). **[property]** `FuzzDecode` from every golden
+  request and `FuzzDecodeParams`: no panic, names without a zero, a `WRITE`'s data its size, and
+  saved parameters re-encoding to their bytes. `FuzzDecode` also decodes each input with its
+  header's length patched to the input's, so a shorter or longer body reaches the body decoders.
+- A `WRITE`'s data stays in its frame, at the offset the kernel put it; `READ` and
+  `READDIRPLUS` replies are built in place behind a header written last.
+- **Benchmarks:** `BenchmarkWrite`, decoding a `WRITE` and encoding its reply, 8.6 ns;
+  `BenchmarkLookup`, decoding a `LOOKUP` and encoding its entry, 16 ns; 0 allocations each, as
+  `TestDecodeAndReplyAllocateNothing` checks for those, `READDIRPLUS`, `STATFS`, `INIT` with its
+  saved parameters, `LINK`, `TMPFILE`, `ACCESS`, `FSYNCDIR`, `RENAME2`, `STATX`, the four xattr
+  opcodes and the notifications (Apple M4 Pro).
 
 ## Simulated FUSE clients
 
