@@ -94,8 +94,9 @@ func (x *Index) Resent(pool core.PoolID, c core.ChunkID, pgs uint32, session, in
 }
 
 // writer applies a writer entry: the table names the request's version unless the request is at
-// or below its session's watermark, and the session's entries in the PG below its oldest
-// outstanding request go, the watermark rising to the one before it.
+// or below its session's watermark, and the session's entries in the PG and its ancestors below
+// its oldest outstanding request go, the watermark at each rising to the one before it. The
+// oldest ID is the session's, so an ancestor's watermark holds for the PG's split sibling too.
 func (x *Index) writer(e *disklog.Entry) {
 	pgs := uint32(e.Length)
 	top := uint8(bits.TrailingZeros32(pgs))
@@ -113,15 +114,15 @@ func (x *Index) writer(e *disklog.Entry) {
 	if oldest <= wm+1 {
 		return
 	}
+	noWatermark := x.plant != nil && x.plant.noWatermark
+	x.val = binary.LittleEndian.AppendUint64(x.val[:0], oldest-1)
 	x.ancestors(e.Pool, e.Chunk, pgs, func(level uint8, pg uint32) bool {
 		x.lo = append(x.lo[:0], x.watermarkKey(e.Pool, level, pg, e.Session, e.Incarnation)...)
 		x.hi = binary.BigEndian.AppendUint64(append(x.hi[:0], x.lo...), oldest)
 		x.must(x.tree.DeleteRange(x.lo, x.hi))
+		if !noWatermark {
+			x.must(x.tree.Put(x.lo, x.val))
+		}
 		return true
 	})
-	if x.plant != nil && x.plant.noWatermark {
-		return
-	}
-	x.val = binary.LittleEndian.AppendUint64(x.val[:0], oldest-1)
-	x.must(x.tree.Put(x.watermarkKey(e.Pool, top, pg, e.Session, e.Incarnation), x.val))
 }

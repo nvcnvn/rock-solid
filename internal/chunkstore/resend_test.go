@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/disklog"
 )
 
 // dropRefusals drops every refusal the client would hear for request id.
@@ -201,5 +202,22 @@ func TestANewPrimaryAnswersAResendFromItsTable(t *testing.T) {
 	c.settle()
 	if rp := c.reply(x); rp.Status != StatusOK || rp.Version != MakeVersion(1, 1) {
 		t.Fatalf("X sent to the new primary answered %+v, want 1.1", rp)
+	}
+}
+
+// A session writes chunk B of the pool's one PG as requests 3 and 5, naming 4 as its oldest
+// outstanding request with 5, so 3 is trimmed. The pool splits in two, B falling in half 1, and
+// the session writes chunk A of half 0 naming 12 as its oldest. Its trim reaches the shared PG
+// below and must leave a watermark there, so late attempts of 3 and 5 at half 1 are stale.
+func TestASplitHalfsTrimKeepsItsSiblingsWritesStale(t *testing.T) {
+	x := newIndex(t)
+	a, b := chunkIn(core.PGID{Index: 0}, 2, 0), chunkIn(core.PGID{Index: 1}, 2, 0)
+	apply(t, x, record(1, disklog.WriterEntry(1, b, 1, 1, 7, 1, 3, 3)))
+	apply(t, x, record(2, disklog.WriterEntry(1, b, 2, 1, 7, 1, 5, 4)))
+	apply(t, x, record(3, disklog.WriterEntry(1, a, 1, 2, 7, 1, 12, 12)))
+	for _, req := range []uint64{3, 5} {
+		if v, stale := x.Resent(1, b, 2, 7, 1, req); !stale {
+			t.Errorf("request %d at half 1: version %d, not stale", req, v)
+		}
 	}
 }
