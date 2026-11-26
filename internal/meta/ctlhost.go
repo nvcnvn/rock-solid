@@ -229,6 +229,9 @@ func (h *CtlHost) Err() error { return h.err }
 // Shard is the host's replica of the control-plane group, nil while a restart replays its log.
 func (h *CtlHost) Shard() *Shard { return h.shard }
 
+// Log is the host's disk log, nil until its format or recovery serves one.
+func (h *CtlHost) Log() *disklog.Log { return h.disk.Log }
+
 // Control is the leader's Control, or nil while the host does not lead with an entry of its term
 // applied.
 func (h *CtlHost) Control() *Control { return h.ctl }

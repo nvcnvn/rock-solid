@@ -296,3 +296,54 @@ func TestFormatMakesAFileNeverWrittenAndRefusesAnyOther(t *testing.T) {
 		}
 	}
 }
+
+// A voter's -max-replay-bytes is held to a quarter of its log's formatted size, not its file's:
+// a file grown since its format holds no more log, so a restart on it with a bound only the
+// larger file would fit is refused.
+func TestTheMaxReplayBytesFitTheLogAFileWasFormattedWith(t *testing.T) {
+	disk := filepath.Join(testDir(t), "ctl-grown-disk")
+	t.Cleanup(func() { _ = os.Remove(disk) })
+	local := netip.MustParseAddrPort("127.0.0.1:0")
+	cfg := ctlConfig{Node: 1, Voters: []voter{{1, local}}, Group: ctlGroup, Listen: local, Disk: disk, Format: true, DiskBytes: 512 << 20, MaxReplayBytes: 4 << 20}
+	run := func(cfg ctlConfig, until func(p *ctl) bool) error {
+		p, err := newCtl(cfg)
+		if err != nil {
+			return err
+		}
+		done := make(chan error, 1)
+		go func() { done <- p.Run() }()
+		if !within(30*time.Second, func() bool {
+			select {
+			case err := <-done:
+				done <- err
+				return true
+			default:
+				return until(p)
+			}
+		}) {
+			t.Fatal("the voter neither led nor stopped")
+		}
+		p.Stop()
+		return <-done
+	}
+	leads := func(p *ctl) bool {
+		ch := make(chan bool, 1)
+		p.call(func(_ *core.Context, h *meta.CtlHost) { ch <- h.Control() != nil })
+		select {
+		case led := <-ch:
+			return led
+		case <-time.After(time.Second):
+			return false
+		}
+	}
+	if err := run(cfg, leads); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(disk, 2<<30); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Format, cfg.MaxReplayBytes = false, 160<<20
+	if err := run(cfg, leads); err == nil || !strings.Contains(err.Error(), "above a quarter") {
+		t.Fatalf("a restart whose bound fits the grown file but not its log gave %v", err)
+	}
+}

@@ -51,6 +51,9 @@ type ctlMachine struct {
 	disk *uring.Disk
 	h    *meta.CtlHost
 	out  meta.CtlHostOutput
+	// fits is set once the served log's formatted size passed replayFits: a file grown since its
+	// format holds no more log.
+	fits bool
 }
 
 func newCtl(cfg ctlConfig) (_ *ctl, err error) {
@@ -228,6 +231,12 @@ func (m *ctlMachine) OnEvent(ctx *core.Context, ev *core.Event, acts []core.Acti
 	if err := m.h.Err(); err != nil {
 		m.p.fail(err)
 	}
+	if log := m.h.Log(); log != nil && !m.fits {
+		m.fits = true
+		if err := replayFits(m.p.cfg.MaxReplayBytes, log.Superblock().DiskBlocks()*core.BlockSize); err != nil {
+			m.p.fail(err)
+		}
+	}
 	return append(acts, m.out.Actions...)
 }
 
@@ -235,9 +244,6 @@ func (m *ctlMachine) OnEvent(ctx *core.Context, ev *core.Event, acts []core.Acti
 // each under its node ID as its Raft ID.
 func (m *ctlMachine) boot(ctx *core.Context) (*meta.CtlHost, error) {
 	cfg := m.p.cfg
-	if err := replayFits(cfg.MaxReplayBytes, m.disk.Blocks()*core.BlockSize); err != nil {
-		return nil, err
-	}
 	cs := raftpb.ConfState{}
 	var peers []raftshard.Peer
 	for _, v := range cfg.Voters {
