@@ -677,12 +677,9 @@ func (h *CtlHost) step(ctx *core.Context, out *CtlHostOutput) {
 }
 
 // ctlEntry is the group's shard-map entry as its applied configuration holds it, each voter on its
-// node, or nil while that configuration is joint or names a voter of no known node.
+// node, or nil while that configuration names a voter of no known node.
 func (h *CtlHost) ctlEntry() *Group {
 	_, cs := h.shard.Applied()
-	if len(cs.VotersOutgoing) > 0 {
-		return nil
-	}
 	g := &Group{ID: h.group}
 	for _, id := range slices.Sorted(slices.Values(cs.Voters)) {
 		at, ok := h.shard.Raft().Node(id)

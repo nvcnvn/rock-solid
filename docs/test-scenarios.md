@@ -9603,9 +9603,9 @@ and [Key layout](design.md#metadata-layer-metastore).
 From [Key layout](design.md#metadata-layer-metastore) and [Sharding](design.md#metadata-layer-metastore).
 
 - `volume/{id}/record` and the counter at `volume/{0}/record` encode as the golden keys say.
-- With no shard map, the leader commits one once a metadata node reports: the control-plane
-  group's entry as its configuration, which `PlaceVoters` never fills onto a storage disk, and the
-  first data group, whose voters `PlaceVoters` fills.
+- With no shard map, the leader commits one: the control-plane group's entry as its
+  configuration, which `PlaceVoters` neither fills onto a storage disk nor counts in any disk's
+  load, and the first data group, whose voters `PlaceVoters` fills.
 - A create writes the record, the counter past its ID and the root; sent again after its answer was
   lost, it is answered from its replay record and makes one volume; a stale ID fails the counter
   check, whose answer gives the next.

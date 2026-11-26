@@ -363,7 +363,7 @@ func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) erro
 	switch {
 	case c.stagedMap != nil:
 		base, p.mapStaged = c.stagedMap, true
-	case len(c.smap.Groups) == 0 && in.Ctl != nil && len(c.metaNodes()) > 0:
+	case len(c.smap.Groups) == 0 && in.Ctl != nil:
 		base = &ShardMap{Groups: []Group{*in.Ctl, {ID: in.Ctl.ID + 1, Start: ctlEnd}}}
 	}
 	live := c.liveRecord()
