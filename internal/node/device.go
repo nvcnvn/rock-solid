@@ -132,7 +132,8 @@ type Device struct {
 	deleted []meta.ReplicaRef
 	// unmapped are the replicas a restart restored of a group Metas has no settings for, as the
 	// shard map no longer names it: hosted with no peers, so the store keeps their runs and
-	// checkpoints, but closed, taking no timer, so none leads; what dropped the group deletes them.
+	// checkpoints, but closed, taking no timer and no Raft message, so none votes, appends or
+	// leads; what dropped the group deletes them.
 	unmapped []disklog.Replica
 }
 
@@ -328,12 +329,15 @@ func (d *Device) OnEvent(ctx *core.Context, ev *core.Event, out *DeviceOutput) {
 // the server, which answers one for a group hosted nowhere here as NotLeader; an ask about a
 // replica the device does not host, once its store serves and so has restored every replica the
 // disk holds, is answered Gone, unless the device removed it and a restart would still restore
-// it; another message for no replica here is dropped.
+// it; another message for no replica here, or for a closed one, is dropped.
 func (d *Device) recvGroup(ctx *core.Context, ev *core.Event, acts []core.Action) []core.Action {
 	in := ev.Msg.Inline()
 	var a *meta.RoundShard
+	var shut bool
 	if len(in) > 9 {
-		a = d.Meta(binary.LittleEndian.Uint64(in[1:]))
+		group := binary.LittleEndian.Uint64(in[1:])
+		a = d.Meta(group)
+		shut = a != nil && d.closed(d.groups[group])
 	}
 	var gone core.Action
 	switch group, id, asked := raftshard.Asked(&ev.Msg); {
@@ -343,7 +347,7 @@ func (d *Device) recvGroup(ctx *core.Context, ev *core.Event, acts []core.Action
 		if d.leftOut(group, id) && raftshard.Gone(&ev.Msg, ev.Peer, &gone) {
 			acts = append(acts, gone)
 		}
-	case a != nil:
+	case a != nil && !shut:
 		return a.OnEvent(ctx, ev, acts)
 	}
 	free(ctx, &ev.Msg)

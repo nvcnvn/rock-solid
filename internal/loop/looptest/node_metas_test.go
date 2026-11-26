@@ -690,7 +690,7 @@ func TestARestartRestoresTheReplicasItsDiskHolds(t *testing.T) {
 }
 
 // A restart whose disk holds a replica of a group the shard map no longer names serves: the device
-// keeps the replica closed, never leading, and deletes nothing, so a restart whose map names the
+// keeps the replica closed, taking no tick or Raft message, so never leading, and deletes nothing, so a restart whose map names the
 // group again restores every Txn it answered.
 func TestARestartKeepsAReplicaOfAGroupTheMapDroppedClosed(t *testing.T) {
 	nm := newNodeMetas(t)
@@ -714,8 +714,15 @@ func TestARestartKeepsAReplicaOfAGroupTheMapDroppedClosed(t *testing.T) {
 	for i := 0; i < 1_000_000 && nm.s.Step(); i++ {
 	}
 	nm.ticking = false
-	if a := nm.m.d.Meta(nodeMetaGroup); a.Shard() != nil && a.Shard().Raft().Leader() != 0 {
-		t.Fatal("the closed replica led")
+	a := nm.m.d.Meta(nodeMetaGroup)
+	if a.Shard() == nil || a.Shard().Raft().Leader() != 0 {
+		t.Fatal("the closed replica is not open, or led")
+	}
+	now := raftpb.Message{Type: raftpb.MsgTimeoutNow, From: 2, To: 1, Term: a.Shard().Raft().Term()}
+	nm.l.Inbox().Post(&core.Event{Kind: core.EvNetRecv, Peer: nodeMetaAsker, Msg: raftFrom(t, now, nodeMetaGroup)})
+	nm.settle()
+	if a.Shard().Raft().Leader() != 0 {
+		t.Fatal("the closed replica campaigned on a MsgTimeoutNow")
 	}
 
 	nm.sd.Restart()
