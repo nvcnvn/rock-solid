@@ -688,6 +688,15 @@ func TestNoFencedSessionsWriteIsApplied(t *testing.T) {
 	})
 }
 
+// Seed 243 of TestNoFencedSessionsWriteIsApplied: a cut takes nodes 0 and 2 while disk 2 is down,
+// so the detector marks every disk of the PG down and it has no primary when the second writer
+// starts. The writer, ready with nothing to send, held the simulated clock still for good.
+func TestFencedReadRunSeed243WaitsForAPrimary(t *testing.T) {
+	if err := runReadsWith(t, 243, true, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Each planted bug breaks its invariant, checked alone, at a seed of the first 200 on the real control plane: the epoch change model's neg-fence-on-arrival (5 of 200), a primary that checks a write's incarnation as it arrives rather than as its store orders it, so that a dead incarnation's write held on a chunk the primary lacks is ordered after its successor's, here with listerOrders, as the successor's whole-block write would otherwise wait behind it while the primary lists the chunk; a primary that commits a version once its own log holds it (134 of 200), so that a read returns a version the next interval drops; the model's neg-serve-refused (103 of 200), a primary that maps the versions it refuses, so that a read returns one neither acknowledged nor kept; its neg-serve-after-other-primary (19 of 200), a primary that keeps serving into a new interval though another primary led the PG since, so that a read returns bytes no order of its chunk's history fits; and a member above the kept version left off the missing list (23 of 200).
 // With the writers as two sessions, on the stand-in, the sessions model's neg-check-on-arrival (3 of 500), the same
 // primary, orders a fenced session's write that waited in its store as the fence came; and its
