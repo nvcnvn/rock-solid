@@ -9520,8 +9520,11 @@ From [Data layer: ChunkStore](design.md#data-layer-chunkstore) and
   incarnation, which every write and punch names too.
 - A refusal naming a newer table holds the write until the client holds that table, which it asks
   for, and then sends it under its request ID to the primary the table names; a refusal naming
-  none sends it again after 100 ms. A refusal for space completes as `ENOSPC` and is never sent
-  again. A read goes to the primary, again after a refusal, and hands the caller its bytes.
+  none, or an answer of unfound, sends it again after a wait that doubles per answer from 100 ms
+  to 3.2 s (`TestARefusedWriteBacksOff`), and a late refusal from the primary a new table moved the
+  write from sends nothing (`TestALateRefusalFromTheOldPrimaryIsIgnored`). A refusal for space
+  completes as `ENOSPC` and is never sent again. A read goes to the primary, again after a refusal,
+  and hands the caller its bytes; a read answered unfound completes.
 - The client's writes and reads allocate nothing per operation (`BenchmarkClientWrite`,
   `BenchmarkClientRead`).
 - **[property]** The request ID rules, checked on every send of seeded runs of writes against
@@ -9530,10 +9533,11 @@ From [Data layer: ChunkStore](design.md#data-layer-chunkstore) and
   (`TestAClientKeepsItsRequestIDRules`), and of one write left unsent behind two windows of others
   (`TestAClientTakesNoIDPastTheWindow`): a send names its own ID at most `RequestWindow` past an
   oldest at or below it, no ID below the oldest lacks a final answer, a write goes again only under
-  its ID and never after its final answer, and every byte written completes. Planted, a resend
-  under a new ID, a write naming its own ID as the oldest, an oldest past an ID assigned and not
-  sent, a refusal taken as final, a write sent again after its final answer and IDs taken past the
-  window each break a rule.
+  its ID and never after its final answer, a write completes once, on its first final answer and
+  with that answer's status and version, and every byte written completes. Planted, a resend under
+  a new ID, a write naming its own ID as the oldest, an oldest past an ID assigned and not sent, a
+  refusal taken as final, a write sent again after its final answer, IDs taken past the window and
+  a refused write completed OK and sent again each break a rule.
 - An epoll event names the whole connection ID: a hang-up of a muted client closed, and its slot
   taken by a new client, after `Wait` reported it closes only the old one
   (`TestAHangUpClosesNoReplacementInItsSlot`).
@@ -9541,11 +9545,14 @@ From [Data layer: ChunkStore](design.md#data-layer-chunkstore) and
   second a new session that starts once every node with a disk up holds the first's fence, each
   client taking the newest table up to 200 ms late
   (`TestChunkClientsWriteAcrossPrimaryChangesAndAFence`): across primary changes, table changes
-  and the fence, no acknowledged write is lost, no fenced session's write is applied, and every
-  chunk's history passes the [consistency check](#consistency-check-of-chunk-histories). Planted in
-  the clients, a resend under a new ID (4 of the first 30 seeds), a refusal taken as final (1 of 30)
-  and a write naming its own ID as the oldest (26 of 30) each have a primary answer a write stale
-  before its client heard a final answer to it.
+  and the fence, no acknowledged write is lost, no fenced session's write is applied, every
+  chunk's history passes the [consistency check](#consistency-check-of-chunk-histories), and each
+  part of a client's request completes once, from a final answer its primary gave to that part,
+  with that answer's status and version. Planted in the clients, a resend under a new ID (1 of the
+  first 30 seeds) and a write naming its own ID as the oldest (26 of 30) each have a primary answer
+  a write stale before its client heard a final answer to it; a refusal taken as final and a
+  refused write completed OK and sent again (each 27 of 30) complete a part on an answer that is
+  not final, and a write sent again after its final answer completes twice (30 of 30).
 
 ## Client sessions
 
