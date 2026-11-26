@@ -9511,17 +9511,39 @@ read past a shrunk end would count as short.
 From [Data layer: ChunkStore](design.md#data-layer-chunkstore) and
 [Sessions and fencing](design.md#sessions-and-fencing).
 
-- A chunk's PG comes from `xxh3_64` of its ID and the pool's `pg_count`, checked against golden
-  values; a write crossing a chunk's end is split into one per chunk.
-- Every connection's hello and every write and punch carry the session and the incarnation.
-- A refusal naming a newer table waits for it and goes to the primary it names; a refusal for
-  space returns `ENOSPC`; a fenced session's write is refused.
-- Open: what a resend after a lost connection does when the first attempt may have committed
-  ([Roadmap and open questions](design.md#roadmap-and-open-questions), resent chunk writes).
-- An epoll event names the whole connection ID: a hang-up of a client closed and replaced in one
-  pass closes only the old one.
-- **[property]** Seeded runs of clients against replicas across a primary change, a table change
-  and a fence: no acknowledged write lost, chunk histories pass the consistency check.
+- A chunk's PG is the top bits of `xxh3_64` of its ID, checked against core's golden vectors for a
+  pool of 64 PGs, and its write goes to that PG's primary tagged with the table's epoch and the PG's
+  interval; a write crossing a chunk's end is one write per chunk, each completing on its own.
+- A connection's first send, and the first after it is lost, is a hello naming the session and
+  incarnation, which every write and punch names too.
+- A refusal naming a newer table holds the write until the client holds that table, which it asks
+  for, and then sends it under its request ID to the primary the table names; a refusal naming
+  none sends it again after 100 ms. A refusal for space completes as `ENOSPC` and is never sent
+  again. A read goes to the primary, again after a refusal, and hands the caller its bytes.
+- The client's writes and reads allocate nothing per operation (`BenchmarkClientWrite`,
+  `BenchmarkClientRead`).
+- **[property]** The request ID rules, checked on every send of seeded runs of writes against
+  replicas that answer, refuse for space, refuse with or without a newer table, answer unfound or
+  not at all, lose connections and move primaries or leave a PG with none
+  (`TestAClientKeepsItsRequestIDRules`), and of one write left unsent behind two windows of others
+  (`TestAClientTakesNoIDPastTheWindow`): a send names its own ID at most `RequestWindow` past an
+  oldest at or below it, no ID below the oldest lacks a final answer, a write goes again only under
+  its ID and never after its final answer, and every byte written completes. Planted, a resend
+  under a new ID, a write naming its own ID as the oldest, an oldest past an ID assigned and not
+  sent, a refusal taken as final, a write sent again after its final answer and IDs taken past the
+  window each break a rule.
+- An epoll event names the whole connection ID: a hang-up of a muted client closed, and its slot
+  taken by a new client, after `Wait` reported it closes only the old one
+  (`TestAHangUpClosesNoReplacementInItsSlot`).
+- **[property]** The [read run](#placement-faults-and-invariants)'s writers as chunk clients, the
+  second a new session that starts once every node with a disk up holds the first's fence, each
+  client taking the newest table up to 200 ms late
+  (`TestChunkClientsWriteAcrossPrimaryChangesAndAFence`): across primary changes, table changes
+  and the fence, no acknowledged write is lost, no fenced session's write is applied, and every
+  chunk's history passes the [consistency check](#consistency-check-of-chunk-histories). Planted in
+  the clients, a resend under a new ID (4 of the first 30 seeds), a refusal taken as final (1 of 30)
+  and a write naming its own ID as the oldest (29 of 30) each have a primary answer a write stale
+  before its client heard a final answer to it.
 
 ## Client sessions
 
