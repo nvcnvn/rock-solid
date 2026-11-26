@@ -515,6 +515,7 @@ func (s *Store) resume(log *disklog.Log) error {
 		log.Recount(live)
 		s.ix.RecountSlotHeld()
 		s.ix.EndReplay()
+		s.ix.forgetSessions(&s.fence)
 	}
 	s.ix.TrackLive(true)
 	s.adm.bucket = bucket{}
@@ -1622,10 +1623,16 @@ func (t *SessionTable) newer(u *SessionTable) bool {
 
 // SetSessions applies t if it is newer than the table the store holds: from then on the store
 // refuses, with ErrFenced when it orders them, the writes and punches of the sessions t fenced,
-// those already queued included.
+// those already queued included, and its index drops their resend table. A replay may bring that
+// table back, so the store drops it again when it serves after one, or at its first table.
 func (s *Store) SetSessions(t SessionTable) {
-	if t.newer(&s.fence) {
-		s.fence = t
+	if !t.newer(&s.fence) {
+		return
+	}
+	fences := t.Next-uint64(len(t.Live)) > s.fence.Next-uint64(len(s.fence.Live))
+	s.fence = t
+	if fences && s.phase == serving {
+		s.ix.forgetSessions(&s.fence)
 	}
 }
 

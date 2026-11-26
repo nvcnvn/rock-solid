@@ -344,3 +344,34 @@ func TestAResendEntryGoesWithItsVersion(t *testing.T) {
 		}
 	})
 }
+
+// A session the session table fences loses its entries and watermark, and a live one keeps its
+// own, both on the live index and after a rebuild replays the writes: a fenced session's writes
+// are refused before any lookup, so its table only takes room, and with no entry a retry would be
+// ordered again.
+func TestAFencedSessionLeavesTheResendTable(t *testing.T) {
+	h := newHarness(t, testConfig())
+	h.s.SetSessions(SessionTable{Version: 1, Next: 10, Live: []uint64{7, 8}})
+	for _, r := range []Request{{Request: 5, Oldest: 5}, {Request: 6, Oldest: 6}, {Session: 8, Request: 5, Oldest: 5}} {
+		r.Session, r.Incarnation, r.PGs = cmp.Or(r.Session, 7), 1, 1
+		h.sync(h.writeReq(chunkC, 0, []byte{byte(r.Session)}, r))
+	}
+	check := func(when string) {
+		t.Helper()
+		for _, req := range []uint64{5, 6} {
+			if v, stale := h.s.Index().Resent(testPool, chunkC, 1, 7, 1, req); v != 0 || stale {
+				t.Fatalf("%s: fenced session 7's request %d names %#x, stale %v", when, req, v, stale)
+			}
+		}
+		if v, _ := h.s.Index().Resent(testPool, chunkC, 1, 8, 1, 5); v == 0 {
+			t.Fatalf("%s: live session 8 lost its entry", when)
+		}
+	}
+	if v, stale := h.s.Index().Resent(testPool, chunkC, 1, 7, 1, 5); v != 0 || !stale {
+		t.Fatalf("session 7's trimmed request 5 names %#x, stale %v", v, stale)
+	}
+	h.s.SetSessions(SessionTable{Version: 2, Next: 10, Live: []uint64{8}})
+	check("fenced")
+	h.rebuild()
+	check("rebuilt")
+}

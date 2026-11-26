@@ -182,3 +182,28 @@ func (x *Index) forget(pool core.PoolID, c core.ChunkID, above uint64, before ui
 		x.must(x.tree.Delete(k))
 	}
 }
+
+// forgetSessions removes the entries and watermarks of every session t fenced, with one range
+// removal per PG count, PG and session: its writes are refused before any lookup, so they only
+// take room.
+func (x *Index) forgetSessions(t *SessionTable) {
+	const sessionEnd = resendWatermarkSize - 8
+	var dead [][]byte
+	x.lo = binary.BigEndian.AppendUint32(x.lo[:0], uint32(ResendPool))
+	x.tree.Iter(&x.it)
+	for ok := x.it.SeekGE(x.lo); ok && bytes.HasPrefix(x.it.Key(), x.lo[:4]); {
+		k := x.it.Key()
+		if len(k) < sessionEnd {
+			ok = x.it.Next()
+			continue
+		}
+		hi := append(bytes.Clone(k[:sessionEnd]), bytes.Repeat([]byte{0xff}, resendKeySize-sessionEnd+1)...)
+		if t.Fenced(binary.BigEndian.Uint64(k[sessionEnd-8:])) {
+			dead = append(dead, bytes.Clone(k[:sessionEnd]), hi)
+		}
+		ok = x.it.SeekGE(hi)
+	}
+	for i := 0; i < len(dead); i += 2 {
+		x.must(x.tree.DeleteRange(dead[i], dead[i+1]))
+	}
+}
