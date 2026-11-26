@@ -178,9 +178,11 @@ func FuzzDecodeBlockMap(f *testing.F) {
 				t.Fatalf("block map %+v writes and punches a block", m)
 			}
 		}
-		again := make([]byte, 4096)
-		m.put(again)
-		if !bytes.Equal(again, b[:4096]) || len(b) != (1+m.data.count())*4096 {
+		h := recoveryHead(recoveryRecords(b)) * 4096
+		again := bytes.Clone(b[:h])
+		clear(again[:16*blockWords])
+		m.putMaps(again)
+		if !bytes.Equal(again, b[:h]) || len(b) != h+m.data.count()*4096 {
 			t.Fatalf("block map %+v of %d bytes does not put back", m, len(b))
 		}
 	})
