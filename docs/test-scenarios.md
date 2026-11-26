@@ -1,6 +1,6 @@
 # Test scenarios
 
-The scenarios the tests of phases 1 to 5 must cover, one section per [build checklist](build-checklist.md) item, in checklist order. A built item's section describes the tests as they are. An unbuilt item's section lists every case and requirement its tests must cover before it is reviewed, and where the item changes a built item's behaviour it quotes the built scenario and says what it becomes, for the change that builds the item to apply. The disk log's scenarios come from the tests of the first, Rust, implementation, and from the RocksDB, Pebble, etcd, Cassandra and Protocol-Aware Recovery (FAST 2018) tests those were ported from, named next to each scenario; the others come from [design.md](design.md), its appendices and the spike and study READMEs each section names. They describe behaviour, not an API.
+The scenarios the tests of phases 1 to 6 must cover, one section per [build checklist](build-checklist.md) item, in checklist order. A built item's section describes the tests as they are. An unbuilt item's section lists every case and requirement its tests must cover before it is reviewed, and where the item changes a built item's behaviour it quotes the built scenario and says what it becomes, for the change that builds the item to apply. The disk log's scenarios come from the tests of the first, Rust, implementation, and from the RocksDB, Pebble, etcd, Cassandra and Protocol-Aware Recovery (FAST 2018) tests those were ported from, named next to each scenario; the others come from [design.md](design.md), its appendices and the spike and study READMEs each section names. They describe behaviour, not an API.
 
 A block is 4 KiB. A "1 GiB disk" is 262,144 blocks: 4,096 segments of 64 blocks (256 KiB), with the superblock copy at block 63. Sizes that follow from the record layout (a 48-byte header prelude, 33 bytes per write or punch entry, 37 per freeze, 14 per blob, 4 bytes of CRC per data block) move with the layout if the Go code changes it; the behaviour does not.
 
@@ -2922,7 +2922,7 @@ planted by hand.
 - Completing an operation twice is a broken invariant of the recorder and panics.
 - **Benchmarks:** `BenchmarkHistoryRecord`, one invoke and completion, zero allocations per
   operation within the capacity the history is made with (16.5 ns on an Intel Core Ultra 5 235U).
-- The consistency check of chunk histories (phase 3) and the file-level close-to-open check (phase 6)
+- The consistency check of chunk histories (phase 3) and the file-level close-to-open check ([Simulated FUSE clients](#simulated-fuse-clients))
   read the same format, and the toy protocol of the planted-bug check records its client's writes in
   it. Real-cluster histories are the [Real-cluster histories](#real-cluster-histories) item's.
 
@@ -4332,11 +4332,12 @@ next milestone's run, which is also the twins' first.
   so this map holds only the configuration results. The sessions model's invariants are registered
   by [MetaStore invariants](#metastore-invariants) (phase 4), which plants its leader-side
   negatives, and [Session fencing on storage nodes](#session-fencing-on-storage-nodes) its
-  storage-side ones. Open: the checklist has no phase 6 or 7 items yet. The sessions model's
-  client-side negatives (`neg-count-from-reply`, `neg-no-drift`, `neg-ignore-resumed`,
-  `neg-fixed-step-check`, `neg-window-per-run`) wait for the phase 6 client daemon, the purge
-  model's invariants are registered with the phase 6 file frontend, and the recall model's with
-  phase 7 (Tier 2).
+  storage-side ones. The sessions model's client-side negatives are planted by
+  [Client sessions](#client-sessions); the purge model's invariants are registered, and its
+  negatives planted, by the phase 6 items its rows in `scripts/model-rules.tsv` name; the recall
+  model's by phase 7 (Tier 2), except the grace period's and the attribute timeout's, which
+  [Owner failover and grace period](#owner-failover-and-grace-period) and
+  [Client fencing](#client-fencing) plant.
 - The sessions model's leader measures its rate over a client's exactly once two renewals reached
   it (`Measured`), so pairing an answer with the heartbeat that names it, lost and repeated
   requests, and a leader's own stop are checked only by the Go tests of
@@ -6704,8 +6705,8 @@ test's alone.
   The checks add a few seconds to the seed runner's list on 2 processes: none of the five runs'
   times moved by more than a second. Open: the check's time on a long history of one chunk, for
   example 3 clients × 400 operations, which no run records.
-- Close-to-open and the file-level checks of Testing strategy's layer 3 belong to the file frontend
-  (phase 6).
+- Close-to-open and the file-level checks of Testing strategy's layer 3 belong to
+  [Simulated FUSE clients](#simulated-fuse-clients).
 
 ## etcd-raft module
 
@@ -7766,7 +7767,7 @@ The rules:
 - (1 + k) × Σ + F ≤ g_d for every disk d;
 - a binding cap is divided by water-filling: grantᵢ = min(askᵢ, max(bufferedᵢ, L)), L the level that fills it, and a node above L buffers nothing new until its buffered bytes fall below L.
 
-The leader's side is in `internal/meta/grants_test.go`. The daemon's side (its asks, reuse budget, early heartbeats, writing through and handoff memfd) comes with phase 6's file frontend; rows marked *daemon* are its cases, and the seeded run models that daemon.
+The leader's side is in `internal/meta/grants_test.go`. The daemon's side (its asks, reuse budget, early heartbeats, writing through and handoff memfd) comes with [Write-back buffer under space grants](#write-back-buffer-under-space-grants); rows marked *daemon* are its cases, and the seeded run models that daemon.
 
 | Case | Inputs | Expected |
 | --- | --- | --- |
@@ -7809,7 +7810,7 @@ The leader's side is in `internal/meta/grants_test.go`. The daemon's side (its a
 - a control-plane failover while daemons stream under their grants, the old leader answering for up to 3 s;
 - up to two clients partitioned from the control-plane leader but not from storage, half streaming under their grants and half idle, until their fences are acknowledged.
 
-A daemon crash in the middle of a reuse window, and a write that crosses from a granted chunk into a refused one, are daemon cases, covered with phase 6's file frontend.
+A daemon crash in the middle of a reuse window, and a write that crosses from a granted chunk into a refused one, are daemon cases, covered by [Write-back buffer under space grants](#write-back-buffer-under-space-grants).
 
 ## Control-plane placement faults
 
@@ -8060,7 +8061,7 @@ Simulator invariants checked after every step, with the faults that must exercis
 | At most one lock holder | Registered by [Control-plane sessions](#control-plane-sessions) (`TestNoSessionIsFencedWhileItsClientsLeaseRuns`): clients racing for one inode's lock in shared and exclusive modes, holders evicted, fenced and dead, and control-plane failovers. Owner failover is not in it: the owner's shard does not fail over |
 | No session is fenced while its client's own lease still runs | Registered by [Control-plane sessions](#control-plane-sessions) (`TestNoSessionIsFencedWhileItsClientsLeaseRuns`, `TestAFastNewLeaderFencesNoSessionEarly`, `TestAFastBootClockFencesNoSessionEarly`): control-plane leader failover while sessions renew; a renewal answered by a deposed leader; a leader stalled past `session_lease`; clients paused past their lease; slewed clocks; a client VM stopped with its clocks frozen |
 | Every write of a fenced lock holder that completes is ordered before every write of the next holder; no fenced session's write is applied; a dead client's locks are free within `session_lease` on the leader's clock plus one heartbeat interval while the leader holds its lease and has measured the client, `dead_wait` instead when it has not, or once an unreachable storage node is marked down | Leader side registered by [Control-plane sessions](#control-plane-sessions) (`TestNoSessionIsFencedWhileItsClientsLeaseRuns`): a lock reaches its next holder only once every node with a disk up holds its old holder's fence, and a dead client's locks are free within `dead_wait` (the measured bound is `TestAFenceStretchesByTheMeasuredRate`'s), under acknowledgements that lag, storage nodes cut off for 2 to 27 s, some of them marked down, and failovers. Storage side registered by [Session fencing on storage nodes](#session-fencing-on-storage-nodes) (`TestNoFencedSessionsWriteIsApplied`): a fenced client that writes on for up to 2 s while the fence reaches each node after its own delay, storage nodes cut off, paused and rebooted, and the rejoin gate in the session run |
-| On every disk of a pool, (1 + k) times the grants outstanding plus the flushes not yet in fill reports never exceed the disk's gap above the larger of its fill and `write_limit`, and no flush under a grant is refused for space | Registered by [Space grants](#space-grants) (`TestNoGrantedFlushIsRefusedForSpace`) on the leader's counts, with the run's own daemons standing in for phase 6's file frontend: the pool reaching `write_limit` while daemons buffer and other nodes write through; grant heartbeats lost or delayed, requests and replies; a control-plane failover while daemons stream; a client partitioned from the control-plane leader but not from storage, streaming under its grant; daemon deaths. A daemon crash in the middle of a reuse window is scripted (`TestARestartedCountKeepsTheOldBudgetInF`); a refill moving members onto the fullest disks while grants are out is not in the run |
+| On every disk of a pool, (1 + k) times the grants outstanding plus the flushes not yet in fill reports never exceed the disk's gap above the larger of its fill and `write_limit`, and no flush under a grant is refused for space | Registered by [Space grants](#space-grants) (`TestNoGrantedFlushIsRefusedForSpace`) on the leader's counts, with the run's own daemons standing in for [Write-back buffer under space grants](#write-back-buffer-under-space-grants): the pool reaching `write_limit` while daemons buffer and other nodes write through; grant heartbeats lost or delayed, requests and replies; a control-plane failover while daemons stream; a client partitioned from the control-plane leader but not from storage, streaming under its grant; daemon deaths. A daemon crash in the middle of a reuse window is scripted (`TestARestartedCountKeepsTheOldBudgetInF`); a refill moving members onto the fullest disks while grants are out is not in the run |
 | An inode ID is never reused; no file's `mtime` goes backwards except by `utimensat`; a file's keys and its directory's entry are in one slot, unless a link or a cross-directory rename put the entry there; no directory is its own ancestor ([Filesystem schema](#filesystem-schema)) | Registered by `TestTheFilesystemWorkloadKeepsItsInvariantsAcrossElections` (`internal/meta`), on the leader's state after every `Txn`: three daemons run every filesystem operation through a three-replica shard, one or two requests proposed in one round, and in 1 step of 6 one daemon's two requests built from one read: two sibling directories renamed into each other, or two `SetAttr`s of one file, applied in either order; the volume's root, inode and slot reservations go through the shard too, and the shard's slots end at 20, so later directories share their parent's slot. Faults: per send, the leader cut off and a new one elected (1 in 10), a replica restarted before or after the round settles (1 in 10), each answer lost (1 in 10); a daemon reconnected without its reservations, its requests resent (1 in 60 steps); a daemon crashed and restarted under a new session, its requests never resent (1 in 120 steps); and the root's creation resent (1 in 40). "Never reused" is read at allocation: no inode ID, the root's included, is handed out twice. The workload has no `utimensat`, so no `mtime` may go backwards. A file's entry outside its slot passes only once a link or cross-directory rename that put it there has committed; directories are not held to their parent's slot. Each invariant fires within the run's 100 per-commit seeds when the code is broken: `Rename` without its ancestors' live checks (36 of the first 120 seeds), `SetAttr` without its check of the attributes it read (74), an inode reservation overlapping the root (92), and inode IDs placed in the wrong slot (120) |
 | A replayed request returns its first result and changes nothing | Registered by `TestTheFilesystemWorkloadKeepsItsInvariantsAcrossElections`, under the faults of the row above: a request is resent up to three times, across leader cut-offs, elections, replica restarts, lost answers and its daemon's crash. A resend's result equals the request's first final one; a round holding only the resend leaves the state unchanged; a check failure that is not final leaves no record. `TestReplayedRequestsReturnTheirFirstFinalResult` and `TestResentFSOpsReturnTheirFirstFinalResult` resend at random later points against one state |
 | No learner is promoted to voter before it has caught up with its leader's log | Registered by [Voter replacement](#voter-replacement) (`TestVoterReplacementRunsReplayFromTheirSeed`; planted by `TestPromotingALearnerBeforeItCaughtUpBreaksTheInvariant`): a voter replaced while another is down, the replaced voter returning mid-swap, compacted logs, drops and partitions on the learner's links |
@@ -8079,7 +8080,7 @@ Each invariant is shown to fire: a planted bug for each must fail at least one s
 - a fence committed at the holder's lease end without its margin;
 - grants not capped by the gap, and a shrink counted before a heartbeat echoes it (planted under
   [Space grants](#space-grants));
-- on the daemon's side, owed by phase 6's file frontend, which builds it: grants reusable for the
+- on the daemon's side, owed by [Write-back buffer under space grants](#write-back-buffer-under-space-grants), which builds it: grants reusable for the
   whole session lease; a reuse window counted from the reply's receipt instead of the request's
   send; flushes reported since the last sent heartbeat instead of cumulatively; a floor grant that
   can be reused;
@@ -8088,7 +8089,7 @@ Each invariant is shown to fire: a planted bug for each must fail at least one s
   and the root's creation without its check, so a resent creation resets the volume's inode and slot
   counters (`FS.resetRoot`, 497 of 500, as an inode ID handed out twice);
 - a purger's `Delete` without its `Check`, scripted by
-  `TestInternalTxnsRepeatedAfterAnElectionFailTheirChecks` and owed in a seeded run by phase 6's purger;
+  `TestInternalTxnsRepeatedAfterAnElectionFailTheirChecks` and owed in a seeded run by [Purger](#purger);
 - a learner promoted at once (planted by [Voter replacement](#voter-replacement));
 - the [Epoch change model](#epoch-change-model)'s two rows for property 2: no support-epoch bump on
   lapse (`neg-no-epoch-bump`), and a leader transfer that keeps the old leader's lease
@@ -9296,7 +9297,7 @@ its own pipe.
   rounds in flight, not writes lost to a power cut. So a store that acknowledges a round once its
   write completes but before its flush passes here; the simulator's
   [crash oracle](#crash-oracle) (`TestRecoveriesMatchTheCrashOracle`) catches it, and so does the
-  `log-writes` target of [io_uring on a raw device and NVMe](#io_uring-on-a-raw-device-and-nvme). Power cuts come with the nightly real-cluster tests of phase 6.
+  `log-writes` target of [io_uring on a raw device and NVMe](#io_uring-on-a-raw-device-and-nvme). Power cuts come with [Real-cluster file runs](#real-cluster-file-runs).
 
 ## Real-cluster histories
 
@@ -9327,4 +9328,303 @@ completion up, and appends them to the run's history file, `history` beside the 
 - **Benchmarks:** `BenchmarkHistFile`, one invocation and completion appended to the file, zero
   allocations per operation (876 ns, two clock reads and two writes, in Docker on arm64).
 - Clients on several hosts, with their stamps mapped by a measured offset and a history file per
-  host, come with the file tests of phase 6; the crash test runs on one host.
+  host, come with [Real-cluster file runs](#real-cluster-file-runs); the crash test runs on one host.
+
+## FUSE protocol codec
+
+From [Daemon restart and upgrade](design.md#daemon-restart-and-upgrade) and the FUSE restart and
+handoff spikes.
+
+- Golden frames for each opcode the item names, request and reply, taken from the spikes' `rawfs.c`
+  and `hofs.c` exchanges on Linux 6.18 (FUSE 7.45); a reply echoes the request's 64-bit `unique`,
+  bit 63 included, as a resent request carries it.
+- `inval_inode`, `inval_entry` and `NOTIFY_RESEND` encode as the kernel reads them.
+- Saved `INIT` parameters round-trip, and two that differ in any negotiated field compare unequal.
+- A truncated header, a length that disagrees with the frame, an unknown opcode and a name without
+  its terminating zero are errors, never panics. **[property]** Fuzz every decoder.
+- A `WRITE`'s data stays in its pool buffer, at the offset the kernel put it.
+- **Benchmarks:** decoding a `WRITE` and encoding its reply, decoding a `LOOKUP` and encoding its
+  entry; 0 allocations each.
+
+## Simulated FUSE clients
+
+From [Testing strategy](design.md#testing-strategy) and the [FUSE coherence
+spike](design.md#appendix-fuse-coherence-spike).
+
+- T1 to T6 of the spike, replayed against the kernel model, give the spike's outcomes: a cached
+  handle stale after another node's write (T1), fresh after `inval_inode` (T2), refilled by an old
+  handle (T3), direct I/O fixed at open (T4), revalidated on read with `auto_inval_data` and a new
+  change counter (T5), stale pages dropped by an open without `keep_cache` (T6); mapped pages stay
+  stale until `inval_inode` (T5b).
+- Every operation is recorded in the history recorder's words; the close-to-open check passes a
+  history whose opens after a close see that close's data and fails one that does not.
+- **[property]** A planted daemon that keeps `keep_cache` after another node's close fails the
+  close-to-open check on the seeds of a two-node run.
+
+## Chunk client
+
+From [Data layer: ChunkStore](design.md#data-layer-chunkstore) and
+[Sessions and fencing](design.md#sessions-and-fencing).
+
+- A chunk's PG comes from `xxh3_64` of its ID and the pool's `pg_count`, checked against golden
+  values; a write crossing a chunk's end is split into one per chunk.
+- Every connection's hello and every write and punch carry the session and the incarnation.
+- A refusal naming a newer table waits for it and goes to the primary it names; a refusal for
+  space returns `ENOSPC`; a fenced session's write is refused.
+- Open: what a resend after a lost connection does when the first attempt may have committed
+  ([Roadmap and open questions](design.md#roadmap-and-open-questions), resent chunk writes).
+- An epoll event names the whole connection ID: a hang-up of a client closed and replaced in one
+  pass closes only the old one.
+- **[property]** Seeded runs of clients against replicas across a primary change, a table change
+  and a fence: no acknowledged write lost, chunk histories pass the consistency check.
+
+## Client sessions
+
+From [Sessions and fencing](design.md#sessions-and-fencing) and the [sessions
+model](#sessions-and-fencing-model).
+
+- A client-only node (no devices) starts a session and renews it every second over TCP; its writes
+  go on past `session_lease` from the start.
+- The holder counts from the send of its last answered renewal, on both clocks, and ends the lease
+  on `Resumed`; requests wait while the lease is lapsed and go once a renewal is answered.
+- Request IDs rise with every send, a resend included, and across a restart.
+- A fence learned from a renewal or a refused write starts a new session.
+- A start resent after a lost answer, and one resent to a new leader, give one session.
+- **[property]** Plants `neg-count-from-reply`, `neg-no-drift`, `neg-ignore-resumed`,
+  `neg-fixed-step-check` and `neg-window-per-run` each fail "no session is fenced while its
+  client's own lease still runs" on the session run's seeds.
+
+## Filesystem client
+
+From [Client design](design.md#client-design), [Cache coherence tiers](design.md#cache-coherence-tiers)
+and [Key layout](design.md#metadata-layer-metastore).
+
+- Each namespace operation sends the `Txn` the design's table gives, built by `meta.FS`, with its
+  replay key; a failed final check returns `EEXIST`, `ENOENT` or `ENOTEMPTY`; a directory renamed
+  over a non-directory is `ENOTDIR` and the reverse `EISDIR`, with nothing sent.
+- A write past `alloc_end` raises it by 1, 2, 4, … up to 16 chunks first, committing the size
+  written so far in the same `Txn`; `close` and `fsync` commit size and
+  `mtime = max(last write's time, mtime + 1 ns)`.
+- A read past the size is clamped; an open after the attributes changed is answered without
+  `keep_cache`.
+- The first create in a slot waits for one reservation `Txn`; a `mkdir` in a fresh slot creates in
+  it with no further reservation.
+- **[property]** Seeded one-node runs of simulated clients against a real shard and replicas, with
+  crashes and elections: histories pass close-to-open, the filesystem invariants hold, and the plant
+  `neg-raise-after-write` fails "a purge never misses a chunk written before a crash".
+
+## Volume records and the first data group
+
+From [Key layout](design.md#metadata-layer-metastore) and [Sharding](design.md#metadata-layer-metastore).
+
+- Open: the key of a volume's record and of the volume ID counter.
+- With no data group in the shard map, the leader adds one once a metadata node reports, and
+  `PlaceVoters` fills its voters.
+- `rock-solid volume create` writes the record and the root; sent again after a lost answer, it
+  makes one volume.
+
+## FUSE mount on one node
+
+From [Client design](design.md#client-design) and [Daemon restart and
+upgrade](design.md#daemon-restart-and-upgrade)'s mount settings.
+
+- `INIT` negotiates `FUSE_PARALLEL_DIROPS` and `auto_inval_data`, and never `writeback_cache`, a
+  request timeout or FUSE over io_uring.
+- Through the kernel, on `rock-solid ctl` and one `rock-solid node` over a file-backed disk: create,
+  write, read back, close, reopen from another process and read the same bytes, unlink, `ls`.
+- Another uid reads the mount (`allow_other`).
+- `testing.AllocsPerRun` of a request's path through the driver and the machine is 0.
+
+## Inode owner's open registry
+
+From [Inode owner](design.md#metadata-layer-metastore) and the [purge model](#purge-model).
+
+- `open` costs one round trip and no log write; `release` deregisters.
+- An unlink of a file open on another node makes it an orphan, purged at its last close.
+- A fenced session's opens are dropped only once its fence version is acknowledged.
+- **[property]** "An orphaned inode is never freed while a live session has it open" on seeded
+  three-node runs; plants `neg-unlink-open` and `neg-release-on-commit` each fail it.
+
+## Owner failover and grace period
+
+From [Inode owner](design.md#metadata-layer-metastore), the [purge model](#purge-model) and the
+[cache-mode recall model](#cache-mode-recall-model).
+
+- The grace period ends once every live session has re-registered, an empty re-registration from a
+  node with nothing open counting, or has left the table; never by time alone.
+- A session that has not re-registered within a lease is evicted, and the period ends once it is
+  fenced.
+- During it, new opens wait and an unlink makes an orphan.
+- **[property]** Plants `purge/neg-grace-by-time`, `purge/neg-orphan-in-grace`,
+  `recall/neg-grace-by-time` and `recall/neg-open-in-grace` each fail their mapped invariant on
+  seeded owner failovers with a node partitioned from the new owner.
+
+## Multi-node mounts
+
+- Mounts of one volume on three nodes, one client-only, route every `Txn` to the shard leader on
+  another node and follow `NotLeader`.
+- **[property]** Seeded runs with failovers, partitions and paused clients: histories pass
+  close-to-open.
+- Over TCP, in Docker: three node processes, mounts on two, a file written and closed on one read on
+  the other.
+
+## Rest of the namespace
+
+From [Key layout](design.md#metadata-layer-metastore) and the Samba spike's xattr counts.
+
+- `link`, `symlink` with a 4,095-byte target in pieces, `readlink`, cross-directory `rename` of a
+  file and of a directory, special files.
+- A directory renamed under itself is refused; the renamed inode's `ctime` moves.
+- A 64 KiB xattr written and read back in pieces; small xattrs answered from the attribute cache
+  within its timeout.
+- A request resent after a restart whose lookups now fail still reaches its shard and gets its
+  replay record's result.
+
+## flock and whole-file locks
+
+From [Cache coherence tiers](design.md#cache-coherence-tiers) and the lock `Txn`s of
+[Key layout](design.md#metadata-layer-metastore).
+
+- Open: byte-range `fcntl` locks ([Roadmap and open questions](design.md#roadmap-and-open-questions)).
+- Shared and exclusive locks from two nodes; a conversion between modes in one `Txn`; a dead
+  session's lock freed by the next holder's `Txn`.
+- A blocking request is granted once its holder releases or is fenced.
+- **[property]** "At most one lock holder" and "every write of a fenced lock holder that completes is
+  ordered before every write of the next holder" on seeded runs.
+
+## Purger
+
+From [Freeing space](design.md#freeing-space) and the [purge model](#purge-model).
+
+- A purge entry's punches go out batched per PG, each naming the shard and its term; a primary that
+  has seen a newer term refuses an older one.
+- Progress is recorded only once every punch before it completed; a run of entries is removed with a
+  check per entry and per gap.
+- A punch to a chunk that does not exist succeeds, so a rerun after a crash fails nothing.
+- **[property]** "Once a purge settles, no chunk of a deleted inode remains" across elections and
+  crashes; plants `neg-missing-punch-fails`, `neg-overwrite-entry`, `neg-progress-before-punch`,
+  `neg-purger-no-term`, `neg-unchecked-removal` and a `Delete` without its `Check` each fail it.
+
+## Truncate
+
+From [Freeing space](design.md#freeing-space) and the [purge model](#purge-model).
+
+- A truncate commits size, lowered `alloc_end` and a purge range from the new size's byte offset; the
+  purger zeroes the rest of the block and chunk holding the new end and deletes later chunks.
+- The purger drains the file through the owner first; an extension over a pending purge waits for it;
+  an extending write whose check fails writes its chunk again.
+- **[property]** "An extension never exposes a byte a truncate cut off" on seeded runs; plants
+  `neg-daemon-punch`, `neg-extend-over-purge`, `neg-no-drain`, `neg-no-rewrite`,
+  `neg-skip-partial-block`, `neg-tail-in-memory` and `neg-trunc-at-chunk` each fail it.
+
+## Quotas and statfs
+
+From [Volume size and capacity](design.md#volume-size-and-capacity).
+
+- `statfs` reports the PVC size as total, the slots' sum as used, and as available the smaller of
+  the rest and the pool's available figure, cached for `statfs_cache`.
+- A write that would extend a file past the PVC size is `ENOSPC` before the grant is looked at.
+- Two nodes filling a volume overshoot its size by at most one cache period's writes.
+
+## Write-back buffer under space grants
+
+From [Client design](design.md#client-design) and [Space grants](#space-grants), whose rows
+marked *daemon* are this item's.
+
+- Buffered writes only under the grant; flushes on a full chunk, `close`, `fsync` and a full buffer,
+  widened to whole blocks the daemon holds; the last partial block kept.
+- Asks of buffered plus one second of writes; the reuse budget of k = 2 grants with an early
+  heartbeat at half; no answer of an older request or issuer taken; nothing new buffered under a
+  grant below what is buffered.
+- A failed flush reaches each handle open on the file once, at its next `write`, `fsync` or `close`:
+  `ENOSPC` for space, `EIO` otherwise.
+- **[property]** The Space grants seeded run with real daemons: no flush under a grant refused for
+  space; the four daemon-side plants each fail it.
+
+## Client fencing
+
+From [Sessions and fencing](design.md#sessions-and-fencing).
+
+- No write issued after the lease ends; no attribute or entry timeout past it.
+- A paused client resumed after its fence serves no stale page; its handles fail with `EIO`, and its
+  files reopen under a new session.
+- Open: timeouts across a machine suspend ([Roadmap and open questions](design.md#roadmap-and-open-questions)).
+- **[property]** Plant `recall/neg-attr-past-lease` fails close-to-open on seeded pause runs.
+
+## Purge and session conformance
+
+As [Spec conformance](#spec-conformance) for the epoch and voter models: traces of the purger,
+truncate and registry runs against the purge model, and of Client sessions against the sessions
+model's client actions, pass, can fail with a rule removed, and cover the spec or list what they
+leave out.
+
+## Daemon restart by descriptor handoff
+
+From [Daemon restart and upgrade](design.md#daemon-restart-and-upgrade) and the FUSE restart and
+handoff spikes.
+
+- A holder takes every descriptor, clone and memfd from a root peer only; a successor adopts them
+  and refuses saved `INIT` parameters other than its own.
+- After `kill -9`, the successor's `NOTIFY_RESEND` brings back every unanswered request; a resent
+  `mkdir` the dead process applied returns its first result, not `EEXIST`.
+- A planned handoff drains and stalls the mount for a few ms.
+- Handles that held unflushed data fail their next `write`, `fsync` or `close` with `EIO`.
+- The successor closes none of its predecessor's files until its incarnation's version is
+  acknowledged; plant `neg-no-incarnation-fence` lets a stale flush bring back a purged chunk.
+
+## Volume deletion
+
+From [Freeing space](design.md#freeing-space).
+
+- The volume's `fs/` range goes in one range removal, checked against its record's deleting state.
+- Every disk of the pool sweeps its chunk index for the volume's ID; a crash mid-sweep resumes it;
+  none of the volume's chunks remain.
+
+## CSI driver for RWX
+
+From [Kubernetes integration for RWX](design.md#kubernetes-integration-for-rwx).
+
+- `csi-sanity` passes.
+- Pods on two nodes write one PVC; fsGroup is applied through `VOLUME_MOUNT_GROUP`, with no
+  recursive ownership change.
+- A StorageClass asking for SMB creates its volumes with `case_index`.
+
+## Rolling upgrade
+
+From [Daemon restart and upgrade](design.md#daemon-restart-and-upgrade).
+
+- Under multi-client `fsx` in a real cluster (kubelet bind mounts, pod user namespaces, SELinux), the
+  daemon pod killed, the node plugin pod killed, and `rock-solid upgrade` from the previous release:
+  no mount sees it, and no node's daemon and plugin restart together.
+
+## Samba gateway
+
+From the [Samba gateway spike](design.md#appendix-samba-gateway-spike).
+
+- A basic subset of smbtorture's SMB2 suites (connect, create, read and write, lock) through one
+  gateway; the subset is listed here when the item is built.
+- The spike's client: two SMB clients and a pod on another node writing one file through
+  `oplocks = no`: each SMB client reads the pod's write on its next open.
+- Share modes hold between the two SMB clients; a byte-range lock of one blocks the other.
+- A name differing only in case from an existing one is refused.
+- A gateway pod whose node is partitioned is not joined by a second gateway.
+
+## POSIX and fsx suites
+
+- `pjdfstest` passes.
+- `fsx` from one client and from several, with `-e` and mapped operations; xfstests `generic/029`
+  and `generic/030`.
+
+## Real-cluster file runs
+
+From [Testing strategy](design.md#testing-strategy).
+
+- Histories from clients on several hosts, their stamps mapped by a measured round-trip offset,
+  pass the same checks as simulation histories.
+- Nightly nemesis: kills, partitions and disk errors under a multi-node file workload.
+- Power cuts: every acknowledged `fsync` survives.
+
+## Cross-version runs
+
+- The simulator opens the previous release's saved disk images and recovers them before its own
+  seeds run.

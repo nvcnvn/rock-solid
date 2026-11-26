@@ -16,7 +16,7 @@ The rules in [CLAUDE.md](../../../CLAUDE.md) ("Documents", "Tech debt") apply. T
 | Workaround, version pin, pre-release dependency | `docs/tech-debts.md` entry, in the same change as the code |
 | Experiment results | The spike's README, then a `design.md` appendix (see the `spike` skill) |
 | A test scenario a component must pass | `docs/test-scenarios.md`, in the section of its build checklist item |
-| A buildable piece of phases 1 to 5 | `docs/build-checklist.md` |
+| A buildable piece of phases 1 to 6 | `docs/build-checklist.md` |
 | A term a reader new to storage would not know | `docs/glossary.md`: what it means, why systems need it, and a link to the `design.md` section that owns its details |
 
 ## Editing design.md

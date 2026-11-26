@@ -79,41 +79,41 @@ sessions/neg-up-with-old-table	meta.upWithOldTable	TestPlantedLockBugsBreakTheLo
 sessions/neg-peering-skipped	chunkstore.stopPreviousOnly,lastActivatedOnly	TestPlantedBugsBreakTheirTraces
 sessions/neg-ack-reachable-only	meta.ackReachableOnly	TestPlantedLockBugsBreakTheLockInvariants
 sessions/neg-ack-waits-down	meta.ackWaitsDown	TestPlantedLockBugsBreakTheLockInvariants
-sessions/neg-count-from-reply	open	phase 6
-sessions/neg-no-drift	open	phase 6
-sessions/neg-ignore-resumed	open	phase 6
-sessions/neg-fixed-step-check	open	phase 6
-sessions/neg-window-per-run	open	phase 6
-purge/neg-daemon-punch	open	phase 6
-purge/neg-extend-over-purge	open	phase 6
-purge/neg-grace-by-time	open	phase 6
-purge/neg-missing-punch-fails	open	phase 6
-purge/neg-no-drain	open	phase 6
-purge/neg-no-incarnation-fence	open	phase 6
-purge/neg-no-rewrite	open	phase 6
-purge/neg-orphan-in-grace	open	phase 6
-purge/neg-overwrite-entry	open	phase 6
-purge/neg-progress-before-punch	open	phase 6
-purge/neg-purger-no-term	open	phase 6
-purge/neg-raise-after-write	open	phase 6
-purge/neg-release-on-commit	open	phase 6
-purge/neg-skip-partial-block	open	phase 6
-purge/neg-tail-in-memory	open	phase 6
-purge/neg-trunc-at-chunk	open	phase 6
-purge/neg-unchecked-removal	open	phase 6
-purge/neg-unlink-open	open	phase 6
+sessions/neg-count-from-reply	open	Client sessions
+sessions/neg-no-drift	open	Client sessions
+sessions/neg-ignore-resumed	open	Client sessions
+sessions/neg-fixed-step-check	open	Client sessions
+sessions/neg-window-per-run	open	Client sessions
+purge/neg-daemon-punch	open	Truncate
+purge/neg-extend-over-purge	open	Truncate
+purge/neg-grace-by-time	open	Owner failover and grace period
+purge/neg-missing-punch-fails	open	Purger
+purge/neg-no-drain	open	Truncate
+purge/neg-no-incarnation-fence	open	Daemon restart by descriptor handoff
+purge/neg-no-rewrite	open	Truncate
+purge/neg-orphan-in-grace	open	Owner failover and grace period
+purge/neg-overwrite-entry	open	Purger
+purge/neg-progress-before-punch	open	Purger
+purge/neg-purger-no-term	open	Purger
+purge/neg-raise-after-write	open	Filesystem client
+purge/neg-release-on-commit	open	Inode owner's open registry
+purge/neg-skip-partial-block	open	Truncate
+purge/neg-tail-in-memory	open	Truncate
+purge/neg-trunc-at-chunk	open	Truncate
+purge/neg-unchecked-removal	open	Purger
+purge/neg-unlink-open	open	Inode owner's open registry
 recall/neg-ack-before-size	open	phase 7
 recall/neg-answer-early	open	phase 7
 recall/neg-any-ack	open	phase 7
-recall/neg-attr-past-lease	open	phase 7
+recall/neg-attr-past-lease	open	Client fencing
 recall/neg-evict-at-once	open	phase 7
-recall/neg-grace-by-time	open	phase 7
+recall/neg-grace-by-time	open	Owner failover and grace period
 recall/neg-keep-cache	open	phase 7
 recall/neg-leave-ws-early	open	phase 7
 recall/neg-no-drop	open	phase 7
 recall/neg-no-flush	open	phase 7
 recall/neg-no-reval	open	phase 7
-recall/neg-open-in-grace	open	phase 7
+recall/neg-open-in-grace	open	Owner failover and grace period
 recall/neg-open-skips-holder	open	phase 7
 recall/neg-rereg-no-wrote	open	phase 7
 recall/neg-timeout-answer	open	phase 7

@@ -61,7 +61,7 @@
 
 ## Documents
 - `docs/design.md` is the design, including every decision and why it was made;
-  `docs/build-checklist.md` the reviewable pieces of phases 1 to 5; `docs/test-scenarios.md`
+  `docs/build-checklist.md` the reviewable pieces of phases 1 to 6; `docs/test-scenarios.md`
   the scenarios their tests cover; `docs/glossary.md` explains the terms they use. The
   `design-doc` skill says which change goes where.
 - Docs and code state current facts, arranged so they are easiest to read and understand.
