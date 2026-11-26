@@ -262,6 +262,47 @@ func (g *gen) lineAt(at int, format string, args ...any) {
 	}
 }
 
+// moveBack moves line from to just before line to, an earlier one, and keeps the marked positions on the lines they name.
+func (g *gen) moveBack(from, to int) {
+	l := g.lines[from]
+	g.lines = slices.Delete(g.lines, from, from+1)
+	type mark struct {
+		m map[int]int
+		k int
+	}
+	var named []mark
+	for _, m := range []map[int]int{g.mergedAt, g.takenAt} {
+		for k, p := range m {
+			if p == from {
+				named = append(named, mark{m, k})
+			} else if p > from {
+				m[k] = p - 1
+			}
+		}
+	}
+	for _, m := range []map[[2]uint64]int{g.left, g.orderAt} {
+		for k, p := range m {
+			if p > from {
+				m[k] = p - 1
+			}
+		}
+	}
+	for k, p := range g.formatAt {
+		if p > from {
+			g.formatAt[k] = p - 1
+		}
+	}
+	for k, p := range g.landAt {
+		if p > from+1 {
+			g.landAt[k] = p - 1
+		}
+	}
+	g.lineAt(to, "%s", l[1:len(l)-1])
+	for _, x := range named {
+		x.m[x.k] = to
+	}
+}
+
 // moveLine moves line from to just after line to, a later one, and keeps the marked positions on the lines they name.
 func (g *gen) moveLine(from, to int) {
 	l := g.lines[from]
@@ -791,6 +832,7 @@ func (g *gen) run(recs []trace.Record) {
 				fatal("request %d heard with no answer line", r.Fields[0])
 			} else {
 				g.heardOK[g.answer[w]] = true
+				g.sentBefore(w)
 			}
 		case trace.OutStale:
 			w := g.wid[[2]uint64{r.Fields[2], r.Fields[0]}]
@@ -887,6 +929,19 @@ func (g *gen) specDisk(n int) uint64 {
 		return d
 	}
 	return uint64(n)
+}
+
+// sentBefore moves the sends of write w after its newest answer line, which its client just heard, to before that line: the
+// client sent them before it heard, and the spec's client hears an answer in the step that gives it, after which it sends no more.
+func (g *gen) sentBefore(w int) {
+	at := slices.IndexFunc(g.lines, func(l string) bool { return strings.Contains(l, g.answer[w]) })
+	send := fmt.Sprintf(`[k |-> "send", w |-> %d]`, w)
+	for i := at + 1; i < len(g.lines); i++ {
+		if g.lines[i] == send {
+			g.moveBack(i, at)
+			at++
+		}
+	}
 }
 
 // answered is the heard field of an answer line of write w: a token its client hearing it marks TRUE, FALSE once written.

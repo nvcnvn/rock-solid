@@ -776,17 +776,19 @@ LapseFor(J, p, k) ==
 \* settled away stay in its log, never mapped, and so do those its store
 \* dropped at a decision the disk persisted, at the decision's marker, live and
 \* on replay. Recovery maps the copied versions, so it clears the chunk's
-\* drops. Replay gates every version of an interval, mapped or not, so it can
-\* drop more than the live store did, but only on a chunk the disk lists at the
-\* decision, which recovery rewrites: conformance compares this with the
-\* store's map only on chunks the disk does not list. The versions a recovery
-\* copied, those of intervals before its own, go with the version it was
-\* logged under when that drops, or when a later activated decision keeps a
-\* version below it (Uncopied).
+\* drops, the settled ones of its own interval's activation and earlier ones
+\* too, which it may copy back from its source. Replay gates every version of
+\* an interval, mapped or not, so it can drop more than the live store did,
+\* but only on a chunk the disk lists at the decision, which recovery
+\* rewrites: conformance compares this with the store's map only on chunks the
+\* disk does not list. The versions a recovery copied, those of intervals
+\* before its own, go with the version it was logged under when that drops, or
+\* when a later activated decision keeps a version below it (Uncopied).
 DropsOf(d, c) ==
     UNION {y.gone[c] : y \in {x \in dec :
               /\ x.n = dnode[d]
               /\ x.p = ChunkPG[c]
+              /\ x.k > rcv[d][c].k
               /\ x.r = run[x.n]
               /\ [p |-> x.p, k |-> x.k, r |-> x.r] \in act}}
     \cup {g.v : g \in {y \in drp[d] \cup ldrp[d] : y.c = c}}

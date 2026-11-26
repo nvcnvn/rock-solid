@@ -309,7 +309,8 @@ if [ "${1:-}" = plants ]; then
 	# The epoch plants whose trace TLC rejects on some seed they fire on, each firing on some of seeds 0 to 39; most fire
 	# on a few seeds in 40, so another window may have none, and some pass on a seed they fire on.
 	ecaught="ackOnLoneCopy activateEarly mergeWhileLacking mergeOnDropped editKeepsInterval relistNever peerInOldInterval oldReport
-		recoverFromListed listerVetoes listerOrders noDegradedHold ownInterval reportDecided removeOnActivation sendEpoch goneWhileUp"
+		recoverFromListed listerVetoes listerOrders noDegradedHold ownInterval reportDecided removeOnActivation sendEpoch goneWhileUp
+		noResendTable resendAtOnce writerAtLog trimOnAnswer recoveryForgetsIds recoveryLiveOnly"
 	for plant in $ecaught; do
 		[ -z "${PLANTS:-}" ] || case " $PLANTS " in *" $plant "*) ;; *) continue ;; esac
 		fired=0 rejected=0

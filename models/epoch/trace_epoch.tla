@@ -154,6 +154,17 @@ RecoverLine(l) ==
 \* the spec's Persist, so a disk listing c is not compared (Known in epoch.tla).
 KnownIds(d, c) == {g \in ids[d] : g.c = c /\ g.v \in Known(d, c)}
 
+\* The entry of write w in n's pin that an order, reanswer or stale line takes.
+\* A write's entries differ only in hold, and a step's guards see hold only in
+\* Fenced, which a later hold, or none, meets no more often. Taking the
+\* earliest-held entry the step allows leaves the one that can do the most,
+\* so no behaviour is lost, and the trace does not double its states at each
+\* line of a write sent again while held.
+Took(n, w, fenceable) ==
+    LET S == {y \in pin[n] : y.w = w /\ ~(fenceable /\ Fenced(n, y))}
+        H == {y \in S : y.hold # 0}
+    IN IF H = {} THEN S ELSE {y \in H : \A z \in H : y.hold <= z.hold}
+
 Line(l) ==
     \/ /\ l.k = "table"
        /\ \A r \in Range(l.rows) : RowMatches(r)
@@ -171,7 +182,7 @@ Line(l) ==
     \/ /\ l.k = "send"
        /\ IF ENABLED Send(l.w) THEN Send(l.w) ELSE UNCHANGED vars
     \/ /\ l.k = "order"
-       /\ \E x \in {y \in pin[l.n] : y.w = l.w} : Order(l.n, x)
+       /\ \E x \in Took(l.n, l.w, TRUE) : Order(l.n, x)
        /\ pv'[l.n][l.c] = l.v
     \/ /\ l.k = "logged"
        /\ IF l.v \in dlog[ddisk[l.n]][l.c]
@@ -249,7 +260,7 @@ Line(l) ==
           THEN UNCHANGED vars
           ELSE \E r \in {x \in pend : x.c = l.c /\ x.v = l.v} : IF l.heard THEN Answer(r) ELSE LoseAnswer(r)
     \/ /\ l.k = "reanswer"
-       /\ \E x \in {y \in pin[l.n] : y.w = l.w} :
+       /\ \E x \in Took(l.n, l.w, TRUE) :
             /\ KnownOf(l.n, x) # {}
             /\ Max(KnownOf(l.n, x)) = l.v
             /\ IF l.heard THEN Reanswer(l.n, x) ELSE LoseReanswer(l.n, x)
@@ -257,7 +268,7 @@ Line(l) ==
        /\ [c |-> l.c, v |-> l.v] \in ackd
        /\ UNCHANGED vars
     \/ /\ l.k = "stale"
-       /\ \E x \in {y \in pin[l.n] : y.w = l.w} : Stale(l.n, x)
+       /\ \E x \in Took(l.n, l.w, FALSE) : Stale(l.n, x)
     \/ /\ l.k = "staled"
        /\ l.w \in wm[ddisk[l.n]]
        /\ UNCHANGED vars
