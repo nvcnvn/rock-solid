@@ -230,7 +230,7 @@ func TestChunkClientsWriteAcrossPrimaryChangesAndAFence(t *testing.T) {
 
 // Planted in the clients of the run, a write sent again under a new request ID (4 of the first 30
 // seeds), a refusal taken as a write's final answer (1 of 30) and a write naming its own ID as the
-// oldest outstanding (29 of 30) each have a primary answer a write stale before its client heard
+// oldest outstanding (26 of 30) each have a primary answer a write stale before its client heard
 // a final answer to it: the client has named as final an ID it never heard answered.
 func TestPlantedClientBugsBreakTheClientRun(t *testing.T) {
 	for _, p := range []struct {

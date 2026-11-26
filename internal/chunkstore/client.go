@@ -44,7 +44,7 @@ type File struct {
 // Completion is the final answer to one chunk's part of a client request: the request's token, the
 // part's range in the file, and the status and version its primary answered with. A read answered
 // OK hands the caller Buf, which holds the part's bytes from Off % core.BlockSize; StatusNoSpace is
-// ENOSPC.
+// ENOSPC. A refused request, and a write answered unfound, is sent again rather than completed.
 type Completion struct {
 	Token   uint64
 	Off     uint64
@@ -273,7 +273,7 @@ func (c *Client) recv(ctx *core.Context, ev *core.Event, out *ClientOutput) {
 	}
 	op := &(*ops)[i]
 	switch {
-	case !final(rp.Status) && !(c.plant.refusedFinal && rp.Kind == KindReply):
+	case rp.Status == StatusRefused && !(c.plant.refusedFinal && rp.Kind == KindReply) || rp.Kind == KindReply && rp.Status == StatusUnfound:
 		if ev.Peer != op.peer {
 			break
 		}

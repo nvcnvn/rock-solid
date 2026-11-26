@@ -9542,7 +9542,7 @@ From [Data layer: ChunkStore](design.md#data-layer-chunkstore) and
   and the fence, no acknowledged write is lost, no fenced session's write is applied, and every
   chunk's history passes the [consistency check](#consistency-check-of-chunk-histories). Planted in
   the clients, a resend under a new ID (4 of the first 30 seeds), a refusal taken as final (1 of 30)
-  and a write naming its own ID as the oldest (29 of 30) each have a primary answer a write stale
+  and a write naming its own ID as the oldest (26 of 30) each have a primary answer a write stale
   before its client heard a final answer to it.
 
 ## Client sessions

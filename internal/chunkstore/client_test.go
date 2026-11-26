@@ -311,6 +311,14 @@ func TestAClientReadsCommittedBytesFromThePrimary(t *testing.T) {
 	if got := h.ctx.Pool.Bytes(h.done[0].Buf)[5000%core.BlockSize:][:100]; !bytes.Equal(got, bytes.Repeat([]byte{2}, 100)) {
 		t.Fatalf("read % x", got[:4])
 	}
+	if err := h.c.Read(&h.ctx, 6, testFile, 0, 1, &h.out); err != nil {
+		t.Fatal(err)
+	}
+	h.take()
+	h.answer(h.sent[len(h.sent)-1], Response{Kind: KindReadReply, Status: StatusUnfound})
+	if len(h.done) != 2 || h.done[1].Status != StatusUnfound || h.c.Pending() != 0 {
+		t.Fatalf("a read answered unfound completed %+v", h.done)
+	}
 }
 
 // idRules holds a client's writes to the rules of request IDs: every send names its own ID at most
