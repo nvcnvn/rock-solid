@@ -27,10 +27,11 @@ const (
 	CtlShardMap
 )
 
-// The tags under volume/{id}/.
+// The tags under volume/{id}/; volume/{0}/record is the volume ID counter.
 const (
 	VolumeAttach byte = iota + 1
 	VolumeSnap
+	VolumeRecord
 )
 
 // An inode's tags, at sequence 1 and above: a, x, t, l, d, c and P.
@@ -109,7 +110,7 @@ const (
 
 var (
 	ctlLayouts    = [...]layout{CtlPool: rest, CtlPlacement: rest, CtlMembership: rest, CtlSession: id, CtlFormat: rest, CtlShardMap: rest}
-	volumeLayouts = [...]layout{VolumeAttach: empty, VolumeSnap: id}
+	volumeLayouts = [...]layout{VolumeAttach: empty, VolumeSnap: id, VolumeRecord: empty}
 	fsLayouts     = [...]layout{
 		InodeAttr: empty, InodeXattr: name, InodeTarget: empty, InodeLock: lock, InodeEntry: name, InodeFolded: name, InodeParent: empty,
 		SlotNext: empty, SlotUsed: empty, SlotOrphan: id, SlotPurge: id, SlotReplay: replay, SlotFree: empty,

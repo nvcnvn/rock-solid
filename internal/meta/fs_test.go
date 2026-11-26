@@ -1131,3 +1131,37 @@ func TestResentFSOpsReturnTheirFirstFinalResult(t *testing.T) {
 		}
 	})
 }
+
+// A volume's create writes its record, the counter past its ID and its root; sent again after
+// its answer was lost it is answered from its replay record, and a create built for an ID the
+// counter has passed fails the counter check, whose answer is the ID to take.
+func TestAVolumeCreateMakesOneVolume(t *testing.T) {
+	h := &fsT{t: t, s: newTestState(t)}
+	counter := mustKey(&Key{Space: SpaceVolume, Tag: VolumeRecord})
+	rec := Volume{Pool: 3, Size: 10 << 30, CaseIndex: true}
+	h.f = FS{Volume: 1, Req: &Request{ID: 77}}
+	h.ok(h.f.CreateVolume(&rec, &rootDir))
+	sent := h.built()
+	if r := run(t, h.s, sent); r.FailedCheck != -1 {
+		t.Fatalf("the resent create got %+v", r)
+	}
+	if v, _ := h.s.tree.Get(counter); binary.BigEndian.Uint64(v) != 2 {
+		t.Fatalf("after a create and its resend the counter is %x, want 2", v)
+	}
+	if v, _ := h.s.tree.Get(mustKey(&Key{Space: SpaceVolume, Volume: 1, Tag: VolumeRecord})); !bytes.Equal(v, AppendVolume(nil, &rec)) {
+		t.Fatalf("volume 1's record is %x", v)
+	}
+	if v, _ := h.s.tree.Get(mustKey(&Key{Space: SpaceFS, Volume: 1, Inode: RootInode, Tag: InodeAttr})); !bytes.Equal(v, AppendAttr(nil, &rootDir)) {
+		t.Fatalf("volume 1's root is %x", v)
+	}
+	h.f = FS{Volume: 1, Req: &Request{ID: 78}}
+	r := h.do(h.f.CreateVolume(&rec, &rootDir))
+	if r.FailedCheck != 0 || binary.BigEndian.Uint64(r.Actual) != 2 {
+		t.Fatalf("a second create for ID 1 got %+v, want the counter check failed on 2", r)
+	}
+	h.f.Volume = 2
+	h.ok(h.f.CreateVolume(&rec, &rootDir))
+	if v, _ := h.s.tree.Get(counter); binary.BigEndian.Uint64(v) != 3 {
+		t.Fatalf("the counter is %x, want 3", v)
+	}
+}

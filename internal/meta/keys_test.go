@@ -46,6 +46,8 @@ var goldenKeys = map[string]Key{
 	"ctl/membership/4":      {Space: SpaceCtl, Tag: CtlMembership, Name: []byte{0, 0, 0, 4}},
 	"volume/5/attach":       {Space: SpaceVolume, Volume: 5, Tag: VolumeAttach},
 	"volume/5/snap/3":       {Space: SpaceVolume, Volume: 5, Tag: VolumeSnap, ID: 3},
+	"volume/5/record":       {Space: SpaceVolume, Volume: 5, Tag: VolumeRecord},
+	"volume/0/record":       {Space: SpaceVolume, Tag: VolumeRecord},
 	"fs/1/0:1/a":            fsKey(1, ino(0, 1), InodeAttr),
 	"fs/5/2:1/a":            fsKey(5, ino(2, 1), InodeAttr),
 	"fs/5/2:3/x/user.big":   with(fsKey(5, ino(2, 3), InodeXattr), func(k *Key) { k.Name = b("user.big") }),
@@ -129,7 +131,7 @@ func randKey(rng *rand.Rand) Key {
 	case SpaceCtl:
 		k.Tag = byte(pick(uint64(CtlPool), uint64(CtlPlacement), uint64(CtlMembership), uint64(CtlSession), uint64(CtlFormat), uint64(CtlShardMap)))
 	case SpaceVolume:
-		k.Volume, k.Tag = uint32(n64()), byte(pick(uint64(VolumeAttach), uint64(VolumeSnap)))
+		k.Volume, k.Tag = uint32(n64()), byte(pick(uint64(VolumeAttach), uint64(VolumeSnap), uint64(VolumeRecord)))
 	case SpaceFS:
 		k.Volume = uint32(n64())
 		k.Inode = ino(uint32(pick(0, 1, 2, 1<<SlotBits-1)), pick(0, 1, 2, 1<<SeqBits-1))
@@ -279,7 +281,7 @@ func TestKeyErrors(t *testing.T) {
 		"no tag":                     attr[:13],
 		"unknown inode tag":          at(attr, 13, 0x08),
 		"unknown ctl tag":            {SpaceCtl, 0x07},
-		"unknown volume tag":         {SpaceVolume, 0, 0, 0, 5, 0x03},
+		"unknown volume tag":         {SpaceVolume, 0, 0, 0, 5, 0x04},
 		"piece of an attribute":      at(attr, 13, InodeAttr|PieceBit),
 		"replay missing its ID":      good[:33],
 		"trailing bytes":             append(slices.Clone(good), 0),

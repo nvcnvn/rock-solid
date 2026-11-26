@@ -6,6 +6,8 @@ import (
 	"errors"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/nvcnvn/rock-solid/internal/core"
 )
 
 // The reservation batches: a daemon reserves InodeBatch sequence numbers of a slot, or SlotBatch
@@ -273,6 +275,11 @@ func (f *FS) unlink(inode uint64, a *Attr, open bool, pending *Purge, now int64)
 // Root creates a volume's root directory and its slot counters, once.
 func (f *FS) Root(a *Attr) error {
 	f.begin(0)
+	f.root(a)
+	return f.end()
+}
+
+func (f *FS) root(a *Attr) {
 	n := f.slotKey(0, SlotNext, 0)
 	if !f.resetRoot {
 		f.op(CheckAbsent(n, true))
@@ -280,6 +287,45 @@ func (f *FS) Root(a *Attr) error {
 	f.op(Put(f.key(RootInode, InodeAttr, nil), f.attr(a)))
 	f.op(Put(n, f.u64(2)))
 	f.op(Put(f.slotKey(0, SlotFree, 0), f.u64(1)))
+}
+
+// Volume is a volume's record: its pool, its size in bytes and whether it keeps case_index.
+type Volume struct {
+	Pool      core.PoolID
+	Size      uint64
+	CaseIndex bool
+}
+
+// AppendVolume appends r's encoding to dst: the pool in 32 bits, the size in 64 and a flags
+// byte whose low bit is CaseIndex.
+func AppendVolume(dst []byte, r *Volume) []byte {
+	var flags byte
+	if r.CaseIndex {
+		flags = 1
+	}
+	return append(binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint32(dst, uint32(r.Pool)), r.Size), flags)
+}
+
+// CreateVolume creates volume f.Volume, the ID the volume ID counter holds, absent for ID 1: its
+// record r, the counter past it and its root a, as Root makes it. A failed counter check, the
+// first op, answers with the counter, the ID to take. Volume 0 is ErrBadKey.
+func (f *FS) CreateVolume(r *Volume, a *Attr) error {
+	f.begin(0)
+	if f.Volume == 0 {
+		f.err = ErrBadKey
+	}
+	counter := f.appendKey(&Key{Space: SpaceVolume, Tag: VolumeRecord})
+	if f.Volume == 1 {
+		f.op(CheckAbsent(counter, false))
+	} else {
+		f.op(Check(counter, f.u64(uint64(f.Volume)), false))
+	}
+	f.op(Put(counter, f.u64(uint64(f.Volume)+1)))
+	start := len(f.buf)
+	f.buf = AppendVolume(f.buf, r)
+	v := f.val(start)
+	f.op(Put(f.appendKey(&Key{Space: SpaceVolume, Volume: f.Volume, Tag: VolumeRecord}), v))
+	f.root(a)
 	return f.end()
 }
 
