@@ -110,6 +110,8 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Version.** A number stamped on each write to a chunk, larger than every earlier one. Versions let a read ask for a past state (`at_ver`), let a write succeed only if the chunk is still at the version the writer last saw (compare-and-set), and let a new primary tell which copy is newest. Its high 32 bits are the number of the chunk's PG [interval](#redundancy-and-placement) in which it was written, and its low 32 bits count the chunk's writes in that interval, from 1; see [Versions](design.md#data-layer-chunkstore).
 
+**Chunk client.** The part of a client daemon that sends chunk writes, punches and reads to each chunk's primary, splitting a request at a chunk's end and resending one that was refused or went unanswered under the same request ID, so the primary's resend table can tell a resend from a new write. See [The chunk client](design.md#data-layer-chunkstore).
+
 **Committed version.** A version that every live member of the chunk's PG holds. Reads return only committed versions, so a reader never sees a write that a crash could still undo.
 
 **Superseded version.** A version peering dropped, because some member live in its interval lacks it or holds it only in part, which proves it was never acknowledged, but that some member's log already holds. Recovery writes the bytes the chunk keeps over its blocks, in a later record, on every member that holds it, so replaying a log never brings the dropped bytes back. See [Recovery](design.md#epoch-changes-and-failure-detection).
