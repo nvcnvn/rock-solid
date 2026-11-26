@@ -21,9 +21,9 @@ type SessionClient struct {
 	cfg  lease.Config
 	h    *lease.Holder
 	node uint32
-	// id is the session, 0 while it starts under the start request start; starts is the start
-	// requests' high bits, drawn at the daemon's start, and started counts them.
-	id, start, starts, started uint64
+	// id is the session, 0 while it starts under the start request start, drawn from rng.
+	id, start uint64
+	rng       *core.Rand
 	// inc is the session's incarnation, the high bits of its requests, seq their count, and first
 	// the session's first request: answers below it are an earlier session's.
 	inc, seq, first, last uint64
@@ -42,21 +42,20 @@ type clientPlants struct {
 	countFromReply, noDrift, ignoreResumed, fixedStepCheck, windowPerNode bool
 }
 
-// NewSessionClient is the session client of a daemon on node, holding leases under cfg, whose
-// start requests carry starts in their high bits, a number the daemon draws at each start so that
-// no earlier start's request is taken for its own.
-func NewSessionClient(cfg lease.Config, node uint32, starts uint64) *SessionClient {
-	s := &SessionClient{cfg: cfg, node: node, starts: starts}
+// NewSessionClient is the session client of a daemon on node, holding leases under cfg, which
+// draws each start request from rng.
+func NewSessionClient(cfg lease.Config, node uint32, rng *core.Rand) *SessionClient {
+	s := &SessionClient{cfg: cfg, node: node, rng: rng}
 	s.over()
 	return s
 }
 
-// over starts a new session: a new start request, no lease, and requests numbered above every
-// earlier one.
+// over starts a new session: no lease, requests numbered above every earlier one, and a new start
+// request of 64 random bits, so that no earlier daemon's start on the node, whose session may still
+// be in the table, is taken for it.
 func (s *SessionClient) over() {
-	s.started++
 	s.inc = 1
-	s.id, s.start, s.first, s.last = 0, s.starts|s.started&0xffffffff, s.inc<<32|(s.seq+1), 0
+	s.id, s.start, s.first, s.last = 0, s.rng.Uint64(), s.inc<<32|(s.seq+1), 0
 	s.answered, s.arrived, s.grantors = 0, 0, s.grantors[:0]
 	c := s.cfg
 	c.Plants = lease.Plants{CountFromReply: s.plant.countFromReply, NoDrift: s.plant.noDrift, HalfStep: s.plant.fixedStepCheck}

@@ -563,6 +563,47 @@ func TestAStartSentAgainMakesOneSession(t *testing.T) {
 	}
 }
 
+// Two daemons started one after the other on a node draw their start requests independently, so the
+// second's start makes a session of its own while the first's is live, even from two seeds whose
+// first 32 bits drawn match.
+func TestARestartedDaemonsStartMakesItsOwnSession(t *testing.T) {
+	r := newCtlRun(t)
+	var ids []uint64
+	for _, seed := range []uint64{22030, 69736} {
+		req, _ := NewSessionClient(ClientLease, 3, core.NewRand(seed)).Starting()
+		r.ctl.StartSession(3, req)
+		for _, s := range r.sessStep().Started {
+			ids = append(ids, s.ID)
+		}
+	}
+	if len(ids) != 2 || ids[0] == ids[1] {
+		t.Fatalf("started %v", ids)
+	}
+}
+
+// A start sent again once its session is fenced, by a client that stood still past the fence,
+// makes a new session, though the fenced one stays in the table until its version is acknowledged.
+func TestAStartSentAgainAfterItsFenceMakesANewSession(t *testing.T) {
+	r := newCtlRun(t)
+	const req = 7<<32 | 1
+	r.ctl.StartSession(3, req)
+	first := r.sessStep().Started[0].ID
+	for !r.fenced(first) {
+		r.tick(sec)
+		if r.now > 2*DeadWait {
+			t.Fatal("never fenced")
+		}
+		r.sessStep()
+	}
+	r.ctl.StartSession(3, req)
+	if s := r.sessStep().Started; len(s) != 1 || s[0].ID == first || len(r.started) != 0 {
+		t.Fatalf("started %+v, answered %+v from the table, after session %d was fenced", s, r.started, first)
+	}
+	if _, ok := slices.BinarySearchFunc(r.ctl.SessionTable().Sessions, first, cmpSession); !ok {
+		t.Fatal("the fenced session left the table before its version was acknowledged")
+	}
+}
+
 const (
 	invSessionLease = "no session is fenced while its client's own lease still runs"
 	invSessionReads = "a new leader reads the session table back as committed"
@@ -729,9 +770,12 @@ func TestPlantedLockBugsBreakTheLockInvariants(t *testing.T) {
 // after a delayed answer (10 of 500 seeds), and one kept across Resumed after the client's VM stood
 // still (72 of 500); the step check at 1 + lease_drift / 2 trips on a leader more than 0.5% fast
 // (437 of 500), and one rate window across a leader node's runs on a run at another rate (48 of
-// 500). A lease that does not end lease_drift early fails in the drift scenario, which the seeded
-// run's leader covers: its rate bound, taken over one heartbeat, overshoots by the run's round
-// trips of tens of milliseconds, more than a rise within the headroom.
+// 500). A lease that does not end lease_drift early breaks "no session is fenced while its
+// client's own lease still runs" only in the drift scenario. In the seeded run the leader's rate
+// bound, taken over one heartbeat, overshoots by the run's round trips of tens of milliseconds,
+// more than a rise within the headroom; and the plant's margin, less lease_drift, is also its step
+// check's, so a rise there can trip it (5 of 200 seeds), which ends the lease, safely, before the
+// leader's count.
 func TestPlantedClientSessionBugs(t *testing.T) {
 	for _, p := range []struct {
 		name string
@@ -763,7 +807,7 @@ func TestPlantedClientSessionBugs(t *testing.T) {
 func driftRun(t *testing.T, cp clientPlants) error {
 	const step = core.Tick(10_000)
 	r := newCtlRun(t)
-	sc := NewSessionClient(clientLease, 0, 1<<32)
+	sc := NewSessionClient(clientLease, 0, core.NewRand(1))
 	sc.plant = cp
 	sc.over()
 	req, _ := sc.Starting()
@@ -993,7 +1037,7 @@ func sessionRun(t *testing.T, seed uint64, pl sessionPlants, cp clientPlants, on
 	rose := make([]bool, len(nodes))
 	clients := make([]*runClient, 4)
 	for i := range clients {
-		sc := NewSessionClient(cfg, uint32(i), uint64(i+1)<<32)
+		sc := NewSessionClient(cfg, uint32(i), core.NewRand(uint64(i+1)))
 		sc.plant = cp
 		sc.over()
 		clients[i] = &runClient{clk: clock(), sc: sc}

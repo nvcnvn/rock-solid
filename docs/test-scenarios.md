@@ -9521,20 +9521,25 @@ From [Data layer: ChunkStore](design.md#data-layer-chunkstore) and
 From [Sessions and fencing](design.md#sessions-and-fencing) and the [sessions
 model](#sessions-and-fencing-model).
 
-- A client-only node (no devices) starts a session and renews it every second over TCP; its writes
-  go on past `session_lease` from the start.
+- A client-only node (`rock-solid node -role client`, no devices) starts a session at `rock-solid
+  ctl` over TCP and renews it: the one session it started is live past `dead_wait` from its start.
 - The holder counts from the send of its last answered renewal, on both clocks, and ends the lease
   on `Resumed`; requests wait while the lease is lapsed and go once a renewal is answered.
-- Request IDs rise with every send, a resend included, and across a restart.
+- Request IDs rise with every send within a run, a resend included; a restarted daemon starts a new
+  session.
 - A fence learned from a renewal or a refused write starts a new session.
-- A start resent after a lost answer, and one resent to a new leader, give one session.
+- A start resent after a lost answer, and one resent to a new leader, give one session; one resent
+  once its session is fenced gives a new session. Two daemons started on one node draw their start
+  requests independently and get two sessions, even from draws whose first 32 bits match.
 - **[property]** The session run's clients are `meta.SessionClient`s, with VMs that stand still,
   leader nodes that start a run at another rate or rise within the headroom, delayed answers and
   lost start answers. Plants `neg-count-from-reply` and `neg-ignore-resumed` fail "no session is
   fenced while its client's own lease still runs", and `neg-fixed-step-check` and
   `neg-window-per-run` fail "the step check never trips for a client that never stood still", on
-  the run's seeds; `neg-no-drift` fails the first in a scenario with exact rate bounds, since the
-  run's leader bound overshoots by its round trips more than a rise within the headroom.
+  the run's seeds. `neg-no-drift` fails the first only in a scenario with exact rate bounds: in the
+  run, the leader's bound overshoots by its round trips more than a rise within the headroom, and
+  the plant's smaller margin also tightens the step check, so on some seeds (5 of 200) a rise trips
+  it, failing the second, safely, since a trip ends the lease.
 
 ## Filesystem client
 

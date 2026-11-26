@@ -345,7 +345,7 @@ func (c *Control) sessionStep(t lease.Time, token uint64, head bool, out *Contro
 		return false, nil
 	}
 	c.starts = slices.DeleteFunc(c.starts, func(s SessionStart) bool {
-		i := slices.IndexFunc(c.sess.Sessions, func(e SessionEntry) bool { return e.Node == s.Node && e.Start == s.Request })
+		i := slices.IndexFunc(c.sess.Sessions, func(e SessionEntry) bool { return e.Node == s.Node && e.Start == s.Request && e.Fenced == 0 })
 		if i >= 0 {
 			s.ID = c.sess.Sessions[i].ID
 			out.Started = append(out.Started, s)

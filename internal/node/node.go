@@ -190,7 +190,7 @@ func New(cfg Config) *Node {
 	n := &Node{cfg: cfg, rng: core.NewRand(cfg.Seed)}
 	n.start = uint64(n.rng.Uint32()) << 32
 	if cfg.Client {
-		n.sess = meta.NewSessionClient(meta.ClientLease, cfg.Node, n.start)
+		n.sess = meta.NewSessionClient(meta.ClientLease, cfg.Node, n.rng)
 	}
 	return n
 }
