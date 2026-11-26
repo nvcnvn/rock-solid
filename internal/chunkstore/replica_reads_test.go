@@ -666,6 +666,16 @@ func TestNoPGServesReadsFromTwoPrimaries(t *testing.T) {
 	})
 }
 
+// Seed 313 of TestNoPGServesReadsFromTwoPrimaries: interval 5's recovery brought down member 2 its
+// chunk's acknowledged 4.9, and the decision of interval 8 lists the two disks that held 4.9 as it
+// was acknowledged, each for a dropped version above it, so the chunk is unfound while disk 2 is
+// down. Disk 2 is its source, though it held 4.9 only from the recovery.
+func TestReadRunSeed313RecoveredCopyIsASource(t *testing.T) {
+	if err := runReads(t, 313, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // The read run's writers as two sessions: the first is fenced when it dies, and the second, its
 // locks' next holder, writes once every node with a disk up holds the fence. No store orders a
 // write of the fenced session once it holds the fence, and every write of the first that completes
