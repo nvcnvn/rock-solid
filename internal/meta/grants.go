@@ -358,7 +358,8 @@ const FillFresh = core.Tick(2_000_000)
 
 // Membership sets m to the leader's answer to a node's report at t: each committed disk not gone
 // that at gives a loop, with the size and log reserve its node last reported and the fill its
-// heartbeat gave within FillFresh, and each committed pool's grants outstanding.
+// heartbeat gave within FillFresh, each committed pool's grants outstanding, and the committed
+// shard map.
 func (c *Control) Membership(t lease.Time, m *Membership, at func(d *DiskEntry) (core.NodeID, bool)) {
 	m.Disks, m.Grants = m.Disks[:0], m.Grants[:0]
 	for i := range c.disks {
@@ -374,6 +375,10 @@ func (c *Control) Membership(t lease.Time, m *Membership, at func(d *DiskEntry) 
 	for _, pg := range c.pgrants {
 		m.Grants = append(m.Grants, PoolGrant{Pool: pg.id, Grant: c.Granted(pg.id)})
 	}
+	// ponytail: every entry in every answer, as a restarted node needs the settings of each group
+	// its disks may hold before they recover; an answer past core.MaxMsgData is not sent, so send
+	// a node only its own groups past a start once maps grow to thousands of groups.
+	m.MapV, m.Plans = c.smapV, c.smap.Groups
 }
 
 func (c *Control) diskOfLog(log uint64) uint32 {

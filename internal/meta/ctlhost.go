@@ -89,6 +89,8 @@ type CtlHost struct {
 	beat    SessionBeat
 	renewed SessionAnswer
 	member  Membership
+	// unsent is set while the last membership failed to encode, so the failure is reported once.
+	unsent  bool
 	sout    Output
 	cout    ControlOutput
 	answers []Answer
@@ -466,9 +468,13 @@ func (h *CtlHost) sendDisks(ctx *core.Context, to core.NodeID, out *CtlHostOutpu
 		return core.NodeID{Node: d.Node, Loop: h.nodes[i].loops[j].loop}, true
 	})
 	a := core.Action{Kind: core.ActNetSend, Peer: to, Reply: true}
-	if EncodeDisks(ctx.Pool, h.group, &h.member, &a.Msg) == nil {
+	err := EncodeDisks(ctx.Pool, h.group, &h.member, &a.Msg)
+	if err == nil {
 		out.Actions = append(out.Actions, a)
+	} else if !h.unsent {
+		out.Errs = append(out.Errs, fmt.Errorf("meta: a membership answer was not sent: %w", err))
 	}
+	h.unsent = err != nil
 }
 
 // startSession hands the Control a client's session start while it serves, once per request the client

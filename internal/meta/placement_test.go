@@ -83,6 +83,25 @@ func TestAVoterDownForRefillAfterIsReplacedOnAFourthNode(t *testing.T) {
 	}
 }
 
+// A group's first fill sets its Boot to the voters it placed, one on a single metadata node, and
+// no later fill changes it: the voters added later join with empty storage.
+func TestAGroupsFirstFillSetsItsBootVoters(t *testing.T) {
+	r, nodes := cluster(t, 3)
+	m := ShardMap{Groups: []Group{{ID: 7}}}
+	m = PlaceVoters(&m, nodes[:1], r.Disks(), nil, 0)
+	if g := m.Groups[0]; g.Boot != 1 || g.LastID != 1 {
+		t.Fatalf("a first fill on one node gave boot %d, last ID %d", g.Boot, g.LastID)
+	}
+	m = PlaceVoters(&m, nodes, r.Disks(), nil, 0)
+	if g := m.Groups[0]; g.Boot != 1 || g.LastID != 3 || len(g.Voters) != 3 {
+		t.Fatalf("a later fill gave boot %d, last ID %d and voters %+v", g.Boot, g.LastID, g.Voters)
+	}
+	m = PlaceVoters(&ShardMap{Groups: []Group{{ID: 8}}}, nodes, r.Disks(), nil, 0)
+	if g := m.Groups[0]; g.Boot != 3 {
+		t.Fatalf("a first fill on three nodes gave boot %d", g.Boot)
+	}
+}
+
 func TestOnThreeNodesAVoterWhoseNodeIsDownStays(t *testing.T) {
 	r, nodes := cluster(t, 3)
 	m := ShardMap{Groups: []Group{{ID: 0}, {ID: 1}}}

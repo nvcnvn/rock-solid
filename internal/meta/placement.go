@@ -19,12 +19,15 @@ type Replica struct {
 }
 
 // Group is a Raft group's entry in the shard map: the first key of its range, which runs to the
-// next group's Start, its voters, and the last replica ID it handed out, which no later replica reuses.
+// next group's Start, its voters, the last replica ID it handed out, which no later replica reuses,
+// and Boot, its first plan's voters, IDs 1 to Boot, which boot with one another as the group's
+// configuration; a replica any later plan adds joins with empty storage.
 type Group struct {
 	ID     uint64
 	Start  []byte
 	Voters []Replica
 	LastID uint64
+	Boot   uint64
 }
 
 // ShardMap is every Raft group's key range, by which a Txn routes, and the control-plane
@@ -43,7 +46,7 @@ type Halt struct {
 // been down for refill_after, or whose disk now reports from another node, replaced, and one stuck
 // in halts for refill_after replaced on another node, and each group filled to Voters, one
 // voter per node in nodes, each new one under a new replica ID on the up disk with the fewest
-// voters of any group. A voter with nowhere to go stays.
+// voters of any group; a group's first fill sets its Boot. A voter with nowhere to go stays.
 func PlaceVoters(m *ShardMap, nodes []uint32, disks []chunkstore.RecordedDisk, halts []Halt, now core.Tick) ShardMap {
 	load := make([]int, len(disks))
 	next := ShardMap{Groups: make([]Group, len(m.Groups))}
@@ -72,12 +75,16 @@ func PlaceVoters(m *ShardMap, nodes []uint32, disks []chunkstore.RecordedDisk, h
 				g.Voters[i] = g.add(&disks[c], load, c)
 			}
 		}
+		first := g.LastID == 0
 		for len(g.Voters) < Voters {
 			c := best(g, -1, false, nodes, disks, load)
 			if c < 0 {
 				break
 			}
 			g.Voters = append(g.Voters, g.add(&disks[c], load, c))
+		}
+		if first {
+			g.Boot = g.LastID
 		}
 	}
 	return next

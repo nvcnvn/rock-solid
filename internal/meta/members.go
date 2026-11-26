@@ -691,6 +691,14 @@ func (c *Control) metaNodes() []uint32 {
 	return ns
 }
 
+// Reported is the metadata replicas node last reported.
+func (c *Control) Reported(node uint32) []ReplicaReport {
+	if i, ok := slices.BinarySearchFunc(c.nodes, node, func(n nodeState, id uint32) int { return cmp.Compare(n.id, id) }); ok {
+		return slices.Clone(c.nodes[i].reps)
+	}
+	return nil
+}
+
 // FailedDevices is every device the nodes heard from report failed, or report opened under a log
 // the record refuses, by node.
 func (c *Control) FailedDevices() []FailedDevice {

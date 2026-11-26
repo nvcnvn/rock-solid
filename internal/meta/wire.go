@@ -57,6 +57,9 @@ func frameMsg(pool core.BufPool, group uint64, kind byte, token uint64, n int, m
 	le.PutUint64(b[1:], group)
 	b[kindAt] = kind
 	le.PutUint64(b[kindAt+1:], token)
+	if n > core.MaxMsgData {
+		return nil, ErrTooLarge
+	}
 	if msgHead+n <= core.MaxInlineMsg {
 		msg.Len, msg.Buf = uint16(msgHead+n), core.NoBuf
 		return b[msgHead:msgHead:core.MaxInlineMsg], nil

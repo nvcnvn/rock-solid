@@ -77,6 +77,9 @@ func (e *PoolExhaustedError) Is(target error) bool { return target == ErrPoolExh
 // MaxInlineMsg is the largest control message carried inline; anything bigger travels as an IOBuf.
 const MaxInlineMsg = 256
 
+// MaxMsgData is the largest IOBuf a message carries between nodes.
+const MaxMsgData = 16 << 20
+
 // Msg is a control message: up to MaxInlineMsg inline bytes and optionally one pool buffer of data.
 type Msg struct {
 	Len  uint16

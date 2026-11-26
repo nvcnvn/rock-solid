@@ -866,7 +866,8 @@ func TestATableIsCheckedAgainstEveryPoolItReads(t *testing.T) {
 
 // A staged shard map keeps each group's replica IDs fresh, which the completion of a plan rests
 // on: refused are a group whose last ID falls, a voter above its group's last ID or not new to
-// the group but above the last ID it had, and a plan that drops voters but adds none.
+// the group but above the last ID it had, a plan that drops voters but adds none, and a change of
+// the boot voters once the group handed out an ID.
 func TestAShardMapThatReusesAReplicaIDIsRefused(t *testing.T) {
 	voters := func(ids ...uint64) []Replica {
 		var vs []Replica
@@ -886,6 +887,7 @@ func TestAShardMapThatReusesAReplicaIDIsRefused(t *testing.T) {
 		{ID: 1, Voters: voters(1, 2, 6), LastID: 5},
 		{ID: 1, Voters: voters(1, 2), LastID: 4},
 		{ID: 1, Voters: voters(1, 2, 5, 5), LastID: 5},
+		{ID: 1, Voters: voters(1, 2, 3), LastID: 4, Boot: 3},
 	} {
 		if err := c.SetShardMap(smap(g)); !errors.Is(err, ErrReplicaIDs) || c.stagedMap != nil {
 			t.Fatalf("a shard map planning %+v is staged: %v", g, err)

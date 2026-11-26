@@ -32,7 +32,8 @@ const (
 var (
 	// ErrNoOps reports a Txn without ops.
 	ErrNoOps = errors.New("meta: txn has no ops")
-	// ErrTooLarge reports a key, value, range bound or Txn over its limit.
+	// ErrTooLarge reports a key, value, range bound or Txn over its limit, or a message over
+	// core.MaxMsgData.
 	ErrTooLarge = errors.New("meta: too large")
 	// ErrEmptyRange reports a DeleteRange or CheckEmpty whose start is not below its end.
 	ErrEmptyRange = errors.New("meta: empty range")

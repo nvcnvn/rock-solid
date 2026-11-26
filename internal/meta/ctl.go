@@ -894,10 +894,10 @@ func decodePool(b []byte) (chunkstore.Pool, error) {
 	return p, nil
 }
 
-// A group's shard map entry: its range start as length and bytes, its last replica ID, its voter
-// count, then each voter's replica ID, node and disk, all as uvarints.
+// A group's shard map entry: its range start as length and bytes, its last replica ID, its boot
+// voters, its voter count, then each voter's replica ID, node and disk, all as uvarints.
 func appendGroup(dst []byte, g *Group) []byte {
-	dst = binary.AppendUvarint(appendBytes(dst, g.Start), g.LastID)
+	dst = binary.AppendUvarint(binary.AppendUvarint(appendBytes(dst, g.Start), g.LastID), g.Boot)
 	dst = binary.AppendUvarint(dst, uint64(len(g.Voters)))
 	for _, v := range g.Voters {
 		dst = binary.AppendUvarint(binary.AppendUvarint(binary.AppendUvarint(dst, v.ID), uint64(v.Node)), uint64(v.Disk))
@@ -905,11 +905,15 @@ func appendGroup(dst []byte, g *Group) []byte {
 	return dst
 }
 
-// freshAfter reports whether g's voters are distinct, none above g's last ID, and, when g follows
-// old (ok), its last ID is no lower and each voter old's plan lacks is above old's last ID, and a
-// plan that differs from old's names one: a plan of voters some earlier configuration had would let
-// a stale report of that configuration complete it.
+// freshAfter reports whether g's voters are distinct, none above g's last ID, nor its Boot, and,
+// when g follows old (ok), its last ID is no lower and each voter old's plan lacks is above old's
+// last ID, and a plan that differs from old's names one: a plan of voters some earlier configuration
+// had would let a stale report of that configuration complete it. Its Boot is old's once old handed
+// out an ID, since a replica takes its boot state from it.
 func (g *Group) freshAfter(old *Group, ok bool) bool {
+	if g.Boot > g.LastID || ok && old.LastID != 0 && g.Boot != old.Boot {
+		return false
+	}
 	fresh := false
 	for i, v := range g.Voters {
 		if v.ID == 0 || v.ID > g.LastID || slices.ContainsFunc(g.Voters[:i], func(o Replica) bool { return o.ID == v.ID }) {
@@ -926,11 +930,12 @@ func (g *Group) freshAfter(old *Group, ok bool) bool {
 	return !ok || g.LastID >= old.LastID && (fresh || len(g.Voters) == len(old.Voters))
 }
 
-// decodeGroup decodes group id's entry; ErrMalformed for a start over MaxKey, a voter ID above the
-// last one handed out or repeated, or anything appendGroup would not write.
+// decodeGroup decodes group id's entry; ErrMalformed for a start over MaxKey, a Boot or voter ID
+// above the last one handed out, a voter ID repeated, or anything appendGroup would not write.
 func decodeGroup(id uint64, b []byte) (Group, error) {
 	d := decoder{b: b}
-	g := Group{ID: id, Start: slices.Clone(d.bytes()), LastID: d.uvarint()}
+	g := Group{ID: id, Start: slices.Clone(d.bytes()), LastID: d.uvarint(), Boot: d.uvarint()}
+	d.bad = d.bad || g.Boot > g.LastID
 	n := d.uvarint()
 	for i := uint64(0); i < n && !d.bad; i++ {
 		v := Replica{ID: d.uvarint(), Node: uint32(d.uvarint()), Disk: uint32(d.uvarint())}

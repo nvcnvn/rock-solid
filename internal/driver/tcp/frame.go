@@ -20,7 +20,7 @@ const (
 	// helloLen is a hello's inline bytes: the sender's node and loop and its incarnation.
 	helloLen = 16
 	// MaxData is the largest data buffer a frame carries.
-	MaxData = 16 << 20
+	MaxData = core.MaxMsgData
 )
 
 var (

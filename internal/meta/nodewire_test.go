@@ -280,14 +280,17 @@ func TestSessionStartAndDiskMessagesCrossTheWireWhole(t *testing.T) {
 			Blocks: uint64(i) << 30, Reserve: uint64(i), Live: uint64(i%2) * uint64(i), Filled: i%2 == 1})
 	}
 	gs := []PoolGrant{{Pool: 0, Grant: 5}, {Pool: 1 << 31, Grant: 1 << 62}}
-	for _, sent := range []Membership{{}, {Disks: ds[:1]}, {Disks: ds, Grants: gs}} {
+	plans := []Group{{ID: 1, LastID: 3, Boot: 3, Voters: []Replica{{ID: 1, Node: 1}, {ID: 2, Node: 2}, {ID: 3, Node: 3}}},
+		{ID: 9, Start: []byte("k"), LastID: 5, Boot: 1, Voters: []Replica{{ID: 4, Node: 7, Disk: 1 << 31}, {ID: 5, Node: 8, Disk: 2}}}}
+	for _, sent := range []Membership{{}, {Disks: ds[:1]}, {Disks: ds, Grants: gs, MapV: 1 << 40, Plans: plans}} {
 		if err := EncodeDisks(pool, 1, &sent, &m); err != nil {
 			t.Fatal(err)
 		}
-		got := Membership{Disks: []DiskAddr{{Disk: 9}}, Grants: []PoolGrant{{Pool: 9}}}
+		got := Membership{Disks: []DiskAddr{{Disk: 9}}, Grants: []PoolGrant{{Pool: 9}}, Plans: []Group{{ID: 9}}}
 		err := DecodeDisks(pool, &m, &got)
-		if err != nil || !slices.Equal(got.Disks, sent.Disks) || !slices.Equal(got.Grants, sent.Grants) {
-			t.Fatalf("decoded %v: %d disks and %d pools, sent %d and %d", err, len(got.Disks), len(got.Grants), len(sent.Disks), len(sent.Grants))
+		if err != nil || !slices.Equal(got.Disks, sent.Disks) || !slices.Equal(got.Grants, sent.Grants) || got.MapV != sent.MapV ||
+			!slices.EqualFunc(got.Plans, sent.Plans, func(a, b Group) bool { return bytes.Equal(appendGroup(nil, &a), appendGroup(nil, &b)) && a.ID == b.ID }) {
+			t.Fatalf("decoded %v: %d disks, %d pools and %d plans, sent %d, %d and %d", err, len(got.Disks), len(got.Grants), len(got.Plans), len(sent.Disks), len(sent.Grants), len(sent.Plans))
 		}
 		free(&core.Context{Pool: pool}, &m)
 	}
@@ -296,12 +299,13 @@ func TestSessionStartAndDiskMessagesCrossTheWireWhole(t *testing.T) {
 	if err := EncodeDisks(pool, 1, &golden, &m); err != nil {
 		t.Fatal(err)
 	}
-	if b, _ := msgBody(pool, KindDisks, &m); hex.EncodeToString(b) != "0201020304ac02060802080000000000010109" {
+	if b, _ := msgBody(pool, KindDisks, &m); hex.EncodeToString(b) != "0201020304ac020608020800000000000101090000" {
 		t.Errorf("membership body %x", b)
 	}
 	free(&core.Context{Pool: pool}, &m)
 	for _, bad := range []Membership{{Disks: []DiskAddr{{Disk: 0}}}, {Disks: []DiskAddr{{Disk: 3}, {Disk: 3}}}, {Disks: []DiskAddr{{Disk: 4}, {Disk: 2}}},
-		{Grants: []PoolGrant{{Pool: 2}, {Pool: 2}}}, {Grants: []PoolGrant{{Pool: 3}, {Pool: 1}}}} {
+		{Grants: []PoolGrant{{Pool: 2}, {Pool: 2}}}, {Grants: []PoolGrant{{Pool: 3}, {Pool: 1}}},
+		{Plans: []Group{{ID: 2, LastID: 1, Boot: 2}}}, {Plans: []Group{{ID: 2, LastID: 1, Voters: []Replica{{ID: 2}}}}}} {
 		_ = EncodeDisks(pool, 1, &bad, &m)
 		if err := DecodeDisks(pool, &m, &Membership{}); err != ErrMalformed {
 			t.Errorf("membership %+v decode: %v", bad, err)
@@ -329,7 +333,7 @@ func FuzzDecodeStarted(f *testing.F) {
 
 func FuzzDecodeDisks(f *testing.F) {
 	fuzzRecode(f, Membership{Disks: []DiskAddr{{Disk: 1, Log: 5, At: core.NodeID{Node: 2, Loop: 1}, Blocks: 9, Reserve: 2, Live: 3, Filled: true}, {Disk: 4, Log: 6, At: core.NodeID{Node: 3}}},
-		Grants: []PoolGrant{{Pool: 1, Grant: 7}, {Pool: 3}}},
+		Grants: []PoolGrant{{Pool: 1, Grant: 7}, {Pool: 3}}, MapV: 4, Plans: []Group{{ID: 2, Start: []byte{1}, LastID: 4, Boot: 3, Voters: []Replica{{ID: 4, Node: 2, Disk: 1}}}}},
 		func(pool core.BufPool, g uint64, m *Membership, msg *core.Msg) error {
 			return EncodeDisks(pool, g, m, msg)
 		},

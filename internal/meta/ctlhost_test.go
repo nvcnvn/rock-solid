@@ -1272,3 +1272,30 @@ func TestANodeSilentForNodeDownAfterIsSentNothing(t *testing.T) {
 		t.Fatalf("delta sent to %v, want %v", to, want)
 	}
 }
+
+// A membership answer over the largest message a node takes is not sent, and the leader says so
+// once, not at every report.
+func TestAMembershipTooLargeToSendIsReportedOnce(t *testing.T) {
+	r := newHostRun(t)
+	r.lead()
+	r.failing = true
+	for i := range 17 {
+		r.h.Control().smap.Groups = append(r.h.Control().smap.Groups, Group{ID: uint64(i) + 2, Start: bytes.Repeat([]byte{byte(i) + 2}, 1<<20)})
+	}
+	var errs []error
+	for range 2 {
+		var m core.Msg
+		if err := EncodeNodeReport(r.pool, hostGroup, &NodeReport{Node: hostNode.Node}, &m); err != nil {
+			t.Fatal(err)
+		}
+		errs = append(errs, r.recv(core.NodeID{Node: hostNode.Node, Loop: 1}, m).Errs...)
+	}
+	for _, a := range r.sent {
+		if _, k, _, _ := Peek(&a.Msg); k == KindDisks {
+			t.Fatal("a membership over the message limit was sent")
+		}
+	}
+	if len(errs) != 1 || !errors.Is(errs[0], ErrTooLarge) {
+		t.Fatalf("the leader reported %v", errs)
+	}
+}

@@ -22,7 +22,8 @@ import (
 // and the session's ID as its body. The disk membership, the leader's answer to a report, is a
 // count and, in rising disk ID order, each disk's ID, log, the node and loop that own it, its size
 // and log reserve, and its live blocks plus one, 0 for none, then a count and, in rising pool ID
-// order, each pool's ID and grants outstanding.
+// order, each pool's ID and grants outstanding, then the shard map's version, a count and, in the
+// map's order, each group's ID and its entry as the control-plane group stores it, length first.
 // A replica's asks for new intervals are a count and each ask's epoch, pool, PG index and interval,
 // with no token. The leader's answer that a node delete metadata replicas is a count and each
 // replica's group and ID, with no token. A session heartbeat's token is its request and its body
@@ -47,11 +48,14 @@ const (
 	KindRenewed      byte = 0x51
 )
 
-// Membership is the leader's answer to a node's report: the committed disks, and each pool's
-// grants outstanding in blocks.
+// Membership is the leader's answer to a node's report: the committed disks, each pool's grants
+// outstanding in blocks, and the committed shard map's entries, the plans each node hosts its
+// MetaStore replicas by, at the map's version, MapV.
 type Membership struct {
 	Disks  []DiskAddr
 	Grants []PoolGrant
+	MapV   uint64
+	Plans  []Group
 }
 
 // DiskAddr is a disk of the committed membership record: its ID, its log, the loop that owns it,
@@ -354,6 +358,10 @@ func EncodeDisks(pool core.BufPool, group uint64, m *Membership, msg *core.Msg) 
 	for _, g := range m.Grants {
 		body = binary.AppendUvarint(binary.AppendUvarint(body, uint64(g.Pool)), g.Grant)
 	}
+	body = binary.AppendUvarint(binary.AppendUvarint(body, m.MapV), uint64(len(m.Plans)))
+	for i := range m.Plans {
+		body = appendBytes(binary.AppendUvarint(body, m.Plans[i].ID), appendGroup(nil, &m.Plans[i]))
+	}
 	return encodeBody(pool, group, KindDisks, 0, body, msg)
 }
 
@@ -361,7 +369,7 @@ func EncodeDisks(pool core.BufPool, group uint64, m *Membership, msg *core.Msg) 
 // decode, has a token, or whose disk IDs are not nonzero and rising or pool IDs not rising, is
 // ErrMalformed.
 func DecodeDisks(pool core.BufPool, msg *core.Msg, m *Membership) error {
-	m.Disks, m.Grants = m.Disks[:0], m.Grants[:0]
+	m.Disks, m.Grants, m.Plans = m.Disks[:0], m.Grants[:0], m.Plans[:0]
 	b, err := untokened(pool, KindDisks, msg)
 	if err != nil {
 		return err
@@ -387,8 +395,17 @@ func DecodeDisks(pool core.BufPool, msg *core.Msg, m *Membership) error {
 		}
 		m.Grants = append(m.Grants, PoolGrant{Pool: core.PoolID(id), Grant: grant})
 	}
+	m.MapV = d.uvarint()
+	for n := d.count(); n > 0 && !d.bad; n-- {
+		g, err := decodeGroup(d.uvarint(), d.bytes())
+		if err != nil {
+			d.bad = true
+			break
+		}
+		m.Plans = append(m.Plans, g)
+	}
 	if d.bad || len(d.b) != 0 {
-		m.Disks, m.Grants = m.Disks[:0], m.Grants[:0]
+		m.Disks, m.Grants, m.Plans = m.Disks[:0], m.Grants[:0], m.Plans[:0]
 		return ErrMalformed
 	}
 	return nil
