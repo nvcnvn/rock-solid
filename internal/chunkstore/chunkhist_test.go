@@ -146,14 +146,14 @@ func (x *chunkHist) invoke(ctx *core.Context, client uint32, a *core.Action) {
 // reply completes an operation from a replica's reply to the client: a write, punch or read
 // answered OK. Any other answer leaves the result unknown, so the operation stays without a
 // completion; a refusal for an expected version among them, since the version it was compared with
-// may be pending and later dropped.
+// may be pending and later dropped. A write sent again under its request ID completes at its first.
 func (x *chunkHist) reply(a *core.Action, data []byte) (int, [sim.OpWords]uint64, bool) {
 	var rp Response
 	if a.Peer != x.c.client || a.Msg.Len < headSize || DecodeResponse(a.Msg.Inline(), len(data), &rp) != nil {
 		return 0, [sim.OpWords]uint64{}, false
 	}
 	i, ok := x.byID[rp.ID]
-	if !ok {
+	if !ok || x.h.Ops()[i].Done {
 		return 0, [sim.OpWords]uint64{}, false
 	}
 	op := &x.ops[i]

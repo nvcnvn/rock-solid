@@ -33,6 +33,18 @@ func (c *conn) end(id core.NodeID) int {
 	return -1
 }
 
+// Detach copies node id's buffer b into every send of it still in the network, so the node may
+// free b while a send of it is on its way, as a client sending a request again does.
+func (s *Scheduler) Detach(id uint32, b core.IOBuf) {
+	n := s.nodes[id]
+	for i := range s.items {
+		it := &s.items[i]
+		if it.kind == ChooseDeliver && it.from.Node == id && it.fromGen == n.gen && it.data == nil && it.act.Msg.Buf == b {
+			it.data = slices.Clone(n.pool.Bytes(b))
+		}
+	}
+}
+
 // Partition loses every message node a sends to node b from now, and every one b sends to a unless oneWay, until Heal.
 func (s *Scheduler) Partition(a, b uint32, oneWay bool) {
 	s.cuts = append(s.cuts, link{from: a, to: b})

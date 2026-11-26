@@ -19,6 +19,9 @@ const (
 	invReadVersion = "no read returns a version before it commits, or one later lost"
 	invFencedWrite = "no fenced session's write is applied"
 	invLockOrder   = "every write of a fenced lock holder that completes is ordered before every write of the next holder"
+	// The epoch change model's AppliedOnce and StaleOnlyHeard as a client sees them.
+	invAppliedOnce    = "a write sent again under its request ID is answered OK under one version"
+	invStaleOnlyHeard = "a write is answered stale only once its client heard a final answer to it"
 )
 
 // readRun is a detector cluster on noisy clocks whose disk nodes are, one at a time, cut off from every other node, the authority's included, so that they miss tables, and in half the cuts from the client too (with fence, half the cuts take a second node, which still reaches the first), paused, rebooted or slowed on a path, while a client reads every PG at every node, tagged with one of the last few tables, and two incarnations of one client session write: the first dies partway, and its successor says hello to every node, reissues the writes left unanswered and writes on.
@@ -428,7 +431,11 @@ func (r *readRun) tendSessions(die core.Tick, second *incWriter) {
 	}
 }
 
-// incWriter is one incarnation of a client session, writing blocks and parts of blocks of two chunks of every PG with up to 6 writes unanswered: the first stops at stop, the second starts at start with a hello to every node and the first's unanswered writes.
+// incWriter is one incarnation of a client session, writing blocks and parts of blocks of two
+// chunks of every PG with up to 6 writes without a final answer: the first stops at stop, the
+// second starts at start with a hello to every node and the first's unanswered writes. A write
+// refused, or unanswered for abandonAfter, is sent again under its request ID, and every write
+// names the lowest request ID the writer holds no final answer to.
 type incWriter struct {
 	r       *readRun
 	rng     *core.Rand
@@ -444,21 +451,33 @@ type incWriter struct {
 	idle core.Tick
 }
 
-func (w *incWriter) Ready() bool {
+// resendRefusedAfter is how long the writer waits to send a refused write again.
+const resendRefusedAfter = 100_000
+
+// due is the lowest request ID to send again now, and outstanding the writes with no final answer.
+func (w *incWriter) due(now core.Tick) (id core.RequestID, outstanding int) {
 	c := w.r.d.rcluster
-	now := c.s.Time()
+	for k, at := range w.at {
+		rp, done := c.cl.replies[k]
+		if done && final(rp.Status) {
+			delete(w.at, k)
+			continue
+		}
+		outstanding++
+		if (now-at >= abandonAfter || done && now-at >= resendRefusedAfter) && (id == 0 || k < id) {
+			id = k
+		}
+	}
+	return id, outstanding
+}
+
+func (w *incWriter) Ready() bool {
+	now := w.r.d.rcluster.s.Time()
 	if now < w.start || now >= w.stop || now < w.idle {
 		return false
 	}
-	out := 0
-	for id, at := range w.at {
-		if _, done := c.cl.replies[id]; done || now-at >= abandonAfter {
-			delete(w.at, id)
-		} else {
-			out++
-		}
-	}
-	return out < 6
+	id, out := w.due(now)
+	return id != 0 || out < 6
 }
 
 func (w *incWriter) Next(ctx *core.Context, acts []core.Action) []core.Action {
@@ -472,10 +491,14 @@ func (w *incWriter) Next(ctx *core.Context, acts []core.Action) []core.Action {
 			acts = append(acts, a)
 		}
 	}
+	id, _ := w.due(c.s.Time())
 	var op faultOp
-	if len(w.reissue) > 0 {
+	switch {
+	case id != 0:
+		op = w.ops[id]
+	case len(w.reissue) > 0:
 		op, w.reissue = w.reissue[0], w.reissue[1:]
-	} else {
+	default:
 		pg := core.PGID{Pool: testPool, Index: uint32(w.rng.Below(4))}
 		op = faultOp{c: chunkIn(pg, 4, uint32(w.rng.Below(2))), off: uint32(w.rng.Below(4)) * core.BlockSize, n: core.BlockSize}
 		if w.rng.Chance(1, 4) {
@@ -493,11 +516,18 @@ func (w *incWriter) Next(ctx *core.Context, acts []core.Action) []core.Action {
 		w.idle = c.s.Time() + 1_000
 		return acts
 	}
-	c.nextID++
-	id := c.nextID
-	w.at[id], w.ops[id] = c.s.Time(), op
-	w.r.writes[id] = incWrite{inc: w.inc, chunk: op.c}
-	u := Update{Kind: KindWrite, ID: id, PG: c.pgFields(pg), Session: w.session, Incarnation: w.inc, Chunk: op.c, Off: op.off, Len: op.n}
+	if id == 0 {
+		c.nextID++
+		id = c.nextID
+		w.ops[id] = op
+		w.r.writes[id] = incWrite{inc: w.inc, chunk: op.c}
+	} else if b, ok := c.cl.sent[id]; ok {
+		c.cl.detach(b)
+		ctx.Pool.Free(b)
+	}
+	delete(c.cl.replies, id)
+	w.at[id] = c.s.Time()
+	u := Update{Kind: KindWrite, ID: id, Oldest: uint64(slices.Min(slices.Collect(maps.Keys(w.at)))), PG: c.pgFields(pg), Session: w.session, Incarnation: w.inc, Chunk: op.c, Off: op.off, Len: op.n}
 	a := core.Action{Kind: core.ActNetSend, Peer: core.NodeID{Node: uint32(c.node(lead))}}
 	a.Msg.Len = uint16(copy(a.Msg.Body[:], AppendUpdate(nil, &u)))
 	buf, err := ctx.Pool.AllocZeroed(dataBytes(op.off, op.n))
@@ -564,6 +594,9 @@ func runReadsWith(t *testing.T, seed uint64, fence bool, plant *readPlant) error
 		c.reps[n].plant, c.reps[n].Store().plant = c.replicaPlants, c.storePlants
 	}
 	c.inv.Register(invOneReader, r.oneReader)
+	c.cl.detach = func(b core.IOBuf) { c.s.Detach(c.client.Node, b) }
+	c.inv.Register(invAppliedOnce, func() error { return c.cl.once })
+	c.inv.Register(invStaleOnlyHeard, func() error { return c.cl.stale })
 	r.epochs = watchEpochs(c, &d.a.rec)
 	c.inv.Register(invReadVersion, func() error { return r.verErr })
 	order := invIncarnation
@@ -700,10 +733,10 @@ func TestFencedReadRunSeed243WaitsForAPrimary(t *testing.T) {
 	}
 }
 
-// Each planted bug breaks its invariant, checked alone, at a seed of the first 200 on the real control plane: the epoch change model's neg-fence-on-arrival (5 of 200), a primary that checks a write's incarnation as it arrives rather than as its store orders it, so that a dead incarnation's write held on a chunk the primary lacks is ordered after its successor's, here with listerOrders, as the successor's whole-block write would otherwise wait behind it while the primary lists the chunk; a primary that commits a version once its own log holds it (134 of 200), so that a read returns a version the next interval drops; the model's neg-serve-refused (103 of 200), a primary that maps the versions it refuses, so that a read returns one neither acknowledged nor kept; its neg-serve-after-other-primary (19 of 200), a primary that keeps serving into a new interval though another primary led the PG since, so that a read returns bytes no order of its chunk's history fits; and a member above the kept version left off the missing list (23 of 200).
-// With the writers as two sessions, on the stand-in, the sessions model's neg-check-on-arrival (3 of 500), the same
+// Each planted bug breaks its invariant, checked alone, at a seed of the first 200 on the real control plane: the epoch change model's neg-fence-on-arrival (5 of 200), a primary that checks a write's incarnation as it arrives rather than as its store orders it, so that a dead incarnation's write held on a chunk the primary lacks is ordered after its successor's, here with listerOrders, as the successor's whole-block write would otherwise wait behind it while the primary lists the chunk; a primary that commits a version once its own log holds it (134 of 200), so that a read returns a version the next interval drops; the model's neg-serve-refused (103 of 200), a primary that maps the versions it refuses, so that a read returns one neither acknowledged nor kept; its neg-serve-after-other-primary (19 of 200), a primary that keeps serving into a new interval though another primary led the PG since, so that a read returns bytes no order of its chunk's history fits; and a member above the kept version left off the missing list (8 of 200).
+// With the writers as two sessions, on the stand-in, the sessions model's neg-check-on-arrival (2 of 500), the same
 // primary, orders a fenced session's write that waited in its store as the fence came; and its
-// neg-replica-no-check (130 of 500), a member that takes a replicated write without checking its
+// neg-replica-no-check (123 of 500), a member that takes a replicated write without checking its
 // session, logs one its primary ordered before the fence reached it.
 func TestPlantedReadBugsBreakTheReadRun(t *testing.T) {
 	for _, p := range []struct {
@@ -716,9 +749,9 @@ func TestPlantedReadBugsBreakTheReadRun(t *testing.T) {
 		{"commit on the primary's own log", 0, false, readPlant{inv: invReadVersion, set: func(r *readRun) { r.d.replicaPlants.commitOnOwnLog = true }}},
 		{"a refused version served", 0, false, readPlant{inv: invReadVersion, set: func(r *readRun) { r.d.replicaPlants.serveRefused = true }}},
 		{"served on after another primary led", 12, false, readPlant{inv: invLinearizable, set: func(r *readRun) { r.d.replicaPlants.serveAfterOther = true }}},
-		{"a member above the kept version left off the list", 7, false, readPlant{inv: invLinearizable, set: func(r *readRun) { r.d.replicaPlants.noListAbove = true }}},
-		{"session checked on arrival", 180, true, readPlant{inv: invFencedWrite, set: func(r *readRun) { r.d.replicaPlants.fenceOnArrival = true }}},
-		{"member takes a fenced session's write", 5, true, readPlant{inv: invFencedWrite, set: func(r *readRun) { r.d.replicaPlants.memberNoFence = true }}},
+		{"a member above the kept version left off the list", 73, false, readPlant{inv: invLinearizable, set: func(r *readRun) { r.d.replicaPlants.noListAbove = true }}},
+		{"session checked on arrival", 21, true, readPlant{inv: invFencedWrite, set: func(r *readRun) { r.d.replicaPlants.fenceOnArrival = true }}},
+		{"member takes a fenced session's write", 3, true, readPlant{inv: invFencedWrite, set: func(r *readRun) { r.d.replicaPlants.memberNoFence = true }}},
 	} {
 		if err := runReadsWith(t, p.seed, p.fence, &p.readPlant); err == nil || !strings.Contains(err.Error(), p.inv) {
 			t.Errorf("%s at seed %d: %v", p.name, p.seed, err)

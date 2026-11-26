@@ -101,7 +101,17 @@ type rclient struct {
 	sent    map[core.RequestID]core.IOBuf
 	// lost, when set, sees each peer whose connection broke.
 	lost func(peer core.NodeID)
+	// detach, when set, lets the client free a request's buffer while an earlier send of it may
+	// still be on its way, and has it take a later answer to a request it holds a final answer
+	// to: a write its writer sends again under its request ID. once and stale hold the first
+	// write it heard answered OK under two versions and the first answered Stale before it
+	// heard a final answer.
+	detach      func(core.IOBuf)
+	once, stale error
 }
+
+// final reports whether a write's answer is final: its client never sends it again.
+func final(st Status) bool { return st != StatusRefused && st != StatusUnfound }
 
 func (c *rclient) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
 	if ev.Kind == core.EvPeerLost && c.lost != nil {
@@ -115,15 +125,26 @@ func (c *rclient) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) 
 	if err := DecodeResponse(frame, data, &rp); err != nil {
 		panic(err)
 	}
-	if _, dup := c.replies[rp.ID]; dup {
+	old, dup := c.replies[rp.ID]
+	switch {
+	case dup && c.detach == nil:
 		panic("a request answered twice")
+	case rp.Kind == KindReply && rp.Status == StatusStale && (!dup || !final(old.Status)) && c.stale == nil:
+		c.stale = fmt.Errorf("%s: request %d answered stale, its client holding %+v", invStaleOnlyHeard, rp.ID, old)
+	case dup && old.Status == StatusOK && rp.Status == StatusOK && old.Version != rp.Version && c.once == nil:
+		c.once = fmt.Errorf("%s: request %d answered OK as %#x and as %#x", invAppliedOnce, rp.ID, old.Version, rp.Version)
 	}
-	c.replies[rp.ID] = rp
+	if !dup || !final(old.Status) {
+		c.replies[rp.ID] = rp
+	}
 	if ev.Msg.Buf != core.NoBuf {
 		c.data[rp.ID] = slices.Clone(ctx.Pool.Bytes(ev.Msg.Buf))
 		ctx.Pool.Free(ev.Msg.Buf)
 	}
 	if b, ok := c.sent[rp.ID]; ok {
+		if c.detach != nil {
+			c.detach(b)
+		}
 		ctx.Pool.Free(b)
 		delete(c.sent, rp.ID)
 	}
