@@ -335,7 +335,7 @@ func TestWireRejectsDataLength(t *testing.T) {
 		t.Fatal("edge count")
 	}
 	mustMalformed(t, "read reply with no data", encodeMsg(&Response{Kind: KindReadReply}), 0)
-	mustMalformed(t, "read reply past a recovery buffer", encodeMsg(&Response{Kind: KindReadReply}), core.ChunkSize+2*core.BlockSize)
+	mustMalformed(t, "read reply past a recovery buffer", encodeMsg(&Response{Kind: KindReadReply}), core.ChunkSize+(maxRecoveryHead+1)*core.BlockSize)
 	mustMalformed(t, "read reply refused with data", encodeMsg(&Response{Kind: KindReadReply, Status: StatusRefused, Interval: 42}), core.BlockSize)
 }
 
@@ -440,7 +440,7 @@ func TestWireRejectsBadFields(t *testing.T) {
 	}{
 		"a recovery write of part of a chunk": {func(u *Update) { u.Off, u.Len = core.BlockSize, core.BlockSize }, 0},
 		"a recovery write of part of a block": {nil, 100},
-		"a recovery write past its chunk":     {nil, 2*core.BlockSize + core.ChunkSize},
+		"a recovery write past its chunk":     {nil, (maxRecoveryHead+1)*core.BlockSize + core.ChunkSize},
 		"a purger's shard on a recovery":      {func(u *Update) { u.Shard = 1 }, 0},
 	} {
 		u := rec

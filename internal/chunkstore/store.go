@@ -288,6 +288,11 @@ type plants struct {
 	// its client heard the answer; noWatermark trims a session's entries and keeps no watermark.
 	trimOnAnswer bool
 	noWatermark  bool
+	// A recovery read's source carries no resend entry or watermark (recoveryForgetsIds), only
+	// the entries of the versions the chunk's live map reads (recoveryLiveOnly), or its PG's
+	// entries of every chunk (recoveryWholeRange): the epoch change model's RecoveryForgetsIds,
+	// RecoveryLiveOnly and RecoveryWholeRange.
+	recoveryForgetsIds, recoveryLiveOnly, recoveryWholeRange bool
 	// clearListed has a persisted missing list clear, in the index alone, every listing of its PG
 	// from an earlier peering that it leaves out.
 	clearListed bool
@@ -353,6 +358,7 @@ type Store struct {
 	mode     disklog.Mode
 	lout     disklog.Output
 	ix       *Index
+	recs     []byte
 	sched    *lsm.Scheduler
 	sb       disklog.Superblock
 	maxWrite uint16
@@ -2331,7 +2337,7 @@ func (s *Store) memberFailed(o *op) {
 
 func (o *op) holdsVersion() bool {
 	for j := range o.items {
-		if it := &o.items[j]; it.state == itemDurable && it.entry.Kind != disklog.EntryFreeze && it.entry.Kind != disklog.EntryWriter {
+		if it := &o.items[j]; it.state == itemDurable && it.entry.Kind != disklog.EntryFreeze && it.entry.Kind != disklog.EntryWriter && it.entry.Kind != disklog.EntryResend {
 			return true
 		}
 	}

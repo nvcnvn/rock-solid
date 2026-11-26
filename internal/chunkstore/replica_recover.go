@@ -506,15 +506,18 @@ func (r *Replica) orderRecovery(ctx *core.Context, k int, buf core.IOBuf, out *R
 		return
 	}
 	l := &r.leads[i]
-	_, e := r.table.entry(rc.pg)
+	p, e := r.table.entry(rc.pg)
 	t := &l.todo[rc.todo]
 	self := slices.IndexFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk })
 	rc.read, rc.rid = 0, 0
+	if buf != core.NoBuf {
+		keepResendRecords(ctx.Pool.Bytes(buf), t.kept)
+	}
 	rc.req = r.newReq(storeReq{kind: reqRecover, pg: rc.pg, chunk: t.chunk, source: rc.from, interval: rc.interval})
 	u := Update{Kind: KindRecover, PG: PGFields{Epoch: r.table.Epoch, PG: rc.pg, Interval: rc.interval}, Chunk: t.chunk, Len: core.ChunkSize, Source: rc.from}
 	r.vers = append(r.vers, version{req: rc.req, epoch: r.table.Epoch, interval: rc.interval, u: u, recover: true})
 	out.note(trace.OutRecoverOrder, t.chunk.Hash(), uint64(rc.from), uint64(rc.interval), 0, 0)
-	r.st.Write(ctx, Request{ID: rc.req, Chunk: t.chunk, Len: core.ChunkSize, Buf: buf, Interval: rc.interval, Gated: true, Recover: true, Ver: t.kept,
+	r.st.Write(ctx, Request{ID: rc.req, Chunk: t.chunk, Len: core.ChunkSize, Buf: buf, Interval: rc.interval, Gated: true, Recover: true, Ver: t.kept, PGs: uint32(len(p.PGs)),
 		Relay: self < 0 || rc.targets&(1<<self) == 0}, &r.sout)
 }
 

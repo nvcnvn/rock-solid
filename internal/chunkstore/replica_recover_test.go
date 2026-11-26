@@ -860,13 +860,19 @@ func TestARottedLastSourceLeavesTheChunkUnfound(t *testing.T) {
 }
 
 // Recovery allocates nothing once warm: rounds of disk 3 missing writes to 6 chunks and recovering
-// them, the last round's events making no heap allocation.
+// them, the last round's events making no heap allocation. Each write names itself its session's
+// oldest outstanding, as a client that heard every earlier answer does, so the resend table the
+// recoveries copy keeps its size.
 func TestRecoveryAllocatesNothing(t *testing.T) {
 	c := newRCluster(t, rtable(4, 2))
 	for round := range 4 {
 		c.publish(c.next(func(t *Table) { mark(t, pg0, 3, MarkDown) }), true)
 		for k := range uint32(6) {
-			c.writeWhole(pg0, chunkIn(pg0, 4, k), 0, 2, byte(round+1))
+			w := c.update(c.pgFields(pg0), chunkIn(pg0, 4, k), 0, bytes.Repeat([]byte{byte(round + 1)}, 2*core.BlockSize), 0, func(u *Update) { u.Oldest = uint64(u.ID) })
+			c.settle()
+			if rp := c.reply(w); rp.Status != StatusOK {
+				t.Fatalf("round %d: write answered %+v", round, rp)
+			}
 		}
 		c.reps[0].plant.noRecovery = true
 		c.publish(c.next(func(t *Table) { mark(t, pg0, 3, MarkUp) }), true)

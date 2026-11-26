@@ -57,9 +57,10 @@ func (b *blockBits) runs(f func(first, n uint16)) {
 	}
 }
 
-// blockMap is a recovery buffer's first block: the chunk's blocks the buffer carries, whose bytes
-// follow it in block order, and those that are holes. A recovery write writes the one and punches
-// the other, leaving every block in neither alone.
+// blockMap opens a recovery buffer: the chunk's blocks the buffer carries, whose bytes follow its
+// head in block order, and those that are holes. A recovery write writes the one and punches the
+// other, leaving every block in neither alone. The head goes on with a u32 count of resend records
+// and the records, zero to the end of its last block; a zero record is one the primary left out.
 type blockMap struct {
 	data, holes blockBits
 }
@@ -77,14 +78,18 @@ func (m *blockMap) strip(cover *blockBits) {
 // put writes m into the first block of buf, zero past it.
 func (m *blockMap) put(buf []byte) {
 	clear(buf[:core.BlockSize])
+	m.putMaps(buf)
+}
+
+func (m *blockMap) putMaps(buf []byte) {
 	for w := range blockWords {
 		binary.LittleEndian.PutUint64(buf[8*w:], m.data[w])
 		binary.LittleEndian.PutUint64(buf[8*(blockWords+w):], m.holes[w])
 	}
 }
 
-// decodeBlockMap reads a recovery buffer's map: no block both written and punched, the rest of the
-// first block zero, and exactly the blocks it writes after it.
+// decodeBlockMap reads a recovery buffer's map: no block both written and punched, the head zero
+// past its records, and exactly the blocks it writes after it.
 func decodeBlockMap(buf []byte, m *blockMap) error {
 	if len(buf) < core.BlockSize || len(buf)%core.BlockSize != 0 {
 		return ErrMalformed
@@ -96,10 +101,48 @@ func decodeBlockMap(buf []byte, m *blockMap) error {
 			return ErrMalformed
 		}
 	}
-	if !allZero(buf[16*blockWords:core.BlockSize]) || len(buf) != (1+m.data.count())*core.BlockSize {
+	n := recoveryRecords(buf)
+	if n > maxResendRecords {
+		return ErrMalformed
+	}
+	h := recoveryHead(n) * core.BlockSize
+	if len(buf) < h || !allZero(buf[recordsAt+n*resendRecordSize:h]) || len(buf) != h+m.data.count()*core.BlockSize {
 		return ErrMalformed
 	}
 	return nil
+}
+
+// recordsAt is where a recovery buffer's resend records start, after their count, and
+// maxResendRecords bounds the count, so the head takes at most maxRecoveryHead blocks.
+// ponytail: a source holding more of the chunk's records than that fails the read, and the chunk
+// stays listed; send the records in more than one message if a PG's sessions grow past them.
+const (
+	recordsAt        = 16*blockWords + 4
+	maxRecoveryHead  = 16
+	maxResendRecords = (maxRecoveryHead*core.BlockSize - recordsAt) / resendRecordSize
+)
+
+// recoveryHead is the blocks a recovery buffer's map and its n resend records take.
+func recoveryHead(n int) int {
+	return (recordsAt + n*resendRecordSize + core.BlockSize - 1) / core.BlockSize
+}
+
+// recoveryRecords is the count of resend records recovery buffer buf gives.
+func recoveryRecords(buf []byte) int { return int(binary.LittleEndian.Uint32(buf[16*blockWords:])) }
+
+// resendRecord is record i of recovery buffer buf.
+func resendRecord(buf []byte, i int) []byte {
+	return buf[recordsAt+i*resendRecordSize:][:resendRecordSize]
+}
+
+// keepResendRecords zeroes the records of buf naming a version above kept, which the target does
+// not take from the source.
+func keepResendRecords(buf []byte, kept uint64) {
+	for i := range recoveryRecords(buf) {
+		if r := resendRecord(buf, i); binary.LittleEndian.Uint64(r[16:]) != 0 && binary.LittleEndian.Uint64(r[24:]) > kept {
+			clear(r)
+		}
+	}
 }
 
 // cover is the blocks of a chunk that the gated writes and punches of an interval have covered so
@@ -149,7 +192,8 @@ func recoveryBlocks(pool core.BufPool, buf core.IOBuf) int {
 	if buf == core.NoBuf {
 		return 0
 	}
-	return len(pool.Bytes(buf))/core.BlockSize - 1
+	b := pool.Bytes(buf)
+	return len(b)/core.BlockSize - recoveryHead(recoveryRecords(b))
 }
 
 // recoverItems builds a recovery write's items: unless it relays, a write of each run of the blocks
@@ -166,7 +210,10 @@ func (s *Store) recoverItems(ctx *core.Context, o *op) error {
 			return err
 		}
 	}
-	orig := m.data
+	orig, head := m.data, 1
+	if src != nil {
+		head = recoveryHead(recoveryRecords(src))
+	}
 	if o.req.Gated {
 		cv, ok := s.covers[c]
 		if !ok || cv.interval != o.req.Interval {
@@ -175,7 +222,7 @@ func (s *Store) recoverItems(ctx *core.Context, o *op) error {
 		delete(s.covers, c)
 		m.strip(&cv.blocks)
 	}
-	at := func(b uint16) []byte { return src[(1+orig.rank(b))*core.BlockSize:][:core.BlockSize] }
+	at := func(b uint16) []byte { return src[(head+orig.rank(b))*core.BlockSize:][:core.BlockSize] }
 	var err error
 	if !o.req.Relay {
 		m.data.runs(func(first, n uint16) {
@@ -199,6 +246,15 @@ func (s *Store) recoverItems(ctx *core.Context, o *op) error {
 	if err != nil {
 		return err
 	}
+	if !o.req.Relay && src != nil {
+		for i := range recoveryRecords(src) {
+			if r := resendRecord(src, i); o.req.PGs != 0 && !allZero(r) {
+				f := func(k int) uint64 { return binary.LittleEndian.Uint64(r[8*k:]) }
+				ch := core.ChunkIDFromBytes([core.ChunkIDSize]byte(r[32:]))
+				o.items = append(o.items, item{entry: disklog.ResendEntry(pool, ch, o.version, o.req.PGs, f(0), f(1), f(2), f(3))})
+			}
+		}
+	}
 	if !o.req.Relay {
 		o.items = append(o.items, item{entry: disklog.RecoveredEntry(pool, c, o.version, o.req.Interval)})
 	}
@@ -206,13 +262,16 @@ func (s *Store) recoverItems(ctx *core.Context, o *op) error {
 		return nil
 	}
 	n := m.data.count()
-	buf, err := ctx.Pool.Alloc((1 + n) * core.BlockSize)
+	buf, err := ctx.Pool.Alloc((head + n) * core.BlockSize)
 	if err != nil {
 		return err
 	}
 	dst := ctx.Pool.Bytes(buf)
-	m.put(dst)
-	k := 1
+	if src != nil {
+		copy(dst[:head*core.BlockSize], src)
+	}
+	m.putMaps(dst)
+	k := head
 	m.data.runs(func(first, n uint16) {
 		for b := first; b < first+n; b++ {
 			copy(dst[k*core.BlockSize:], at(b))
@@ -240,11 +299,20 @@ func (s *Store) recoveryRead(ctx *core.Context, oi int32) error {
 			}
 		}
 	}
-	buf, err := ctx.Pool.Alloc((1 + m.data.count()) * core.BlockSize)
+	s.recs = s.ix.appendResendRecords(s.recs[:0], s.cfg.Pool, o.req.Chunk, s.rexts)
+	n := len(s.recs) / resendRecordSize
+	if n > maxResendRecords {
+		return ErrMalformed
+	}
+	buf, err := ctx.Pool.Alloc((recoveryHead(n) + m.data.count()) * core.BlockSize)
 	if err != nil {
 		return err
 	}
-	m.put(ctx.Pool.Bytes(buf))
+	b := ctx.Pool.Bytes(buf)
+	clear(b[:recoveryHead(n)*core.BlockSize])
+	m.putMaps(b)
+	binary.LittleEndian.PutUint32(b[16*blockWords:], uint32(n))
+	copy(b[recordsAt:], s.recs)
 	o.buf = buf
 	for _, e := range s.rexts {
 		if e.LBA == 0 {
@@ -263,5 +331,5 @@ func recoveryAt(buf []byte, b uint16) int {
 	for w := range blockWords {
 		m[w] = binary.LittleEndian.Uint64(buf[8*w:])
 	}
-	return (1 + m.rank(b)) * core.BlockSize
+	return (recoveryHead(recoveryRecords(buf)) + m.rank(b)) * core.BlockSize
 }

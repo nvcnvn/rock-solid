@@ -164,7 +164,7 @@ func (x *Index) forget(pool core.PoolID, c core.ChunkID, above uint64, before ui
 	if !ok || x.plant != nil && x.plant.writerAtLog {
 		return
 	}
-	var dead [][]byte
+	x.dead = x.dead[:0]
 	for l := uint(lowest); l < 32; l++ {
 		x.lo = x.resendPrefix(x.lo[:0], pool, uint8(l), core.PGIndexOf(c.Hash(), 1<<l))
 		x.tree.Iter(&x.it)
@@ -174,11 +174,11 @@ func (x *Index) forget(pool core.PoolID, c core.ChunkID, above uint64, before ui
 				continue
 			}
 			if ver := binary.LittleEndian.Uint64(v[core.ChunkIDSize:]); ver > above && intervalOf(ver) < before {
-				dead = append(dead, bytes.Clone(k))
+				x.dead = append(x.dead, k...)
 			}
 		}
 	}
-	for _, k := range dead {
+	for k := range slices.Chunk(x.dead, resendKeySize) {
 		x.must(x.tree.Delete(k))
 	}
 }
@@ -206,4 +206,77 @@ func (x *Index) forgetSessions(t *SessionTable) {
 	for i := 0; i < len(dead); i += 2 {
 		x.must(x.tree.DeleteRange(dead[i], dead[i+1]))
 	}
+}
+
+// resendRecordSize is a resend record's size in a recovery buffer: session, incarnation, request
+// (0 for a watermark), version (the watermark for one) and chunk.
+const resendRecordSize = 4*8 + core.ChunkIDSize
+
+// appendResendRecords appends the records a recovery read of chunk c carries: the session
+// watermarks of c's PG and its ancestors, and c's entries there, each version's an older
+// interval's that the disk holds, since removals keep the table to those.
+func (x *Index) appendResendRecords(dst []byte, pool core.PoolID, c core.ChunkID, live []Extent) []byte {
+	lowest, ok := x.lowestLevel(pool)
+	if !ok || x.plant != nil && x.plant.recoveryForgetsIds {
+		return dst
+	}
+	for l := uint(lowest); l < 32; l++ {
+		x.lo = x.resendPrefix(x.lo[:0], pool, uint8(l), core.PGIndexOf(c.Hash(), 1<<l))
+		x.tree.Iter(&x.it)
+		for ok := x.it.SeekGE(x.lo); ok && bytes.HasPrefix(x.it.Key(), x.lo); ok = x.it.Next() {
+			k, v := x.it.Key(), x.it.Value()
+			session, inc := binary.BigEndian.Uint64(k[len(x.lo):]), binary.BigEndian.Uint64(k[len(x.lo)+8:])
+			switch {
+			case len(k) == resendWatermarkSize && len(v) == 8:
+				dst = appendResendRecord(dst, session, inc, 0, binary.LittleEndian.Uint64(v), c)
+			case len(k) == resendKeySize && len(v) == resendValueSize:
+				ch, ver := core.ChunkIDFromBytes([core.ChunkIDSize]byte(v)), binary.LittleEndian.Uint64(v[core.ChunkIDSize:])
+				if ch != c && (x.plant == nil || !x.plant.recoveryWholeRange) {
+					continue
+				}
+				if x.plant != nil && x.plant.recoveryLiveOnly && !slices.ContainsFunc(live, func(e Extent) bool { return e.Version == ver }) {
+					continue
+				}
+				dst = appendResendRecord(dst, session, inc, binary.BigEndian.Uint64(k[resendWatermarkSize:]), ver, ch)
+			}
+		}
+	}
+	return dst
+}
+
+func appendResendRecord(dst []byte, session, inc, request, version uint64, c core.ChunkID) []byte {
+	for _, v := range [4]uint64{session, inc, request, version} {
+		dst = binary.LittleEndian.AppendUint64(dst, v)
+	}
+	return c.AppendTo(dst)
+}
+
+// copied applies the resend entries recovery write e logged, once e is applied: the target first
+// drops its own entries of e's chunk from older intervals, which the write leaves only as the
+// source's entries name them, then takes the source's watermarks and, above them, its entries.
+// Entries of a recovery write that tore are dropped with the chunk's next recovery.
+func (x *Index) copied(e *disklog.Entry) {
+	x.forget(e.Pool, e.Chunk, 0, e.Interval)
+	for _, watermarks := range [2]bool{true, false} {
+		for i := range x.copies {
+			r := &x.copies[i]
+			if r.Pool != e.Pool || r.Oldest != e.Version || (r.Request == 0) != watermarks {
+				continue
+			}
+			pgs := uint32(r.Length)
+			top := uint8(bits.TrailingZeros32(pgs))
+			pg := core.PGIndexOf(r.Chunk.Hash(), pgs)
+			wm := x.watermark(r.Pool, r.Chunk, pgs, r.Session, r.Incarnation)
+			switch {
+			case watermarks && r.Version > wm:
+				x.val = binary.LittleEndian.AppendUint64(x.val[:0], r.Version)
+				x.must(x.tree.Put(x.watermarkKey(r.Pool, top, pg, r.Session, r.Incarnation), x.val))
+			case !watermarks && r.Request > wm:
+				k := binary.BigEndian.AppendUint64(x.watermarkKey(r.Pool, top, pg, r.Session, r.Incarnation), r.Request)
+				x.val = binary.LittleEndian.AppendUint64(r.Chunk.AppendTo(x.val[:0]), r.Version)
+				x.must(x.tree.Put(k, x.val))
+			}
+		}
+	}
+	x.copies = slices.DeleteFunc(x.copies, func(r disklog.Entry) bool { return r.Pool == e.Pool && (r.Oldest == e.Version || r.Chunk == e.Chunk) })
 }

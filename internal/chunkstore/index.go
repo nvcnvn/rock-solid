@@ -191,6 +191,10 @@ type Index struct {
 	// writers is the writer entries applied whose versions' last entries are not yet: a version's
 	// entries follow its writer entry in log order, so a later entry of the chunk resolves it.
 	writers []disklog.Entry
+	// copies is the resend entries of recovery writes whose recovered entry is not applied yet.
+	copies []disklog.Entry
+	// dead is the resend keys a removal deletes, one after another.
+	dead []byte
 	// plant is the store's planted bugs, nil for none.
 	plant *plants
 }
@@ -360,8 +364,11 @@ func (x *Index) Apply(ev *disklog.Event) error {
 			x.decide(e)
 		case disklog.EntryWriter:
 			x.waitWhole(e)
+		case disklog.EntryResend:
+			x.copies = append(x.copies, *e)
 		case disklog.EntryRecovered:
 			x.recovered(e)
+			x.copied(e)
 		case disklog.EntryDropped:
 			if ch, _ := x.Chunk(e.Pool, e.Chunk); !ch.after(e.Interval) {
 				x.drop(e.Pool, e.Chunk)

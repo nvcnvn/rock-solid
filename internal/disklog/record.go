@@ -54,6 +54,7 @@ const (
 	EntryImage
 	EntryDropped
 	EntryWriter
+	EntryResend
 )
 
 // BlobKind says what a blob payload holds; the codec carries it without checking it.
@@ -143,6 +144,15 @@ func DroppedEntry(pool core.PoolID, chunk core.ChunkID, interval uint32) Entry {
 	return Entry{Kind: EntryDropped, Pool: pool, Chunk: chunk, Interval: interval}
 }
 
+// ResendEntry is one entry of a resend table a recovery write logged under version recovery copies:
+// the request that took the chunk's version in PG pg's key range of the pool's pgs PGs, or, with
+// request 0, the session's watermark there, held in version. Its layout is a writer entry's, the
+// recovery's version in place of the oldest outstanding request.
+func ResendEntry(pool core.PoolID, chunk core.ChunkID, recovery uint64, pgs uint32, session, incarnation, request, version uint64) Entry {
+	return Entry{Kind: EntryResend, Pool: pool, Chunk: chunk, Version: version, Length: uint64(pgs), Session: session,
+		Incarnation: incarnation, Request: request, Oldest: recovery}
+}
+
 // DecisionEntry marks the decision of the peering of interval persisted for PG pg of the pool's pgs PGs, held in Owner and Length.
 func DecisionEntry(pool core.PoolID, pg, pgs, interval uint32) Entry {
 	return Entry{Kind: EntryDecision, Pool: pool, Owner: pg, Length: uint64(pgs), Interval: interval}
@@ -188,7 +198,7 @@ func (e *Entry) wireSize() (int, error) {
 		n = missingEntrySize
 	case EntryDecision:
 		n = decisionEntrySize
-	case EntryWriter:
+	case EntryWriter, EntryResend:
 		n = writerEntrySize
 	default:
 		return 0, ErrMalformed
@@ -220,8 +230,9 @@ func (e *Entry) ofKind() Entry {
 		return DroppedEntry(e.Pool, e.Chunk, e.Interval)
 	case EntryDecision:
 		return Entry{Kind: e.Kind, Pool: e.Pool, Owner: e.Owner, Length: e.Length, Interval: e.Interval}
-	case EntryWriter:
-		return WriterEntry(e.Pool, e.Chunk, e.Version, uint32(e.Length), e.Session, e.Incarnation, e.Request, e.Oldest)
+	case EntryWriter, EntryResend:
+		return Entry{Kind: e.Kind, Pool: e.Pool, Chunk: e.Chunk, Version: e.Version, Length: e.Length, Session: e.Session,
+			Incarnation: e.Incarnation, Request: e.Request, Oldest: e.Oldest}
 	}
 	return BlobEntry(e.BlobKind, e.Owner, e.Length)
 }
@@ -237,7 +248,7 @@ func (e *Entry) valid() bool {
 		return e.Interval != 0 && uint32(e.Version>>32) <= e.Interval
 	case EntryDecision:
 		return e.Interval != 0 && e.Length != 0 && e.Length <= 1<<31 && e.Length&(e.Length-1) == 0 && uint64(e.Owner) < e.Length
-	case EntryWriter:
+	case EntryWriter, EntryResend:
 		return e.Version != 0 && e.Session != 0 && e.Length != 0 && e.Length <= 1<<31 && e.Length&(e.Length-1) == 0
 	}
 	return true
@@ -447,7 +458,7 @@ func appendEntries(dst []byte, entries []Entry) []byte {
 			dst = binary.LittleEndian.AppendUint32(dst, e.Owner)
 			dst = binary.LittleEndian.AppendUint32(dst, uint32(e.Length))
 			dst = binary.LittleEndian.AppendUint32(dst, e.Interval)
-		case EntryWriter:
+		case EntryWriter, EntryResend:
 			dst = binary.LittleEndian.AppendUint32(dst, uint32(e.Pool))
 			dst = e.Chunk.AppendTo(dst)
 			dst = binary.LittleEndian.AppendUint64(dst, e.Version)
@@ -540,7 +551,7 @@ func decodeEntry(b []byte, e *Entry) (int, error) {
 		e.Owner = binary.LittleEndian.Uint32(b[5:])
 		e.Length = uint64(binary.LittleEndian.Uint32(b[9:]))
 		e.Interval = binary.LittleEndian.Uint32(b[13:])
-	case EntryWriter:
+	case EntryWriter, EntryResend:
 		if len(b) < writerEntrySize {
 			return 0, ErrMalformed
 		}
@@ -738,7 +749,7 @@ func entrySize(k EntryKind) int {
 		return missingEntrySize
 	case EntryDecision:
 		return decisionEntrySize
-	case EntryWriter:
+	case EntryWriter, EntryResend:
 		return writerEntrySize
 	}
 	return 0
