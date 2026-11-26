@@ -427,7 +427,7 @@ func DecodeUpdate(b []byte, data int, u *Update) error {
 		want = edgeBytes(u.Off, u.Len)
 	case u.Kind == KindRecover:
 		want = data
-		if u.Off != 0 || u.Len != core.ChunkSize || data%core.BlockSize != 0 || data > maxRecoveryHead*core.BlockSize+core.ChunkSize || u.Shard != 0 || u.Term != 0 || u.HasExpect {
+		if u.Off != 0 || u.Len != core.ChunkSize || data%core.BlockSize != 0 || u.Shard != 0 || u.Term != 0 || u.HasExpect {
 			r.bad = true
 		}
 	}
@@ -480,7 +480,7 @@ func DecodeResponse(b []byte, data int, rp *Response) error {
 	rp.Interval, rp.Fill = r.u32(), r.u64()
 	dataOK := data == 0
 	if rp.Kind == KindReadReply && rp.Status == StatusOK {
-		dataOK = data > 0 && data <= maxRecoveryHead*core.BlockSize+core.ChunkSize && data%core.BlockSize == 0
+		dataOK = data > 0 && data%core.BlockSize == 0
 	}
 	if !replyTakes(rp.Kind, rp.Status) || !validVersion(rp.Version) || rp.Status == StatusRefused && rp.Interval == 0 ||
 		!dataOK {

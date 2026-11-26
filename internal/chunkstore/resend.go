@@ -231,7 +231,7 @@ func (x *Index) appendResendRecords(dst []byte, pool core.PoolID, c core.ChunkID
 				dst = appendResendRecord(dst, session, inc, 0, binary.LittleEndian.Uint64(v), c)
 			case len(k) == resendKeySize && len(v) == resendValueSize:
 				ch, ver := core.ChunkIDFromBytes([core.ChunkIDSize]byte(v)), binary.LittleEndian.Uint64(v[core.ChunkIDSize:])
-				if ch != c && (x.plant == nil || !x.plant.recoveryWholeRange) {
+				if ch != c {
 					continue
 				}
 				if x.plant != nil && x.plant.recoveryLiveOnly && !slices.ContainsFunc(live, func(e Extent) bool { return e.Version == ver }) {

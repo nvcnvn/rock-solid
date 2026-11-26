@@ -102,9 +102,6 @@ func decodeBlockMap(buf []byte, m *blockMap) error {
 		}
 	}
 	n := recoveryRecords(buf)
-	if n > maxResendRecords {
-		return ErrMalformed
-	}
 	h := recoveryHead(n) * core.BlockSize
 	if len(buf) < h || !allZero(buf[recordsAt+n*resendRecordSize:h]) || len(buf) != h+m.data.count()*core.BlockSize {
 		return ErrMalformed
@@ -112,15 +109,8 @@ func decodeBlockMap(buf []byte, m *blockMap) error {
 	return nil
 }
 
-// recordsAt is where a recovery buffer's resend records start, after their count, and
-// maxResendRecords bounds the count, so the head takes at most maxRecoveryHead blocks.
-// ponytail: a source holding more of the chunk's records than that fails the read, and the chunk
-// stays listed; send the records in more than one message if a PG's sessions grow past them.
-const (
-	recordsAt        = 16*blockWords + 4
-	maxRecoveryHead  = 16
-	maxResendRecords = (maxRecoveryHead*core.BlockSize - recordsAt) / resendRecordSize
-)
+// recordsAt is where a recovery buffer's resend records start, after their count.
+const recordsAt = 16*blockWords + 4
 
 // recoveryHead is the blocks a recovery buffer's map and its n resend records take.
 func recoveryHead(n int) int {
@@ -301,9 +291,6 @@ func (s *Store) recoveryRead(ctx *core.Context, oi int32) error {
 	}
 	s.recs = s.ix.appendResendRecords(s.recs[:0], s.cfg.Pool, o.req.Chunk, s.rexts)
 	n := len(s.recs) / resendRecordSize
-	if n > maxResendRecords {
-		return ErrMalformed
-	}
 	buf, err := ctx.Pool.Alloc((recoveryHead(n) + m.data.count()) * core.BlockSize)
 	if err != nil {
 		return err

@@ -375,3 +375,109 @@ func TestAFencedSessionLeavesTheResendTable(t *testing.T) {
 	h.rebuild()
 	check("rebuilt")
 }
+
+// Disk 2 is down while a session writes chunk A: X, whose answer it hears, Z, and then n more, each
+// naming Z as the session's oldest outstanding request, which trims X. Disk 2 comes back and
+// recovers A from disk 1, its write carrying the PG's watermarks and A's entries, the overwritten
+// Z's included; then disk 1 goes down and disk 2 leads. X sent again to it is Stale and Z sent again
+// is answered with its first version, with a few entries and with more than 16 blocks of recovery
+// head hold. A recovery carrying no entry or watermark (recoveryForgetsIds, the epoch change model's
+// RecoveryForgetsIds), or only the entries of the versions A's live map reads (recoveryLiveOnly,
+// RecoveryLiveOnly), orders Z again.
+func TestARecoveredMemberAnswersResendsFromItsCopy(t *testing.T) {
+	for _, n := range []int{3, 1500} {
+		if err := recoveredResends(t, n, func(*plants) {}); err != nil {
+			t.Fatalf("%d writes after Z: %v", n, err)
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		plant func(*plants)
+	}{
+		{"no entries", func(p *plants) { p.recoveryForgetsIds = true }},
+		{"the live map's own", func(p *plants) { p.recoveryLiveOnly = true }},
+	} {
+		if err := recoveredResends(t, 3, tc.plant); err == nil {
+			t.Errorf("copying %s, the resends passed", tc.name)
+		}
+	}
+}
+
+func recoveredResends(t *testing.T, n int, plant func(*plants)) error {
+	c := newRCluster(t, rtable(4, 2))
+	for _, r := range c.reps {
+		plant(&r.st.plant)
+	}
+	ch := chunkIn(pg0, 4, 0)
+	c.publish(c.next(func(t *Table) { mark(t, pg0, 2, MarkDown) }), true)
+	c.settle()
+	x := c.sendX(0, ch, bytes.Repeat([]byte{'x'}, 100), 0)
+	z := c.sendX(0, ch, bytes.Repeat([]byte{'z'}, 100), 0)
+	c.settle()
+	zv := c.reply(z).Version
+	for i := range n {
+		c.sendX(0, ch, bytes.Repeat([]byte{'a' + byte(i%20)}, 100), z)
+		if i%50 == 49 {
+			c.settle()
+		}
+	}
+	c.settle()
+	last := c.readNow(pg0, ch, 0, 100)
+	c.publish(c.next(func(t *Table) { mark(t, pg0, 2, MarkUp) }), true)
+	c.settle()
+	if l := c.listed(1, ch); l.ListedIn != 0 {
+		return fmt.Errorf("disk 2 still lists A: %+v", l)
+	}
+	c.publish(c.next(func(t *Table) { mark(t, pg0, 1, MarkDown) }), true)
+	c.settle()
+	c.sendX(x, ch, bytes.Repeat([]byte{'x'}, 100), x)
+	c.sendX(z, ch, bytes.Repeat([]byte{'z'}, 100), z)
+	c.settle()
+	if rp := c.reply(x); rp.Status != StatusStale {
+		return fmt.Errorf("X sent again answered %+v, want stale", rp)
+	}
+	if rp := c.reply(z); rp.Status != StatusOK || rp.Version != zv {
+		return fmt.Errorf("Z sent again answered %+v, want %#x", rp, zv)
+	}
+	if got := c.readNow(pg0, ch, 0, 100); !bytes.Equal(got, last) {
+		return fmt.Errorf("read %q, want %q", got[:1], last[:1])
+	}
+	return nil
+}
+
+// A recovery write in interval 2 copies session 7's watermark 4 and its entry for request 5 at
+// 1.1. Once the recovered entry is applied the target answers request 5 with 1.1 and request 3 as
+// stale, and it drops its own entry for request 9 at 1.3, an earlier interval's version the write
+// does not leave on it, while keeping request 20's at 2.1, of the write's own interval. Copies whose
+// recovered entry never came, as when the write tore, are dropped at the chunk's next recovery.
+func TestARecoveryWriteReplacesTheTargetsEntriesForItsChunk(t *testing.T) {
+	c := chunk(1)
+	writer := func(v, req uint64) disklog.Entry {
+		e := disklog.WriterEntry(1, c, v, 1, 7, 1, req, 1)
+		e.Last = true
+		return e
+	}
+	resent := func(x *Index, req uint64) (uint64, bool) { return x.Resent(1, c, 1, 7, 1, req) }
+	copies := func(rv uint64) []disklog.Entry {
+		return []disklog.Entry{disklog.ResendEntry(1, c, rv, 1, 7, 1, 0, 4), disklog.ResendEntry(1, c, rv, 1, 7, 1, 5, MakeVersion(1, 1))}
+	}
+	x := newIndex(t)
+	apply(t, x, record(1, writer(MakeVersion(1, 3), 9), writer(MakeVersion(2, 1), 20)))
+	apply(t, x, record(2, copies(MakeVersion(1, 2))...))
+	apply(t, x, record(3, disklog.RecoveredEntry(1, c, MakeVersion(1, 2), 2)))
+	for _, tc := range []struct {
+		req     uint64
+		version uint64
+		stale   bool
+	}{{5, MakeVersion(1, 1), false}, {3, 0, true}, {9, 0, false}, {20, MakeVersion(2, 1), false}} {
+		if v, stale := resent(x, tc.req); v != tc.version || stale != tc.stale {
+			t.Errorf("request %d names %#x, stale %v; want %#x, %v", tc.req, v, stale, tc.version, tc.stale)
+		}
+	}
+	torn := newIndex(t)
+	apply(t, torn, record(1, copies(MakeVersion(1, 2))...))
+	apply(t, torn, record(2, disklog.RecoveredEntry(1, c, MakeVersion(1, 3), 2)))
+	if v, stale := resent(torn, 5); v != 0 || stale {
+		t.Errorf("a torn recovery's copy names %#x, stale %v", v, stale)
+	}
+}

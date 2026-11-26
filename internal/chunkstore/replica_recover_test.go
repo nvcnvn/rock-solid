@@ -51,7 +51,7 @@ func (c *rcluster) watchRecoveries() *[]recSend {
 				if decodeBlockMap(buf, &rs.m) != nil {
 					c.t.Fatalf("disk %d sent a recovery buffer that does not decode", d+1)
 				}
-				k := 1
+				k := recoveryHead(recoveryRecords(buf))
 				rs.m.data.runs(func(first, n uint16) {
 					for b := first; b < first+n; b++ {
 						rs.bytes[b] = buf[k*core.BlockSize]

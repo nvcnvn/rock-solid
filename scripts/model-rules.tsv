@@ -163,8 +163,8 @@ epoch/neg-report-across-split	chunkstore.reportAcrossSplit	TestPlantedReportAcro
 epoch/neg-resend-reorders	chunkstore.noResendTable	TestAResentWriteIsAppliedOnce
 epoch/neg-resend-dropped	chunkstore.writerAtLog	TestAResendOfADroppedVersionIsOrderedAgain
 epoch/neg-resend-at-once	chunkstore.resendAtOnce	TestAResendWaitsForItsPendingVersion
-epoch/neg-resend-recovery-ids	open	Resend table
-epoch/neg-resend-recovery-live-only	open	Resend table
-epoch/neg-resend-recovery-whole-range	open	Resend table
+epoch/neg-resend-recovery-ids	chunkstore.recoveryForgetsIds	TestARecoveredMemberAnswersResendsFromItsCopy
+epoch/neg-resend-recovery-live-only	chunkstore.recoveryLiveOnly	TestARecoveredMemberAnswersResendsFromItsCopy
+epoch/neg-resend-recovery-whole-range	none	The rule is appendResendRecords' filter to the recovered chunk's entries (resend.go), and dropping it breaks nothing: the primary keeps only records at or below the chunk's kept version (keepResendRecords), all of earlier intervals, and each such version of another chunk was settled at its decision marker, which removed a dropped one's entry from the source (Index.decide) and left a kept one on the target or listed there for its own recovery; the model keeps a dropped version's entry on the source until that chunk is recovered
 epoch/neg-resend-no-watermark	chunkstore.noWatermark	TestATrimmedWriteSentAgainIsStale
 epoch/neg-resend-trim-on-answer	chunkstore.trimOnAnswer	TestAWriteIsStaleOnlyOnceItsClientHeard

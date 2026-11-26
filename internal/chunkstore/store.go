@@ -288,11 +288,10 @@ type plants struct {
 	// its client heard the answer; noWatermark trims a session's entries and keeps no watermark.
 	trimOnAnswer bool
 	noWatermark  bool
-	// A recovery read's source carries no resend entry or watermark (recoveryForgetsIds), only
-	// the entries of the versions the chunk's live map reads (recoveryLiveOnly), or its PG's
-	// entries of every chunk (recoveryWholeRange): the epoch change model's RecoveryForgetsIds,
-	// RecoveryLiveOnly and RecoveryWholeRange.
-	recoveryForgetsIds, recoveryLiveOnly, recoveryWholeRange bool
+	// A recovery read's source carries no resend entry or watermark (recoveryForgetsIds), or only
+	// the entries of the versions the chunk's live map reads (recoveryLiveOnly): the epoch change
+	// model's RecoveryForgetsIds and RecoveryLiveOnly.
+	recoveryForgetsIds, recoveryLiveOnly bool
 	// clearListed has a persisted missing list clear, in the index alone, every listing of its PG
 	// from an earlier peering that it leaves out.
 	clearListed bool
