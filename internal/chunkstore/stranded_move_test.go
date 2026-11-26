@@ -423,7 +423,7 @@ func tornMember(t *testing.T, seed uint64, plant func(*replicaPlants)) (*soleRun
 	return r, ch, x, m
 }
 
-// holdsInPart reports whether s has a version of ch above v with some of its records durable and not its last.
+// holdsInPart reports whether s has a version of ch above v with some of its data records durable and not its last.
 func holdsInPart(s *Store, ch core.ChunkID, v uint64) bool {
 	ci, ok := s.chunkOf[ch]
 	if !ok {
@@ -431,14 +431,11 @@ func holdsInPart(s *Store, ch core.ChunkID, v uint64) bool {
 	}
 	for _, oi := range s.chunks[ci].pending {
 		if o := &s.ops[oi]; o.version > v {
-			durable, last := 0, false
+			last := false
 			for _, it := range o.items {
-				if it.state == itemDurable {
-					durable++
-					last = last || it.entry.Last
-				}
+				last = last || it.state == itemDurable && it.entry.Last
 			}
-			return durable > 0 && !last
+			return o.holdsVersion() && !last
 		}
 	}
 	return false

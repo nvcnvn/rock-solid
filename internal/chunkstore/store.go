@@ -975,7 +975,8 @@ func (s *Store) submit(ctx *core.Context, oi int32, out *Output) {
 		o.items = append(o.items, item{entry: disklog.FreezeEntry(pool, c, cs.version, o.req.Epoch)})
 		cs.epoch = o.req.Epoch
 	}
-	if o.req.Request != 0 && o.req.PGs != 0 && o.req.Session != 0 && !o.req.Recover {
+	writer := o.req.Request != 0 && o.req.PGs != 0 && o.req.Session != 0 && !o.req.Recover
+	if writer {
 		o.items = append(o.items, item{entry: disklog.WriterEntry(pool, c, o.version, o.req.PGs, o.req.Session, o.req.Incarnation, o.req.Request, o.req.Oldest)})
 	}
 	cs.version = o.version
@@ -1023,6 +1024,12 @@ func (s *Store) submit(ctx *core.Context, oi int32, out *Output) {
 		o.answered = true
 		out.Replies = append(out.Replies, Reply{ID: o.req.ID, Version: o.version})
 	}
+	// A writer entry rides in the round of its version's first data rather than in a record of
+	// its own, which would cost each client write a round and a header block.
+	held := true
+	if writer {
+		held = s.log.Hold()
+	}
 	for j := range o.items {
 		it := &o.items[j]
 		if o.err != nil {
@@ -1036,6 +1043,9 @@ func (s *Store) submit(ctx *core.Context, oi int32, out *Output) {
 		}
 		it.ticket = t
 		s.sent = append(s.sent, sentItem{ticket: t, op: oi, item: int32(j)})
+	}
+	if !held {
+		s.log.Release(ctx, &s.lout)
 	}
 	if s.ops[oi].left == 0 {
 		s.mapResolved(ctx, ci, out)

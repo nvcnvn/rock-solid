@@ -1747,8 +1747,12 @@ func (l *Log) firstFree() (uint32, bool) {
 func (l *Log) NameNewest() { l.naming = l.manifest.LSN }
 
 // Hold keeps the log from starting rounds until Release, so that the items an owner submits
-// within a pass share one round.
-func (l *Log) Hold() { l.held = true }
+// within a pass share one round, and reports whether the log was already held.
+func (l *Log) Hold() bool {
+	was := l.held
+	l.held = true
+	return was
+}
 
 // Release lets the log start rounds again and starts those it can.
 func (l *Log) Release(ctx *core.Context, out *Output) {
