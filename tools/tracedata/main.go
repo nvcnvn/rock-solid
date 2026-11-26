@@ -663,7 +663,7 @@ func (g *gen) run(recs []trace.Record) {
 			g.recovering[n] = slices.DeleteFunc(g.recovering[n], func(x [4]uint64) bool { return x[0] == r.Fields[0] && x[2] == r.Fields[3] })
 			f, s := g.chunkField(r.Fields[0]), g.source(r.Fields[2])
 			at, kind := len(g.lines), "recovered"
-			if n == g.primary[f] && g.repliedLater(n, f, r.Fields[0], r.Fields[3]) {
+			if g.decisions[[3]uint64{uint64(n), f, r.Fields[3]}] && g.repliedLater(n, f, r.Fields[0], r.Fields[3]) {
 				kind = "recoveredlate"
 			} else if r.Fields[3] == g.activated[f] {
 				at = g.recoveredAt(f, r.Fields[0], r.Fields[3], n, s, r.Fields[1])
