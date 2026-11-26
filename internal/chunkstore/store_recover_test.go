@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"testing"
 
@@ -346,6 +347,22 @@ func TestAMemberRefusesARecoveryWriteAtAVersionItLacks(t *testing.T) {
 		if !errors.Is(h.replies[id].Err, ErrVersion) {
 			t.Fatalf("a recovery write at %#x over 4.1 answered %+v", v, h.replies[id])
 		}
+	}
+}
+
+// A member refuses a recovery write whose buffer carries a resend record of another chunk.
+func TestAMemberRefusesARecoveryWriteCarryingAnotherChunksRecord(t *testing.T) {
+	h := newRecoveryHarness(t)
+	kept := MakeVersion(3, 1)
+	h.sync(h.memberWrite(chunkC, 0, 4, kept, 1))
+	buf := recoveryBuf(h, map[uint16]byte{1: 1})
+	b := h.pool.Bytes(buf)
+	binary.LittleEndian.PutUint32(b[16*blockWords:], 1)
+	copy(b[recordsAt:], appendResendRecord(nil, 7, 1, 5, MakeVersion(1, 1), core.ChunkID{Volume: 1, Inode: 7, Index: 9}))
+	id := h.recoverWrite(Request{Chunk: chunkC, HasVer: true, Ver: kept, Interval: 4, PGs: 1, Buf: buf})
+	h.settle()
+	if !errors.Is(h.replies[id].Err, ErrMalformed) {
+		t.Fatalf("a recovery write carrying another chunk's record answered %+v", h.replies[id])
 	}
 }
 

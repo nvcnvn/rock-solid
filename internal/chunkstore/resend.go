@@ -260,7 +260,7 @@ func (x *Index) copied(e *disklog.Entry) {
 	for _, watermarks := range [2]bool{true, false} {
 		for i := range x.copies {
 			r := &x.copies[i]
-			if r.Pool != e.Pool || r.Oldest != e.Version || (r.Request == 0) != watermarks {
+			if r.Pool != e.Pool || r.Chunk != e.Chunk || r.Oldest != e.Version || (r.Request == 0) != watermarks {
 				continue
 			}
 			pgs := uint32(r.Length)
@@ -278,5 +278,10 @@ func (x *Index) copied(e *disklog.Entry) {
 			}
 		}
 	}
-	x.copies = slices.DeleteFunc(x.copies, func(r disklog.Entry) bool { return r.Pool == e.Pool && (r.Oldest == e.Version || r.Chunk == e.Chunk) })
+	x.dropCopies(e.Pool, e.Chunk)
+}
+
+// dropCopies forgets the resend entries of chunk c's recovery writes not yet applied.
+func (x *Index) dropCopies(pool core.PoolID, c core.ChunkID) {
+	x.copies = slices.DeleteFunc(x.copies, func(r disklog.Entry) bool { return r.Pool == pool && r.Chunk == c })
 }

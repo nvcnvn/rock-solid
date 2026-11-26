@@ -374,6 +374,7 @@ func (x *Index) Apply(ev *disklog.Event) error {
 				x.drop(e.Pool, e.Chunk)
 				x.forget(e.Pool, e.Chunk, 0, math.MaxUint32)
 			}
+			x.dropCopies(e.Pool, e.Chunk)
 		}
 	}
 	return nil
@@ -443,9 +444,9 @@ func (x *Index) Decided(pool core.PoolID, pg, pgs uint32) uint32 {
 	}
 }
 
-// EndReplay forgets the missing-list entries no decision marker followed: a crash cut short the
-// list they belong to, which the disk never persisted.
-func (x *Index) EndReplay() { x.unmarked = x.unmarked[:0] }
+// EndReplay forgets the missing-list entries no decision marker followed and the resend entries
+// no recovered entry did: a crash cut short the list or the recovery write they belong to.
+func (x *Index) EndReplay() { x.unmarked, x.copies = x.unmarked[:0], x.copies[:0] }
 
 // PGChunks appends to dst, in key order, each chunk of PG pg of the pool's pgs PGs that the disk
 // logged or lists, seeking past each chunk's maps: a PG's chunks are one key range.

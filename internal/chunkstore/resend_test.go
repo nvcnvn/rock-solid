@@ -298,6 +298,26 @@ func TestAFailedWriteLeavesNoResendEntry(t *testing.T) {
 	}
 }
 
+// A recovery write that fails after its resend entries are durable leaves none of them waiting.
+func TestAFailedRecoveryWriteLeavesNoCopies(t *testing.T) {
+	h := newHarness(t, testConfig())
+	ci := h.s.chunkSlot(chunkC)
+	v := MakeVersion(1, 1)
+	oi := h.s.newOp(opWrite, Request{Chunk: chunkC, Recover: true, PGs: 1})
+	o := &h.s.ops[oi]
+	o.chunk, o.version, o.left = ci, v, 1
+	o.items = append(o.items, item{entry: disklog.ResendEntry(testPool, chunkC, v, 1, 7, 1, 5, v), state: itemDurable},
+		item{entry: disklog.RecoveredEntry(testPool, chunkC, v, 1)})
+	h.s.chunks[ci].pending = append(h.s.chunks[ci].pending, oi)
+	if h.s.itemFailed(&h.ctx, oi, 1, disklog.ErrNoSpace, &h.out) {
+		h.s.mapResolved(&h.ctx, ci, &h.out)
+	}
+	h.take()
+	if n := len(h.s.ix.copies); n != 0 {
+		t.Fatalf("the failed recovery write left %d copies", n)
+	}
+}
+
 // A disk's resend table names a version only while the disk holds it: a client write's entry
 // goes when a decision marker lists the chunk at a version below it, when the marker drops a
 // recovery that brought the chunk, along with every version of an earlier interval, and when a
@@ -479,5 +499,31 @@ func TestARecoveryWriteReplacesTheTargetsEntriesForItsChunk(t *testing.T) {
 	apply(t, torn, record(2, disklog.RecoveredEntry(1, c, MakeVersion(1, 3), 2)))
 	if v, stale := resent(torn, 5); v != 0 || stale {
 		t.Errorf("a torn recovery's copy names %#x, stale %v", v, stale)
+	}
+}
+
+// Chunk b's recovery at 1.2 tears after its resend entries; chunk a's recovery at the same
+// version takes none of them, and b's drop, or the end of replay, forgets them.
+func TestARecoveryTakesOnlyItsOwnChunksCopies(t *testing.T) {
+	a, b := chunk(1), chunk(2)
+	rv := MakeVersion(1, 2)
+	torn := disklog.ResendEntry(1, b, rv, 1, 7, 1, 5, MakeVersion(1, 1))
+	x := newIndex(t)
+	apply(t, x, record(1, torn))
+	apply(t, x, record(2, disklog.RecoveredEntry(1, a, rv, 2)))
+	if v, stale := x.Resent(1, b, 1, 7, 1, 5); v != 0 || stale {
+		t.Errorf("chunk b, never recovered, names %#x, stale %v", v, stale)
+	}
+	if len(x.copies) != 1 {
+		t.Fatalf("chunk a's recovery left %d of b's copies, want 1", len(x.copies))
+	}
+	apply(t, x, record(3, disklog.DroppedEntry(1, b, 2)))
+	if len(x.copies) != 0 {
+		t.Errorf("chunk b's drop left %d of its copies", len(x.copies))
+	}
+	apply(t, x, record(4, torn))
+	x.EndReplay()
+	if len(x.copies) != 0 {
+		t.Errorf("the end of replay left %d torn copies", len(x.copies))
 	}
 }

@@ -2374,6 +2374,9 @@ func (s *Store) mapResolved(ctx *core.Context, ci int32, out *Output) {
 				it.buf = core.NoBuf
 			}
 		}
+		if o.req.Recover && o.err != nil {
+			s.ix.dropCopies(s.cfg.Pool, cs.id)
+		}
 		r := Reply{ID: o.req.ID, Version: o.version, Err: o.err}
 		if o.err != nil && !o.holdsVersion() {
 			r.Version = 0

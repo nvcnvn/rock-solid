@@ -199,6 +199,11 @@ func (s *Store) recoverItems(ctx *core.Context, o *op) error {
 		if err := decodeBlockMap(src, &m); err != nil {
 			return err
 		}
+		for i := range recoveryRecords(src) {
+			if r := resendRecord(src, i); !allZero(r) && core.ChunkIDFromBytes([core.ChunkIDSize]byte(r[32:])) != c {
+				return ErrMalformed
+			}
+		}
 	}
 	orig, head := m.data, 1
 	if src != nil {
@@ -240,8 +245,7 @@ func (s *Store) recoverItems(ctx *core.Context, o *op) error {
 		for i := range recoveryRecords(src) {
 			if r := resendRecord(src, i); o.req.PGs != 0 && !allZero(r) {
 				f := func(k int) uint64 { return binary.LittleEndian.Uint64(r[8*k:]) }
-				ch := core.ChunkIDFromBytes([core.ChunkIDSize]byte(r[32:]))
-				o.items = append(o.items, item{entry: disklog.ResendEntry(pool, ch, o.version, o.req.PGs, f(0), f(1), f(2), f(3))})
+				o.items = append(o.items, item{entry: disklog.ResendEntry(pool, c, o.version, o.req.PGs, f(0), f(1), f(2), f(3))})
 			}
 		}
 	}
