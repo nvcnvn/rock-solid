@@ -510,9 +510,6 @@ func (r *Replica) orderRecovery(ctx *core.Context, k int, buf core.IOBuf, out *R
 	t := &l.todo[rc.todo]
 	self := slices.IndexFunc(e.Members, func(m Member) bool { return m.Disk == r.cfg.Disk })
 	rc.read, rc.rid = 0, 0
-	if buf != core.NoBuf {
-		keepResendRecords(ctx.Pool.Bytes(buf), t.kept)
-	}
 	rc.req = r.newReq(storeReq{kind: reqRecover, pg: rc.pg, chunk: t.chunk, source: rc.from, interval: rc.interval})
 	u := Update{Kind: KindRecover, PG: PGFields{Epoch: r.table.Epoch, PG: rc.pg, Interval: rc.interval}, Chunk: t.chunk, Len: core.ChunkSize, Source: rc.from}
 	r.vers = append(r.vers, version{req: rc.req, epoch: r.table.Epoch, interval: rc.interval, u: u, recover: true})

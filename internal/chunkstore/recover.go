@@ -125,16 +125,6 @@ func resendRecord(buf []byte, i int) []byte {
 	return buf[recordsAt+i*resendRecordSize:][:resendRecordSize]
 }
 
-// keepResendRecords zeroes the records of buf naming a version above kept, which the target does
-// not take from the source.
-func keepResendRecords(buf []byte, kept uint64) {
-	for i := range recoveryRecords(buf) {
-		if r := resendRecord(buf, i); binary.LittleEndian.Uint64(r[16:]) != 0 && binary.LittleEndian.Uint64(r[24:]) > kept {
-			clear(r)
-		}
-	}
-}
-
 // cover is the blocks of a chunk that the gated writes and punches of an interval have covered so
 // far, which a recovery write of the chunk in that interval leaves out.
 type cover struct {
@@ -200,7 +190,7 @@ func (s *Store) recoverItems(ctx *core.Context, o *op) error {
 			return err
 		}
 		for i := range recoveryRecords(src) {
-			if r := resendRecord(src, i); !allZero(r) && core.ChunkIDFromBytes([core.ChunkIDSize]byte(r[32:])) != c {
+			if r := resendRecord(src, i); core.ChunkIDFromBytes([core.ChunkIDSize]byte(r[32:])) != c {
 				return ErrMalformed
 			}
 		}
@@ -243,7 +233,7 @@ func (s *Store) recoverItems(ctx *core.Context, o *op) error {
 	}
 	if !o.req.Relay && src != nil {
 		for i := range recoveryRecords(src) {
-			if r := resendRecord(src, i); o.req.PGs != 0 && !allZero(r) {
+			if r := resendRecord(src, i); o.req.PGs != 0 {
 				f := func(k int) uint64 { return binary.LittleEndian.Uint64(r[8*k:]) }
 				o.items = append(o.items, item{entry: disklog.ResendEntry(pool, c, o.version, o.req.PGs, f(0), f(1), f(2), f(3))})
 			}
