@@ -41,6 +41,8 @@ type nodeMetas struct {
 	groups  map[uint64]uint64
 	next    uint64
 	gone    int
+	// removing is the group whose replica the device removes at nodeMetaRemove.
+	removing uint64
 	// askFirst has start ask about replica 1 as the device starts, before its store serves.
 	askFirst bool
 }
@@ -60,6 +62,13 @@ type metaDevice struct {
 func (m *metaDevice) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
 	if ev.Kind == core.EvTimer && ev.Timer >= node.MetaTimer && !m.nm.ticking {
 		return out
+	}
+	if ev.Kind == core.EvTimer && ev.Timer == nodeMetaRemove {
+		m.out.Reset()
+		if !m.d.RemoveMeta(ctx, m.nm.removing, &m.out) {
+			m.nm.t.Fatalf("the device hosts no replica of group %d", m.nm.removing)
+		}
+		return m.done(out)
 	}
 	return m.deviceOnLoop.OnEvent(ctx, ev, out)
 }
@@ -106,20 +115,25 @@ func (nm *nodeMetas) replica() meta.RoundConfig { return nm.replicaOf(nodeMetaGr
 
 // replicaOf is the configuration of group's one voter, booting from its configuration.
 func (nm *nodeMetas) replicaOf(group uint64) meta.RoundConfig {
-	storage := raftshard.NewStorage()
-	cs := raftpb.ConfState{Voters: []uint64{1}}
-	if err := storage.ApplySnapshot(raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: 1, Term: 1, ConfState: cs}}); err != nil {
-		nm.t.Fatal(err)
-	}
 	return meta.RoundConfig{
 		Shard: meta.Config{
-			Raft: raftshard.Config{Group: group, ID: 1, Storage: storage, Seed: 1,
+			Raft: raftshard.Config{Group: group, ID: 1, Storage: bootAt(nm.t, 1), Seed: 1,
 				Peers:  []raftshard.Peer{{ID: 1, Node: core.NodeID{Node: nm.node, Loop: 1}}},
 				Holder: lease.NewHolder(lease.DefaultConfig), Grantor: lease.NewGrantor(lease.DefaultConfig, 1, lease.Time{})},
 			Tree: lsm.Config{MaxPiece: 4 << 10, StepBytes: 4 << 10, Check: true},
 		},
 		Owner: 991 + uint32(group),
 	}
+}
+
+// bootAt is the storage of a group's one voter whose configuration is at index.
+func bootAt(t *testing.T, index uint64) *raftshard.Storage {
+	storage := raftshard.NewStorage()
+	cs := raftpb.ConfState{Voters: []uint64{1}}
+	if err := storage.ApplySnapshot(raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: index, Term: 1, ConfState: cs}}); err != nil {
+		t.Fatal(err)
+	}
+	return storage
 }
 
 // start starts a process whose device restores metas, and settles.
@@ -495,7 +509,13 @@ func (nm *nodeMetas) ask(id uint64) {
 }
 
 func (nm *nodeMetas) postAsk(id uint64) {
-	body := binary.LittleEndian.AppendUint64([]byte{core.ProtoGroup}, nodeMetaGroup)
+	ev := nm.askOf(nodeMetaGroup, id)
+	nm.l.Inbox().Post(&ev)
+}
+
+// askOf is an ask, from nodeMetaAsker, about replica id of group.
+func (nm *nodeMetas) askOf(group, id uint64) core.Event {
+	body := binary.LittleEndian.AppendUint64([]byte{core.ProtoGroup}, group)
 	body = append(body, raftKindAsk)
 	for _, v := range []uint64{2, id, 0, 0, 0} {
 		body = binary.LittleEndian.AppendUint64(body, v)
@@ -504,7 +524,35 @@ func (nm *nodeMetas) postAsk(id uint64) {
 	if err := ev.Msg.SetInline(body); err != nil {
 		nm.t.Fatal(err)
 	}
-	nm.l.Inbox().Post(&ev)
+	return ev
+}
+
+// goneNow hands the device, between the loop's passes, an ask about replica id of group, and
+// reports whether it answered Gone.
+func (nm *nodeMetas) goneNow(group, id uint64) bool {
+	ev := nm.askOf(group, id)
+	var out node.DeviceOutput
+	nm.m.d.OnEvent(nm.l.Context(), &ev, &out)
+	before := nm.gone
+	nm.execute(out.Actions)
+	return nm.gone > before
+}
+
+// execute hands the client's driver the messages acts send.
+func (nm *nodeMetas) execute(acts []core.Action) {
+	for i := range acts {
+		metaDeviceDriver{nm: nm}.Execute(&acts[i])
+	}
+}
+
+// nodeMetaRemove is the timer at which the device removes its replica of nodeMetas.removing,
+// within a pass of its loop, as a message from the control plane would have it.
+const nodeMetaRemove core.TimerID = 0x72656d
+
+// remove has the device remove its replica of group at its loop's next pass.
+func (nm *nodeMetas) remove(group uint64) {
+	nm.removing = group
+	nm.l.Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: nodeMetaRemove})
 }
 
 // A restart restores the MetaStore replicas its disk's manifest names, not those the device has
@@ -581,5 +629,172 @@ func TestANewReplicaStartsOnlyOnceARestartWouldRestoreIt(t *testing.T) {
 	}
 	if lost == 0 {
 		t.Fatal("no crash came before a manifest named the replica")
+	}
+}
+
+// Removing a replica answers every Txn it holds, as applied or dropped, and frees its group for
+// a new replica of it.
+func TestRemovingAReplicaAnswersTheTxnsItHolds(t *testing.T) {
+	nm := newNodeMetas(t)
+	if err := nm.m.d.AddMeta(nm.replica()); err != nil {
+		t.Fatal(err)
+	}
+	nm.lead()
+	nm.post(nodeMetaGroup, 8, 10)
+	for range 3 {
+		nm.s.Step()
+	}
+	nm.remove(nodeMetaGroup)
+	nm.settle()
+	dropped := 0
+	for tok := range nm.keys {
+		switch err, ok := nm.answers[tok]; {
+		case !ok:
+			t.Fatalf("Txn %d was never answered", tok)
+		case errors.Is(err, raft.ErrProposalDropped):
+			dropped++
+		case err != nil:
+			t.Fatalf("Txn %d answered %v", tok, err)
+		}
+	}
+	if dropped == 0 {
+		t.Fatal("the replica held no Txn when removed")
+	}
+	cfg := nm.replica()
+	cfg.Owner++
+	if err := nm.m.d.AddMeta(cfg); err != nil {
+		t.Fatalf("the device refused a new replica of the group it removed one of: %v", err)
+	}
+	nm.lead()
+	nm.send(1, 10)
+	if err, ok := nm.answers[nm.next]; !ok || err != nil {
+		t.Fatalf("the new replica answered %v, %v", ok, err)
+	}
+}
+
+// The device soon answers an ask about a replica it removed Gone: the removal has the store begin
+// a checkpoint whose manifest leaves the replica out, and the disk's next ordinary round opens a
+// segment, whose header names that manifest, the one a restart then loads.
+func TestARemovedReplicaIsSoonGone(t *testing.T) {
+	nm := newNodeMetas(t)
+	other := uint64(nodeMetaGroup + 1)
+	for _, g := range []uint64{other, nodeMetaGroup} {
+		if err := nm.m.d.AddMeta(nm.replicaOf(g)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	nm.lead(other)
+	nm.remove(nodeMetaGroup)
+	nm.settle()
+	nm.sendTo(other, 1, 10)
+	if !nm.goneNow(nodeMetaGroup, 1) {
+		t.Fatal("the device never answered Gone for the replica it removed")
+	}
+}
+
+// A restart after a removal never brings back a replica its device answered Gone, and never hands
+// a removed replica's blobs to a new replica its owner key went to: crashed at every step from the
+// removal of a replica that answered Txns, through another group's Txns, to a new replica under
+// the removed one's owner key starting, the disk restores the removed replica, holding every Txn
+// it answered, only while the device would not answer an ask about it Gone, and restores the new
+// replica, holding none of the removed one's keys, whenever it had started.
+func TestARestartAfterARemovalNeverRestoresTheRemovedReplicaGone(t *testing.T) {
+	other, reuse := uint64(nodeMetaGroup+1), uint64(nodeMetaGroup+2)
+	var restoredRemoved, goneCrashes, reusedStarted int
+	for k := 0; goneCrashes < 3 || reusedStarted < 3; k++ {
+		if k == 2000 {
+			t.Fatalf("after %d crashes: %d after Gone, %d with the new replica started", k, goneCrashes, reusedStarted)
+		}
+		nm := newNodeMetas(t)
+		cfgs := []meta.RoundConfig{nm.replicaOf(other), nm.replicaOf(nodeMetaGroup)}
+		for _, c := range cfgs {
+			if err := nm.m.d.AddMeta(c); err != nil {
+				t.Fatal(err)
+			}
+		}
+		nm.lead(other, nodeMetaGroup)
+		nm.send(20, 100)
+		nm.post(nodeMetaGroup, 4, 100)
+		nm.s.Step()
+		removedKeys := len(nm.keys)
+		next := nm.replicaOf(reuse)
+		next.Owner = cfgs[1].Owner
+		next.Shard.Raft.Storage = bootAt(t, 100)
+		cfgs = append(cfgs, next)
+
+		nm.remove(nodeMetaGroup)
+		gone, reused := false, false
+		for step := 0; step < k; step++ {
+			stepped := nm.s.Step()
+			gone = gone || nm.goneNow(nodeMetaGroup, 1)
+			if !reused && nm.m.d.Store().Reusable(next.Owner) {
+				if err := nm.m.d.AddMeta(next); err != nil {
+					t.Fatal(err)
+				}
+				reused = true
+			}
+			switch {
+			case stepped:
+			case reused && nm.m.d.Meta(reuse).Shard() != nil:
+				step = k
+			default:
+				nm.post(other, 2, 10)
+			}
+		}
+		up := reused && nm.m.d.Meta(reuse).Shard() != nil
+		nm.sd.Crash(core.NewRand(uint64(k)))
+		nm.start(cfgs)
+		back, renewed := nm.m.d.Meta(nodeMetaGroup), nm.m.d.Meta(reuse)
+		if nm.m.d.Store() == nil {
+			t.Fatalf("crashed %d steps after the removal, the device failed", k)
+		}
+		var restored []uint64
+		for _, g := range []uint64{other, nodeMetaGroup, reuse} {
+			if nm.m.d.Meta(g) != nil {
+				restored = append(restored, g)
+			}
+		}
+		nm.lead(restored...)
+		switch {
+		case gone && back != nil:
+			t.Fatalf("crashed %d steps after the removal, the replica the device answered Gone was restored", k)
+		case up && renewed == nil:
+			t.Fatalf("crashed %d steps after the removal, the new replica that had started was not restored", k)
+		}
+		for tok, key := range nm.keys {
+			if err, ok := nm.answers[tok]; !ok || err != nil {
+				continue
+			}
+			if renewed != nil && renewed.Shard() != nil && tok <= uint64(removedKeys) {
+				if _, ok := renewed.Shard().State().Tree().Get(key); ok {
+					t.Fatalf("crashed %d steps after the removal, the new replica under its owner key holds the removed one's Txn %d", k, tok)
+				}
+			}
+			a := nm.m.d.Meta(nm.groups[tok])
+			if a == nil && nm.groups[tok] == nodeMetaGroup {
+				continue
+			}
+			if a == nil || a.Err() != nil || a.Shard() == nil {
+				t.Fatalf("crashed %d steps after the removal, the replica of group %d did not restore", k, nm.groups[tok])
+			}
+			if v, ok := a.Shard().State().Tree().Get(key); !ok || !bytes.HasPrefix(v, key) {
+				t.Fatalf("crashed %d steps after the removal, the replica of group %d holds %q under Txn %d's key", k, nm.groups[tok], v, tok)
+			}
+		}
+		if renewed != nil && renewed.Err() != nil {
+			t.Fatalf("crashed %d steps after the removal, the new replica did not restore: %v", k, renewed.Err())
+		}
+		if back != nil {
+			restoredRemoved++
+		}
+		if gone {
+			goneCrashes++
+		}
+		if up {
+			reusedStarted++
+		}
+	}
+	if restoredRemoved == 0 {
+		t.Fatal("no crash came before a named manifest left the removed replica out")
 	}
 }

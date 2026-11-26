@@ -140,6 +140,10 @@ func (s *Store) RemoteFull() { s.remoteFull = true }
 // reported dead, the newest at lsn: its owner goes to no new shard while that blob can replay.
 func (s *Store) RemoveRemote(owner uint32, lsn uint64) { s.raft.RemoveRemote(owner, lsn) }
 
+// LeftOut reports whether every manifest a restart may load leaves out the removed shards of owner
+// on the round driver.
+func (s *Store) LeftOut(owner uint32) bool { return s.raft == nil || s.raft.LeftOut(owner) }
+
 // Reusable reports whether owner may be given to a new shard, hosted or on the round driver.
 func (s *Store) Reusable(owner uint32) bool { return s.raft == nil || s.raft.Reusable(owner) }
 

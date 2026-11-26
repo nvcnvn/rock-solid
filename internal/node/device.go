@@ -110,11 +110,21 @@ type Device struct {
 	rout    chunkstore.ReplicaOutput
 	rp      chunkstore.Report
 	frame   []byte
-	// metas are the MetaStore replicas by the slot their Raft timer names, groups each one's slot
-	// by its group, and sv the server of their Txns.
-	metas  []*meta.RoundShard
-	groups map[uint64]int
-	sv     *meta.Server
+	// metas are the MetaStore replicas by the slot their Raft timer names, a removed one keeping
+	// its slot and taking no event, groups each hosted one's slot by its group, sv the server of
+	// their Txns, and removed the replicas removed that a manifest a restart may load still names.
+	metas   []*meta.RoundShard
+	groups  map[uint64]int
+	sv      *meta.Server
+	removed []removedMeta
+}
+
+// removedMeta is a removed MetaStore replica: its group, replica ID and owner key, and whether
+// the store has taken its removal, which waits for its rounds in flight (loop.ReplyRemoved).
+type removedMeta struct {
+	group, id uint64
+	owner     uint32
+	reported  bool
 }
 
 // NewDevice starts recovering the device's store, or fails it at once on cfg.Err.
@@ -177,6 +187,35 @@ func (d *Device) Meta(group uint64) *meta.RoundShard {
 		return d.metas[i]
 	}
 	return nil
+}
+
+// RemoveMeta takes the device's replica of group off its loop and deletes it, answering every Txn
+// it holds dropped; false when the device hosts none. The disk's next manifest leaves it out.
+func (d *Device) RemoveMeta(ctx *core.Context, group uint64, out *DeviceOutput) bool {
+	i, ok := d.groups[group]
+	if !ok {
+		return false
+	}
+	a := d.metas[i]
+	delete(d.groups, group)
+	d.removed = append(d.removed, removedMeta{group: group, id: a.ReplicaID(), owner: a.Owner()})
+	out.Actions = a.Remove(ctx, out.Actions)
+	return true
+}
+
+// leftOut reports whether a restart would restore replica id of group no more, if the device
+// removed it: the manifest a restart loads leaves it out.
+func (d *Device) leftOut(group, id uint64) bool {
+	keep, ok := 0, true
+	for _, r := range d.removed {
+		if !r.reported || !d.st.LeftOut(r.owner) {
+			ok = ok && (r.group != group || r.id != id)
+			d.removed[keep] = r
+			keep++
+		}
+	}
+	d.removed = d.removed[:keep]
+	return ok
 }
 
 // host puts the replica cfg describes on the device's loop and makes it known to the store, in
@@ -244,7 +283,8 @@ func (d *Device) OnEvent(ctx *core.Context, ev *core.Event, out *DeviceOutput) {
 // recvGroup hands a MetaStore group's message to the device's replica of the group: a Txn through
 // the server, which answers one for a group hosted nowhere here as NotLeader; an ask about a
 // replica the device does not host, once its store serves and so has restored every replica the
-// disk holds, is answered Gone; another message for no replica here is dropped.
+// disk holds, is answered Gone, unless the device removed it and a restart would still restore
+// it; another message for no replica here is dropped.
 func (d *Device) recvGroup(ctx *core.Context, ev *core.Event, acts []core.Action) []core.Action {
 	in := ev.Msg.Inline()
 	var a *meta.RoundShard
@@ -252,11 +292,11 @@ func (d *Device) recvGroup(ctx *core.Context, ev *core.Event, acts []core.Action
 		a = d.Meta(binary.LittleEndian.Uint64(in[1:]))
 	}
 	var gone core.Action
-	switch _, id, asked := raftshard.Asked(&ev.Msg); {
+	switch group, id, asked := raftshard.Asked(&ev.Msg); {
 	case len(in) > 9 && in[9] == meta.KindTxn:
 		return d.sv.ServeRound(ctx, ev, a, acts)
 	case asked && d.phase == opened && (a == nil || a.ReplicaID() != id):
-		if raftshard.Gone(&ev.Msg, ev.Peer, &gone) {
+		if d.leftOut(group, id) && raftshard.Gone(&ev.Msg, ev.Peer, &gone) {
 			acts = append(acts, gone)
 		}
 	case a != nil:
@@ -287,6 +327,9 @@ func (d *Device) OnReply(r loop.Reply) {
 		d.st.RemoteCosts(r.Owner, r.Costs)
 	case loop.ReplyRemoved:
 		d.st.RemoveRemote(r.Owner, r.LSN)
+		for i := range d.removed {
+			d.removed[i].reported = d.removed[i].reported || d.removed[i].owner == r.Owner
+		}
 	}
 }
 

@@ -100,6 +100,9 @@ func NewRoundShard(l *loop.Loop, lg *loop.Log, cfg RoundConfig) *RoundShard {
 // ReplicaID is the replica's ID in its group.
 func (a *RoundShard) ReplicaID() uint64 { return a.cfg.Shard.Raft.ID }
 
+// Owner is the owner key its blobs carry on its disk's log.
+func (a *RoundShard) Owner() uint32 { return a.cfg.Owner }
+
 // ID is the replica's ShardID on its loop.
 func (a *RoundShard) ID() loop.ShardID { return a.id }
 
@@ -260,6 +263,26 @@ func (a *RoundShard) start(ctx *core.Context) {
 	}
 	a.shard, a.state = s, s.State()
 	s.Start(ctx, &a.out)
+}
+
+// ErrRemoved is why a replica taken off its loop by Remove stopped.
+var ErrRemoved = errors.New("meta: the replica was removed from its disk")
+
+// Remove takes the replica off its loop for good and deletes its state: every Txn it holds is
+// answered dropped, every blob of it reported dead, and its disk's owner told, with the newest
+// blob's LSN, that the replica is gone (loop.ReplyRemoved). It gives its page slabs back, and may
+// not be used after.
+func (a *RoundShard) Remove(ctx *core.Context, out []core.Action) []core.Action {
+	a.l.RemoveShard(a.id)
+	newest := a.rs.Delete()
+	a.fail(ErrRemoved)
+	out = a.answer(ctx, out)
+	if a.dead = a.rs.Dead(a.dead[:0]); len(a.dead) > 0 {
+		a.l.Dead(a.id, a.dead)
+	}
+	a.l.Reply(a.id, loop.Reply{Kind: loop.ReplyRemoved, Owner: a.cfg.Owner, LSN: newest})
+	a.Close()
+	return out
 }
 
 // Close gives the replica's page slabs back; it may not be used after.

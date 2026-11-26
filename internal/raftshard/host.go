@@ -39,6 +39,8 @@ type Host struct {
 	// unnamed is the owners of shards removed from the round driver that a manifest a restart may
 	// load can still name.
 	unnamed []unnamedOwner
+	// leaving says the running checkpoint is the first to leave out a removed shard.
+	leaving bool
 	// remote is the shards on the round driver, remoteAt each one's place by owner, and mail
 	// what a restart's replay sends them.
 	remote   []remoteShard
@@ -354,9 +356,14 @@ func (h *Host) Mail(dst []Mail) []Mail {
 // reports the pieces the manifest left out (RemoteDead). The first manifest naming a replica asks
 // the log to name it in a segment header (disklog.Log.NameNewest), as only one a header names is
 // the one a restart loads, so a round the shard starts after the mail is durable only once a
-// restart restores the shard.
+// restart restores the shard; so does the first manifest leaving out a removed one, so a restart
+// soon restores it no more.
 func (h *Host) Checkpointed(base uint64) {
 	h.cp = 0
+	if h.leaving {
+		h.leaving = false
+		h.Log.NameNewest()
+	}
 	for i := range h.remote {
 		rs := &h.remote[i]
 		if rs.flush == nil {
@@ -1072,7 +1079,7 @@ func (h *Host) Indexes(dst []disklog.CheckpointIndex, durable uint64) []disklog.
 func (h *Host) RemoteIndexes(dst []disklog.CheckpointIndex, durable uint64) []disklog.CheckpointIndex {
 	for i := range h.unnamed {
 		if h.unnamed[i].after == 0 {
-			h.unnamed[i].after = durable
+			h.unnamed[i].after, h.leaving = durable, true
 		}
 	}
 	for _, rs := range h.remote {
@@ -1147,9 +1154,29 @@ func (h *Host) Reusable(owner uint32) bool {
 			return false
 		}
 	}
-	var floor, named uint64
+	var floor uint64
 	if h.Log != nil {
-		floor, named = h.Log.ReplayFloor(), h.Log.NamedLSN()
+		floor = h.Log.ReplayFloor()
+	}
+	ok := h.LeftOut(owner)
+	keep := 0
+	for _, r := range h.retired {
+		if r.lsn > floor {
+			ok = ok && r.owner != owner
+			h.retired[keep] = r
+			keep++
+		}
+	}
+	h.retired = h.retired[:keep]
+	return ok
+}
+
+// LeftOut reports whether every manifest a restart may load leaves out the removed shards of owner
+// on the round driver, so a restart restores none of them.
+func (h *Host) LeftOut(owner uint32) bool {
+	var named uint64
+	if h.Log != nil {
+		named = h.Log.NamedLSN()
 	}
 	keep, ok := 0, true
 	for _, u := range h.unnamed {
@@ -1160,15 +1187,6 @@ func (h *Host) Reusable(owner uint32) bool {
 		}
 	}
 	h.unnamed = h.unnamed[:keep]
-	keep = 0
-	for _, r := range h.retired {
-		if r.lsn > floor {
-			ok = ok && r.owner != owner
-			h.retired[keep] = r
-			keep++
-		}
-	}
-	h.retired = h.retired[:keep]
 	return ok
 }
 
