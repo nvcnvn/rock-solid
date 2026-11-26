@@ -1138,7 +1138,7 @@ func (x *Index) Check() error {
 				return fmt.Errorf("decision %x: interval %x", k, v)
 			}
 			prefix = prefix[:0]
-		case core.PoolID(binary.BigEndian.Uint32(k)) == ResendPool && (len(k) == resendWatermarkSize && len(v) == 8 || len(k) == resendKeySize && len(v) == resendValueSize):
+		case (len(k) == resendWatermarkSize && len(v) == 8 || len(k) == resendKeySize && len(v) == resendValueSize) && core.PoolID(binary.BigEndian.Uint32(k)) == ResendPool:
 			if k[8] > 31 || binary.BigEndian.Uint32(k[9:]) >= 1<<k[8] {
 				return fmt.Errorf("resend table key %x outside its PGs", k)
 			}
