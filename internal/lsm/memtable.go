@@ -50,7 +50,8 @@ type memtable struct {
 }
 
 func newMemtable(pg *pages) *memtable {
-	m := &memtable{pg: pg, gen: 1, refs: 1, froot: noPage}
+	m := &memtable{pg: pg, gen: 1, refs: 1, froot: noPage,
+		elist: make([][]byte, 0, maxEntries+1), slist: make([][]byte, 0, 2*maxEntries+1)}
 	m.root = pg.alloc(leafPage, m.gen)
 	return m
 }

@@ -12,13 +12,16 @@ import (
 // entry. Every inner key equals the smallest key of its child's subtree, since memtables never
 // drop a key: a removal is an entry too.
 const (
-	pageSize  = 4096
-	pageHdr   = 16
-	pageCap   = pageSize - pageHdr
-	slabPages = 256
-	leafPage  = 1
-	innerPage = 2
-	maxDepth  = 40
+	pageSize = 4096
+	pageHdr  = 16
+	pageCap  = pageSize - pageHdr
+	// maxEntries bounds a page's entries: the smallest, a leaf entry of an empty key, takes 5 bytes
+	// and its slot 2.
+	maxEntries = pageCap / 7
+	slabPages  = 256
+	leafPage   = 1
+	innerPage  = 2
+	maxDepth   = 40
 )
 
 type page [pageSize]byte

@@ -907,3 +907,34 @@ func TestFlushFailedAfterARunCompleted(t *testing.T) {
 	roots, _ := f.checkpoint(t, tr, nil)
 	checkReads(t, f.restore(t, 512, roots), m, []string{"a0", "b"})
 }
+
+// A memtable's scratch lists hold a page's entries however small they are: once Puts of large
+// entries have split pages, Puts filling pages with more entries than any before allocate nothing.
+func TestPutsOfTheSmallestEntriesAllocateNothing(t *testing.T) {
+	tr, err := New(Config{MaxPiece: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(tr.Close)
+	k := make([]byte, 3)
+	for i := range 16 {
+		k[0], k[1], k[2] = 0xff, 0xff, byte(i)
+		if err := tr.Put(k, make([]byte, 1000)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	order := rand.New(rand.NewPCG(1, 2)).Perm(1 << 14)
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for _, i := range order {
+		k[0], k[1] = byte(i>>8), byte(i)
+		if err := tr.Put(k[:2], nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime.ReadMemStats(&after)
+	if n := after.Mallocs - before.Mallocs; n != 0 {
+		t.Fatalf("%d heap allocations over %d puts", n, len(order))
+	}
+}
