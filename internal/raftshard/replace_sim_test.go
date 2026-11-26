@@ -45,10 +45,14 @@ type replacement struct {
 	swappedAt                                             core.Tick
 	healed, deleted                                       bool
 	// wedged is the leader the wedge fault took, or -1, wedgeLeave the index of the leave it
-	// applied, and stopped whether it halted or stood still.
-	wedged     int
-	wedgeLeave uint64
-	stopped    bool
+	// applied, stopped whether it halted or stood still, and halted whether it halted.
+	wedged          int
+	wedgeLeave      uint64
+	stopped, halted bool
+	// haltedShard is the shard the wedged replica halted, restartedShard the one it runs since its
+	// next restart, and still the term, vote and last index that restarted shard's storage held at first.
+	haltedShard, restartedShard *Shard
+	still                       [3]uint64
 	// planLed is whether a replica led having applied the plan's configuration once the faults stopped.
 	planLed bool
 	// removed is whether the cut-off replica reported itself removed, dropped whether a replica
@@ -177,12 +181,31 @@ func (c *simCluster) replace() {
 			c.s.Pause(uint32(p.wedged), clock.Suspend, 100_000_000, true)
 		} else {
 			c.reps[p.wedged].s.Halt()
+			p.halted, p.haltedShard = true, c.reps[p.wedged].s
 		}
 	}
 	if p.plan != nil && !p.deleted && c.reps[p.dead].s.removed && !slices.ContainsFunc(p.plan, func(v Peer) bool { return !p.holds(c.reps[v.ID-1]) }) {
 		d := c.reps[p.dead]
 		p.deleted, d.deleted, d.leads = true, true, false
 	}
+}
+
+// haltedStill checks invHaltedStill: the entry a halted replica could not decode is still in its
+// log, so after a restart its storage takes no vote, term or append.
+func (c *simCluster) haltedStill() error {
+	p := c.rep
+	r := c.reps[max(p.wedged, 0)]
+	if !p.halted || r.s == nil || r.s == p.haltedShard {
+		return nil
+	}
+	st := c.storage[p.wedged]
+	now := [3]uint64{st.hs.Term, st.hs.Vote, st.last()}
+	if r.s != p.restartedShard {
+		p.restartedShard, p.still = r.s, now
+	} else if now != p.still {
+		return fmt.Errorf("replica %d halted and restarted with term, vote and last index %v, now %v", r.id+1, p.still, now)
+	}
+	return nil
 }
 
 // newLeader checks invNewLeader, noting in planLed once a replica led having applied the plan's configuration.
@@ -379,9 +402,10 @@ func planned(plan []Peer) []uint64 {
 // Seeds that found bugs: 6389, a lease-reading leader behind a follower that applied first (the run
 // has since changed and no longer reaches it), and only a leader's applies count against it; 8218, a leader whose configuration change of an
 // earlier term was lost, and which then proposed none again; 1005, a leader the plan dropped
-// that waited for a follower to reach its own durable index, which steady writes never allowed.
+// that waited for a follower to reach its own durable index, which steady writes never allowed;
+// 391702, a halted replica the run crashed, which came back unhalted and voted.
 func TestVoterReplacementRegressionSeeds(t *testing.T) {
-	for _, seed := range []uint64{6389, 8218, 1005} {
+	for _, seed := range []uint64{6389, 8218, 1005, 391702} {
 		if c := newReplaceCluster(seed, plants{}, faults(), true, false).run(t, seed); !c.done {
 			t.Fatalf("seed %d: swapped at %d, removed %v, the new replica caught up %v", seed, c.rep.swappedAt, c.rep.removed, c.rep.caughtUp)
 		}

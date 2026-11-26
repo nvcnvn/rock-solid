@@ -159,6 +159,7 @@ func newCluster(seed uint64, p plants, set sim.Settings, rep *replacement, disk 
 	if rep != nil {
 		nodes++
 		c.inv.Register(invNewLeader, c.newLeader)
+		c.inv.Register(invHaltedStill, c.haltedStill)
 	}
 	c.storage, c.reps = make([]*Storage, nodes), make([]*simReplica, nodes)
 	disks := []sim.DiskSpec{{Blocks: 16, Settings: sim.DefaultDiskSettings()}}
@@ -213,6 +214,10 @@ func (r *simReplica) start(ctx *core.Context) {
 		s.SetPlan(r.c.rep.plan)
 	}
 	s.Start(ctx, &r.out)
+	if p := r.c.rep; p != nil && p.halted && r.id == p.wedged {
+		// The entry its state machine cannot decode is still in the log, so it halts again.
+		s.Halt()
+	}
 }
 
 // run steps the group under faults for simRunFor, then heals every partition and, while it is not
@@ -407,6 +412,7 @@ const (
 	invOneLeaseReader         = "no two replicas of a shard serve lease reads at overlapping times"
 	invLeaseReadsCurrent      = "a lease read sees every applied entry"
 	invNewLeader              = "a replica leads having applied the plan's configuration within newLeaderBound of the faults stopping"
+	invHaltedStill            = "a halted replica neither votes nor takes appends after it restarts"
 	// newLeaderBound is 15 election timeouts, past the longest wait a run allows once its faults
 	// stop: a pause drawn before then holds a leader's node up to 5 s, its followers' grants to it
 	// lapse primary_lease and a heartbeat after its last renewal, they campaign raft_lapse_campaign
