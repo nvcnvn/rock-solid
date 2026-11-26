@@ -440,12 +440,14 @@ type incWriter struct {
 	ops     map[core.RequestID]faultOp
 	reissue []faultOp
 	hello   bool
+	// idle is when a writer that found its write's PG with no primary tries again.
+	idle core.Tick
 }
 
 func (w *incWriter) Ready() bool {
 	c := w.r.d.rcluster
 	now := c.s.Time()
-	if now < w.start || now >= w.stop {
+	if now < w.start || now >= w.stop || now < w.idle {
 		return false
 	}
 	out := 0
@@ -488,6 +490,7 @@ func (w *incWriter) Next(ctx *core.Context, acts []core.Action) []core.Action {
 	_, e := c.table.entry(pg)
 	lead, ok := e.primary()
 	if !ok {
+		w.idle = c.s.Time() + 1_000
 		return acts
 	}
 	c.nextID++
