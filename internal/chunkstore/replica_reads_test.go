@@ -59,6 +59,8 @@ type readRun struct {
 	// reqSession is the session of each write a primary took, and verSession of each it ordered.
 	reqSession map[opKey]uint64
 	verSession map[chunkVersion]uint64
+	// clientPlant is planted in the chunk clients of a run whose writers are clients.
+	clientPlant clientPlants
 }
 
 // readVersion is a read's PG and chunk and, once answered OK, the version it returned.
@@ -410,7 +412,7 @@ func (r *readRun) rejoined(n int) bool {
 // tendSessions fences session 1 at die and hands the table to each running node not cut off once
 // its own delay of up to a heartbeat has passed, starting the second writer once every node with a
 // disk up holds it.
-func (r *readRun) tendSessions(die core.Tick, second *incWriter) {
+func (r *readRun) tendSessions(die core.Tick, second *core.Tick) {
 	c, now := r.d.rcluster, r.d.s.Time()
 	if now < die {
 		return
@@ -426,8 +428,8 @@ func (r *readRun) tendSessions(die core.Tick, second *incWriter) {
 			r.fenceNode(n)
 		}
 	}
-	if second.start == math.MaxInt64 && r.fenced() {
-		second.start = now
+	if *second == math.MaxInt64 && r.fenced() {
+		*second = now
 	}
 }
 
@@ -581,6 +583,11 @@ func runReads(t *testing.T, seed uint64, plant *readPlant) error {
 // runReadsWith is runReads, with fence the second writer a new session, which writes once every
 // node with a disk up holds the session table that fences the first.
 func runReadsWith(t *testing.T, seed uint64, fence bool, plant *readPlant) error {
+	return runReadRun(t, seed, fence, false, plant)
+}
+
+// runReadRun is runReadsWith, with clients the writers chunk clients.
+func runReadRun(t *testing.T, seed uint64, fence, clients bool, plant *readPlant) error {
 	set := noisy()
 	r := &readRun{rng: core.NewRand(seed ^ 0x4ead), reads: map[core.RequestID]readVersion{}, writes: map[core.RequestID]incWrite{}, acked: map[chunkVersion]bool{}, faulted: -1,
 		fence: fence, applied: map[*Store]map[uint64]bool{}, reqSession: map[opKey]uint64{}, verSession: map[chunkVersion]uint64{}}
@@ -649,8 +656,13 @@ func runReadsWith(t *testing.T, seed uint64, fence bool, plant *readPlant) error
 		first.stop += core.Tick(r.rng.Below(2_000_000))
 		second.session, second.start = 2, math.MaxInt64
 	}
-	c.addClient(first)
-	c.addClient(second)
+	var cn *clientNode
+	if clients {
+		cn = newClientNode(r, first, second)
+	} else {
+		c.addClient(first)
+		c.addClient(second)
+	}
 	c.addClient(&pgReader{r: r, rng: r.rng.Fork()})
 	r.next = now + 1_000_000
 	end := now + 30_000_000
@@ -659,10 +671,16 @@ func runReadsWith(t *testing.T, seed uint64, fence bool, plant *readPlant) error
 		if t := c.table; t.Epoch != r.tables[len(r.tables)-1].Epoch {
 			r.tables = append(r.tables, t)
 		}
-		if fence {
-			r.tendSessions(die, second)
+		start := &second.start
+		if clients {
+			start = &cn.ws[1].start
 		}
-		if second.reissue == nil && c.s.Time() >= second.start {
+		if fence {
+			r.tendSessions(die, start)
+		}
+		if clients {
+			cn.tend()
+		} else if second.reissue == nil && c.s.Time() >= second.start {
 			second.reissue = []faultOp{}
 			for _, id := range slices.Sorted(maps.Keys(first.at)) {
 				if _, done := c.cl.replies[id]; !done {

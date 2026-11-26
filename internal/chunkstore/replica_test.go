@@ -108,6 +108,9 @@ type rclient struct {
 	// heard a final answer.
 	detach      func(core.IOBuf)
 	once, stale error
+	// route, when set, takes each event first, but a reply the client does not report taking,
+	// which it takes once it has checked it.
+	route func(ctx *core.Context, ev *core.Event, out []core.Action) ([]core.Action, bool)
 }
 
 func (c *rclient) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
@@ -115,6 +118,9 @@ func (c *rclient) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) 
 		c.lost(ev.Peer)
 	}
 	if ev.Kind != core.EvNetRecv {
+		if c.route != nil {
+			out, _ = c.route(ctx, ev, out)
+		}
 		return out
 	}
 	frame, data := Frame(ctx.Pool, &ev.Msg)
@@ -133,6 +139,11 @@ func (c *rclient) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) 
 	}
 	if !dup || !final(old.Status) {
 		c.replies[rp.ID] = rp
+	}
+	if c.route != nil {
+		if out, ok := c.route(ctx, ev, out); ok {
+			return out
+		}
 	}
 	if ev.Msg.Buf != core.NoBuf {
 		c.data[rp.ID] = slices.Clone(ctx.Pool.Bytes(ev.Msg.Buf))
