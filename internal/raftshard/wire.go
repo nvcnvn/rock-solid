@@ -141,3 +141,11 @@ func decode(pool core.BufPool, msg *core.Msg, m *raftpb.Message, f *fortify) (ui
 	}
 	return group, kindRaft, nil
 }
+
+// Appends reports whether msg is a Raft MsgApp, which a replica whose disk holds its share of
+// retained entries drops, as Raft takes a lost message.
+func Appends(pool core.BufPool, msg *core.Msg) bool {
+	var m raftpb.Message
+	_, kind, err := decode(pool, msg, &m, &fortify{})
+	return err == nil && kind == kindRaft && m.Type == raftpb.MsgApp
+}

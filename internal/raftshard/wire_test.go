@@ -88,3 +88,32 @@ func BenchmarkEncode(b *testing.B) {
 		})
 	}
 }
+
+// TestAppendsIsAMsgAppOnly reports a Raft append as one, inline or in a buffer, and no other
+// message: not a heartbeat, a snapshot or a fortification message.
+func TestAppendsIsAMsgAppOnly(t *testing.T) {
+	pool := sim.NewPool(1<<20, 0)
+	for _, c := range []struct {
+		m    raftpb.Message
+		want bool
+	}{
+		{raftpb.Message{Type: raftpb.MsgApp, To: 2, From: 1, Term: 3, Index: 6, LogTerm: 3}, true},
+		{raftpb.Message{Type: raftpb.MsgApp, To: 2, From: 1, Term: 3, Index: 6, LogTerm: 3, Entries: []raftpb.Entry{{Term: 3, Index: 7, Data: bytes.Repeat([]byte{9}, 400)}}}, true},
+		{raftpb.Message{Type: raftpb.MsgHeartbeat, To: 2, From: 1, Term: 3, Commit: 7}, false},
+		{raftpb.Message{Type: raftpb.MsgSnap, To: 2, From: 1, Term: 3, Snapshot: &raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: 9, Term: 3}}}, false},
+	} {
+		var msg core.Msg
+		encode(pool, testGroup, &c.m, &msg)
+		if got := Appends(pool, &msg); got != c.want {
+			t.Errorf("Appends(%v) = %v", c.m.Type, got)
+		}
+		if msg.Buf != core.NoBuf {
+			pool.Free(msg.Buf)
+		}
+	}
+	var msg core.Msg
+	encodeFortify(testGroup, &fortify{kind: kindFortify, from: 1, to: 2, term: 3}, &msg)
+	if Appends(pool, &msg) {
+		t.Error("a fortification message is an append")
+	}
+}
