@@ -160,3 +160,11 @@ epoch/neg-give-up-candidate	chunkstore.giveUpWithCandidate	TestPlantedGiveUpBugs
 epoch/neg-skip-past-give-up	chunkstore.skipPastGiveUp	TestPeeringPastAGiveUpKeepsLaterWrites
 epoch/neg-give-up-not-stopped	chunkstore.giveUpNotStopped	TestPlantedGiveUpBugsLoseWrites
 epoch/neg-report-across-split	chunkstore.reportAcrossSplit	TestPlantedReportAcrossSplitRecordsAnActivationThatNeverCame
+epoch/neg-resend-reorders	open	Resend table
+epoch/neg-resend-dropped	open	Resend table
+epoch/neg-resend-at-once	open	Resend table
+epoch/neg-resend-recovery-ids	open	Resend table
+epoch/neg-resend-recovery-live-only	open	Resend table
+epoch/neg-resend-recovery-whole-range	open	Resend table
+epoch/neg-resend-no-watermark	open	Resend table
+epoch/neg-resend-trim-on-answer	open	Resend table

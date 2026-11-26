@@ -3,8 +3,9 @@
 \* detection": placement tables numbering each PG's intervals, requests checked
 \* against their PG's interval, peering across every interval since the last
 \* activated one, missing lists, versions merged on the version below them,
-\* incarnation fencing of client writes, per-node-pair read leases counted on
-\* two clocks per node, and Raft leader fortification on the same leases.
+\* incarnation fencing of client writes, resent client writes answered from a
+\* resend table, per-node-pair read leases counted on two clocks per node, and
+\* Raft leader fortification on the same leases.
 \*
 \* Each element of Bugs removes or breaks one rule; a negative configuration
 \* sets one and names the property it must violate.
@@ -110,6 +111,8 @@ VARIABLES
     gat,      \* [Disk -> SUBSET [c, v]]: versions a store keeps gated, unsettled, after a restart or a lost lead
     failed,   \* [Disk -> SUBSET [c, v]]: versions of its current intervals a member refused or
               \* failed, in memory only
+    ids,      \* [Disk -> SUBSET [c, v, w]]: the disk's resend table, the write each version it logged took
+    wm,       \* [Disk -> SUBSET 1..Len(Writes)]: the writes at or below their session's trimmed watermark
     \* Primaries
     pr,       \* [Node -> [PG -> [iv, act, srv, since, ask]]]; ask: the interval ended under it
     pv,       \* [Node -> [Chunk -> Nat]]: newest version a primary ordered
@@ -142,7 +145,7 @@ VARIABLES
     rterm, rlead, fort, fby, xfer, xto
 
 ctlVars == <<tbl, ivs, reqIv, reports, recd, plan, step>>
-nodeVars == <<ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, dlog, rcv, miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat, failed>>
+nodeVars == <<ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, dlog, rcv, miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat, failed, ids, wm>>
 priVars == <<pr, pv, pin, known, dec, act>>
 dataVars == <<rm, vers, ackd, wst, sends, dmn, bad, pend, refd, ownw>>
 leaseVars == <<gr, hl, rw>>
@@ -329,6 +332,8 @@ Init ==
     /\ mrecv = [d \in Disk |-> {}]
     /\ gat = [d \in Disk |-> {}]
     /\ failed = [d \in Disk |-> {}]
+    /\ ids = [d \in Disk |-> {}]
+    /\ wm = [d \in Disk |-> {}]
     /\ pr = [n \in Node |-> [p \in PG |->
               IF InitMem[p][1] = n THEN [NoPr EXCEPT !.iv = 1, !.act = TRUE, !.srv = TRUE, !.since = 1]
               ELSE NoPr]]
@@ -630,7 +635,7 @@ Lost(d) ==
     /\ dnode[d] # 0
     /\ \A p \in PG : d \in Mem(p, Cur(p)) => St(p, Cur(p), d) = "down"
     /\ dnode' = [dnode EXCEPT ![d] = 0]
-    /\ UNCHANGED <<tbl, ivs, reqIv, reports, recd, plan, ep, ddisk, dhost, fmts, stale, run, rsIv, dlog, rcv,
+    /\ UNCHANGED <<ids, wm, tbl, ivs, reqIv, reports, recd, plan, ep, ddisk, dhost, fmts, stale, run, rsIv, dlog, rcv,
                    miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat, failed, priVars, dataVars, leaseVars, clockVars, raftVars>>
 
 LostPlanned ==
@@ -710,8 +715,9 @@ Adopt(n, e) ==
           /\ drp' = [drp EXCEPT ![d] = {g \in @ : g.c \notin W}]
           /\ rdrp' = [rdrp EXCEPT ![d] = {g \in @ : g.c \notin W}]
           /\ imf' = [imf EXCEPT ![d] = @ \ W]
+          /\ ids' = [ids EXCEPT ![d] = {g \in @ : g.c \notin W}]
     /\ failed' = [failed EXCEPT ![ddisk[n]] = {f \in @ : tbl[e][ChunkPG[f.c]].iv = IvOfV(f.v)}]
-    /\ UNCHANGED <<ctlVars, dnode, ddisk, dhost, fmts, stale, run, rsIv, persIv, mrecv,
+    /\ UNCHANGED <<wm, ctlVars, dnode, ddisk, dhost, fmts, stale, run, rsIv, persIv, mrecv,
                    pv, dec, act, rm, vers, ackd, wst, sends, dmn, bad, ownw, leaseVars, clockVars, raftVars>>
 
 -----------------------------------------------------------------------------
@@ -793,6 +799,26 @@ RcvDropped(d, c) ==
 Uncopied(d, c) == IF RcvDropped(d, c) THEN {v \in dlog[d][c] : IvOfV(v) < rcv[d][c].k} ELSE {}
 
 Held(d, c) == dlog[d][c] \ (DropsOf(d, c) \cup Uncopied(d, c))
+
+\* The resend table: each version's log entry carries its writer's identity,
+\* and every disk keeps the identities of the versions it logs (ids). A
+\* version leaves the table where the disk stops holding it: the rewrites of
+\* its log remove the entry (OwnFail, a give-up's Adopt, recovery), and the
+\* drops leave it in ids but out of Known, as DropsOf and Uncopied derive
+\* them: a settle's drops, a member's at its decision marker, the left-gated
+\* ones, replay gating, and a dropped recovery write taking the versions it
+\* copied. A session's update trims the entries below its oldest outstanding
+\* request ID and raises the session's watermark (Trim); a write at or below
+\* it is answered stale, never ordered (Stale). Each write is its own
+\* session's request here, so a watermark is a set of writes. KeepDroppedIds
+\* answers from an entry whose version was dropped.
+Known(d, c) ==
+    {g.v : g \in {y \in ids[d] : y.c = c /\ (y.v \notin DropsOf(d, c) \cup Uncopied(d, c) \/ Bug("KeepDroppedIds"))}}
+AddIds(d, c, v, w) == IF w \in wm[d] THEN ids ELSE [ids EXCEPT ![d] = @ \cup {[c |-> c, v |-> v, w |-> w]}]
+\* The versions of the write x names that n's resend table knows on its own disk.
+KnownOf(n, x) ==
+    LET c == Writes[x.w].c
+    IN {v \in Known(ddisk[n], c) : WOf(c, v) = x.w}
 
 \* A member's reply to peering, for one chunk: its newest whole version, the
 \* kept version it lists (NoMiss for none) and the newest interval whose
@@ -1071,7 +1097,7 @@ PeerOn(n, p, J, P, U) ==
           ELSE /\ PersistAll(P, p, k, lists, img, TRUE)
                /\ Activated(n, p, k, K, lists)
                /\ UNCHANGED mrecv
-       /\ UNCHANGED <<tbl, ivs, plan, step, reqIv, recd, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv,
+       /\ UNCHANGED <<ids, wm, tbl, ivs, plan, step, reqIv, recd, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv,
                       dlog, rcv, failed, pin, known, rm, vers, sends, dmn, rw, clockVars, raftVars>>
 
 Peer(n, p) ==
@@ -1095,7 +1121,7 @@ Activate(n, p) ==
        /\ PersistAll(R, p, k, lists, TheDec(n, p, k).img, TRUE)
        /\ UNCHANGED ownw
        /\ Activated(n, p, k, K, lists)
-       /\ UNCHANGED <<tbl, ivs, plan, step, reqIv, recd, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv,
+       /\ UNCHANGED <<ids, wm, tbl, ivs, plan, step, reqIv, recd, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv,
                       dlog, rcv, mrecv, failed, pv, pin, known, dec, rm, vers, sends, dmn, bad, leaseVars,
                       clockVars, raftVars>>
 
@@ -1115,7 +1141,7 @@ Persist(d) ==
                                    \cup {c \in x.img : d = PrimDisk(x.p, x.k) /\ x.ent[c] # NoMiss}]
        /\ gat' = [gat EXCEPT ![d] = {g \in @ : ChunkPG[g.c] # x.p}]
        /\ mrecv' = [mrecv EXCEPT ![d] = mrecv[d] \ {x}]
-       /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, dlog, rcv, failed, priVars,
+       /\ UNCHANGED <<ids, wm, ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, dlog, rcv, failed, priVars,
                       dataVars, leaseVars, clockVars, raftVars>>
 
 \* The disks to try bringing back: the members down or in maintenance whose
@@ -1194,7 +1220,14 @@ GiveUpPlanned ==
 \* RecoverNoSource, a chunk something was kept of needs none, so the write
 \* clears the list with no read. With RecoveryReadOldDisk, a read for a source
 \* formatted again is answered by its node's new, empty disk, and taken for the
-\* kept version.
+\* kept version. The write carries the source's watermarks for the PG and its
+\* resend table's entries for the chunk at or below the kept version, those
+\* of overwritten versions too, and the target drops its own entries for the
+\* chunk whose versions the write does not leave on it; KeepDroppedIds keeps
+\* them. With RecoveryForgetsIds the write carries no entry or watermark, with
+\* RecoveryLiveOnly only the entries of the versions the chunk's live map
+\* reads, and with RecoveryWholeRange the source's whole table for the PG, from
+\* a source other than the target.
 RecoverFrom(n, p, c, d, m, rv) ==
     LET k == IvAt(n, p)
         K == miss[d][c]
@@ -1224,6 +1257,15 @@ RecoverFrom(n, p, c, d, m, rv) ==
                              {v \in dlog[s][c] \ Uncopied(s, c) : v <= K \/ Bug("RecoverFromListed")
                                                   \/ (K # 0 /\ s = PrimDisk(p, k) /\ c \in TheDec(n, p, k).img /\ v \in Held(s, c) /\ IvOfV(v) < k)}
                              \cup {v \in dlog[d][c] : IvOfV(v) = k /\ (v <= at \/ ~Bug("RecoveryCoversAtRead"))}]
+               /\ LET W == wm[d] \cup IF Bug("RecoveryForgetsIds") THEN {} ELSE {i \in wm[s] : ChunkPG[Writes[i].c] = p}
+                      live == {Content(c, dlog'[d][c])[b] : b \in 1..Blocks[c]}
+                      E == IF Bug("RecoveryForgetsIds") THEN {}
+                           ELSE IF Bug("RecoveryLiveOnly") THEN {g \in ids[s] : g.c = c /\ g.v \in live}
+                           ELSE IF Bug("RecoveryWholeRange") THEN {g \in ids[s] : s # d /\ ChunkPG[g.c] = p /\ g.v \in Held(s, g.c)}
+                           ELSE {g \in ids[s] : g.c = c /\ g.v <= K /\ g.v \in Held(s, c)}
+                      own == {g \in ids[d] : g.c # c \/ g.v \in dlog'[d][c] \/ Bug("KeepDroppedIds")}
+                  IN /\ wm' = [wm EXCEPT ![d] = W]
+                     /\ ids' = [ids EXCEPT ![d] = {g \in own \cup E : g.w \notin W}]
        /\ rcv' = [rcv EXCEPT ![d][c] = [v |-> rv, k |-> k]]
        /\ miss' = [miss EXCEPT ![d][c] = NoMiss]
        /\ drp' = [drp EXCEPT ![d] = {g \in @ : g.c # c}]
@@ -1366,16 +1408,23 @@ LoggedByAll(r, logs) == \A d \in UpIn(ChunkPG[r.c], IvOfV(r.v)) : r.v \in logs[d
 \* the chunk's earlier versions: the store maps committed versions in version
 \* order and answers clients after, though its own records may become durable
 \* out of that order, as a write covering part of a block waits for its base.
-Answer(r) ==
+AnswerAs(r, heard) ==
     /\ r \in pend
     /\ r \notin ownw
     /\ Running(r.n)
     /\ LoggedByAll(r, dlog)
     /\ ~\E x \in pend : x.n = r.n /\ x.c = r.c /\ x.v < r.v
     /\ ackd' = ackd \cup {[c |-> r.c, v |-> r.v]}
-    /\ wst' = [wst EXCEPT ![r.w] = 2]
+    /\ wst' = IF heard THEN [wst EXCEPT ![r.w] = 2] ELSE wst
     /\ pend' = pend \ {r}
     /\ UNCHANGED <<ctlVars, nodeVars, priVars, rm, vers, sends, dmn, bad, refd, ownw, leaseVars, clockVars, raftVars>>
+Answer(r) == AnswerAs(r, TRUE)
+
+\* With "lose", the answer is lost on the way: the client never hears of it
+\* and may send the write again.
+LoseAnswer(r) ==
+    /\ "lose" \in plan.f
+    /\ AnswerAs(r, FALSE)
 
 \* The active primary orders a client write: the chunk's next version, merged
 \* on the newest version it holds that peering did not drop. A write waits while
@@ -1389,6 +1438,8 @@ Answer(r) ==
 \* waits while the chunk has fewer than min_live copies, as Copies counts them,
 \* until recovery clears enough members' lists (Degraded): an OK resting on
 \* members that list the chunk leaves it unfound when its one clean copy is lost.
+\* A write sent again whose identity the primary's resend table knows is not
+\* ordered (Reanswer); NoResendTable orders it again.
 Order(n, x) ==
     LET w == Writes[x.w]
         c == w.c
@@ -1408,6 +1459,8 @@ Order(n, x) ==
        /\ ~pr[n][p].ask \/ Bug("OrderPastFailed")
        /\ own = PrimDisk(p, k)
        /\ ~Fenced(n, x)
+       /\ sends[x.w] = 1 \/ KnownOf(n, x) = {} \/ Bug("NoResendTable")
+       /\ x.w \notin wm[own]
        /\ \/ miss[own][c] = NoMiss
           \/ Bug("ListerOrders") /\ (w.whole \/ c \in y.img \/ Bug("MergeBeforeKept"))
        /\ ~Degraded(p, k, c) \/ Bug("NoDegradedHold")
@@ -1416,12 +1469,82 @@ Order(n, x) ==
        /\ pv' = [pv EXCEPT ![n][c] = v]
        /\ vers' = vers \cup {r}
        /\ dlog' = logs
+       /\ ids' = AddIds(own, c, v, x.w)
        /\ rm' = rm \cup {[p |-> p, c |-> c, v |-> v, e |-> ep[n], iv |-> k, from |-> n, r |-> run[n], to |-> d] :
                           d \in UpIn(p, k) \ {own}}
        /\ pend' = pend \cup {r}
        /\ ownw' = ownw \cup {r}
-       /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, rcv, miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat, failed,
+       /\ UNCHANGED <<wm, ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, rcv, miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat, failed,
                       pr, known, dec, act, ackd, wst, sends, dmn, bad, refd, leaseVars, clockVars, raftVars>>
+
+\* A write sent again that an earlier attempt took effect for is answered with
+\* that attempt's version, not ordered, when the primary would order it: after
+\* the same holds, and once that version is mapped, so a resend of a pending one
+\* waits for its outcome. A version peering dropped has left Known, so its
+\* write is ordered afresh. ResendAtOnce answers before the version is mapped.
+\* With "lose", this answer too can be lost, while the client may send again.
+ReanswerAs(n, x, heard) ==
+    LET c == Writes[x.w].c
+        p == ChunkPG[c]
+        k == IvAt(n, p)
+        own == ddisk[n]
+        V == KnownOf(n, x)
+    IN /\ ~Bug("NoResendTable")
+       /\ Running(n)
+       /\ x \in pin[n]
+       /\ sends[x.w] > 1
+       /\ V # {}
+       /\ Leads(n, p)
+       /\ pr[n][p].act
+       /\ ~pr[n][p].ask
+       /\ own = PrimDisk(p, k)
+       /\ ~Fenced(n, x)
+       /\ miss[own][c] = NoMiss
+       /\ ~Degraded(p, k, c)
+       /\ Max(V) \notin Gated(n, c) \/ Bug("ResendAtOnce")
+       /\ pin' = [pin EXCEPT ![n] = @ \ {x}]
+       /\ ackd' = ackd \cup {[c |-> c, v |-> Max(V)]}
+       /\ wst' = IF heard THEN [wst EXCEPT ![x.w] = 2] ELSE wst
+       /\ UNCHANGED <<ctlVars, nodeVars, pr, pv, known, dec, act, rm, vers, sends, dmn, bad, pend, refd, ownw,
+                      leaseVars, clockVars, raftVars>>
+Reanswer(n, x) == ReanswerAs(n, x, TRUE)
+\* A lost answer to the last send allowed is left out: the client could do
+\* nothing with it.
+LoseReanswer(n, x) ==
+    /\ "lose" \in plan.f
+    /\ sends[x.w] < MaxSend
+    /\ ReanswerAs(n, x, FALSE)
+
+\* A write at or below its session's watermark on the primary's disk is
+\* answered stale and never ordered: its client heard an earlier attempt's
+\* answer before an update trimmed it, so it takes the stale answer as final.
+Stale(n, x) ==
+    /\ Running(n)
+    /\ x \in pin[n]
+    /\ x.w \in wm[ddisk[n]]
+    /\ pin' = [pin EXCEPT ![n] = @ \ {x}]
+    /\ bad' = IF wst[x.w] = 2 THEN bad ELSE bad \cup {"stale"}
+    /\ UNCHANGED <<ctlVars, nodeVars, pr, pv, known, dec, act, rm, vers, ackd, wst, sends, dmn, pend, refd, ownw,
+                   leaseVars, clockVars, raftVars>>
+
+\* With "trim", an update of a write's session, which names the oldest request
+\* ID it still has outstanding, reaches a disk once the client heard the
+\* write's answer: the disk removes the write's entries and raises the
+\* session's watermark past it. TrimOnAnswer trims once the write is answered,
+\* heard or not; NoWatermark removes the entries and keeps no watermark.
+Trim(d, i) ==
+    /\ "trim" \in plan.f
+    /\ dnode[d] # 0
+    /\ \/ wst[i] = 2
+       \/ Bug("TrimOnAnswer") /\ \E y \in ackd : WOf(y.c, y.v) = i
+    /\ IF Bug("NoWatermark")
+       THEN /\ \E g \in ids[d] : g.w = i
+            /\ UNCHANGED wm
+       ELSE /\ i \notin wm[d]
+            /\ wm' = [wm EXCEPT ![d] = @ \cup {i}]
+    /\ ids' = [ids EXCEPT ![d] = {g \in @ : g.w # i}]
+    /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, dlog, rcv, miss, persIv, drp, rdrp, ldrp, imf, mrecv,
+                   gat, failed, priVars, dataVars, leaseVars, clockVars, raftVars>>
 
 \* The primary refuses a write it may not order; the client retries.
 Refuse(n, x) ==
@@ -1460,8 +1583,9 @@ Deliver(m) ==
                               => \/ m2.v \in dlog[d][m.c]
                                  \/ Bug("LogPastFailed") /\ [c |-> m.c, v |-> m2.v] \in failed[d]
        /\ dlog' = logs
+       /\ ids' = AddIds(d, m.c, m.v, r.w)
        /\ bad' = IF IvAt(dnode[d], m.p) > m.iv THEN bad \cup {"late"} ELSE bad
-       /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, rcv, miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat, failed,
+       /\ UNCHANGED <<wm, ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, rcv, miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat, failed,
                       priVars, rm, vers, ackd, wst, sends, dmn, pend, refd, ownw, leaseVars, clockVars, raftVars>>
 
 \* The primary's own record of a version it ordered becomes durable, in the run
@@ -1490,7 +1614,7 @@ Refused(m) ==
              /\ refd' = refd \cup out
        /\ pr' = IF r \in pend /\ pr[m.from][m.p].iv = m.iv
                 THEN [pr EXCEPT ![m.from][m.p].ask = TRUE] ELSE pr
-       /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, dlog, rcv, miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat,
+       /\ UNCHANGED <<ids, wm, ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, dlog, rcv, miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat,
                       pv, pin, known, dec, act, rm, vers, ackd, wst, sends, dmn, bad, ownw,
                       leaseVars, now, raw, boot, rawR, bootR, slew, runId, frz, suspAt, rstAt,
                       rq, gm, hbm, lastAsk, lastHb, net, arrived, dirty, hs, raftVars>>
@@ -1559,10 +1683,11 @@ OwnFail(n, r) ==
        /\ Newest(dlog[own][r.c]) = r.v
        /\ Fault("ownfail")
        /\ dlog' = [dlog EXCEPT ![own][r.c] = @ \ {r.v}]
+       /\ ids' = [ids EXCEPT ![own] = {g \in @ : g.c # r.c \/ g.v # r.v}]
        /\ pend' = pend \ {r}
        /\ ownw' = ownw \ {r}
        /\ pr' = [pr EXCEPT ![n][p].ask = TRUE]
-       /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, rcv, miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat, failed,
+       /\ UNCHANGED <<wm, ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, rcv, miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat, failed,
                       pv, pin, known, dec, act, rm, vers, ackd, wst, sends, dmn, bad, refd,
                       leaseVars, now, raw, boot, rawR, bootR, slew, runId, frz, suspAt, rstAt,
                       rq, gm, hbm, lastAsk, lastHb, net, arrived, dirty, hs, raftVars>>
@@ -1876,7 +2001,7 @@ Isolate(n) ==
     /\ "isolate2" \in plan.f
     /\ stale = {}
     /\ stale' = {n}
-    /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, run, rsIv, dlog, rcv, miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat, failed,
+    /\ UNCHANGED <<ids, wm, ctlVars, ep, dnode, ddisk, dhost, fmts, run, rsIv, dlog, rcv, miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat, failed,
                    priVars, dataVars, leaseVars, clockVars, raftVars>>
 
 Taint(n) ==[h \in Node |-> [g \in Node |-> dirty[h][g] \/ h = n \/ g = n]]
@@ -2038,7 +2163,7 @@ Restart(n) ==
                   ELSE [hl[h] EXCEPT ![n].has = @ /\ ~waited]]
     /\ rstAt' = [rstAt EXCEPT ![n] = [r |-> raw[n], b |-> boot[n]]]
     /\ dirty' = Taint(n)
-    /\ UNCHANGED <<tbl, ivs, plan, step, reports, recd, ep, dnode, ddisk, dhost, fmts, stale, dlog, rcv, miss, persIv, imf,
+    /\ UNCHANGED <<ids, wm, tbl, ivs, plan, step, reports, recd, ep, dnode, ddisk, dhost, fmts, stale, dlog, rcv, miss, persIv, imf,
                    pv, dec, act, rm, vers, ackd, wst, sends, dmn, bad,
                    now, raw, boot, rawR, bootR, slew, frz, suspAt, rq, gm, hbm,
                    lastAsk, lastHb, net, arrived, hs, rterm, xto>>
@@ -2065,7 +2190,7 @@ Reboot(n) ==
     /\ dirty' = Taint(n)
     /\ frz' = [frz EXCEPT ![n] = "boot"]
     /\ suspAt' = [suspAt EXCEPT ![n] = now]
-    /\ UNCHANGED <<tbl, ivs, plan, step, reports, recd, ep, dnode, ddisk, dhost, fmts, stale, dlog, rcv, miss, persIv, imf,
+    /\ UNCHANGED <<ids, wm, tbl, ivs, plan, step, reports, recd, ep, dnode, ddisk, dhost, fmts, stale, dlog, rcv, miss, persIv, imf,
                    pv, dec, act, rm, vers, ackd, wst, sends, dmn, bad,
                    now, slew, rq, gm, hbm, lastAsk, lastHb, net, arrived,
                    hs, rterm, xto>>
@@ -2105,7 +2230,7 @@ Format(n) ==
             /\ ddisk' = [ddisk EXCEPT ![n] = x]
             /\ dhost' = [dhost EXCEPT ![x] = n]
             /\ UNCHANGED <<dlog, rcv, miss, persIv, drp, rdrp, ldrp, imf, mrecv>>
-    /\ UNCHANGED <<ctlVars, ep, stale, run, rsIv, gat, priVars, dataVars, leaseVars, now, raw, boot, rawR, bootR,
+    /\ UNCHANGED <<ids, wm, ctlVars, ep, stale, run, rsIv, gat, priVars, dataVars, leaseVars, now, raw, boot, rawR, bootR,
                    slew, runId, frz, suspAt, rstAt, rq, gm, hbm, lastAsk, lastHb, net, arrived,
                    dirty, hs, raftVars>>
 
@@ -2191,7 +2316,7 @@ Protocol ==
     \/ \E d \in Disk : Persist(d)
     \/ \E n \in Node, p \in PG, c \in Chunk, d \in Disk : Recover(n, p, c, d)
     \/ \E i \in 1..Len(Writes) : Send(i)
-    \/ \E n \in Node : \E x \in pin[n] : Order(n, x) \/ Refuse(n, x)
+    \/ \E n \in Node : \E x \in pin[n] : Order(n, x) \/ Reanswer(n, x) \/ Stale(n, x) \/ Refuse(n, x)
     \/ \E m \in rm : Deliver(m)
     \/ \E r \in ownw : OwnLogged(r)
     \/ \E r \in pend : Answer(r)
@@ -2211,6 +2336,9 @@ Choices ==
     \/ \E m \in rm : MemberFail(m) \/ GoneRefuses(m)
     \/ \E n \in Node, c \in Chunk, d \in Disk : GoneRefusesRecovery(n, c, d)
     \/ \E n \in Node, r \in pend : OwnFail(n, r)
+    \/ \E r \in pend : LoseAnswer(r)
+    \/ \E n \in Node : \E x \in pin[n] : LoseReanswer(n, x)
+    \/ \E d \in Disk, i \in 1..Len(Writes) : Trim(d, i)
     \/ \E g, h \in Node : OpenGrant(g, h) \/ OpenLapse(g, h)
     \/ \E n \in Node : Target(n) /\
          \/ Suspend(n) \/ Wake(n) \/ Freeze(n, "pause") \/ Freeze(n, "stop") \/ Thaw(n)
@@ -2518,10 +2646,14 @@ LeftGatesSettle ==
              \A g \in gat[ddisk[n]] : ChunkPG[g.c] # p \/ g.v \notin dlog[ddisk[n]][g.c])
 
 \* The interval that answers a version acknowledged in this step: the one
-\* activating, or the version's own.
+\* activating, the current one of a primary answering a resend, or the
+\* version's own.
 AckIv(y) ==
     LET new == {a \in act' \ act : a.p = ChunkPG[y.c]}
-    IN IF new = {} THEN IvOfV(y.v) ELSE (CHOOSE a \in new : TRUE).k
+        re == {n \in Node : pin'[n] # pin[n]}
+    IN IF new # {} THEN (CHOOSE a \in new : TRUE).k
+       ELSE IF re # {} THEN IvAt(CHOOSE n \in re : TRUE, ChunkPG[y.c])
+       ELSE IvOfV(y.v)
 
 \* 17. A version is acknowledged only on at least min_live clean copies in the
 \* interval that answers it: members that logged it and list nothing of its
@@ -2559,6 +2691,21 @@ GiveUpOnlyLost == [][\A p \in PG : (GU(p))' > GU(p) =>
     \A c \in ChunksOf(p), d \in Disk : ~Removed(p, d) =>
        /\ dnode[d] # 0 /\ AckedV(c) \cap dlog[d][c] # {} => d \in UpIn(p, Cur(p))
        /\ AckedV(c) # {} /\ CanServe(d, c) => c \notin GiveUpDrops(p)]_vars
+
+\* 24. A client write takes effect once, however often it is sent: no two
+\* committed versions of a chunk carry the same write. A reissue under a new
+\* incarnation is another write.
+AppliedOnce ==
+    \A c \in Chunk : \A u, u2 \in CommitAt(c) : WOf(c, u.v) = WOf(c, u2.v) => u.v = u2.v
+
+\* 25. A write is answered stale only once its client heard an earlier
+\* attempt's answer, since the client takes a stale answer as final.
+StaleOnlyHeard == "stale" \notin bad
+
+\* The resend table names only versions its disk logs, so Known keeps an entry
+\* exactly when the disk holds its version (Held), the set conformance
+\* compares with the store's table.
+IdsLogged == \A d \in Disk : \A g \in ids[d] : g.v \in dlog[d][g.c]
 -----------------------------------------------------------------------------
 \* Configurations: the .cfg files substitute these for the constants. PG 1 is
 \* in a rep3 pool with min_live 2; PG 2 in a rep2 pool with min_live 2 that
@@ -2837,6 +2984,36 @@ UnfoundPlans == {Plan(<<Mark(3, "maint"), Mark(3, "up"), Mark(2, "down")>>, <<Pa
 \* holds Y logged, not gated, so the veto leaves every member listing.
 MovePrimaryPlans == {Plan(<<AddM(2, 3, 1), Tab(2, <<1, 2>>, <<"up", "up">>, {})>>, Partial2, {})}
 ListerPrimaryPlans == {Plan(<<Mark(3, "down"), Mark(3, "up"), Rot(1)>>, Partial, {})}
+
+\* ci-resend: two whole-block writes to chunk 1's one block, from two clients,
+\* each sent up to MaxSend times, with answers that may be lost: the primary
+\* moved, or restarted. ci-resend-faults: a member's refusal ending the interval
+\* under a primary that stays, with a third send, so a lost reanswer is sent
+\* again. ci-resend-held: the chunk left one clean copy, as in HeldPlans.
+\* ci-resend-recovered: a member down for the writes, back, recovered and made
+\* primary. The last two send X alone: with Y as well, neg-resend-recovery-ids
+\* passed 4 million states in 10 minutes unbroken. ci-resend-trim: the refusal
+\* and the recovered plans with trimming. neg-resend-recovery-live-only needs Y
+\* to overwrite X, so its member comes back as primary in one table.
+Resend == <<[c |-> 1, blk |-> 1, whole |-> TRUE, inc |-> 0, re |-> 0, after |-> 0],
+            [c |-> 1, blk |-> 1, whole |-> TRUE, inc |-> 0, re |-> 0, after |-> 0]>>
+ResendPlans == {Plan(<<Rot(1)>>, Resend, {"lose"}), Plan(<<>>, Resend, {"lose", "restart"})}
+ResendFailPlans == {Plan(<<>>, Resend, {"lose", "mfail"})}
+ResendHeldPlans == {Plan(<<Mark(3, "down"), Mark(3, "up"), Mark(2, "down")>>, <<Resend[1]>>, {"lose"})}
+ResendRecoveredPlans == {Plan(<<Mark(2, "down"), Mark(2, "up"), Rot(1)>>, <<Resend[1]>>, {"lose"})}
+ResendOverwrittenPlans == {Plan(<<Mark(2, "down"), Tab(1, <<2, 1, 3>>, <<"up", "up", "up">>, {})>>, Resend, {})}
+TrimPlans == {Plan(<<>>, Resend, {"lose", "mfail", "trim"}),
+              Plan(<<Mark(2, "down"), Mark(2, "up"), Rot(1)>>, <<Resend[1]>>, {"lose", "trim"})}
+\* neg-resend-recovery-whole-range: chunks 1 and 2 in PG 1, a block each, a
+\* write to each, and node 1, the primary, marked down: each write's version
+\* is on disk 1 and one other, so peering drops both, and disks 2 and 3 each
+\* list the chunk whose dropped version they hold.
+ChunksInPG1 == [c \in Chunks2 |-> 1]
+Blocks21 == [c \in Chunks2 |-> 1]
+WholeRangePlans == {Plan(<<Mark(1, "down")>>, <<Resend[1], [Resend[1] EXCEPT !.c = 2]>>, {})}
+\* neg-resend-reorders runs ResendPlans, neg-resend-dropped and neg-resend-at-once
+\* the member refusal, neg-resend-recovery-ids the member made primary, and
+\* neg-resend-no-watermark and neg-resend-trim-on-answer TrimPlans.
 
 \* ci-peering checks the plans with membership changes alone, but one;
 \* ci-restarts those with a restart or a format, under which a decision can
