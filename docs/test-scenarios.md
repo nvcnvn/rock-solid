@@ -3003,6 +3003,8 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | `internal/chunkstore` `TestPeeringKeepsAcknowledgedWritesAcrossPrimaries` | 500 | 45 s |
   | `internal/chunkstore` `TestNoPGServesReadsFromTwoPrimaries` | 500 | 42 s |
   | `internal/chunkstore` `TestNoFencedSessionsWriteIsApplied` | 500 | 41 s |
+  | `internal/chunkstore` `TestChunkClientsWriteAcrossPrimaryChangesAndAFence` | 500 | 41 s |
+  | `internal/chunkstore` `TestAClientKeepsItsRequestIDRules` | 2,000 | 4 s |
   | `internal/chunkstore` `TestWritesPassTheWriteLimitOnlyWhereAdmitted` | 200 | 60 s |
   | `internal/chunkstore` `TestTheDetectorMarksAFailedDiskDown` | 500 | 47 s |
   | `internal/chunkstore` `TestWriteAdmissionHoldsAt90And95PercentFull` | 4 | 74 s |
