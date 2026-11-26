@@ -2,12 +2,14 @@ package uring
 
 import (
 	"bytes"
+	"cmp"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"testing"
 	"unsafe"
 
@@ -662,7 +664,10 @@ func TestALinkedFlushBehindAnotherDisksWriteFails(t *testing.T) {
 	if e := r.Submit(); e.Took != 2 {
 		t.Fatalf("submitted %+v", e)
 	}
-	expect(t, reap(t, r, 4), core.Event{IO: 2, Err: core.DiskIO}, core.Event{IO: 4, Err: core.DiskIO}, core.Event{IO: 1}, core.Event{IO: 3})
+	evs := reap(t, r, 4)
+	// The two writes go to the kernel unlinked, so either may complete first.
+	slices.SortFunc(evs[2:], func(a, b core.Event) int { return cmp.Compare(a.IO, b.IO) })
+	expect(t, evs, core.Event{IO: 2, Err: core.DiskIO}, core.Event{IO: 4, Err: core.DiskIO}, core.Event{IO: 1}, core.Event{IO: 3})
 }
 
 // TestACutBetweenTwoChainsWaitsForNothing has the kernel take a write and its flush, a whole
