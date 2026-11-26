@@ -1,21 +1,30 @@
 package node
 
 import (
-	"fmt"
+	"encoding/binary"
+	"errors"
 	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lease"
+	"github.com/nvcnvn/rock-solid/internal/loop"
 	"github.com/nvcnvn/rock-solid/internal/meta"
+	"github.com/nvcnvn/rock-solid/internal/raftshard"
 )
+
+// MetaTimer is the Raft timer of the MetaStore replica a device hosts first, MetaTimer+i that of
+// the i-th.
+const MetaTimer core.TimerID = 0x6d657461 << 32
 
 // DeviceConfig is one device of a node: its stable identity, its size in blocks, its class, the
 // loop that owns it, its store's settings, the seed of its source, which the daemon takes from
 // the operating system at each start, so a format a crash cut short is formatted again under
 // another log ID, the control-plane group's ID, the voter its replica reports to until
-// Authority names another, and the error opening the device, if any, which leaves it failed.
+// Authority names another, and the error opening the device, if any, which leaves it failed;
+// Host is the loop that owns the device, Rounds its log there, and Metas the MetaStore replicas
+// the disk holds, which a store opened, not formatted, restores.
 type DeviceConfig struct {
 	Device uint64
 	Blocks uint64
@@ -26,6 +35,9 @@ type DeviceConfig struct {
 	Group  uint64
 	Ctl    core.NodeID
 	Err    error
+	Host   *loop.Loop
+	Rounds *loop.Log
+	Metas  []meta.RoundConfig
 }
 
 // DeviceOutput is what a call into a Device asks of its loop and of the node's machine: actions;
@@ -69,7 +81,9 @@ const (
 // formats it or leaves it failed as chunkstore.StartDevice says; once the store serves, it runs
 // the replica as the disk the committed membership names for its log, which the replica's
 // placement table names it by. Until then it keeps the newest session and placement tables and
-// the authority, which the replica starts with.
+// the authority, which the replica starts with. It hosts the disk's MetaStore replicas on the
+// round driver of its loop, routes the store's mail to them and their replies to the store, and
+// serves the Txns sent to them.
 type Device struct {
 	cfg   DeviceConfig
 	rng   *core.Rand
@@ -93,17 +107,95 @@ type Device struct {
 	rout    chunkstore.ReplicaOutput
 	rp      chunkstore.Report
 	frame   []byte
+	// metas are the MetaStore replicas by the slot their Raft timer names, groups each one's slot
+	// by its group, and sv the server of their Txns.
+	metas  []*meta.RoundShard
+	groups map[uint64]int
+	sv     *meta.Server
 }
 
 // NewDevice starts recovering the device's store, or fails it at once on cfg.Err.
 func NewDevice(ctx *core.Context, cfg DeviceConfig, out *DeviceOutput) *Device {
-	d := &Device{cfg: cfg, rng: core.NewRand(cfg.Seed), start: lease.Now(ctx), auth: cfg.Ctl, hasAuth: cfg.Ctl != core.NodeID{}}
+	d := &Device{cfg: cfg, rng: core.NewRand(cfg.Seed), start: lease.Now(ctx), auth: cfg.Ctl, hasAuth: cfg.Ctl != core.NodeID{},
+		groups: map[uint64]int{}, sv: meta.NewServer()}
 	err := cfg.Err
 	if err == nil {
 		d.st, err = chunkstore.Open(ctx, cfg.Store, cfg.Blocks, &d.sout)
 	}
+	if err == nil {
+		for _, m := range cfg.Metas {
+			m.Open = true
+			d.host(m)
+		}
+	}
 	d.settle(ctx, err, out)
 	return d
+}
+
+// ErrHosted refuses a MetaStore replica of a group the device hosts one of, or whose owner key
+// its store may not give a new shard yet.
+var ErrHosted = errors.New("node: the device hosts the group, or its owner key is not reusable")
+
+// ErrBlobBound fails a device whose log's blob bound is not the one a log formatted at its size
+// has, which its replicas took: a log formatted at another size, as a grown volume's.
+var ErrBlobBound = errors.New("node: the log's blob bound is not a log of the device's size's")
+
+// ErrNotServing refuses a MetaStore replica on a device whose store does not serve.
+var ErrNotServing = errors.New("node: the device's store does not serve")
+
+// AddMeta hosts a new MetaStore replica, which writes its group's boot state as its first round.
+func (d *Device) AddMeta(cfg meta.RoundConfig) error {
+	_, hosted := d.groups[cfg.Shard.Raft.Group]
+	switch {
+	case d.phase != opened:
+		return ErrNotServing
+	case hosted || !d.st.Reusable(cfg.Owner):
+		return ErrHosted
+	}
+	cfg.Open = false
+	d.host(cfg)
+	return nil
+}
+
+// Meta is the device's MetaStore replica of group, or nil.
+func (d *Device) Meta(group uint64) *meta.RoundShard {
+	if i, ok := d.groups[group]; ok {
+		return d.metas[i]
+	}
+	return nil
+}
+
+// host puts the replica cfg describes on the device's loop and makes it known to the store, in
+// one call, so before any event of a store just opened.
+func (d *Device) host(cfg meta.RoundConfig) {
+	maxBlob, err := d.maxBlob()
+	if err != nil {
+		panic(err)
+	}
+	i := len(d.metas)
+	cfg.Shard.Raft.Timer, cfg.MaxBlob, cfg.Answered = MetaTimer+core.TimerID(i), maxBlob, d.sv.Reply
+	a := meta.NewRoundShard(d.cfg.Host, d.cfg.Rounds, cfg)
+	d.st.AddRemote(cfg.Owner, int(d.cfg.Loop), uint32(a.ID()))
+	d.metas = append(d.metas, a)
+	d.groups[cfg.Shard.Raft.Group] = i
+}
+
+// maxBlob is MaxBlobBytes of a log formatted at the device's size, which its replicas take before
+// a log serves.
+func (d *Device) maxBlob() (uint64, error) {
+	g, err := disklog.GeometryFor(d.cfg.Blocks * core.BlockSize)
+	return disklog.MaxBlobFor(d.cfg.Store.Log, g), err
+}
+
+// dropMetas takes the replicas the device restored off the loop when its store does not serve:
+// they wrote nothing, and no store knows them.
+func (d *Device) dropMetas() {
+	for _, a := range d.metas {
+		d.cfg.Host.RemoveShard(a.ID())
+		a.Close()
+	}
+	d.metas = d.metas[:0]
+	clear(d.groups)
 }
 
 // Replica is the device's replica, nil until the membership names its log.
@@ -116,6 +208,12 @@ func (d *Device) Store() *chunkstore.Store { return d.st }
 // replica; a message before the replica runs is dropped, and the replica drops a Raft group's.
 func (d *Device) OnEvent(ctx *core.Context, ev *core.Event, out *DeviceOutput) {
 	switch {
+	case ev.Kind == core.EvNetRecv && ev.Msg.Group():
+		out.Actions = d.recvGroup(ctx, ev, out.Actions)
+		return
+	case ev.Kind == core.EvTimer && ev.Timer >= MetaTimer && ev.Timer-MetaTimer < core.TimerID(len(d.metas)):
+		out.Actions = d.metas[ev.Timer-MetaTimer].OnEvent(ctx, ev, out.Actions)
+		return
 	case d.rep != nil:
 		d.rep.OnEvent(ctx, ev, &d.rout)
 		d.take(ctx, out)
@@ -127,6 +225,71 @@ func (d *Device) OnEvent(ctx *core.Context, ev *core.Event, out *DeviceOutput) {
 		d.st.OnEvent(ctx, ev, &d.sout)
 	}
 	d.settle(ctx, nil, out)
+}
+
+// recvGroup hands a MetaStore group's message to the device's replica of the group: a Txn through
+// the server, which answers one for a group hosted nowhere here as NotLeader; another message for
+// no replica here is dropped.
+func (d *Device) recvGroup(ctx *core.Context, ev *core.Event, acts []core.Action) []core.Action {
+	in := ev.Msg.Inline()
+	var a *meta.RoundShard
+	if len(in) > 9 {
+		a = d.Meta(binary.LittleEndian.Uint64(in[1:]))
+	}
+	switch {
+	case len(in) > 9 && in[9] == meta.KindTxn:
+		return d.sv.ServeRound(ctx, ev, a, acts)
+	case a != nil:
+		return a.OnEvent(ctx, ev, acts)
+	}
+	free(ctx, &ev.Msg)
+	return acts
+}
+
+// OnReply takes what a MetaStore replica replied its disk's owner, for the store, which acts on it
+// at the next OnLog.
+func (d *Device) OnReply(r loop.Reply) {
+	if d.st == nil {
+		return
+	}
+	switch r.Kind {
+	case loop.ReplyReplay:
+		d.st.RemoteReplay(r.Owner, r.LSN)
+	case loop.ReplyFull:
+		d.st.RemoteFull()
+	case loop.ReplyPiece:
+		d.st.RemotePiece(r.Owner, r.LSN, r.Data, r.Root)
+	case loop.ReplyRuns:
+		d.st.RemoteRuns(r.Owner, r.LSN, r.Refs, r.Bounds)
+	case loop.ReplyDead:
+		d.st.RemoteDead(r.Owner, r.Refs)
+	case loop.ReplyCosts:
+		d.st.RemoteCosts(r.Owner, r.Costs)
+	case loop.ReplyRemoved:
+		d.st.RemoveRemote(r.Owner, r.LSN)
+	}
+}
+
+// mailKinds is the loop's kind of each raftshard.MailKind.
+var mailKinds = [...]loop.MailKind{
+	raftshard.MailReplayed:     loop.MailReplayed,
+	raftshard.MailRecovered:    loop.MailRecovered,
+	raftshard.MailCheckpointed: loop.MailCheckpointed,
+	raftshard.MailShare:        loop.MailShare,
+	raftshard.MailFlush:        loop.MailFlush,
+	raftshard.MailPiece:        loop.MailPiece,
+	raftshard.MailFlushFailed:  loop.MailFlushFailed,
+	raftshard.MailRun:          loop.MailRun,
+	raftshard.MailRewrite:      loop.MailRewrite,
+}
+
+// mail sends the store's mail to its shards on the round driver.
+func (d *Device) mail(ms []raftshard.Mail) {
+	for i := range ms {
+		m := &ms[i]
+		d.cfg.Rounds.Send(m.Loop, loop.Mail{Shard: loop.ShardID(m.Shard), Kind: mailKinds[m.Kind], Owner: m.Owner, Ref: m.Ref, Blob: m.Blob,
+			Data: m.Data, Pieces: m.Pieces, Base: m.Base, Share: m.Share, Bound: m.Bound})
+	}
 }
 
 // OnLog takes an event of the store's log, or the nil that follows each disk completion, from the
@@ -153,11 +316,17 @@ func (d *Device) settle(ctx *core.Context, err error, out *DeviceOutput) {
 			return
 		}
 	}
+	if err == nil && d.st != nil && d.phase != opened {
+		if maxBlob, gerr := d.maxBlob(); gerr != nil || maxBlob != d.st.Log().MaxBlobBytes() {
+			err = ErrBlobBound
+		}
+	}
 	switch act, log := chunkstore.StartDevice(d.rng, err); {
 	case d.phase == recovering && act == chunkstore.StartFormat:
 		d.phase = formatting
 		g, gerr := disklog.GeometryFor(d.cfg.Blocks * core.BlockSize)
 		if gerr == nil {
+			d.dropMetas()
 			d.closeStore()
 			d.st, gerr = chunkstore.Format(ctx, d.cfg.Store, disklog.Superblock{LogID: log, Geometry: g}, &d.sout)
 		}
@@ -179,6 +348,7 @@ func (d *Device) settle(ctx *core.Context, err error, out *DeviceOutput) {
 }
 
 func (d *Device) fail(out *DeviceOutput) {
+	d.dropMetas()
 	d.closeStore()
 	d.phase, out.Failed = failed, true
 }
@@ -192,9 +362,7 @@ func (d *Device) closeStore() {
 }
 
 func (d *Device) flush(out *DeviceOutput) {
-	if len(d.sout.Mail) > 0 {
-		panic(fmt.Sprintf("node: the store mailed %+v, and a device hosts no shard on the round driver", d.sout.Mail[0]))
-	}
+	d.mail(d.sout.Mail)
 	out.Actions = append(out.Actions, d.sout.Actions...)
 	d.sout.Reset()
 }
@@ -315,6 +483,7 @@ func (d *Device) Authority(ctx *core.Context, at core.NodeID, out *DeviceOutput)
 // answers it.
 func (d *Device) take(ctx *core.Context, out *DeviceOutput) {
 	out.Actions = append(out.Actions, d.rout.Actions...)
+	d.mail(d.rout.Mail)
 	if d.hasAuth && len(d.rout.Asks) != 0 {
 		a := core.Action{Kind: core.ActNetSend, Peer: d.auth}
 		if meta.EncodeAsks(ctx.Pool, d.cfg.Group, d.rout.Asks, &a.Msg) == nil {

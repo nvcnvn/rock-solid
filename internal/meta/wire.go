@@ -30,7 +30,7 @@ var le = binary.LittleEndian
 // wireErrs are the errors an Answer carries, by code; code 1 is a NotLeader. Any other error
 // travels as raft.ErrProposalDropped, which promises nothing about whether the Txn applied.
 var wireErrs = [...]error{nil, nil, raft.ErrProposalDropped, ErrMalformed, ErrHalted, ErrNoOps, ErrTooLarge,
-	ErrEmptyRange, ErrBadOp, ErrBadReplay, ErrReplayTagged}
+	ErrEmptyRange, ErrBadOp, ErrBadReplay, ErrReplayTagged, ErrOverloaded}
 
 const (
 	codeNotLeader = 1
@@ -312,13 +312,20 @@ var ErrServerToken = errors.New("meta: token has ServerToken set")
 
 // Server answers the Txns peers' routers send to a node's replicas: it proposes each under a
 // token of its own, answers at once with any error Shard.Txn returns, and sends each answer the
-// replica gives back to the loop the Txn came from.
+// replica gives back to the loop the Txn came from. A replica on the round driver gathers the Txns
+// that arrive while backpressure holds its round in flight, which the disk does not bound, so the
+// server refuses one with ErrOverloaded while Held of its group's are proposed and unanswered.
 type Server struct {
+	Held  int
 	next  uint64
 	waits map[uint64]wait
+	held  map[uint64]int
 	t     Txn
 	a     Answer
 }
+
+// ServerHeld is a new Server's Held.
+const ServerHeld = 1024
 
 // wait is a Txn proposed: its group, and the loop and token it came under.
 type wait struct {
@@ -328,7 +335,9 @@ type wait struct {
 }
 
 // NewServer makes a server.
-func NewServer() *Server { return &Server{waits: map[uint64]wait{}} }
+func NewServer() *Server {
+	return &Server{Held: ServerHeld, waits: map[uint64]wait{}, held: map[uint64]int{}}
+}
 
 // Serve takes ev, a Txn message, and proposes it on s, the replica of its group Peek names, or
 // nil when the node hosts none, which answers NotLeader naming no leader. out is s's output for
@@ -348,6 +357,35 @@ func (sv *Server) Serve(ctx *core.Context, ev *core.Event, s *Shard, out *Output
 			sv.waits[local] = wait{group, ev.Peer, token}
 		}
 	}
+	return sv.refuse(ctx, ev, group, token, ok, err, acts)
+}
+
+// ServeRound is Serve for a, a replica on the round driver, or nil when the node hosts none of
+// the group. The Txn waits before it is proposed, as the replica may answer it within the call.
+func (sv *Server) ServeRound(ctx *core.Context, ev *core.Event, a *RoundShard, acts []core.Action) []core.Action {
+	group, _, token, ok := Peek(&ev.Msg)
+	err := DecodeTxn(ctx.Pool, &ev.Msg, &sv.t)
+	switch {
+	case !ok:
+	case err != nil:
+	case a == nil || a.Err() != nil:
+		err = NotLeader{Group: group}
+	case sv.held[group] >= sv.Held:
+		err = ErrOverloaded
+	default:
+		sv.next++
+		local := ServerToken | sv.next
+		sv.waits[local] = wait{group, ev.Peer, token}
+		sv.held[group]++
+		if acts, err = a.submit(ctx, &sv.t, local, acts); err != nil {
+			sv.release(local)
+		}
+	}
+	return sv.refuse(ctx, ev, group, token, ok, err, acts)
+}
+
+// refuse frees ev's buffer and answers err, if any, to a Txn that Peek could read.
+func (sv *Server) refuse(ctx *core.Context, ev *core.Event, group, token uint64, ok bool, err error, acts []core.Action) []core.Action {
 	if ev.Msg.Buf != core.NoBuf {
 		ctx.Pool.Free(ev.Msg.Buf)
 	}
@@ -362,16 +400,28 @@ func (sv *Server) Serve(ctx *core.Context, ev *core.Event, s *Shard, out *Output
 // Txn came from, and leaves the others, which are their proposers'.
 func (sv *Server) Reply(ctx *core.Context, answers []Answer, acts []core.Action) []core.Action {
 	for i := range answers {
-		w, ok := sv.waits[answers[i].Token]
+		w, ok := sv.release(answers[i].Token)
 		if !ok {
 			continue
 		}
-		delete(sv.waits, answers[i].Token)
 		sv.a = answers[i]
 		sv.a.Token = w.token
 		acts = sv.answer(ctx, w.group, w.peer, acts)
 	}
 	return acts
+}
+
+// release forgets the Txn proposed under token, if it waits, and returns its wait.
+func (sv *Server) release(token uint64) (wait, bool) {
+	w, ok := sv.waits[token]
+	if !ok {
+		return w, false
+	}
+	delete(sv.waits, token)
+	if sv.held[w.group]--; sv.held[w.group] <= 0 {
+		delete(sv.held, w.group)
+	}
+	return w, true
 }
 
 // answer sends sv.a to peer. An answer the pool has no buffer for goes inline as dropped, which

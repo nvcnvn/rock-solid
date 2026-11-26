@@ -284,8 +284,9 @@ func (l *Loop) logOf(io core.IOID) *Log {
 	return nil
 }
 
-// AddShard puts s on l, its records going to lg. When s is l's first shard on lg it makes their
-// handoff, so it runs before l and lg's owner start; otherwise it runs on l. Mail that came for
+// AddShard puts s on l, its records going to lg. When s is l's first shard on lg and l is not lg's
+// owner it makes their handoff, which the owner reads, so it runs before l and the owner start;
+// otherwise it runs on l. Mail that came for
 // the ID it returns before it, which l held, reaches s by the end of the pass.
 func (l *Loop) AddShard(s Shard, lg *Log) ShardID {
 	h := lg.handoffs[l.cfg.ID]
@@ -470,8 +471,8 @@ func (l *Loop) handoff(ev *core.Event) {
 
 // Send hands m to its shard on the loop of ID to, which takes it at the end of the owner's pass
 // if it is the owner, else on its next pass, or holds it until it adds the shard; it runs on lg's
-// owner, and m.Data becomes the shard's, the caller keeping no hold on it. A loop with no shard on
-// lg has none added after the loops start, so mail to it is a broken invariant of the caller.
+// owner, and m.Data becomes the shard's, the caller keeping no hold on it. Mail to any loop with no
+// shard on lg, the owner included, is a broken invariant of the caller.
 func (lg *Log) Send(to int, m Mail) {
 	h := lg.handoffs[to]
 	if h == nil {

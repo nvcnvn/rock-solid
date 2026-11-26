@@ -812,6 +812,12 @@ func (l *Log) Err() error { return l.err }
 // MaxBlobBytes is the largest blob one record holds.
 func (l *Log) MaxBlobBytes() uint64 { return l.maxBlob }
 
+// MaxBlobFor is MaxBlobBytes of a log of configuration cfg with geometry g, known before the log
+// recovers.
+func MaxBlobFor(cfg Config, g Geometry) uint64 {
+	return maxBlobBytes(itemRecordBlocks(cfg, Superblock{Geometry: g}))
+}
+
 // MaxWriteBlocks is the most blocks one write item holds, besides a whole chunk on a disk with chunk slots.
 func (l *Log) MaxWriteBlocks() uint16 { return l.maxWrites }
 

@@ -129,13 +129,20 @@ func (a *RoundShard) OnEvent(ctx *core.Context, ev *core.Event, out []core.Actio
 // Txn proposes t, as Shard.Txn, or refuses it with ErrOverloaded while the replica leads full, or
 // with a NotLeader naming no leader before it starts.
 func (a *RoundShard) Txn(ctx *core.Context, t *Txn, token uint64, out []core.Action) ([]core.Action, error) {
+	if token&ServerToken != 0 {
+		return out, ErrServerToken
+	}
+	return a.submit(ctx, t, token, out)
+}
+
+func (a *RoundShard) submit(ctx *core.Context, t *Txn, token uint64, out []core.Action) ([]core.Action, error) {
 	switch {
 	case a.shard == nil || a.err != nil:
 		return out, NotLeader{Group: a.cfg.Shard.Raft.Group}
 	case a.rs.Full() && a.shard.Raft().Leader() == a.cfg.Shard.Raft.ID:
 		return out, ErrOverloaded
 	}
-	err := a.shard.Txn(ctx, t, token, &a.out)
+	err := a.shard.submit(ctx, t, token, &a.out)
 	return a.after(ctx, out), err
 }
 
@@ -146,12 +153,24 @@ func (a *RoundShard) after(ctx *core.Context, out []core.Action) []core.Action {
 	if o.Raft.Flush != 0 {
 		a.rs.Write(o.Raft.Flush, &o.Raft.Round)
 	}
-	if len(o.Answers) > 0 && a.cfg.Answered != nil {
-		out = a.cfg.Answered(ctx, o.Answers, out)
-	}
+	out = a.answer(ctx, out)
 	out = append(out, o.Raft.Actions...)
 	o.Reset()
 	a.bury()
+	return out
+}
+
+// answer hands the replica's answers to Answered, with every Txn it holds answered dropped once
+// it stopped, as it applies nothing more.
+func (a *RoundShard) answer(ctx *core.Context, out []core.Action) []core.Action {
+	o := &a.out
+	if a.err != nil && a.shard != nil {
+		a.shard.drop(o)
+	}
+	if len(o.Answers) > 0 && a.cfg.Answered != nil {
+		out = a.cfg.Answered(ctx, o.Answers, out)
+	}
+	o.Answers = o.Answers[:0]
 	return out
 }
 

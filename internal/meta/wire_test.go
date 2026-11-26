@@ -70,6 +70,7 @@ func TestTxnsAndAnswersCrossTheWireWhole(t *testing.T) {
 		{Token: 6, Result: Result{FailedCheck: -1}, Err: ErrHalted},
 		{Token: 7, Result: Result{FailedCheck: -1}, Err: ErrReplayTagged},
 		{Token: 8, Result: Result{FailedCheck: -1}, Err: raft.ErrProposalDropped},
+		{Token: 9, Result: Result{FailedCheck: -1}, Err: ErrOverloaded},
 	} {
 		var m core.Msg
 		if err := EncodeAnswer(pool, 5, &a, &m); err != nil {

@@ -47,6 +47,8 @@ type metaShards struct {
 	ticking bool
 	joined  bool
 	replies []loop.Reply
+	// answered, if set, takes each replica's answers too.
+	answered func(*core.Context, []meta.Answer, []core.Action) []core.Action
 }
 
 // metaRep is the replica on a loop: Txns waiting for its loop, the answer to each Txn by token,
@@ -112,9 +114,12 @@ func (sh *metaShards) opened(st *chunkstore.Store, open bool) {
 				Tree: lsm.Config{MaxPiece: 4 << 10, StepBytes: 4 << 10, Check: true},
 			},
 			Owner: metaOwner(i), MaxBlob: sh.maxBlob, Open: open,
-			Answered: func(_ *core.Context, as []meta.Answer, out []core.Action) []core.Action {
+			Answered: func(ctx *core.Context, as []meta.Answer, out []core.Action) []core.Action {
 				for _, an := range as {
 					rep.answers[an.Token] = an.Err
+				}
+				if sh.answered != nil {
+					out = sh.answered(ctx, as, out)
 				}
 				return out
 			},

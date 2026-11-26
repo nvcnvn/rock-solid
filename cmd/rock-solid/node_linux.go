@@ -116,6 +116,7 @@ func (p *storageNode) add(dm *deviceMachine, path string) error {
 			return err
 		}
 		dm.lg = nl.l.AttachLog(nil, dm.cfg.Store.Log, chunkstore.FirstLogIO, chunkstore.EndLogIO, len(p.cfg.Devices)+1)
+		dm.cfg.Host, dm.cfg.Rounds = nl.l, dm.lg
 	}
 	lfd, _, err := tcp.ListenTCP(netip.AddrPortFrom(p.cfg.Listen.Addr(), p.cfg.Listen.Port()+uint16(id)))
 	if err != nil {
@@ -244,6 +245,9 @@ func (m *deviceMachine) OnLog(ctx *core.Context, _ *loop.Log, ev *disklog.Event,
 	m.d.OnLog(ctx, ev, &m.out)
 	return m.done(acts)
 }
+
+// OnReply hands the device what a MetaStore replica on its loop replied the store.
+func (m *deviceMachine) OnReply(_ *loop.Log, r loop.Reply) { m.d.OnReply(r) }
 
 // done serves the loop the store's log and hands on what the device output.
 func (m *deviceMachine) done(acts []core.Action) []core.Action {

@@ -3,12 +3,12 @@ package chunkstore
 import (
 	"cmp"
 	"errors"
-	"fmt"
 	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lease"
+	"github.com/nvcnvn/rock-solid/internal/raftshard"
 	"github.com/nvcnvn/rock-solid/internal/trace"
 )
 
@@ -44,7 +44,7 @@ type ReplicaConfig struct {
 	Restarted bool
 }
 
-// ReplicaOutput is what a call into a Replica asks of its loop: actions, and of the control plane a table at least as new as Fetch, whole if Whole, a new interval of each PG in Asks, whose interval a spent version counter, a failed version or an index rebuild ended, and the record of each interval in Activations and in Recovered, which the loop sends the control plane in a Report beside its heartbeat. The replica asks again, and reports again, every RetryAfter until a table answers. Trace is the protocol steps the call took, for the loop's trace.
+// ReplicaOutput is what a call into a Replica asks of its loop: actions, and of the control plane a table at least as new as Fetch, whole if Whole, a new interval of each PG in Asks, whose interval a spent version counter, a failed version or an index rebuild ended, and the record of each interval in Activations and in Recovered, which the loop sends the control plane in a Report beside its heartbeat. The replica asks again, and reports again, every RetryAfter until a table answers. Trace is the protocol steps the call took, for the loop's trace, and Mail the store's mail to its shards on the round driver.
 type ReplicaOutput struct {
 	Actions []core.Action
 	Fetch   uint64
@@ -56,11 +56,12 @@ type ReplicaOutput struct {
 	Activations   []PGReport
 	Recovered     []PGReport
 	Trace         []trace.Record
+	Mail          []raftshard.Mail
 }
 
 // Reset empties the output for reuse.
 func (o *ReplicaOutput) Reset() {
-	o.Actions, o.Fetch, o.Whole, o.FetchSessions, o.Asks, o.Activations, o.Recovered, o.Trace = o.Actions[:0], 0, false, 0, o.Asks[:0], o.Activations[:0], o.Recovered[:0], o.Trace[:0]
+	o.Actions, o.Fetch, o.Whole, o.FetchSessions, o.Asks, o.Activations, o.Recovered, o.Trace, o.Mail = o.Actions[:0], 0, false, 0, o.Asks[:0], o.Activations[:0], o.Recovered[:0], o.Trace[:0], o.Mail[:0]
 }
 
 func (o *ReplicaOutput) note(name trace.Name, a, b, c, d, e uint64) {
@@ -1611,9 +1612,7 @@ func (r *Replica) drainStore(ctx *core.Context, out *ReplicaOutput) {
 		}
 		r.recs = r.recs[:0]
 	}
-	if len(r.sout.Mail) > 0 {
-		panic(fmt.Sprintf("chunkstore: the store mailed %+v, and a replica hosts no shard on the round driver", r.sout.Mail[0]))
-	}
+	out.Mail = append(out.Mail, r.sout.Mail...)
 	acts := r.sout.Actions
 	r.sout.Reset()
 	r.sout.Actions = acts

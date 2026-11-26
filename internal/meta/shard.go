@@ -197,9 +197,14 @@ func (s *Shard) submit(ctx *core.Context, t *Txn, token uint64, out *Output) err
 // after answers every Txn waiting or gathered dropped once the replica left its group or halted,
 // as it applies nothing more.
 func (s *Shard) after() {
-	if !s.out.Raft.Removed && s.halted == 0 {
-		return
+	if s.out.Raft.Removed || s.halted != 0 {
+		s.drop(s.out)
 	}
+}
+
+// drop answers every Txn waiting or gathered dropped, in out.
+func (s *Shard) drop(out *Output) {
+	s.out = out
 	for len(s.waits) > 0 {
 		s.settle(0, raft.ErrProposalDropped)
 	}
