@@ -110,9 +110,6 @@ type rclient struct {
 	once, stale error
 }
 
-// final reports whether a write's answer is final: its client never sends it again.
-func final(st Status) bool { return st != StatusRefused && st != StatusUnfound }
-
 func (c *rclient) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
 	if ev.Kind == core.EvPeerLost && c.lost != nil {
 		c.lost(ev.Peer)
