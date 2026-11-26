@@ -506,8 +506,8 @@ func (h *CtlHost) renew(ctx *core.Context, ev *core.Event, out *CtlHostOutput) {
 }
 
 // admin hands the Control an operator's command while the leader holds its lease, once per request
-// the command line still waits on. A refusal is answered at once; a command taken is answered once
-// nothing of it is staged, by settle.
+// the command line still waits on. A refusal is answered at once, as a read is, the membership
+// as a node's report gets it; a command taken is answered once nothing of it is staged, by settle.
 func (h *CtlHost) admin(ctx *core.Context, ev *core.Event, request uint64, out *CtlHostOutput) {
 	w := adminWait{starter: starter{at: ev.Peer, request: request}}
 	if !h.leased(ctx) || slices.ContainsFunc(h.admins, func(o adminWait) bool { return o.starter == w.starter }) {
@@ -519,6 +519,9 @@ func (h *CtlHost) admin(ctx *core.Context, ev *core.Event, request uint64, out *
 	case err != nil:
 	case w.a.Op == AdminFailed:
 		h.answerAdmin(ctx, &w, &AdminAnswer{Failed: c.FailedDevices()}, out)
+		return
+	case w.a.Op == AdminMembership:
+		h.sendDisks(ctx, ev.Peer, out)
 		return
 	case w.a.Op == AdminPool:
 		c.begin(ctx.Now)

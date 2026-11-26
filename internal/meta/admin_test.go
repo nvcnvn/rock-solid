@@ -596,7 +596,7 @@ func TestAdminCrossesTheWireWhole(t *testing.T) {
 	pool := sim.NewPool(1<<20, 0)
 	full := chunkstore.PoolSpec{Replicas: new(3), MinLive: new(2), Data: new(4), Parity: new(2), EncodeOnWrite: new(true), MaxPerDomain: new(1),
 		Overcommit: new(false), WriteLimit: new(uint8(90)), PGCount: new(uint32(1 << 31)), Sealed: "ec", FailureDomain: "disk", Locality: "node", DiskClass: "nvme"}
-	for _, a := range []Admin{{Op: AdminLost, Disk: 1 << 31}, {Op: AdminRemove, Disk: 1}, {Op: AdminFailed}, {Op: AdminPool, Pool: 7}, {Op: AdminPool, Pool: 1, Spec: full}, {Op: AdminGiveUp, Pool: 1 << 31, PG: 1<<32 - 1, Interval: 1<<32 - 1}, {Op: AdminPG, Pool: 2, PG: 5}, {Op: AdminDrain, Disk: 1<<32 - 1}, {Op: AdminUndrain, Disk: 4},
+	for _, a := range []Admin{{Op: AdminLost, Disk: 1 << 31}, {Op: AdminRemove, Disk: 1}, {Op: AdminFailed}, {Op: AdminMembership}, {Op: AdminPool, Pool: 7}, {Op: AdminPool, Pool: 1, Spec: full}, {Op: AdminGiveUp, Pool: 1 << 31, PG: 1<<32 - 1, Interval: 1<<32 - 1}, {Op: AdminPG, Pool: 2, PG: 5}, {Op: AdminDrain, Disk: 1<<32 - 1}, {Op: AdminUndrain, Disk: 4},
 		{Op: AdminEdit, Pool: 1 << 31, PG: 1<<32 - 1, Pin: true}, {Op: AdminEdit, Pool: 3, PG: 2, Disks: []uint32{1<<32 - 1, 1, 7}}} {
 		var m core.Msg
 		if err := EncodeAdmin(pool, 1, 5, &a, &m); err != nil {
@@ -628,7 +628,7 @@ func TestAdminCrossesTheWireWhole(t *testing.T) {
 }
 
 func FuzzDecodeAdmin(f *testing.F) {
-	for _, a := range []Admin{{Op: AdminLost, Disk: 2}, {Op: AdminRemove, Disk: 3}, {Op: AdminFailed}, {Op: AdminGiveUp, Pool: 1, PG: 7, Interval: 3}, {Op: AdminPG, Pool: 1, PG: 7}, {Op: AdminDrain, Disk: 4}, {Op: AdminUndrain, Disk: 5},
+	for _, a := range []Admin{{Op: AdminLost, Disk: 2}, {Op: AdminRemove, Disk: 3}, {Op: AdminFailed}, {Op: AdminMembership}, {Op: AdminGiveUp, Pool: 1, PG: 7, Interval: 3}, {Op: AdminPG, Pool: 1, PG: 7}, {Op: AdminDrain, Disk: 4}, {Op: AdminUndrain, Disk: 5},
 		{Op: AdminEdit, Pool: 1, PG: 7, Pin: true}, {Op: AdminEdit, Pool: 1, PG: 7, Disks: []uint32{3, 1, 2}}} {
 		addWire(f, func(pool core.BufPool, m *core.Msg) { _ = EncodeAdmin(pool, 1, 4, &a, m) })
 	}
@@ -762,5 +762,36 @@ func TestAnEditWaitsOutACutAndAFailedCommit(t *testing.T) {
 	}
 	if got := memberDisks(r.ctl.Table().Entry(pg)); !slices.Equal(got, was) {
 		t.Fatalf("after the reload, PG %v has members %v", pg, got)
+	}
+}
+
+// The membership command is answered at once with what a node's report gets: here the shard map
+// the leader committed once node 2 reported, its control-plane group's entry this host's
+// configuration and its data group's voter on node 2's disk, and the loop of that disk.
+func TestTheMembershipCommandAnswersTheShardMapAndTheDisks(t *testing.T) {
+	r := newHostRun(t)
+	r.lead()
+	r.report(&NodeReport{Node: 2, Meta: true, Opened: []OpenedDisk{{Device: 1, Log: 0x77, Blocks: 1 << 20, Loop: 1}}})
+	r.run(StepInterval * 5)
+	r.answers()
+	r.admin(1, Admin{Op: AdminMembership})
+	var m Membership
+	n := 0
+	for _, a := range r.sent {
+		if _, k, _, _ := Peek(&a.Msg); a.Peer == operator && k == KindDisks {
+			if err := DecodeDisks(r.pool, &a.Msg, &m); err != nil {
+				t.Fatal(err)
+			}
+			n++
+		}
+	}
+	r.answers()
+	if n != 1 || len(m.Disks) != 1 || m.Disks[0].At != (core.NodeID{Node: 2, Loop: 1}) {
+		t.Fatalf("answered %d memberships, the last %+v", n, m)
+	}
+	want := []Group{{ID: hostGroup, Voters: []Replica{{ID: 1, Node: voterNode(1).Node}}, LastID: 1},
+		{ID: hostGroup + 1, Start: ctlEnd, Voters: []Replica{{ID: 1, Node: 2, Disk: m.Disks[0].Disk}}, LastID: 1, Boot: 1}}
+	if len(m.Plans) != 2 || string(appendGroup(nil, &m.Plans[0])) != string(appendGroup(nil, &want[0])) || string(appendGroup(nil, &m.Plans[1])) != string(appendGroup(nil, &want[1])) {
+		t.Fatalf("the map is %+v, want %+v", m.Plans, want)
 	}
 }

@@ -30,7 +30,8 @@ type AdminOp byte
 
 // The operator's commands: declare a disk lost, remove a drained disk, create or change a pool,
 // list the devices nodes left failed, give up a PG's current interval, read a PG's state,
-// drain a disk or end its drain, and edit, pin or unpin a PG.
+// drain a disk or end its drain, edit, pin or unpin a PG, and read the membership a node's
+// report gets, the shard map with the loop of each disk.
 const (
 	AdminLost AdminOp = 1 + iota
 	AdminRemove
@@ -41,6 +42,7 @@ const (
 	AdminDrain
 	AdminUndrain
 	AdminEdit
+	AdminMembership
 )
 
 // Admin is an operator's command: Disk for AdminLost, AdminRemove, AdminDrain and AdminUndrain, Pool and Spec for AdminPool,
@@ -131,7 +133,7 @@ func DecodeAdmin(pool core.BufPool, msg *core.Msg) (Admin, error) {
 				a.Disks = append(a.Disks, uint32(disk))
 			}
 		}
-	case AdminFailed:
+	case AdminFailed, AdminMembership:
 	default:
 		d.bad = true
 	}
