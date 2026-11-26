@@ -3,6 +3,7 @@ package fuseproto
 // INIT flags, joined as InitIn.Flags and InitOut.Flags join flags and flags2.
 const (
 	FlagAsyncRead      = 1 << 0
+	FlagBigWrites      = 1 << 5
 	FlagAutoInvalData  = 1 << 12
 	FlagDoReaddirplus  = 1 << 13
 	FlagWritebackCache = 1 << 16

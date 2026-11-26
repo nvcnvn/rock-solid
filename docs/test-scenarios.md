@@ -9361,6 +9361,14 @@ handoff spikes.
   request and `FuzzDecodeParams`: no panic, names without a zero, a `WRITE`'s data its size, and
   saved parameters re-encoding to their bytes. `FuzzDecode` also decodes each input with its
   header's length patched to the input's, so a shorter or longer body reaches the body decoders.
+- The kernel's side, which the [simulated FUSE clients](#simulated-fuse-clients) speak:
+  `AppendRequest` encodes `INIT`, `LOOKUP`, `GETATTR`, `OPEN`, `READ`, `WRITE`, `FLUSH`, `RELEASE`
+  and `FSYNC` to their golden frames byte for byte (`TestGoldenRequestsEncode`), and
+  `DecodeReply` with the entry, attribute, open, write, `INIT` and `inval_inode` decoders reads
+  the golden replies back to what encoded them (`TestGoldenRepliesDecode`). A frame whose length
+  disagrees with its header and a body one byte short or long are `ErrReply`
+  (`TestMalformedRepliesAreErrors`). **[property]** `FuzzDecodeReply`: no panic, and every body a
+  decoder takes re-encodes to its frame.
 - A `WRITE`'s data stays in its frame, at the offset the kernel put it; `READ` and
   `READDIRPLUS` replies are built in place behind a header written last.
 - **Benchmarks:** `BenchmarkWrite`, decoding a `WRITE` and encoding its reply, 8.6 ns;

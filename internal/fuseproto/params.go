@@ -33,20 +33,6 @@ func DecodeParams(b []byte) (Params, error) {
 	var p Params
 	p.Kernel = InitIn{Major: le.Uint32(b), Minor: le.Uint32(b[4:]), MaxReadahead: le.Uint32(b[8:]),
 		Flags: uint64(le.Uint32(b[12:])) | uint64(le.Uint32(b[16:]))<<32}
-	o := b[initInSize:]
-	p.Daemon = InitOut{
-		Major:               le.Uint32(o),
-		Minor:               le.Uint32(o[4:]),
-		MaxReadahead:        le.Uint32(o[8:]),
-		Flags:               uint64(le.Uint32(o[12:])) | uint64(le.Uint32(o[32:]))<<32,
-		MaxBackground:       le.Uint16(o[16:]),
-		CongestionThreshold: le.Uint16(o[18:]),
-		MaxWrite:            le.Uint32(o[20:]),
-		TimeGran:            le.Uint32(o[24:]),
-		MaxPages:            le.Uint16(o[28:]),
-		MapAlignment:        le.Uint16(o[30:]),
-		MaxStackDepth:       le.Uint32(o[36:]),
-		RequestTimeout:      le.Uint16(o[40:]),
-	}
+	p.Daemon = decodeInitOut(b[initInSize:])
 	return p, nil
 }
