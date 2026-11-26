@@ -418,7 +418,8 @@ CommitTo(i, n) ==
                                     [e |-> log[i][Len(chosen) + k], t |-> term[i]]]
 
 \* The leader sends its log and commit index to a member of its applied configuration,
-\* learners included, and learns what it holds; the replica keeps a longer log that agrees
+\* learners included, and learns what it holds; an append sent before the leader's latest
+\* advance and taken after it carries the commit index before it, hbCommit; the replica keeps a longer log that agrees
 \* with it, and takes the leader's otherwise; a halted replica drops it. The replica writes its hard state when its term changes, or when
 \* it appends, the newest one, or without NewestHardState only if its commit index moves in the
 \* same Ready.
@@ -432,7 +433,7 @@ Replicate(i, j) ==
     /\ leader' = [leader EXCEPT ![j] = FALSE]
     /\ log' = [log EXCEPT ![j] = IF IsPrefix(log[i], @) THEN @ ELSE log[i]]
     /\ match' = [match EXCEPT ![i][j] = Len(log[i]), ![j] = NoMatch]
-    /\ commit' = [commit EXCEPT ![j] = IF commit[i] > @ THEN commit[i] ELSE @]
+    /\ \E c \in {hbCommit[i], commit[i]} : commit' = [commit EXCEPT ![j] = IF c > @ THEN c ELSE @]
     /\ hbCommit' = [hbCommit EXCEPT ![j] = 0]
     /\ support' = [support EXCEPT ![j] = IF term[j] < term[i] THEN {} ELSE @]
     /\ fort' = [fort EXCEPT ![j] = {}]
@@ -614,14 +615,19 @@ Die(r) ==
     /\ UNCHANGED crashes
 
 \* The replica restarts from a base at or below what its state machine applied, which a
-\* halted one never applied past the entry before its halt. It still knows its removal.
+\* halted one never applied past the entry before its halt. It still knows its removal. With
+\* NewestHardState its hard state's commit index is any from the one this spec's steps last
+\* wrote up to the one it knew: a round that appends a command, which the log here leaves out,
+\* writes the newest hard state too.
 Restart(r) ==
-    LET top == IF haltAt[r] = 0 THEN applied[r] ELSE Min({applied[r], haltAt[r] - 1}) IN
+    LET top == IF haltAt[r] = 0 THEN applied[r] ELSE Min({applied[r], haltAt[r] - 1})
+        hs == hsCommit[r] .. IF NewestHardState THEN Max({hsCommit[r], commit[r]}) ELSE hsCommit[r]
+    IN
     /\ ~up[r] /\ r \notin Stopped \cup dead
     /\ up' = [up EXCEPT ![r] = TRUE]
-    /\ \E b \in 0 .. top :
+    /\ \E b \in 0 .. top, h \in hs :
           /\ applied' = [applied EXCEPT ![r] = b]
-          /\ commit' = [commit EXCEPT ![r] = IF DurableCommit THEN Max({b, hsCommit[r]}) ELSE b]
+          /\ commit' = [commit EXCEPT ![r] = IF DurableCommit THEN Max({b, h}) ELSE b]
     /\ UNCHANGED <<term, leader, log, match, hbCommit, gone, crashes, elected, chosen, early,
                    support, fort, hsCommit, haltAt, out, dead, reported>>
 
