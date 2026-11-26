@@ -286,6 +286,28 @@ func TestARefusedWriteBacksOff(t *testing.T) {
 	}
 }
 
+// A refusal from a primary the write no longer waits on, the one before a new table moved it, does
+// not send the write again early.
+func TestALateRefusalFromTheOldPrimaryIsIgnored(t *testing.T) {
+	tbl := rtable(1, 2)
+	h := newTClient(t, tbl)
+	h.write(1, 0, []byte("a"))
+	_, old := h.updates()
+	next := cloneTable(tbl)
+	next.Epoch = 2
+	next.Pools[0].PGs[0].Members[0], next.Pools[0].PGs[0].Members[1] = next.Pools[0].PGs[0].Members[1], next.Pools[0].PGs[0].Members[0]
+	h.c.SetTable(&h.ctx, next, &h.out)
+	h.take()
+	if _, as := h.updates(); len(as) != 1 || as[0].Peer == old[0].Peer {
+		t.Fatalf("with the new table sent %+v", as)
+	}
+	h.answer(old[0], refused(2))
+	h.at(h.ctx.Now + ClientRetryAfter)
+	if _, as := h.updates(); len(as) != 0 {
+		t.Fatalf("after the old primary's refusal sent %d", len(as))
+	}
+}
+
 // The client asks for the table a refusal names.
 func TestAClientAsksForTheTableARefusalNames(t *testing.T) {
 	h := newTClient(t, rtable(1, 2))
@@ -366,6 +388,9 @@ type idRules struct {
 func newIDRules(pool core.BufPool) *idRules {
 	return &idRules{pool: pool, final: map[core.RequestID]bool{}, low: 1, idOf: map[core.IOBuf]core.RequestID{}, bufOf: map[core.RequestID]core.IOBuf{}}
 }
+
+// final reports whether a write's answer is final: its client never sends it again.
+func final(st Status) bool { return st != StatusRefused && st != StatusUnfound }
 
 func (r *idRules) send(a *core.Action) {
 	if Kind(a.Msg.Body[1]) != KindWrite || r.err != nil {

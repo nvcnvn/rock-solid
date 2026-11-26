@@ -31,7 +31,9 @@ const readIDs = core.RequestID(1) << 63
 var ErrClientRange = errors.New("chunkstore: client request of no bytes or past a file's last chunk")
 
 // ClientConfig names a client's session and incarnation, and IDBase the request ID below its
-// first, so that several clients on one node take apart request IDs.
+// first. A session incarnation has one Client: its request IDs and the resend table's trim by the
+// oldest outstanding are the incarnation's, so IDBase sets apart only clients of different
+// incarnations, as a test keeping one history of several does.
 type ClientConfig struct {
 	Session     uint64
 	Incarnation uint64
@@ -99,7 +101,7 @@ type clientPlants struct {
 	resendNewID, oldestOwn, oldestSent, refusedFinal, keepAnswered, pastWindow, refusedOK bool
 }
 
-// Client is the client side of chunk I/O for one session incarnation: it sends each chunk's
+// Client is the client side of chunk I/O for one session incarnation, its only one: it sends each chunk's
 // writes, punches and reads to the primary the table it holds names for the chunk's PG, after a
 // hello naming the session and incarnation on each connection. Writes take request IDs in order,
 // each named by every send of its write; a write names the lowest ID with no final answer, and no
@@ -312,11 +314,11 @@ func (c *Client) recv(ctx *core.Context, ev *core.Event, out *ClientOutput) {
 	freeBuf(ctx, ev.Msg.Buf)
 }
 
-// final reports whether a write's answer is final: its client never sends it again.
-func final(st Status) bool { return st != StatusRefused && st != StatusUnfound }
-
 // pump gives queued writes their IDs while the window allows, sends every request due, and arms
 // ClientTimer for the next one due.
+//
+// ponytail: a walk of every request per event, and a queue drained from its front, fine at a few
+// dozen requests in flight; a heap by due time and a ring for the queue if a client keeps thousands.
 func (c *Client) pump(ctx *core.Context, out *ClientOutput) {
 	for len(c.queued) > 0 && (c.plant.pastWindow || len(c.writes) == 0 || c.next+1-uint64(c.writes[0].id-c.cfg.IDBase) <= RequestWindow) {
 		c.next++
