@@ -283,6 +283,16 @@ int main(void)
 	put(&ao, sizeof(ao));
 	emit("attr_reply");
 
+	struct fuse_attr sa = attr(7);
+	struct fuse_statx_out sxo = {.attr_valid = 2, .attr_valid_nsec = 600, .stat = {
+		.mask = 0x7ff /* STATX_BASIC_STATS */, .blksize = sa.blksize, .nlink = sa.nlink, .uid = sa.uid,
+		.gid = sa.gid, .mode = sa.mode, .ino = sa.ino, .size = sa.size, .blocks = sa.blocks,
+		.atime = {sa.atime, sa.atimensec}, .ctime = {sa.ctime, sa.ctimensec},
+		.mtime = {sa.mtime, sa.mtimensec}, .rdev_major = 0, .rdev_minor = 7}};
+	out(0, 0x188);
+	put(&sxo, sizeof(sxo));
+	emit("statx_reply");
+
 	struct fuse_open_out oo = {.fh = 7, .open_flags = FOPEN_DIRECT_IO};
 	out(0, 0x15a);
 	put(&oo, sizeof(oo));

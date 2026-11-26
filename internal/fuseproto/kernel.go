@@ -105,6 +105,22 @@ func DecodeAttrOut(b []byte) (valid uint64, validNsec uint32, a Attr, err error)
 	return le.Uint64(b), le.Uint32(b[8:]), decodeAttr(b[16:]), nil
 }
 
+// DecodeStatxOut decodes the body of a STATX reply as the kernel takes it: the attributes when
+// its mask holds StatxBasic, the rdev from its major and minor.
+func DecodeStatxOut(b []byte) (valid uint64, validNsec uint32, a Attr, err error) {
+	if len(b) != statxOutSize || le.Uint32(b[32:])&StatxBasic != StatxBasic {
+		return 0, 0, Attr{}, ErrReply
+	}
+	x := b[32:]
+	a = Attr{Blksize: le.Uint32(x[4:]), Nlink: le.Uint32(x[16:]), UID: le.Uint32(x[20:]), GID: le.Uint32(x[24:]),
+		Mode: uint32(le.Uint16(x[28:])), Ino: le.Uint64(x[32:]), Size: le.Uint64(x[40:]), Blocks: le.Uint64(x[48:]),
+		Atime: le.Uint64(x[64:]), AtimeNsec: le.Uint32(x[72:]), Ctime: le.Uint64(x[96:]), CtimeNsec: le.Uint32(x[104:]),
+		Mtime: le.Uint64(x[112:]), MtimeNsec: le.Uint32(x[120:])}
+	major, minor := le.Uint32(x[128:]), le.Uint32(x[132:])
+	a.Rdev = minor&0xff | major<<8 | minor&^0xff<<12
+	return le.Uint64(b), le.Uint32(b[8:]), a, nil
+}
+
 // DecodeOpen decodes the body of an OPEN reply.
 func DecodeOpen(b []byte) (Open, error) {
 	if len(b) != openSize {

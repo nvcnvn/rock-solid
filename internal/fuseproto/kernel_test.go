@@ -38,6 +38,9 @@ func TestGoldenRepliesDecode(t *testing.T) {
 	if v, n, a, err := DecodeAttrOut(body("attr_reply", 0x154)); err != nil || v != 2 || n != 600 || a != entry7.Attr {
 		t.Errorf("attr: %d %d %+v %v", v, n, a, err)
 	}
+	if v, n, a, err := DecodeStatxOut(body("statx_reply", 0x188)); err != nil || v != 2 || n != 600 || a != entry7.Attr {
+		t.Errorf("statx: %d %d %+v %v", v, n, a, err)
+	}
 	if o, err := DecodeOpen(body("open_reply", 0x15a)); err != nil || o != (Open{Fh: 7, Flags: OpenDirectIO}) {
 		t.Errorf("open: %+v %v", o, err)
 	}
@@ -113,6 +116,11 @@ func FuzzDecodeReply(f *testing.F) {
 		}
 		if v, n, a, err := DecodeAttrOut(b); err == nil && le.Uint32(b[12:]) == 0 {
 			again("attr", AppendAttr(nil, h.Unique, v, n, &a))
+		}
+		if v, n, a, err := DecodeStatxOut(b); err == nil {
+			if v2, n2, a2, err := DecodeStatxOut(AppendStatx(nil, h.Unique, v, n, &a)[OutHeaderSize:]); err != nil || v2 != v || n2 != n || a2 != a {
+				t.Fatalf("statx %+v came back %+v", a, a2)
+			}
 		}
 		if o, err := DecodeOpen(b); err == nil && le.Uint32(b[12:]) == 0 {
 			again("open", AppendOpen(nil, h.Unique, o))

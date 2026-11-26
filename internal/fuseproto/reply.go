@@ -65,6 +65,7 @@ const (
 	openSize     = 16
 	initOutSize  = 64
 	statfsSize   = 80
+	statxOutSize = 32 + 256
 	direntOffset = entrySize + 24
 )
 
@@ -166,6 +167,35 @@ func AppendAttr(dst []byte, unique, valid uint64, validNsec uint32, a *Attr) []b
 	dst = le.AppendUint64(dst, valid)
 	dst = le.AppendUint64(dst, uint64(validNsec))
 	return appendAttr(dst, a)
+}
+
+// StatxBasic is STATX_BASIC_STATS, the fields a STATX reply fills: every one but the birth time.
+const StatxBasic = 0x7ff
+
+// AppendStatx appends the reply of STATX: a's fields as fuse_statx_out with mask StatxBasic,
+// cached for valid seconds and validNsec.
+func AppendStatx(dst []byte, unique, valid uint64, validNsec uint32, a *Attr) []byte {
+	dst = appendOutHeader(dst, statxOutSize, 0, unique)
+	dst = le.AppendUint64(dst, valid)
+	dst = le.AppendUint32(dst, validNsec)
+	dst = append(dst, make([]byte, 4+16)...)
+	dst = le.AppendUint32(dst, StatxBasic)
+	dst = le.AppendUint32(dst, a.Blksize)
+	dst = le.AppendUint64(dst, 0)
+	dst = le.AppendUint32(dst, a.Nlink)
+	dst = le.AppendUint32(dst, a.UID)
+	dst = le.AppendUint32(dst, a.GID)
+	dst = le.AppendUint16(dst, uint16(a.Mode))
+	dst = le.AppendUint16(dst, 0)
+	for _, v := range [...]uint64{a.Ino, a.Size, a.Blocks, 0} {
+		dst = le.AppendUint64(dst, v)
+	}
+	for _, t := range [...][2]uint64{{a.Atime, uint64(a.AtimeNsec)}, {}, {a.Ctime, uint64(a.CtimeNsec)}, {a.Mtime, uint64(a.MtimeNsec)}} {
+		dst = le.AppendUint64(le.AppendUint64(dst, t[0]), t[1])
+	}
+	dst = le.AppendUint32(dst, a.Rdev>>8&0xfff)
+	dst = le.AppendUint32(dst, a.Rdev&0xff|a.Rdev>>12&0xfff00)
+	return append(dst, make([]byte, 8+14*8)...)
 }
 
 // AppendOpen appends the reply of OPEN or OPENDIR.

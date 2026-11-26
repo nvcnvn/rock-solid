@@ -188,6 +188,7 @@ func TestGoldenRepliesEncode(t *testing.T) {
 			MaxBackground: 16, CongestionThreshold: 12, MaxWrite: 128 << 10, TimeGran: 1, MaxPages: 32}),
 		"entry_reply":  AppendEntry(nil, 0x800000000000014a, &entry7),
 		"attr_reply":   AppendAttr(nil, 0x154, 2, 600, &entry7.Attr),
+		"statx_reply":  AppendStatx(nil, 0x188, 2, 600, &entry7.Attr),
 		"open_reply":   AppendOpen(nil, 0x15a, Open{Fh: 7, Flags: OpenDirectIO}),
 		"create_reply": AppendCreate(nil, 0x158, &entry7, Open{Fh: 7, Flags: OpenKeepCache}),
 		"read_reply": func() []byte {
@@ -342,6 +343,10 @@ func TestDecodeAndReplyAllocateNothing(t *testing.T) {
 		"write": func() {
 			_ = Decode(frames["write"], &r)
 			out = AppendWrite(out[:0], r.Unique, uint32(len(r.Data)))
+		},
+		"statx": func() {
+			_ = Decode(frames["statx"], &r)
+			out = AppendStatx(out[:0], r.Unique, 1, 0, &entry7.Attr)
 		},
 		"lookup": func() {
 			_ = Decode(frames["lookup"], &r)
