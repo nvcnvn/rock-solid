@@ -412,7 +412,8 @@ func DecodeUpdate(b []byte, data int, u *Update) error {
 	default:
 		u.Oldest = r.u64()
 	}
-	if flags&^(expectFlag|grantedFlag) != 0 || !validVersion(u.Expect) || !u.HasExpect && u.Expect != 0 || u.Granted && u.Kind != KindWrite {
+	if flags&^(expectFlag|grantedFlag) != 0 || !validVersion(u.Expect) || !u.HasExpect && u.Expect != 0 || u.Granted && u.Kind != KindWrite ||
+		u.Oldest > uint64(u.ID) && (u.Kind == KindWrite || u.Kind == KindPunch) || u.Oldest > u.Request && (u.Kind == KindReplicaWrite || u.Kind == KindReplicaPunch) {
 		r.bad = true
 	}
 	replica := u.Kind == KindReplicaWrite || u.Kind == KindReplicaPunch || u.Kind == KindRecover

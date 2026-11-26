@@ -380,6 +380,8 @@ func TestWireRejectsVersions(t *testing.T) {
 func TestWireRejectsAClientWriteOrPunchWithoutASession(t *testing.T) {
 	mustMalformed(t, "client write without a session", AppendUpdate(nil, &Update{Kind: KindWrite, PG: wirePG, Incarnation: 1, Len: 1}), core.BlockSize)
 	mustMalformed(t, "client punch without a session", AppendUpdate(nil, &Update{Kind: KindPunch, PG: wirePG, Incarnation: 1, Len: 1}), 0)
+	mustMalformed(t, "client write naming an oldest request past its own", AppendUpdate(nil, &Update{Kind: KindWrite, ID: 5, PG: wirePG, Session: 1, Len: 1, Oldest: 6}), core.BlockSize)
+	mustMalformed(t, "member write naming an oldest request past its write's", AppendUpdate(nil, &Update{Kind: KindReplicaWrite, ID: 9, PG: wirePG, Len: 1, Version: 1<<32 | 1, Request: 5, Oldest: 6}), core.BlockSize)
 }
 
 // A report's pg_count is a power of two above its PG's number.

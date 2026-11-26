@@ -56,6 +56,7 @@ func FuzzDecodeRecord(f *testing.F) {
 	f.Add(recoveryRecord(f).image)
 	f.Add(droppedRecord(f).image)
 	f.Add(encodeRecord(f, Record{Place: testPlace, LSN: 12, Durable: 11}, []Entry{ImageEntry(1, testChunk, 0x200000003, 4), DecisionEntry(1, 5, 8, 4)}, [][]byte{nil, nil}).image)
+	f.Add(encodeRecord(f, Record{Place: testPlace, LSN: 13, Durable: 12}, []Entry{WriterEntry(1, testChunk, 0x200000003, 8, 7, 3, 41, 40), WriteEntry(1, testChunk, 0x200000003, 0, 1)}, [][]byte{nil, make([]byte, core.BlockSize)}).image)
 	f.Fuzz(func(t *testing.T, img []byte) {
 		d, err := DecodeRecord(img, testPlace, math.MaxUint32, nil)
 		if err != nil {

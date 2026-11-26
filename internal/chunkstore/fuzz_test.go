@@ -81,6 +81,7 @@ func FuzzCheck(f *testing.F) {
 		disklog.Entry{Kind: disklog.EntryFreeze, Pool: 1, Chunk: chunk(2), Version: 0, Epoch: 5},
 		disklog.Entry{Kind: disklog.EntryWrite, Pool: 1, Chunk: chunk(2), Version: 1, First: 0, Count: 1},
 		disklog.SlotEntry(1, chunk(3), 1, 2, 1),
+		disklog.WriterEntry(1, chunk(3), 2, 1, 7, 1, 5, 4),
 		disklog.Entry{Kind: disklog.EntryWrite, Pool: 1, Chunk: chunk(3), Version: 2, First: 7, Count: 1, Last: true},
 		disklog.MissingEntry(1, chunk(2), 1<<32|1, 2),
 		disklog.MissingEntry(1, chunk(4), 0, 2),
