@@ -3016,6 +3016,7 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | `internal/meta` `TestNoGrantedFlushIsRefusedForSpace` | 1,000 | 4 s |
   | `internal/meta` `TestTheFilesystemWorkloadKeepsItsInvariantsAcrossElections` | 100 | 2 s |
   | `internal/loop/nettest` `TestSuiteOnTheSimulatedNetwork` | 100 | 5 s |
+  | `internal/fsclient` `TestAMountsHistoriesKeepTheirInvariantsAcrossCrashes` | 150 | 73 s on the SYS-2 box (4 processes) |
 
 - A process's memory does not grow with the seeds it runs; the disk log tests' processes stay
   under 400 MiB, the random-crash harness's pool being 16 MiB. The group commit property's seed
@@ -9583,7 +9584,8 @@ model](#sessions-and-fencing-model).
 
 From [Client design](design.md#client-design), [Cache coherence tiers](design.md#cache-coherence-tiers)
 and [Key layout](design.md#metadata-layer-metastore). Scripted in `internal/fsclient` against a real
-`meta.State`, chunks in memory.
+`meta.State`, chunks in memory, each `Txn` checked as a shard checks it; seeded against a real shard
+and chunk devices.
 
 - Each namespace operation sends the `Txn` the design's table gives, built by `meta.FS`, with its
   replay key; a failed final check returns `EEXIST`, `ENOENT` or `ENOTEMPTY`; a directory renamed
@@ -9610,9 +9612,19 @@ and [Key layout](design.md#metadata-layer-metastore). Scripted in `internal/fscl
   (`TestTheRequestPathAllocatesNothing`).
 - The plant `neg-raise-after-write` leaves a chunk past `alloc_end` that the purge of the file,
   unlinked after a crash, misses (`TestAWriteBeforeItsRaiseLeavesAChunkThePurgeMisses`).
-- **[property]** Seeded one-node runs of simulated clients against a real shard and replicas, with
-  crashes and elections: histories pass close-to-open, the filesystem invariants hold, and the plant
-  `neg-raise-after-write` fails "a purge never misses a chunk written before a crash".
+- **[property]** `TestAMountsHistoriesKeepTheirInvariantsAcrossCrashes`: one node's `sim.Mount`,
+  four processes on two root-directory files as in `TestFileHistoriesKeepCloseToOpen`, against
+  three `meta.Shard` replicas over the meta wire and three `node.Device` chunk devices; partitions,
+  replicas' nodes rebooted so leaders change, and the daemon crashed, half the time within 3 ms of
+  a file's first chunk write, restarting as a new mount that may unlink and create each file
+  again. Histories pass close-to-open, every system call succeeds, no inode is handed out twice,
+  no `mtime` goes backwards, every file's entry is in its directory's slot, no directory is its
+  own ancestor, and at each daemon crash every chunk written lies below `alloc_end` or within its
+  purge entry. Until **MetaStore reads over the wire**, the run serves reads from a replica that
+  has applied every entry any replica has. The devices do not crash: a restarted primary asks the
+  control plane for a new interval, which the run does not model.
+- The plant `neg-raise-after-write` fails "a purge never misses a chunk written before a crash" on
+  each of the run's first 30 seeds (`TestARaiseAfterItsChunkWriteFailsTheMountsRun`, seed 1).
 
 ## Volume records and the first data group
 
