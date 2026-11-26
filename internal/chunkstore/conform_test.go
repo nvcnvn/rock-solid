@@ -433,3 +433,13 @@ func TestResendPlantsKeepTraces(t *testing.T) {
 		}
 	})
 }
+
+// A write whose first version peering dropped is ordered again when sent again, and the run's check keeps the
+// later version: seeds 35 and 46 of the resending run, whose check kept only the first.
+func TestAResentWriteIsKeptAtItsLaterVersion(t *testing.T) {
+	for _, seed := range []uint64{35, 46} {
+		if _, err := runPrimaryRunOn(t, seed, nil, false, 2, false, true); err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+	}
+}

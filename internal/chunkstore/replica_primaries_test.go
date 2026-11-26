@@ -131,8 +131,9 @@ type primaryRun struct {
 	resend bool
 	ended  bool
 	ops    map[core.RequestID]faultOp
-	// version is each write's version once a primary ordered it, kept each activated interval's decision, and tainted the disks that may lack writes.
-	version map[core.RequestID]uint64
+	// version is the versions primaries ordered each write under, more than one only for a write sent again after
+	// peering dropped one, kept each activated interval's decision, and tainted the disks that may lack writes.
+	version map[core.RequestID][]uint64
 	kept    map[uint32][]keptChunk
 	tainted map[uint32]bool
 	// sent is each update a primary sent, by its node and request ID; acked the bytes a member acknowledged under each block and version.
@@ -344,8 +345,8 @@ func (r *primaryRun) pass(d int, acts []core.Action) {
 	}
 	rep.leftDropped = 0
 	for _, v := range rep.vers {
-		if _, ok := r.ops[v.msgID]; ok && v.u.Version != 0 && r.version[v.msgID] == 0 {
-			r.version[v.msgID] = v.u.Version
+		if _, ok := r.ops[v.msgID]; ok && v.u.Version != 0 && !slices.Contains(r.version[v.msgID], v.u.Version) {
+			r.version[v.msgID] = append(r.version[v.msgID], v.u.Version)
 		}
 	}
 	if i := rep.lead(pg0); i >= 0 && rep.leads[i].active && r.kept[rep.leads[i].interval] == nil {
@@ -512,17 +513,18 @@ func (r *primaryRun) formatted(n int) uint32 {
 	return id
 }
 
-// keptVersion reports whether the run keeps write id's version: the client heard OK, or the first activated interval after the version's kept it.
+// keptVersion gives the version of write id the run keeps, if any: the one its client heard OK, or one the first
+// activated interval after it kept.
 func (r *primaryRun) keptVersion(id core.RequestID) (uint64, bool) {
 	if rp, ok := r.c.cl.replies[id]; ok && rp.Status == StatusOK {
 		return rp.Version, true
 	}
-	v := r.version[id]
-	if v == 0 {
-		return 0, false
+	for _, v := range r.version[id] {
+		if k, ok := r.decision(r.ops[id].c, intervalOf(v)); ok && v <= k {
+			return v, true
+		}
 	}
-	k, ok := r.decision(r.ops[id].c, intervalOf(v))
-	return v, ok && v <= k
+	return 0, false
 }
 
 // decision is the version of ch kept by the first activated interval after interval i.
@@ -744,7 +746,7 @@ func runPrimaryRunOn(t *testing.T, seed uint64, plant *peerPlant, crashLeaving b
 	}
 	c.conformBegin()
 	r := &primaryRun{c: c, a: a, rng: core.NewRand(seed ^ 0x9e3), chunks: [2]core.ChunkID{chunkIn(pg0, 4, 0), chunkIn(pg0, 4, 1)}, ops: map[core.RequestID]faultOp{},
-		version: map[core.RequestID]uint64{}, kept: map[uint32][]keptChunk{}, tainted: map[uint32]bool{},
+		version: map[core.RequestID][]uint64{}, kept: map[uint32][]keptChunk{}, tainted: map[uint32]bool{},
 		sent: map[[2]uint64]Update{}, acked: map[blockVersion][]byte{}, errs: map[string]error{}}
 	r.returns, r.crashLeaving, r.resend = r.rng.Chance(1, 2), crashLeaving, resend
 	if resend {
