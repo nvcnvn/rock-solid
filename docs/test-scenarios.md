@@ -2970,6 +2970,7 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | --- | --- | --- |
   | `internal/sim/toy` `TestTheFixedProtocolKeepsEveryAcknowledgedWrite` | 10,000 | 7 s |
   | `internal/sim` `TestFaultsKeepTheDriverContractAndTheResumedRule` | 2,000 | 2 s |
+  | `internal/sim` `TestFileHistoriesKeepCloseToOpen` | 10,000 | 2 s |
   | `internal/core` `TestPoolIsFirstFit` | 10,000 | about 1 s |
   | `internal/lease` `TestNoLeaseOutlastsItsGrant` | 10,000 | 2 s |
   | `internal/raftshard` `TestRaftRunsReplayFromTheirSeed` | 2,000 | 10 s |
@@ -9382,15 +9383,101 @@ handoff spikes.
 From [Testing strategy](design.md#testing-strategy) and the [FUSE coherence
 spike](design.md#appendix-fuse-coherence-spike).
 
-- T1 to T6 of the spike, replayed against the kernel model, give the spike's outcomes: a cached
-  handle stale after another node's write (T1), fresh after `inval_inode` (T2), refilled by an old
-  handle (T3), direct I/O fixed at open (T4), revalidated on read with `auto_inval_data` and a new
-  change counter (T5), stale pages dropped by an open without `keep_cache` (T6); mapped pages stay
-  stale until `inval_inode` (T5b).
-- Every operation is recorded in the history recorder's words; the close-to-open check passes a
-  history whose opens after a close see that close's data and fails one that does not.
-- **[property]** A planted daemon that keeps `keep_cache` after another node's close fails the
-  close-to-open check on the seeds of a two-node run.
+`sim.Mount` is the kernel side of a mount without `writeback_cache`, each rule citing the function
+of `fs/fuse` (or `mm/filemap.c`) it follows in Linux 6.18.44, the spikes' kernel; where torvalds'
+v6.18 differs, as in a direct write dropping its pages again after its `WRITE`s, it follows
+6.18.44. It sends `INIT` first and requests as frames (`fuseproto.AppendRequest`), which the
+daemon reads with `Read`, and takes replies and `inval_inode` through `Write`, refusing a malformed frame, a reply to no request and any other
+notification. Its `Process`es open the root directory's files by name, or by node ID without a
+`LOOKUP` as a reopen through `/proc/self/fd` does (`OpenInode`), and read, read through a mapping,
+write, `fsync` and close them, one system call at a time, each recorded in the history recorder:
+the kind and node ID in the first input word, the errno first in the output, then a write's bytes
+written, or a read's bytes returned and what its 8-byte words say. The tests' daemon is scripted
+in `fuse_test.go`, over files every node's daemon shares; it can hold a reply and write it later,
+as a slow daemon thread does. Not modelled: readahead (each missing page is its own `READ`),
+`FORGET`, `O_APPEND`, creates, other notifications, and `O_TRUNC` or any shrink of a file, which
+the close-to-open check cannot yet express: it takes every writer to cover the whole file, so a
+read past a shrunk end would count as short.
+
+- **T1 to T6 replayed** (`TestTheCoherenceSpikeReplays`), in the spike's order on its file of
+  64 KiB of A, with its daemon's hour-long timeouts and the data version as `mtime`, give the
+  spike's outcomes: a cached handle stale after another node's write (T1), fresh after
+  `inval_inode` (T2), refilled by its old handle and stale again (T3), a new direct handle fresh
+  and the old cached one stale until the node's own direct write (T4), revalidated on each read
+  with an attribute timeout of 0, one `READ` and two `GETATTR` for two reads (T5), mapped pages
+  stale until `inval_inode` (T5b), a churned change counter revalidating a write that kept the
+  version (T5c), and stale pages dropped by an open without `keep_cache` (T6).
+- **The page cache** (`TestWritesGoThroughThePageCache`, `TestASizeChangeDropsThePages`,
+  `TestEntryAndAttributeTimeouts`): a whole page written is cached, a part of an uncached page is
+  read from the daemon later, the read after a write fetches the attributes again, a direct write
+  drops the pages under it before its `WRITE`s and again after them, so a page a cached read
+  filled while they were out goes too (`fs/fuse/file.c` `fuse_direct_io`), a size change drops
+  every page with `mtime` unchanged, and a name is looked up again once its entry timeout passes
+  and attributes once theirs does.
+- **A read's record** (`TestAReadRecordsWhatItsWordsSay`): the least ID among its words that are
+  not zero, a word holding another offset counting as ID 0, and the offset of its first zero word,
+  or of its end if none is.
+- **The close-to-open check** (`sim.CloseToOpen`): every word a handle writes is
+  `id<<32 | offset/8`, its ID rising from one writing handle of a file to the next; one handle
+  writes a file at a time, over every byte it holds. A read in a handle opened after the close of
+  a handle that wrote the file returns as many bytes as that close left in its range, every word
+  below that close's end the close's or a later writer's, and every word at its own offset; a
+  word past the end may be zero, as a reader beside a writer extending the file sees.
+  `TestTheCloseToOpenCheck`: a read of the close's data passes, and so do zeros past its end;
+  one with an older word, a zero word before the end or short of the close's size fails, and
+  either passes in a handle opened before the close returned; a word at another offset fails
+  whenever the handle opened.
+- **The size at open** (`TestAReadAfterAnotherNodesCloseSeesItsSizeOnlyWhenTheOpenLooksItUp`): A
+  grows a file from one page to three and closes; on B, which cached the size of one page, a
+  writer opens and writes two pages, its `WRITE` held, and a reader opens and reads the third
+  page. With entries cached for 1 s the read returns nothing and fails the check, whether the
+  daemon answered without `keep_cache` alone or also sent `inval_inode` for the attributes, whose
+  `GETATTR` the kernel discards while the write past its size is out; with an entry timeout of 0
+  the open's `LOOKUP` brings the size and the read returns the page.
+- **A reopen without `LOOKUP`** (`TestAReopenWithoutLookupHoldsTheNodesSizeForAWhile`), Tier 1's
+  known limit: after A grows the file from one page to three and closes, a reader on B reopening
+  it by node ID reads one page, failing the check as the limit allows, and all three of A's once
+  the attribute timeout passes. Beside a writer reopened that way, which writes past the old size,
+  a reader opened by path reads one page while the write is out, and the writer's three once it
+  returns.
+- **A late reply** (`TestALateAttributeReplyHidesAnotherNodesClose`): B's `LOOKUP` answered with
+  the size before A's close and held lands after a later open's `LOOKUP` was sent, and that open's
+  read passes the check because Tier 1's daemon fetches the attributes again for having read the
+  later request. Written as fetched, the old size lands first, the kernel drops the fresh reply
+  (`attr_version`) and the read fails the check.
+- **`inval_inode` at open** (`TestAnInvalInodeAtOpenWouldDropTheSizeAnotherOpenFetches`), the guard
+  against that alternative: an open of a changed file on B is answered after A's close, while a
+  writer's `LOOKUP` with the fresh size is out; the writer writes past the size it took, and a
+  reader opened by path after A's close reads all three pages. Had the daemon sent `inval_inode`
+  for the attributes at that open, the kernel would drop the writer's fresh size, and the reader
+  would read one page and fail the check.
+- **A miss** (`TestAMissIsNotCached`): an open of a missing name answered `ENOENT` is looked up
+  again by the next open, which finds the file created since; answered with an entry of node ID 0,
+  the next open within its timeout fails with `ENOENT` (`fs/fuse/dir.c` `fuse_lookup`).
+- **[property]** `TestFileHistoriesKeepCloseToOpen`: two nodes, two processes each, two files;
+  sessions that open by name, read, read through a mapping, `fsync` and write the whole file, one
+  writer of a file at a time; the daemons answer requests in any order and hold a quarter of their
+  replies to write later in any order, time moves up to 1.5 s at once past the 1 s attribute
+  timeout, `max_write` is one to three pages and `big_writes` is off on a quarter of the seeds.
+  Tier 1's daemon gives files' entries a timeout of 0, answers an open of a changed file without
+  `keep_cache`, and fetches a held reply's attributes again once it has read another request for
+  the inode: every history passes over 10,000 seeds, in 2 s. Opens by node ID stay out of it, as
+  the known limit lets them read the node's size.
+- **[property]** `TestPlantedDaemonsBreakCloseToOpen`, entries cached for 1 s, over 1,000 seeds:
+  `keep_cache` after another node's close fails 457 (first seed 1), Tier 1's daemon otherwise 307
+  (first 3), and that with `inval_inode` of the attributes at open 5 (first 147).
+- **Mutations** of the model, each failing a test above: `keep_cache` ignored, no `auto_inval_data`,
+  attributes never fetched again, mapped reads revalidated, direct handles cached, `inval_inode`
+  dropping no page, no `FUSE_I_SIZE_UNSTABLE`, no `attr_version` guard, entries never expiring,
+  negative entries not kept, readers ignoring page locks, a part page not locked, a whole page not
+  uptodate, direct writes dropping no page before their `WRITE`s, or none after them, writes
+  leaving attributes fresh, a size change keeping pages, a page copied from its start instead of
+  the read's offset, a read's record ignoring offsets or zeros. Of the check: no word check, no
+  size check, closes counted late, an open timed from its return, no closes counted, zeros past
+  the close's end failing, a word at another offset passing without a close. Of Tier 1's daemon:
+  attributes written as fetched, a miss answered with node ID 0, entries cached for 1 s,
+  `inval_inode` at open.
+- **Cost:** a seed of the property run, about 300 operations, takes under a millisecond.
 
 ## Chunk client
 

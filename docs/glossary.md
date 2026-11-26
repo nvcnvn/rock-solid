@@ -360,6 +360,8 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Direct I/O.** Bypassing the page cache, so every read and write goes to the daemon. rock-solid opens a file with direct I/O while it is write-shared.
 
+**Attribute and entry timeouts.** How long the kernel may use a file's attributes (its size and `mtime`) or a name's lookup without asking the daemon again; the daemon sets both in each reply. Until they run out the kernel sees no other node's change, so rock-solid gives a regular file's name a timeout of 0, and every open asks. See [Cache coherence tiers](design.md#cache-coherence-tiers).
+
 **Write-back and write-through.** A write-back cache acknowledges a write before passing it on and sends it later; a write-through cache passes it on first. The daemon's **write-back buffer** holds a file's writes while no other node shares the file and the node's space grant covers them; otherwise the daemon writes through.
 
 **Cache coherence.** Making every node's cache agree with the latest writes, so no node reads stale data. See [Cache coherence tiers](design.md#cache-coherence-tiers).

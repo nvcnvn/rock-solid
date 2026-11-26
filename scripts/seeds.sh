@@ -14,6 +14,7 @@ export GOTOOLCHAIN GOMEMLIMIT
 tests="
 internal/sim/toy TestTheFixedProtocolKeepsEveryAcknowledgedWrite 10000
 internal/sim TestFaultsKeepTheDriverContractAndTheResumedRule 2000
+internal/sim TestFileHistoriesKeepCloseToOpen 10000
 internal/core TestPoolIsFirstFit 10000
 internal/lease TestNoLeaseOutlastsItsGrant 10000
 internal/raftshard TestRaftRunsReplayFromTheirSeed 2000
