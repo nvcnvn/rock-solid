@@ -843,7 +843,8 @@ func BenchmarkProposal(b *testing.B) {
 }
 
 // SetPeer moves a member of the applied configuration to the node it names, and names none for a
-// replica outside it.
+// replica outside it. A moved peer stops counting toward a lease read until it fortifies again,
+// even when its new node's lease carries the run and support epoch it fortified under.
 func TestSetPeerNamesTheNodeOfAMember(t *testing.T) {
 	s := newNet(t, 3, 1).r[0].s
 	at := core.NodeID{Node: 9, Loop: 2}
@@ -854,5 +855,23 @@ func TestSetPeerNamesTheNodeOfAMember(t *testing.T) {
 	}
 	if got, ok := s.Node(4); ok {
 		t.Fatalf("replica 4, outside the configuration, is at %v", got)
+	}
+
+	n := newNet(t, 3, 1)
+	n.r[2].grantor.Resumed(n.r[1].grantor.Run())
+	n.leases(0, 1)
+	n.elect(0)
+	if !n.leaseRead(0) {
+		t.Fatal("the leader fortified by member 2 does not lease")
+	}
+	n.leases(0, 2)
+	n.r[0].s.SetPeer(2, core.NodeID{Node: 2})
+	if n.leaseRead(0) {
+		t.Fatal("member 2's fortification from its old node counts at its new one")
+	}
+	n.r[0].s.SetPeer(2, core.NodeID{Node: 1})
+	n.heartbeat(2)
+	if !n.leaseRead(0) {
+		t.Fatal("member 2 fortified again does not count")
 	}
 }
