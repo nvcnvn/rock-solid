@@ -103,6 +103,9 @@ func (h *tclient) answer(a core.Action, rp Response) {
 		ev.Msg.Buf = b
 	}
 	h.c.OnEvent(&h.ctx, &ev, &h.out)
+	if h.ids != nil {
+		h.ids.completed(rp, h.out.Done)
+	}
 	h.take()
 }
 
@@ -323,14 +326,17 @@ func TestAClientReadsCommittedBytesFromThePrimary(t *testing.T) {
 
 // idRules holds a client's writes to the rules of request IDs: every send names its own ID at most
 // RequestWindow past an oldest at or below it, no ID below the oldest lacks a final answer, a write
-// goes again only under its request ID, and never once it has a final answer.
+// goes again only under its request ID, and never once it has a final answer. It also holds what the
+// client tells its caller: a write completes once, on its first final answer, as answered.
 type idRules struct {
 	pool  core.BufPool
 	final map[core.RequestID]bool
 	low   core.RequestID
 	idOf  map[core.IOBuf]core.RequestID
 	bufOf map[core.RequestID]core.IOBuf
-	err   error
+	// due is whether the answer being given is its write's first final answer.
+	due bool
+	err error
 }
 
 func newIDRules(pool core.BufPool) *idRules {
@@ -366,9 +372,16 @@ func (r *idRules) send(a *core.Action) {
 }
 
 func (r *idRules) answered(rp Response) {
+	r.due = rp.Kind == KindReply && final(rp.Status) && !r.final[rp.ID]
 	if rp.Kind == KindReply && final(rp.Status) {
 		r.final[rp.ID] = true
 		delete(r.idOf, r.bufOf[rp.ID])
+	}
+}
+
+func (r *idRules) completed(rp Response, done []Completion) {
+	if r.err == nil && rp.Kind == KindReply && (len(done) != b2i(r.due) || r.due && (done[0].Status != rp.Status || done[0].Version != rp.Version)) {
+		r.err = fmt.Errorf("write %d answered %d at %#x completed %+v", rp.ID, rp.Status, rp.Version, done)
 	}
 }
 
@@ -559,9 +572,10 @@ func TestPlantedClientBugsBreakItsRequestIDRules(t *testing.T) {
 		{"a write sent again under a new ID", clientPlants{resendNewID: true}, "sent again as"},
 		{"a write naming its own ID as the oldest", clientPlants{oldestOwn: true}, "which has no final answer"},
 		{"the oldest past an ID assigned and not sent", clientPlants{oldestSent: true}, "which has no final answer"},
-		{"a refusal taken as final", clientPlants{refusedFinal: true}, "which has no final answer"},
+		{"a refusal taken as final", clientPlants{refusedFinal: true}, "answered 2 at 0x0 completed"},
 		{"a write sent again after its final answer", clientPlants{keepAnswered: true}, "after its final answer"},
 		{"IDs taken past the window", clientPlants{pastWindow: true}, "names oldest"},
+		{"a refused write completed OK", clientPlants{refusedOK: true}, "answered 2 at 0x0 completed"},
 	} {
 		var err error
 		for seed := uint64(0); seed < 20 && err == nil; seed++ {

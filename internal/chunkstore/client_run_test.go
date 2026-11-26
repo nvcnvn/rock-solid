@@ -1,6 +1,8 @@
 package chunkstore
 
 import (
+	"cmp"
+	"fmt"
 	"maps"
 	"slices"
 	"strings"
@@ -10,6 +12,9 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/sim"
 	"github.com/nvcnvn/rock-solid/internal/sim/seeds"
 )
+
+// invClientAnswers is the run's check of what a client tells its caller.
+const invClientAnswers = "a client completes each part of a request once, as its primary answered it"
 
 // clientIDSpan is how far apart the read run's chunk clients take their request IDs.
 const clientIDSpan = core.RequestID(1) << 40
@@ -21,6 +26,13 @@ type clientNode struct {
 	r   *readRun
 	ws  [2]*clientWriter
 	out ClientOutput
+	err error
+}
+
+// clientPart is the range of a file one request ID of a client names.
+type clientPart struct {
+	off uint64
+	n   uint32
 }
 
 // clientWriter writes, and in one request of four reads, blocks and parts of blocks of two chunks
@@ -36,6 +48,7 @@ type clientWriter struct {
 	token    uint64
 	ops      map[uint64]faultOp
 	left     map[uint64]uint32
+	parts    map[core.RequestID]clientPart
 	reissue  []faultOp
 	reissued bool
 	idle     core.Tick
@@ -48,7 +61,7 @@ func newClientNode(r *readRun, first, second *incWriter) *clientNode {
 	c := r.d.rcluster
 	n := &clientNode{r: r}
 	for i, iw := range []*incWriter{first, second} {
-		w := &clientWriter{n: n, i: i, rng: iw.rng, start: iw.start, stop: iw.stop, ops: map[uint64]faultOp{}, left: map[uint64]uint32{}, reissued: i == 0}
+		w := &clientWriter{n: n, i: i, rng: iw.rng, start: iw.start, stop: iw.stop, ops: map[uint64]faultOp{}, left: map[uint64]uint32{}, parts: map[core.RequestID]clientPart{}, reissued: i == 0}
 		w.cl = NewClient(ClientConfig{Session: iw.session, Incarnation: iw.inc, IDBase: core.RequestID(i+1) * clientIDSpan})
 		w.cl.plant = r.clientPlant
 		if x := c.hist; x != nil {
@@ -59,6 +72,7 @@ func newClientNode(r *readRun, first, second *incWriter) *clientNode {
 		c.s.Node(c.client.Node).AddActor(c.client, w)
 	}
 	c.cl.route = n.route
+	c.inv.Register(invClientAnswers, func() error { return n.err })
 	return n
 }
 
@@ -76,8 +90,9 @@ func (p detachPool) Free(b core.IOBuf) {
 	p.BufPool.Free(b)
 }
 
-// call runs f on w's client and returns its actions, its timer numbered for w, each send recorded.
-func (w *clientWriter) call(ctx *core.Context, acts []core.Action, f func(ctx *core.Context, out *ClientOutput)) []core.Action {
+// call runs f on w's client, with rp the answer f hands it if any, and returns its actions, its
+// timer numbered for w, each send recorded and each completion checked against rp.
+func (w *clientWriter) call(ctx *core.Context, acts []core.Action, rp *Response, f func(ctx *core.Context, out *ClientOutput)) []core.Action {
 	c := w.n.r.d.rcluster
 	cctx := *ctx
 	cctx.Pool = detachPool{BufPool: ctx.Pool, s: c.s, node: c.client.Node}
@@ -90,8 +105,17 @@ func (w *clientWriter) call(ctx *core.Context, acts []core.Action, f func(ctx *c
 			a.Timer += core.TimerID(w.i + 1)
 		case core.ActNetSend:
 			var u Update
-			if Kind(a.Msg.Body[1]) == KindWrite && DecodeUpdate(a.Msg.Inline(), dataLen(ctx.Pool, a.Msg.Buf), &u) == nil {
-				w.n.r.writes[u.ID] = incWrite{inc: uint64(w.i + 1), chunk: u.Chunk}
+			var rd Read
+			switch Kind(a.Msg.Body[1]) {
+			case KindWrite:
+				if DecodeUpdate(a.Msg.Inline(), dataLen(ctx.Pool, a.Msg.Buf), &u) == nil {
+					w.n.r.writes[u.ID] = incWrite{inc: uint64(w.i + 1), chunk: u.Chunk}
+					w.parts[u.ID] = clientPart{off: uint64(u.Chunk.Index)*core.ChunkSize + uint64(u.Off), n: u.Len}
+				}
+			case KindRead:
+				if DecodeRead(a.Msg.Inline(), 0, &rd) == nil {
+					w.parts[rd.ID] = clientPart{off: uint64(rd.Chunk.Index)*core.ChunkSize + uint64(rd.Off), n: rd.Len}
+				}
 			}
 			c.hist.invoke(ctx, w.hist, &a)
 			c.noteSends([]core.Action{a})
@@ -99,6 +123,10 @@ func (w *clientWriter) call(ctx *core.Context, acts []core.Action, f func(ctx *c
 		acts = append(acts, a)
 	}
 	for _, d := range out.Done {
+		if err := w.answers(rp, d); err != nil {
+			w.n.err = cmp.Or(w.n.err, err)
+			continue
+		}
 		if w.left[d.Token] -= d.Len; w.left[d.Token] == 0 {
 			delete(w.left, d.Token)
 			delete(w.ops, d.Token)
@@ -106,6 +134,24 @@ func (w *clientWriter) call(ctx *core.Context, acts []core.Action, f func(ctx *c
 		freeBuf(ctx, d.Buf)
 	}
 	return acts
+}
+
+// answers reports how completion d breaks the client's word to its caller: d is the part rp
+// answers, with rp's status and version, and its token has that part outstanding.
+func (w *clientWriter) answers(rp *Response, d Completion) error {
+	var p clientPart
+	if rp != nil {
+		p = w.parts[rp.ID]
+	}
+	switch {
+	case rp == nil || p != (clientPart{off: d.Off, n: d.Len}):
+		return fmt.Errorf("%s: client %d completed %d bytes at %d of request %d, an answer to none of them", invClientAnswers, w.i, d.Len, d.Off, d.Token)
+	case d.Status != rp.Status || d.Version != rp.Version:
+		return fmt.Errorf("%s: client %d completed request %d %v at version %#x, its primary answered %v at %#x", invClientAnswers, w.i, d.Token, d.Status, d.Version, rp.Status, rp.Version)
+	case d.Len > w.left[d.Token]:
+		return fmt.Errorf("%s: client %d completed %d bytes of request %d, of which %d were outstanding", invClientAnswers, w.i, d.Len, d.Token, w.left[d.Token])
+	}
+	return nil
 }
 
 // route hands a client its answers, its timer and lost connections while it lives.
@@ -122,15 +168,20 @@ func (n *clientNode) route(ctx *core.Context, ev *core.Event, out []core.Action)
 				freeBuf(ctx, ev.Msg.Buf)
 				return out, true
 			}
-			return w.call(ctx, out, func(ctx *core.Context, o *ClientOutput) { w.cl.OnEvent(ctx, ev, o) }), true
+			var rp Response
+			frame, data := Frame(ctx.Pool, &ev.Msg)
+			if DecodeResponse(frame, data, &rp) != nil {
+				return w.call(ctx, out, nil, func(ctx *core.Context, o *ClientOutput) { w.cl.OnEvent(ctx, ev, o) }), true
+			}
+			return w.call(ctx, out, &rp, func(ctx *core.Context, o *ClientOutput) { w.cl.OnEvent(ctx, ev, o) }), true
 		case core.EvTimer:
 			if ev.Timer == ClientTimer+core.TimerID(w.i+1) && w.alive(now) {
 				t := core.Event{Kind: core.EvTimer, Timer: ClientTimer}
-				out = w.call(ctx, out, func(ctx *core.Context, o *ClientOutput) { w.cl.OnEvent(ctx, &t, o) })
+				out = w.call(ctx, out, nil, func(ctx *core.Context, o *ClientOutput) { w.cl.OnEvent(ctx, &t, o) })
 			}
 		case core.EvPeerLost:
 			if w.alive(now) {
-				out = w.call(ctx, out, func(ctx *core.Context, o *ClientOutput) { w.cl.OnEvent(ctx, ev, o) })
+				out = w.call(ctx, out, nil, func(ctx *core.Context, o *ClientOutput) { w.cl.OnEvent(ctx, ev, o) })
 			}
 		}
 	}
@@ -156,7 +207,7 @@ func (n *clientNode) tend() {
 				for k, id := range c.ids {
 					w.cl.SetAddr(id, core.NodeID{Node: uint32(k)})
 				}
-				return w.call(ctx, acts, func(ctx *core.Context, o *ClientOutput) { w.cl.SetTable(ctx, t, o) })
+				return w.call(ctx, acts, nil, func(ctx *core.Context, o *ClientOutput) { w.cl.SetTable(ctx, t, o) })
 			})
 		}
 	}
@@ -198,7 +249,7 @@ func (w *clientWriter) Next(ctx *core.Context, acts []core.Action) []core.Action
 	f := File{Pool: testPool, Volume: op.c.Volume, Inode: op.c.Inode}
 	off := uint64(op.c.Index)*core.ChunkSize + uint64(op.off)
 	var err error
-	acts = w.call(ctx, acts, func(ctx *core.Context, o *ClientOutput) {
+	acts = w.call(ctx, acts, nil, func(ctx *core.Context, o *ClientOutput) {
 		if read {
 			err = w.cl.Read(ctx, tok, f, off, op.n, o)
 		} else {
@@ -231,19 +282,24 @@ func TestChunkClientsWriteAcrossPrimaryChangesAndAFence(t *testing.T) {
 // Planted in the clients of the run, a write sent again under a new request ID (4 of the first 30
 // seeds), a refusal taken as a write's final answer (1 of 30) and a write naming its own ID as the
 // oldest outstanding (26 of 30) each have a primary answer a write stale before its client heard
-// a final answer to it: the client has named as final an ID it never heard answered.
+// a final answer to it: the client has named as final an ID it never heard answered. A refused
+// write completed OK and sent again tells its caller what no primary answered, and a write sent
+// again after its final answer completes twice (each 10 of the first 10).
 func TestPlantedClientBugsBreakTheClientRun(t *testing.T) {
 	for _, p := range []struct {
 		name  string
 		seed  uint64
 		plant clientPlants
+		inv   string
 	}{
-		{"a write sent again under a new ID", 12, clientPlants{resendNewID: true}},
-		{"a refusal taken as final", 24, clientPlants{refusedFinal: true}},
-		{"a write naming its own ID as the oldest", 0, clientPlants{oldestOwn: true}},
+		{"a write sent again under a new ID", 12, clientPlants{resendNewID: true}, invStaleOnlyHeard},
+		{"a refusal taken as final", 24, clientPlants{refusedFinal: true}, invStaleOnlyHeard},
+		{"a write naming its own ID as the oldest", 0, clientPlants{oldestOwn: true}, invStaleOnlyHeard},
+		{"a refused write completed OK", 0, clientPlants{refusedOK: true}, invClientAnswers},
+		{"a write sent again after its final answer", 0, clientPlants{keepAnswered: true}, invClientAnswers},
 	} {
-		err := runReadRun(t, p.seed, true, true, &readPlant{inv: invStaleOnlyHeard, set: func(r *readRun) { r.clientPlant = p.plant }})
-		if err == nil || !strings.Contains(err.Error(), invStaleOnlyHeard) {
+		err := runReadRun(t, p.seed, true, true, &readPlant{inv: p.inv, set: func(r *readRun) { r.clientPlant = p.plant }})
+		if err == nil || !strings.Contains(err.Error(), p.inv) {
 			t.Errorf("%s at seed %d: %v", p.name, p.seed, err)
 		}
 	}

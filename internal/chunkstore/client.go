@@ -88,8 +88,9 @@ type clientPlants struct {
 	// resendNewID sends a write again under a new request ID; oldestOwn names a write's own ID as
 	// the oldest outstanding; oldestSent names the lowest sent one, past IDs assigned and not yet
 	// sent; refusedFinal takes a refusal as a write's final answer; keepAnswered sends a write
-	// again after its final answer; pastWindow assigns IDs past RequestWindow over the oldest.
-	resendNewID, oldestOwn, oldestSent, refusedFinal, keepAnswered, pastWindow bool
+	// again after its final answer; pastWindow assigns IDs past RequestWindow over the oldest;
+	// refusedOK completes a refused write OK and sends it again, completing it no more.
+	resendNewID, oldestOwn, oldestSent, refusedFinal, keepAnswered, pastWindow, refusedOK bool
 }
 
 // Client is the client side of chunk I/O for one session incarnation: it sends each chunk's
@@ -277,6 +278,10 @@ func (c *Client) recv(ctx *core.Context, ev *core.Event, out *ClientOutput) {
 		if ev.Peer != op.peer {
 			break
 		}
+		if c.plant.refusedOK && rp.Kind == KindReply && op.token != 0 {
+			out.Done = append(out.Done, Completion{Token: op.token, Off: op.file, Len: op.n, Status: StatusOK})
+			op.token = 0
+		}
 		if rp.Status == StatusRefused && rp.Epoch > c.table.Epoch {
 			op.wait = rp.Epoch
 			out.Fetch = max(out.Fetch, rp.Epoch)
@@ -291,7 +296,9 @@ func (c *Client) recv(ctx *core.Context, ev *core.Event, out *ClientOutput) {
 		if rp.Kind == KindReadReply && rp.Status == StatusOK {
 			cp.Buf, ev.Msg.Buf = ev.Msg.Buf, core.NoBuf
 		}
-		out.Done = append(out.Done, cp)
+		if !c.plant.refusedOK || op.token != 0 {
+			out.Done = append(out.Done, cp)
+		}
 		freeBuf(ctx, op.buf)
 		*ops = slices.Delete(*ops, i, i+1)
 	}
