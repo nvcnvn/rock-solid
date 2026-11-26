@@ -109,7 +109,7 @@ func TestTheChunkModel(t *testing.T) {
 
 // Each planted bug breaks the check of chunk histories, checked alone, at the first seed that fails
 // it: a primary committing a version once its own log holds it, whose reads return a pending version
-// the next interval drops (82 of 100); an old primary serving reads with no lease check (P1, 11 of
+// the next interval drops (82 of 100); an old primary serving reads with no lease check (P1, 12 of
 // 100), which a client that missed the new primary's table reads from after the new one
 // acknowledged a write; merging on the committed version (sub-block spike M2, 100 of 100), which
 // loses bytes a read back sees; and peering dropping a subset of a chunk's pending versions rather

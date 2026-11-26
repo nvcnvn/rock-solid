@@ -875,7 +875,7 @@ func TestAnOKAnsweredWhileThePrimaryPeersCountsItsOwnLoggedCopy(t *testing.T) {
 	}
 }
 
-// Each planted bug breaks its invariant, checked alone, at a seed of the first 500: peering dropping any subset of a chunk's pending versions rather than a suffix (sub-block spike M7, 26 of 500), a partial-block write merged before the primary holds the versions peering kept (M8, 11 of 500), the epoch change model's neg-merge-on-dropped, a partial-block write merged on a version the primary mapped and peering dropped (12 of 500), and neg-edit-keeps-interval, a table that reorders a PG's disks and keeps its interval (3 of 500), a restarted primary peering in its old interval (16 of 500 at min_live 1; none at 2, where the write that reuses a version goes to a chunk with too few clean copies and waits for recovery), a disk formatted again keeping its old disk ID (212 of 500), the epoch change model's neg-compare-table-epochs (441 of 500) and neg-compare-member-lists (310 of 500), which breaks property 3 first: a member that compares member lists logs the old primary's write tagged with an interval its table left; and the model's neg-remove-before-recovered (120 of 500), here a leaving member removed once its PG's interval activates, and neg-accept-old-report (136 of 500), each removing a moved member while its replacement lacks acknowledged writes; and neg-report-before-activate (500 of 500), a primary that reports its interval activated once it decides, before it activates; a primary that recovers only its own copies (462 of 500), whose members, those a drain refilled among them, never reach the copy count; and neg-no-degraded-hold, a write ordered at once on a chunk with fewer than min_live clean copies (143 of 500); and neg-lister-orders, a write ordered by a primary that lists its chunk, which leaves the chunk unfound with every disk kept (7 of 500 at min_live 1; none at 2, where the count of clean copies holds the write too).
+// Each planted bug breaks its invariant, checked alone, at a seed of the first 500: peering dropping any subset of a chunk's pending versions rather than a suffix (sub-block spike M7, 26 of 500), a partial-block write merged before the primary holds the versions peering kept (M8, 7 of 500), the epoch change model's neg-merge-on-dropped, a partial-block write merged on a version the primary mapped and peering dropped (7 of 500), and neg-edit-keeps-interval, a table that reorders a PG's disks and keeps its interval (5 of 500), a restarted primary peering in its old interval (16 of 500 at min_live 1; none at 2, where the write that reuses a version goes to a chunk with too few clean copies and waits for recovery), a disk formatted again keeping its old disk ID (212 of 500), the epoch change model's neg-compare-table-epochs (441 of 500) and neg-compare-member-lists (310 of 500), which breaks property 3 first: a member that compares member lists logs the old primary's write tagged with an interval its table left; and the model's neg-remove-before-recovered (120 of 500), here a leaving member removed once its PG's interval activates, and neg-accept-old-report (136 of 500), each removing a moved member while its replacement lacks acknowledged writes; and neg-report-before-activate (500 of 500), a primary that reports its interval activated once it decides, before it activates; a primary that recovers only its own copies (462 of 500), whose members, those a drain refilled among them, never reach the copy count; and neg-no-degraded-hold, a write ordered at once on a chunk with fewer than min_live clean copies (143 of 500); and neg-lister-orders, a write ordered by a primary that lists its chunk, which leaves the chunk unfound with every disk kept (6 of 500 at min_live 1; none at 2, where the count of clean copies holds the write too).
 func TestPlantedPeeringBugsBreakTheOracle(t *testing.T) {
 	for _, p := range []struct {
 		name string
@@ -886,11 +886,11 @@ func TestPlantedPeeringBugsBreakTheOracle(t *testing.T) {
 		{"ordered with too few clean copies", 0, peerPlant{invAckCopies, func(r *primaryRun) { r.c.replicaPlants.noDegradedHold = true }}},
 		{"M7", 169, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.storePlants.settleSubset = true }}},
 		{"M8", 16, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.mergeWhileLacking, r.c.replicaPlants.listerOrders = true, true }}},
-		{"recovered from a primary that lacks the chunk", 11, peerPlant{invOneVersion, func(r *primaryRun) { r.c.replicaPlants.recoverFromListed = true }}},
-		{"a list cleared with no source", 387, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.clearNoSource = true }}},
+		{"recovered from a primary that lacks the chunk", 1, peerPlant{invOneVersion, func(r *primaryRun) { r.c.replicaPlants.recoverFromListed = true }}},
+		{"a list cleared with no source", 378, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.clearNoSource = true }}},
 		{"refused as gone while up", 0, peerPlant{invSameInterval, func(r *primaryRun) { r.c.replicaPlants.goneWhileUp = true }}},
-		{"merged on a dropped version", 94, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.mergeOnDropped = true }}},
-		{"edit keeps its interval", 160, peerPlant{invOneVersion, func(r *primaryRun) { r.a.plant.editKeepsInterval = true }}},
+		{"merged on a dropped version", 0, peerPlant{invKeptWritten, func(r *primaryRun) { r.c.replicaPlants.mergeOnDropped = true }}},
+		{"edit keeps its interval", 21, peerPlant{invOneVersion, func(r *primaryRun) { r.a.plant.editKeepsInterval = true }}},
 		{"old disk ID kept", 2, peerPlant{invDiskIDs, func(r *primaryRun) { r.a.keepID = true }}},
 		{"a new disk answers for its old ID", 2, peerPlant{invAckedKept, func(r *primaryRun) { r.c.replicaPlants.answerForOldDisk = true }}},
 		{"accepted only in the send epoch", 0, peerPlant{invSameInterval, func(r *primaryRun) { r.c.replicaPlants.sendEpoch = true }}},
@@ -907,8 +907,8 @@ func TestPlantedPeeringBugsBreakTheOracle(t *testing.T) {
 	if _, err := runPrimaryRunAt(t, 57, &peerPlant{invOneVersion, func(r *primaryRun) { r.c.replicaPlants.peerInOldInterval = true }}, false, 1); err == nil || !strings.Contains(err.Error(), invOneVersion) {
 		t.Errorf("restart in the old interval at min_live 1, seed 57: %v", err)
 	}
-	if _, err := runPrimaryRunAt(t, 236, &peerPlant{invHasSource, func(r *primaryRun) { r.c.replicaPlants.listerOrders = true }}, false, 1); err == nil || !strings.Contains(err.Error(), invHasSource) {
-		t.Errorf("a write ordered by a primary that lists its chunk at min_live 1, seed 236: %v", err)
+	if _, err := runPrimaryRunAt(t, 20, &peerPlant{invHasSource, func(r *primaryRun) { r.c.replicaPlants.listerOrders = true }}, false, 1); err == nil || !strings.Contains(err.Error(), invHasSource) {
+		t.Errorf("a write ordered by a primary that lists its chunk at min_live 1, seed 20: %v", err)
 	}
 	if err := fullParkRun(t, func(a *authority) { a.plant.swapFull = true }, false); err == nil || !strings.Contains(err.Error(), invStranded) {
 		t.Errorf("a full member swapped out: %v", err)
