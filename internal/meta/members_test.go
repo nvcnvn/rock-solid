@@ -663,10 +663,12 @@ func TestAVoterOnADownDiskMovesToItsNodesOtherDisk(t *testing.T) {
 	nr := r.reports[0]
 	nr.Opened = append(slices.Clone(nr.Opened), OpenedDisk{Device: devOf(9), Log: logOf(9)})
 	r.heartbeat(&nr)
-	for _, n := range []uint32{1, 2} {
-		other := r.reports[n]
-		other.Meta = false
-		r.heartbeat(&other)
+	for n := uint32(1); n < 5; n++ {
+		if !slices.ContainsFunc(r.ctl.ShardMap().Groups[1].Voters, func(v Replica) bool { return v.Node == n }) {
+			other := r.reports[n]
+			other.Meta = false
+			r.heartbeat(&other)
+		}
 	}
 	k := slices.IndexFunc(r.ctl.ShardMap().Groups[1].Voters, func(v Replica) bool { return v.Node == 0 })
 	v := r.ctl.ShardMap().Groups[1].Voters[k]
@@ -966,5 +968,29 @@ func TestTheLeaderAddsTheFirstDataGroup(t *testing.T) {
 	}
 	if r.settle(in) {
 		t.Fatalf("a second map committed: %+v", r.ctl.ShardMap())
+	}
+}
+
+// Placement counts only real voters: the control-plane group's entry, which placement leaves alone,
+// adds no load, so a new data group takes the disks no group's voter is on.
+func TestANewDataGroupTakesTheDisksNoVoterIsOn(t *testing.T) {
+	r := newCtlRun(t)
+	held := []Replica{{ID: 1, Node: 0, Disk: 1}, {ID: 2, Node: 1, Disk: 2}, {ID: 3, Node: 2, Disk: 3}}
+	m := ShardMap{Groups: []Group{
+		{ID: 7, Voters: []Replica{{ID: 1, Node: 100}}, LastID: 1},
+		{ID: 8, Start: ctlEnd, Voters: held, LastID: 3, Boot: 3},
+		{ID: 9, Start: []byte{SpaceFS}},
+	}}
+	if err := r.ctl.SetShardMap(&m); err != nil {
+		t.Fatal(err)
+	}
+	if !r.settle(&ControlInputs{}) {
+		t.Fatal("the staged map did not commit")
+	}
+	g := r.ctl.ShardMap().Groups[2]
+	for _, d := range []uint32{4, 5} {
+		if !slices.ContainsFunc(g.Voters, func(v Replica) bool { return v.Disk == d }) {
+			t.Fatalf("group 9's voters are %+v: disk %d holds none of any group", g.Voters, d)
+		}
 	}
 }

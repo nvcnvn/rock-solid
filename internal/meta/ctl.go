@@ -368,12 +368,12 @@ func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) erro
 	}
 	live := c.liveRecord()
 	c.countStuck(in.Now, live)
-	n.smap = PlaceVoters(base, c.metaNodes(), live, append(c.halts(), c.stuck...), in.Now)
 	if len(base.Groups) > 0 {
 		// The control-plane group's voters are rock-solid ctl processes, on no storage disk: only a staged map moves them.
+		n.smap = PlaceVoters(&ShardMap{Groups: base.Groups[1:]}, c.metaNodes(), live, append(c.halts(), c.stuck...), in.Now)
 		g := base.Groups[0]
 		g.Voters = slices.Clone(g.Voters)
-		n.smap.Groups[0] = g
+		n.smap.Groups = slices.Insert(n.smap.Groups, 0, g)
 	}
 	n.smapV = c.smapV
 	n.disks, n.diskV, n.format, n.sess = c.diskView(live, in.Now), c.diskV, max(c.format, c.stagedFormat), c.sess
