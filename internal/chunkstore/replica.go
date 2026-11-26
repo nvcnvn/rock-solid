@@ -1376,12 +1376,15 @@ func (r *Replica) resent(ctx *core.Context, ev *core.Event, u *Update, pgs uint3
 	})
 	switch {
 	case stale:
+		out.note(trace.OutStale, uint64(u.ID), u.Chunk.Hash(), u.Session<<32|u.Incarnation, 0, 0)
 		r.reply(ctx, ev.Peer, u.ID, Response{Status: StatusStale}, out)
 	case j >= 0 && r.plant.resendAtOnce && r.vers[j].ordered:
+		out.note(trace.OutReanswer, u.Chunk.Hash(), r.vers[j].u.Version, uint64(u.ID), 0, 0)
 		r.reply(ctx, ev.Peer, u.ID, Response{Version: r.vers[j].u.Version}, out)
 	case j >= 0:
-		r.dups = append(r.dups, dup{orig: r.vers[j].req, peer: ev.Peer, msgID: u.ID})
+		r.dups = append(r.dups, dup{orig: r.vers[j].req, peer: ev.Peer, msgID: u.ID, chunk: u.Chunk})
 	case ver != 0:
+		out.note(trace.OutReanswer, u.Chunk.Hash(), ver, uint64(u.ID), 0, 0)
 		r.reply(ctx, ev.Peer, u.ID, Response{Version: ver}, out)
 	default:
 		return false
@@ -1506,6 +1509,7 @@ type dup struct {
 	orig  uint64
 	peer  core.NodeID
 	msgID core.RequestID
+	chunk core.ChunkID
 }
 
 // unready is a member refusal's trace field: 1 while the store is not serving, as while it replays its log after a
@@ -1609,6 +1613,12 @@ func (r *Replica) drain(ctx *core.Context, out *ReplicaOutput) {
 		r.peerWork(ctx, out)
 		r.recoverWork(ctx, out)
 	}
+	if x := r.st.Index(); x != nil {
+		for _, e := range x.trims {
+			out.note(trace.OutTrim, e.Chunk.Hash(), e.Session<<32|e.Incarnation, e.Oldest, 0, 0)
+		}
+		x.trims = x.trims[:0]
+	}
 	r.reportRecovered(false, out)
 	if r.st.Err() != nil {
 		r.storeFailed(ctx, out)
@@ -1660,7 +1670,7 @@ func (r *Replica) ordered(ctx *core.Context, o Reply, out *ReplicaOutput) {
 	v := &r.vers[i]
 	v.u.Version, v.buf, v.ordered = o.Version, o.Buf, true
 	if !v.recover {
-		out.note(trace.OutOrder, uint64(v.msgID), v.u.Chunk.Hash(), o.Version, 0, 0)
+		out.note(trace.OutOrder, uint64(v.msgID), v.u.Chunk.Hash(), o.Version, v.u.Session<<32|v.u.Incarnation, 0)
 	} else if r.recoveryTarget(v, r.cfg.Disk) {
 		out.note(trace.OutRecovering, v.u.Chunk.Hash(), uint64(v.u.Source), uint64(v.interval), o.Version, 0)
 	}
@@ -2114,6 +2124,9 @@ func (r *Replica) answerClient(ctx *core.Context, v *version, rp Response, out *
 func (r *Replica) answerDups(ctx *core.Context, orig uint64, rp *Response, out *ReplicaOutput) {
 	for j := 0; j < len(r.dups); {
 		if d := r.dups[j]; d.orig == orig {
+			if rp.Kind == KindReply && rp.Status == StatusOK {
+				out.note(trace.OutReanswer, d.chunk.Hash(), rp.Version, uint64(d.msgID), 0, 0)
+			}
 			r.answer(ctx, d.peer, d.msgID, rp, core.NoBuf, out)
 			r.dups = slices.Delete(r.dups, j, j+1)
 			continue

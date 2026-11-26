@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -42,6 +43,7 @@ type refusal struct {
 type write struct {
 	chunk, block, inc int
 	whole             bool
+	identity, request uint64
 }
 
 type reply struct {
@@ -58,15 +60,30 @@ type gen struct {
 	initial map[uint64]entry
 	// nodes counts the replicas' nodes: the client, which records the tables, is numbered after them,
 	// though a run may add a node of its own later, such as the real control plane's.
-	nodes   int
-	writes  []write
-	wid     map[uint64]int
-	plan    []string
-	tables  int
-	epochs  map[uint64]int
-	lines   []string
-	replies map[[3]uint64]map[uint64]*reply
-	cur     *reply
+	nodes  int
+	writes []write
+	// wid is each write's spec number by its identity, the session and incarnation as OutSend packs them, and its request ID; byID by its request ID alone, 0 for one two identities share.
+	wid  map[[2]uint64]int
+	byID map[uint64]int
+	// verWrite is the write each ordered [chunk, version] took.
+	verWrite map[[2]uint64]int
+	// answer is each write's newest answer line's token, which its client hearing an answer marks heard; a token not marked is a lost answer.
+	answer  map[int]string
+	heardOK map[string]bool
+	// unanswered counts each write's sends since its last order, reanswer or stale line: the spec's sends of a write the
+	// primary holds are one, so a later answer with none since repeats the last.
+	unanswered map[int]int
+	// mergedAt is the line of each write's newest send while the primary held an attempt, which the spec's pin, a set,
+	// merges with it, and takenAt the line of its newest order, reanswer or stale.
+	mergedAt, takenAt map[int]int
+	// watermark is each [spec disk, pg, identity]'s newest oldest outstanding request ID a trim named.
+	watermark map[[3]uint64]uint64
+	plan      []string
+	tables    int
+	epochs    map[uint64]int
+	lines     []string
+	replies   map[[3]uint64]map[uint64]*reply
+	cur       *reply
 	// decisions holds each [node, pg, interval] an OutDecide named.
 	decisions map[[3]uint64]bool
 	// disks maps a disk ID to the spec's: one formatted again takes the next past the nodes.
@@ -234,6 +251,44 @@ func (g *gen) lineAt(at int, format string, args ...any) {
 	for k, p := range g.landAt {
 		if p > at {
 			g.landAt[k] = p + 1
+		}
+	}
+	for _, m := range []map[int]int{g.mergedAt, g.takenAt} {
+		for k, p := range m {
+			if p >= at {
+				m[k] = p + 1
+			}
+		}
+	}
+}
+
+// moveLine moves line from to just after line to, a later one, and keeps the marked positions on the lines they name.
+func (g *gen) moveLine(from, to int) {
+	l := g.lines[from]
+	copy(g.lines[from:to], g.lines[from+1:to+1])
+	g.lines[to] = l
+	for _, m := range []map[int]int{g.mergedAt, g.takenAt} {
+		for k, p := range m {
+			if p > from && p <= to {
+				m[k] = p - 1
+			}
+		}
+	}
+	for _, m := range []map[[2]uint64]int{g.left, g.orderAt} {
+		for k, p := range m {
+			if p > from && p <= to {
+				m[k] = p - 1
+			}
+		}
+	}
+	for k, p := range g.formatAt {
+		if p > from && p <= to {
+			g.formatAt[k] = p - 1
+		}
+	}
+	for k, p := range g.landAt {
+		if p > from+1 && p <= to+1 {
+			g.landAt[k] = p - 1
 		}
 	}
 }
@@ -557,11 +612,20 @@ func (g *gen) scan(recs []trace.Record) {
 			g.blocks = append(g.blocks, 1)
 			j = len(g.chunks) - 1
 		}
+		key := [2]uint64{r.Fields[4], r.Fields[0]}
+		if g.wid[key] != 0 {
+			continue
+		}
 		off, n := r.Fields[3]>>32, r.Fields[3]&(1<<32-1)
 		blk := int(off/4096) + 1
 		g.blocks[j] = max(g.blocks[j], blk)
-		g.writes = append(g.writes, write{chunk: j + 1, block: blk, inc: int(r.Fields[4]), whole: off%4096 == 0 && n%4096 == 0})
-		g.wid[r.Fields[0]] = len(g.writes)
+		g.writes = append(g.writes, write{chunk: j + 1, block: blk, inc: int(r.Fields[4] & (1<<32 - 1)), whole: off%4096 == 0 && n%4096 == 0, identity: r.Fields[4], request: r.Fields[0]})
+		g.wid[key] = len(g.writes)
+		if _, ok := g.byID[r.Fields[0]]; ok {
+			g.byID[r.Fields[0]] = 0
+		} else {
+			g.byID[r.Fields[0]] = len(g.writes)
+		}
 	}
 }
 
@@ -615,9 +679,18 @@ func (g *gen) run(recs []trace.Record) {
 			}
 			g.line(`k |-> "adopt", n |-> %d, e |-> %d`, n, e)
 		case trace.OutSend:
-			g.line(`k |-> "send", w |-> %d`, g.wid[r.Fields[0]])
+			w := g.wid[[2]uint64{r.Fields[4], r.Fields[0]}]
+			if g.unanswered[w] > 0 {
+				g.mergedAt[w] = len(g.lines)
+			}
+			g.unanswered[w]++
+			g.line(`k |-> "send", w |-> %d`, w)
 		case trace.OutOrder:
-			g.line(`k |-> "order", n |-> %d, w |-> %d, c |-> %d, v |-> %s`, n, g.wid[r.Fields[0]], g.chunk(r.Fields[1]), ver(r.Fields[2]))
+			w := g.wid[[2]uint64{r.Fields[3], r.Fields[0]}]
+			g.verWrite[[2]uint64{r.Fields[1], r.Fields[2]}] = w
+			g.unanswered[w] = 0
+			g.takenAt[w] = len(g.lines)
+			g.line(`k |-> "order", n |-> %d, w |-> %d, c |-> %d, v |-> %s`, n, w, g.chunk(r.Fields[1]), ver(r.Fields[2]))
 			cv := [2]uint64{r.Fields[1], r.Fields[2]}
 			g.ownOpen[n] = append(g.ownOpen[n], cv)
 		case trace.OutAccepted:
@@ -682,11 +755,7 @@ func (g *gen) run(recs []trace.Record) {
 			}
 			g.line(`k |-> "%s", n |-> %d, p |-> %d, iv |-> %d`, kind, n, g.pg(r.Fields[0]), r.Fields[1])
 		case trace.OutRecoverRead:
-			d, ok := g.nodeDisk[n]
-			if !ok {
-				d = uint64(n)
-			}
-			g.served[[3]uint64{d, r.Fields[0], r.Fields[1]}] = true
+			g.served[[3]uint64{g.specDisk(n), r.Fields[0], r.Fields[1]}] = true
 		case trace.OutFormat:
 			old, ok := g.nodeDisk[n]
 			if !ok {
@@ -702,7 +771,53 @@ func (g *gen) run(recs []trace.Record) {
 			g.outOfPool[g.disk(r.Fields[0])] = true
 			g.line(`k |-> "lost", d |-> %d`, g.disk(r.Fields[0]))
 		case trace.OutCommitted:
-			g.line(`k |-> "committed", c |-> %d, v |-> %s`, g.chunk(r.Fields[0]), ver(r.Fields[1]))
+			g.line(`k |-> "committed", c |-> %d, v |-> %s, heard |-> %s`, g.chunk(r.Fields[0]), ver(r.Fields[1]), g.answered(g.verWrite[[2]uint64{r.Fields[0], r.Fields[1]}]))
+		case trace.OutReanswer:
+			w := g.verWrite[[2]uint64{r.Fields[0], r.Fields[1]}]
+			if g.unanswered[w] == 0 && g.answer[w] != "" {
+				g.line(`k |-> "reanswered", c |-> %d, v |-> %s`, g.chunk(r.Fields[0]), ver(r.Fields[1]))
+				break
+			}
+			// An attempt the primary held beside the one it took, which the pin merged, is the spec's send after that step.
+			if m, ok := g.mergedAt[w]; ok && g.unanswered[w] == 0 && m < g.takenAt[w] {
+				g.moveLine(m, g.takenAt[w])
+				delete(g.mergedAt, w)
+			}
+			g.unanswered[w] = 0
+			g.takenAt[w] = len(g.lines)
+			g.line(`k |-> "reanswer", n |-> %d, w |-> %d, c |-> %d, v |-> %s, heard |-> %s`, n, w, g.chunk(r.Fields[0]), ver(r.Fields[1]), g.answered(w))
+		case trace.OutHeard:
+			if w := g.byID[r.Fields[0]]; w == 0 || g.answer[w] == "" {
+				fatal("request %d heard with no answer line", r.Fields[0])
+			} else {
+				g.heardOK[g.answer[w]] = true
+			}
+		case trace.OutStale:
+			w := g.wid[[2]uint64{r.Fields[2], r.Fields[0]}]
+			kind := "stale"
+			if g.unanswered[w] == 0 {
+				kind = "staled"
+			}
+			g.unanswered[w] = 0
+			g.takenAt[w] = len(g.lines)
+			g.line(`k |-> "%s", n |-> %d, w |-> %d`, kind, n, w)
+		case trace.OutTrim:
+			d, f := g.specDisk(n), g.chunkField(r.Fields[0])
+			key := [3]uint64{d, f, r.Fields[1]}
+			for i, x := range g.writes {
+				if x.identity == r.Fields[1] && g.pgs[g.chunkPG[x.chunk-1]-1] == f && x.request > g.watermark[key] && x.request < r.Fields[2] {
+					g.line(`k |-> "trim", d |-> %d, w |-> %d`, d, i+1)
+				}
+			}
+			g.watermark[key] = max(g.watermark[key], r.Fields[2]-1)
+		case trace.OutResends:
+			var es []string
+			for i < len(recs) && recs[i].Name == trace.OutResendEntry && recs[i].Fields[0] == r.Fields[0] {
+				e := &recs[i]
+				es = append(es, fmt.Sprintf("[c |-> %d, v |-> %s, w |-> %d]", g.chunk(e.Fields[1]), ver(e.Fields[2]), g.wid[[2]uint64{e.Fields[3], e.Fields[4]}]))
+				i++
+			}
+			g.line(`k |-> "resends", d |-> %d, e |-> {%s}`, g.disk(r.Fields[0]), strings.Join(es, ", "))
 		case trace.OutReply:
 			key := [3]uint64{uint64(n), r.Fields[0], r.Fields[1]}
 			if g.replies[key] == nil {
@@ -764,6 +879,20 @@ var belowProtocol = []trace.Name{
 	trace.ActNetSend, trace.ActDiskRead, trace.ActDiskWrite, trace.ActDiskFsync, trace.ActDiskTrim, trace.ActSetTimer, trace.ActEntry,
 	trace.SysEpollWait, trace.SysRead, trace.SysWritev, trace.SysIOUringEnter, trace.SysTimerfdSettime, trace.SysEventfdWrite,
 	trace.OutDurable, trace.OutFailed, trace.OutCheckpointDone,
+}
+
+// specDisk is the spec's disk of node n.
+func (g *gen) specDisk(n int) uint64 {
+	if d, ok := g.nodeDisk[n]; ok {
+		return d
+	}
+	return uint64(n)
+}
+
+// answered is the heard field of an answer line of write w: a token its client hearing it marks TRUE, FALSE once written.
+func (g *gen) answered(w int) string {
+	g.answer[w] = fmt.Sprintf("@heard%d@", len(g.lines))
+	return g.answer[w]
 }
 
 func (g *gen) decide(n int, r *trace.Record, kept, listed []string) {
@@ -874,9 +1003,13 @@ func (g *gen) write(w *bufio.Writer, module string) {
 	fmt.Fprintf(w, "TWrites == <<%s>>\n", strings.Join(ws, ",\n  "))
 	fmt.Fprintf(w, "TTables == %d\n", g.tables)
 	fmt.Fprintf(w, "TMaxFormat == %d\n", max(g.fmts, 1))
-	fmt.Fprintf(w, "Trace == <<\n  %s\n>>\n", strings.Join(g.lines, ",\n  "))
+	lines := strings.Join(g.lines, ",\n  ")
+	lines = heardToken.ReplaceAllStringFunc(lines, func(t string) string { return strings.ToUpper(strconv.FormatBool(g.heardOK[t])) })
+	fmt.Fprintf(w, "Trace == <<\n  %s\n>>\n", lines)
 	fmt.Fprintln(w, "====")
 }
+
+var heardToken = regexp.MustCompile(`@heard[0-9]+@`)
 
 func main() {
 	module := flag.String("module", "trace_data", "module name")
@@ -884,7 +1017,7 @@ func main() {
 	if flag.NArg() != 1 {
 		fatal("usage: tracedata [-module name] run.trace")
 	}
-	g := &gen{entries: map[uint64]*entry{}, initial: map[uint64]entry{}, wid: map[uint64]int{}, epochs: map[uint64]int{}, replies: map[[3]uint64]map[uint64]*reply{}, decisions: map[[3]uint64]bool{},
+	g := &gen{entries: map[uint64]*entry{}, initial: map[uint64]entry{}, wid: map[[2]uint64]int{}, byID: map[uint64]int{}, verWrite: map[[2]uint64]int{}, answer: map[int]string{}, unanswered: map[int]int{}, mergedAt: map[int]int{}, takenAt: map[int]int{}, heardOK: map[string]bool{}, watermark: map[[3]uint64]uint64{}, epochs: map[uint64]int{}, replies: map[[3]uint64]map[uint64]*reply{}, decisions: map[[3]uint64]bool{},
 		lists: map[[3]uint64]bool{}, operatorAsk: map[uint64]bool{}, restarted: map[[2]uint64]bool{}, diskIDs: map[uint64]uint64{}, primary: map[uint64]int{}, ownOpen: map[int][][2]uint64{}, memberOpen: map[int][][2]uint64{},
 		activated: map[uint64]uint64{}, tableIv: map[uint64]map[uint64]uint64{}, left: map[[2]uint64]int{}, formatAt: map[uint64]int{}, outOfPool: map[uint64]bool{}, nodeDisk: map[int]uint64{}, recovering: map[int][][4]uint64{}, orderAt: map[[2]uint64]int{}, served: map[[3]uint64]bool{}, landAt: map[[3]uint64]int{}, refused: map[uint64][]refusal{}}
 	recs := g.load(flag.Arg(0))

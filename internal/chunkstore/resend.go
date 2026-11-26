@@ -141,6 +141,8 @@ func (x *Index) writer(e *disklog.Entry) {
 	if oldest <= wm+1 {
 		return
 	}
+	x.trims = append(x.trims, *e)
+	x.trims[len(x.trims)-1].Oldest = oldest
 	noWatermark := x.plant != nil && x.plant.noWatermark
 	x.val = binary.LittleEndian.AppendUint64(x.val[:0], oldest-1)
 	x.ancestors(e.Pool, e.Chunk, pgs, func(level uint8, pg uint32) bool {

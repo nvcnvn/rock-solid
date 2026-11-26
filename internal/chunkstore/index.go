@@ -193,6 +193,9 @@ type Index struct {
 	writers []disklog.Entry
 	// copies is the resend entries of recovery writes whose recovered entry is not applied yet.
 	copies []disklog.Entry
+	// trims is the writer entries that raised a session's watermark since the replica took them for its trace, each
+	// with the oldest request ID it trimmed below.
+	trims []disklog.Entry
 	// dead is the resend keys a removal deletes, one after another.
 	dead []byte
 	// plant is the store's planted bugs, nil for none.

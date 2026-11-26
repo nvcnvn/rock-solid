@@ -43,8 +43,8 @@ var everyName = []string{
 	"1000255 2 output pass=81 PGEntry pg=1 interval=2 activated=1 minlive=2",
 	"1000255 2 output pass=81 Member pg=1 disk=2 mark=0 leaving=0",
 	"1000255 2 output pass=81 Adopt epoch=3",
-	"1000255 2 output pass=81 Send id=1 chunk=9 pg=1 span=4096 incarnation=1",
-	"1000255 2 output pass=81 Order id=1 chunk=9 version=4294967297",
+	"1000255 2 output pass=81 Send id=1 chunk=9 pg=1 span=4096 identity=4294967297",
+	"1000255 2 output pass=81 Order id=1 chunk=9 version=4294967297 identity=4294967297",
 	"1000255 2 output pass=81 Logged chunk=9 version=4294967297",
 	"1000255 2 output pass=81 Committed chunk=9 version=4294967297",
 	"1000255 2 output pass=81 PeerReply pg=1 interval=2 disk=2 decided=1",
@@ -76,6 +76,12 @@ var everyName = []string{
 	"1000256 2 output pass=82 RaftForced to=4",
 	"1000256 2 output pass=82 RaftPlan voters=26",
 	"1000256 2 output pass=82 RaftSupport lead=2 fort=24 end=0",
+	"1000257 2 output pass=83 Reanswer chunk=9 version=4294967298 id=5",
+	"1000258 2 output pass=84 Stale id=5 chunk=9 identity=4294967297",
+	"1000259 2 output pass=85 Trim chunk=9 identity=4294967297 oldest=6",
+	"1000260 2 output pass=86 Heard id=5 version=4294967298",
+	"1000261 2 output pass=87 Resends disk=1",
+	"1000262 2 output pass=88 ResendEntry disk=1 chunk=9 version=4294967298 identity=4294967297 request=5",
 }
 
 const scenarioExample = `1000250 2 syscall pass=81 epoll_wait ready=3

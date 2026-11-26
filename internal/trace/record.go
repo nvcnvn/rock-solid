@@ -99,9 +99,10 @@ const (
 	OutMember
 	// OutAdopt, a replica taking a table: epoch.
 	OutAdopt
-	// OutSend, a client sending a write: id chunk pg span incarnation; span packs offset and length as off<<32 | len.
+	// OutSend, a client sending a write: id chunk pg span identity; span packs offset and length as off<<32 | len, identity
+	// the session and incarnation as session<<32 | incarnation.
 	OutSend
-	// OutOrder, a primary ordering a client's write: id chunk version.
+	// OutOrder, a primary ordering a client's write: id chunk version identity, identity as OutSend packs it.
 	OutOrder
 	// OutLogged, a disk's copy of a version durable: chunk version.
 	OutLogged
@@ -174,6 +175,19 @@ const (
 	// the peers whose fortification of its term runs now, and end, when the support of the leader
 	// it last had ended, why: a Support constant.
 	OutRaftSupport
+	// OutReanswer, a primary answering a client write sent again OK from its resend table: chunk version id.
+	OutReanswer
+	// OutStale, a primary answering a client write sent again Stale: id chunk identity, identity as OutSend packs it.
+	OutStale
+	// OutTrim, a disk's resend table raising a session's watermark in a chunk's PG: chunk identity oldest; oldest is the
+	// session's oldest outstanding request ID, so the watermark is one below it.
+	OutTrim
+	// OutHeard, a client hearing a write answered OK: id version.
+	OutHeard
+	// OutResends, a harness listing a disk's resend table: disk. One OutResendEntry per entry follows.
+	OutResends
+	// OutResendEntry is one entry of the OutResends before it: disk chunk version identity request.
+	OutResendEntry
 	numNames
 )
 
@@ -272,8 +286,8 @@ var schemas = [numNames]schema{
 	OutEntry:          {"PGEntry", KindOutput, []field{fPG, fIv, {"activated", typeNum}, {"minlive", typeNum}}},
 	OutMember:         {"Member", KindOutput, []field{fPG, fDisk, {"mark", typeNum}, {"leaving", typeBool}}},
 	OutAdopt:          {"Adopt", KindOutput, []field{fEpoch}},
-	OutSend:           {"Send", KindOutput, []field{{"id", typeNum}, fChunk, fPG, {"span", typeNum}, {"incarnation", typeNum}}},
-	OutOrder:          {"Order", KindOutput, []field{{"id", typeNum}, fChunk, fVer}},
+	OutSend:           {"Send", KindOutput, []field{{"id", typeNum}, fChunk, fPG, {"span", typeNum}, {"identity", typeNum}}},
+	OutOrder:          {"Order", KindOutput, []field{{"id", typeNum}, fChunk, fVer, {"identity", typeNum}}},
 	OutLogged:         {"Logged", KindOutput, []field{fChunk, fVer}},
 	OutCommitted:      {"Committed", KindOutput, []field{fChunk, fVer}},
 	OutReply:          {"PeerReply", KindOutput, []field{fPG, fIv, fDisk, {"decided", typeNum}}},
@@ -305,6 +319,12 @@ var schemas = [numNames]schema{
 	OutRaftForced:     {"RaftForced", KindOutput, []field{{"to", typeNum}}},
 	OutRaftPlan:       {"RaftPlan", KindOutput, []field{{"voters", typeNum}}},
 	OutRaftSupport:    {"RaftSupport", KindOutput, []field{{"lead", typeNum}, {"fort", typeNum}, {"end", typeNum}}},
+	OutReanswer:       {"Reanswer", KindOutput, []field{fChunk, fVer, {"id", typeNum}}},
+	OutStale:          {"Stale", KindOutput, []field{{"id", typeNum}, fChunk, {"identity", typeNum}}},
+	OutTrim:           {"Trim", KindOutput, []field{fChunk, {"identity", typeNum}, {"oldest", typeNum}}},
+	OutHeard:          {"Heard", KindOutput, []field{{"id", typeNum}, fVer}},
+	OutResends:        {"Resends", KindOutput, []field{fDisk}},
+	OutResendEntry:    {"ResendEntry", KindOutput, []field{fDisk, fChunk, fVer, {"identity", typeNum}, {"request", typeNum}}},
 }
 
 // Kind is the kind of record the name belongs to, or 0 for an unknown name.

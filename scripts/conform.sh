@@ -9,7 +9,8 @@
 #   scripts/conform.sh file.trace ...   those traces alone
 #   scripts/conform.sh plants           traces can fail: on each of COUNT seeds (default 10) from FIRST
 #                                       (default 0) whose unplanted trace passes, each plant of PLANTS
-#                                       (default all of conformPlants), one row each; a run stops at its
+#                                       (default all of conformPlants and resendPlants, the latter in the
+#                                       resending run), one row each; a run stops at its
 #                                       first broken invariant, or goes on with CONFORM_RUNON=1, failing
 #                                       when a seed's baseline fails or a plant the check catches fires
 #                                       on some seed and is rejected on none, or over seeds 0 to 39 fires
@@ -129,7 +130,7 @@ cover() {
 	m=$(model "$1")
 	{
 		[ "$m" = voters ] || sed -n '/^TPlan ==/,/^TWrites ==/p' "$dir/trace_data.tla" | sed -n '/^TWrites/d;s/^[^"]*"\([a-z]*\)".*/P \1/p'
-		steps "$dir/trace_data.tla" | sed 's/^[^"]*"\([a-z]*\)".*/L \1/'
+		steps "$dir/trace_data.tla" | sed -e 's/^[^"]*"\([a-z]*\)".*heard |-> FALSE.*/L \1.lost/;t' -e 's/^[^"]*"\([a-z]*\)".*/L \1/'
 		cat "$dir/out"
 	} | awk -v model="$m" '
 		function step() {
@@ -146,7 +147,8 @@ cover() {
 				"gone GoneRefuses gonerecover GoneRefusesRecovery mayfail OwnFail restart Restart format Format recovered Recover recoveredlate Recover mayrecover Recover " \
 				"reported ReportRecovered ask AskNext restartask RestartAsk peer Peer activate Activate plan.mark MarkDisk " \
 				"plan.replace Replace plan.rotate Rotate plan.add Add plan.remove Remove plan.stay Stay plan.drop Drop plan.refill Refill " \
-				"plan.minlive SetMinLive plan.edit Edit lost Lost", m)
+				"plan.minlive SetMinLive plan.edit Edit lost Lost committed.lost LoseAnswer reanswer Reanswer reanswer.lost LoseReanswer " \
+				"stale Stale trim Trim reanswered check staled check resends check", m)
 			if (model == "voters")
 				split("elect Elect transfer Transfer addlearner AddLearner swap Swap leave Leave replicate Replicate commit Commit " \
 					"apply Apply removed Apply notice Notice delete Delete crash Crash restart Restart halt Halt die Die " \
@@ -187,7 +189,7 @@ coverage() {
 			never = ""
 			n = split("Fold Renew Adopt Peer Activate CounterOut AskNext RestartAsk ReportRecovered Persist Recover Send Order Refuse Deliver OwnLogged Answer " \
 				"Fortify BootUp MarkDisk Replace Rotate Add Remove Drop Stay Refill Lost GiveUp SetMinLive Split Edit Die Isolate MemberFail GoneRefuses GoneRefusesRecovery OwnFail " \
-				"OpenGrant OpenLapse Suspend Wake Freeze Thaw RateStep Restart Reboot Format NetFault Elect Transfer StepDown " \
+				"LoseAnswer Reanswer LoseReanswer Stale Trim OpenGrant OpenLapse Suspend Wake Freeze Thaw RateStep Restart Reboot Format NetFault Elect Transfer StepDown " \
 				"Ask Grant GrantRefused SendHb RecvGrant RecvHb RoundTrip Beat EndWait Tick", a)
 			for (i = 1; i <= n; i++) if (!(a[i] in done)) never = never " " a[i]
 			print "never taken:" never
@@ -211,12 +213,15 @@ plain() {
 	mv "$dir/line.new" "$dir/line"
 }
 
+# baseline prints the unplanted run plant $1 is set in: the resending primary-change run for a resend plant.
+baseline() { case " $rplants " in *" $1 "*) echo resend ;; *) echo primaries ;; esac; }
+
 # planted leaves plant trace $1's table row in its directory, against its seed's baseline.
 planted() {
 	name=$(basename "$1" .trace)
 	dir=$tmp/check/$name
 	mkdir -p "$dir"
-	base=$tmp/check/primaries-${name##*-}/base.lines
+	base=$tmp/check/$(baseline "${name%-*}")-${name##*-}/base.lines
 	stop=$(cut -c1-80 "${1%.trace}.stop" | head -1)
 	(
 		if ! data "$1"; then
@@ -250,46 +255,55 @@ each() {
 	shift
 	[ $# -gt 0 ] || return 0
 	export -f steps data check cover plain planted
-	export -f model
-	export tmp jar end
+	export -f model baseline
+	export tmp jar end rplants
 	printf '%s\0' "$@" | xargs -0 -n 1 -P "${JOBS:-1}" "$BASH" -c 'set -euo pipefail; "$@"' each "$fn"
 }
+
+# The resend table's plants, set in the resending primary-change run.
+rplants="noResendTable resendAtOnce writerAtLog noWatermark trimOnAnswer recoveryForgetsIds recoveryLiveOnly"
 
 if [ "${1:-}" = plants ]; then
 	# The plants' 40 seeds take 450 s of go test on the M4 Pro and past go test's default 10 minutes on a
 	# hosted runner.
 	rm -f "$tmp"/traces/*
-	CONFORM_DIR=$tmp/traces CONFORM_PLANTS=${PLANTS:-} GOMEMLIMIT=4GiB go test -p 4 -timeout 60m ./internal/chunkstore -run '^TestPlantsKeepTraces$' \
+	CONFORM_DIR=$tmp/traces CONFORM_PLANTS=${PLANTS:-} GOMEMLIMIT=4GiB go test -p 4 -timeout 60m ./internal/chunkstore -run '^(TestPlantsKeepTraces|TestConformResendSeeds|TestResendPlantsKeepTraces)$' \
 		-seeds.first "${FIRST:-0}" -seeds "${COUNT:-10}"
 	go build -o "$tmp/tracedata" ./tools/tracedata
 	seeds=$(seq "${FIRST:-0}" $((${FIRST:-0} + ${COUNT:-10} - 1)))
 	bases=()
 	for seed in $seeds; do
-		bases+=("$tmp/traces/primaries-$seed.trace")
+		bases+=("$tmp/traces/primaries-$seed.trace" "$tmp/traces/resend-$seed.trace")
 	done
 	each plain "${bases[@]}"
 	rows=()
 	for seed in $seeds; do
-		dir=$tmp/check/primaries-$seed
-		grep -q '^ok' "$dir/verdict" || continue
-		steps "$dir/trace_data.tla" >"$dir/base.lines"
+		for b in primaries resend; do
+			dir=$tmp/check/$b-$seed
+			if grep -q '^ok' "$dir/verdict"; then steps "$dir/trace_data.tla" >"$dir/base.lines"; fi
+		done
 		for f in "$tmp"/traces/*-"$seed".trace; do
-			[ "$(basename "$f")" = "primaries-$seed.trace" ] || rows+=("$f")
+			name=$(basename "$f" .trace)
+			case $name in primaries-* | resend-*) continue ;; esac
+			if grep -q '^ok' "$tmp/check/$(baseline "${name%-*}")-$seed/verdict"; then rows+=("$f"); fi
 		done
 	done
 	each planted ${rows[@]+"${rows[@]}"}
 	failed=0
 	for seed in $seeds; do
-		dir=$tmp/check/primaries-$seed
-		if ! grep -q '^ok' "$dir/verdict"; then
-			echo "FAIL seed $seed: baseline fails, no evidence: $(head -1 "$dir/verdict")"
-			failed=1
-			continue
-		fi
-		echo "seed $seed: baseline passes, $(cat "$dir/verdict")"
-		for f in "$tmp"/traces/*-"$seed".trace; do
-			name=$(basename "$f" .trace)
-			[ "$name" = "primaries-$seed" ] || cat "$tmp/check/$name/line"
+		for b in primaries resend; do
+			dir=$tmp/check/$b-$seed
+			if ! grep -q '^ok' "$dir/verdict"; then
+				echo "FAIL seed $seed: $b baseline fails, no evidence: $(head -1 "$dir/verdict")"
+				failed=1
+				continue
+			fi
+			echo "seed $seed: $b baseline passes, $(cat "$dir/verdict")"
+			for f in "$tmp"/traces/*-"$seed".trace; do
+				name=$(basename "$f" .trace)
+				case $name in primaries-* | resend-*) continue ;; esac
+				if [ "$(baseline "${name%-*}")" = "$b" ]; then cat "$tmp/check/$name/line"; fi
+			done
 		done
 	done
 	# The epoch plants whose trace TLC rejects on some seed they fire on, each firing on some of seeds 0 to 39; most fire
@@ -301,7 +315,7 @@ if [ "${1:-}" = plants ]; then
 		fired=0 rejected=0
 		for seed in $seeds; do
 			line=$tmp/check/$plant-$seed/line
-			grep -q '^ok' "$tmp/check/primaries-$seed/verdict" && [ -f "$line" ] || continue
+			grep -q '^ok' "$tmp/check/$(baseline "$plant")-$seed/verdict" && [ -f "$line" ] || continue
 			case $(head -1 "$line") in
 			*": not fired,"* | *": NO DATA,"*) ;;
 			*": rejected,"*) fired=$((fired + 1)) rejected=$((rejected + 1)) ;;

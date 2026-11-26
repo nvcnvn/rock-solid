@@ -31,7 +31,7 @@ TCnt(v) == v % TBase
 \* restart: a refusal of a version of its interval by a store that serves, an
 \* mfail line, has no step. That no step, not UnchangedIntervalAccepts, which
 \* a budget for "mfail" leaves silent on refusals, is what rejects one.
-TPlanSet == {[free |-> FALSE, m |-> TPlan, w |-> TWrites, f |-> {"restart", "format", "ownfail", "lateask", "mfail"},
+TPlanSet == {[free |-> FALSE, m |-> TPlan, w |-> TWrites, f |-> {"restart", "format", "ownfail", "lateask", "mfail", "lose", "trim"},
               t |-> 0, k |-> 100000, s |-> 100000]}
 TMaint == [p \in TPG |-> FALSE]
 TRates == [n \in TNode |-> {1000}]
@@ -149,6 +149,11 @@ RecoverLine(l) ==
     /\ (l.s = 0) = (miss[ddisk[l.n]][l.c] = 0)
     /\ RecoverFrom(l.l, ChunkPG[l.c], l.c, ddisk[l.n], IF l.s = 0 THEN ddisk[l.n] ELSE l.s, l.v)
 
+\* The entries of chunk c the resend table of disk d answers from. The code
+\* drops a version's entry at the decision marker that drops it, earlier than
+\* the spec's Persist, so a disk listing c is not compared (Known in epoch.tla).
+KnownIds(d, c) == {g \in ids[d] : g.c = c /\ g.v \in Known(d, c)}
+
 Line(l) ==
     \/ /\ l.k = "table"
        /\ \A r \in Range(l.rows) : RowMatches(r)
@@ -242,7 +247,25 @@ Line(l) ==
     \/ /\ l.k = "committed"
        /\ IF [c |-> l.c, v |-> l.v] \in ackd
           THEN UNCHANGED vars
-          ELSE \E r \in {x \in pend : x.c = l.c /\ x.v = l.v} : Answer(r)
+          ELSE \E r \in {x \in pend : x.c = l.c /\ x.v = l.v} : IF l.heard THEN Answer(r) ELSE LoseAnswer(r)
+    \/ /\ l.k = "reanswer"
+       /\ \E x \in {y \in pin[l.n] : y.w = l.w} :
+            /\ KnownOf(l.n, x) # {}
+            /\ Max(KnownOf(l.n, x)) = l.v
+            /\ IF l.heard THEN Reanswer(l.n, x) ELSE LoseReanswer(l.n, x)
+    \/ /\ l.k = "reanswered"
+       /\ [c |-> l.c, v |-> l.v] \in ackd
+       /\ UNCHANGED vars
+    \/ /\ l.k = "stale"
+       /\ \E x \in {y \in pin[l.n] : y.w = l.w} : Stale(l.n, x)
+    \/ /\ l.k = "staled"
+       /\ l.w \in wm[ddisk[l.n]]
+       /\ UNCHANGED vars
+    \/ /\ l.k = "trim"
+       /\ IF l.w \in wm[l.d] THEN UNCHANGED vars ELSE Trim(l.d, l.w)
+    \/ /\ l.k = "resends"
+       /\ \A c \in Chunk : miss[l.d][c] = NoMiss => {g \in l.e : g.c = c} = KnownIds(l.d, c)
+       /\ UNCHANGED vars
     \/ /\ l.k = "peer"
        /\ pr[l.n][l.p].iv = l.iv
        /\ ReplyMatches(l)
@@ -289,4 +312,6 @@ AtEndCommitted == line <= Len(Trace) \/ NothingCommittedDropped
 AtEndOneWrite == line <= Len(Trace) \/ OneWritePerVersion
 AtEndMerges == line <= Len(Trace) \/ MergesOnKept
 AtEndTables == line <= Len(Trace) \/ TablesForward
+AtEndAppliedOnce == line <= Len(Trace) \/ AppliedOnce
+AtEndStaleOnlyHeard == line <= Len(Trace) \/ StaleOnlyHeard
 =============================================================================

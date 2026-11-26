@@ -1,6 +1,8 @@
 package chunkstore
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +20,9 @@ import (
 func (c *rcluster) conformBegin() {
 	c.conforming = true
 	c.noteTable(&c.table)
+	c.cl.heard = func(id core.RequestID, version uint64) {
+		c.s.Node(c.client.Node).Output(c.client, trace.Record{Name: trace.OutHeard, Fields: [trace.MaxFields]uint64{uint64(id), version}})
+	}
 }
 
 func (c *rcluster) noteTable(next *Table) {
@@ -53,7 +58,38 @@ func (c *rcluster) noteSends(acts []core.Action) {
 			continue
 		}
 		c.s.Node(c.client.Node).Output(c.client, trace.Record{Name: trace.OutSend, Fields: [trace.MaxFields]uint64{
-			uint64(u.ID), u.Chunk.Hash(), pgField(u.PG.PG), uint64(u.Off)<<32 | uint64(u.Len), uint64(u.Incarnation)}})
+			uint64(u.ID), u.Chunk.Hash(), pgField(u.PG.PG), uint64(u.Off)<<32 | uint64(u.Len), u.Session<<32 | u.Incarnation}})
+	}
+}
+
+// noteResends records each up disk's resend table, which the trace compares with the spec's.
+func (c *rcluster) noteResends() {
+	if !c.conforming {
+		return
+	}
+	note := func(name trace.Name, f ...uint64) {
+		r := trace.Record{Name: name}
+		copy(r.Fields[:], f)
+		c.s.Node(c.client.Node).Output(c.client, r)
+	}
+	lo := binary.BigEndian.AppendUint32(nil, uint32(ResendPool))
+	for n, rep := range c.reps {
+		x := rep.Store().Index()
+		if x == nil || !c.s.Node(uint32(n)).Up() {
+			continue
+		}
+		disk := uint64(rep.cfg.Disk)
+		note(trace.OutResends, disk)
+		x.tree.Iter(&x.it)
+		for ok := x.it.SeekGE(lo); ok && bytes.HasPrefix(x.it.Key(), lo); ok = x.it.Next() {
+			k, v := x.it.Key(), x.it.Value()
+			if len(k) != resendKeySize || len(v) != resendValueSize {
+				continue
+			}
+			ch := core.ChunkIDFromBytes([core.ChunkIDSize]byte(v))
+			note(trace.OutResendEntry, disk, ch.Hash(), binary.LittleEndian.Uint64(v[core.ChunkIDSize:]),
+				binary.BigEndian.Uint64(k[13:])<<32|binary.BigEndian.Uint64(k[21:]), binary.BigEndian.Uint64(k[resendWatermarkSize:]))
+		}
 	}
 }
 
@@ -270,6 +306,16 @@ func TestConformSweepSeeds(t *testing.T) {
 	}
 }
 
+// The primary-change run with each client its own session, sending a write again under its request ID until it has a
+// final answer: the resend table's reanswer, lost-answer, trim and stale lines, and each disk's table at the end.
+func TestConformResendSeeds(t *testing.T) {
+	seeds.Run(t, 0, 10, func(seed uint64) {
+		if _, err := runPrimaryRunOn(t, seed, nil, false, 2, false, true); err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+	})
+}
+
 // conformPlants are the plants of the rule map and of the oracle test that scripts/conform.sh runs in the primary-change run.
 var conformPlants = []struct {
 	name string
@@ -321,7 +367,7 @@ var conformPlants = []struct {
 }
 
 // conformPlant keeps a planted run's trace, however the run stops, and beside it a .stop file saying how; with CONFORM_RUNON set the run goes on past its first broken invariant, for a plant whose break comes before the record of what broke it.
-func conformPlant(t *testing.T, name string, set func(r *primaryRun), seed uint64) {
+func conformPlant(t *testing.T, name string, set func(r *primaryRun), seed uint64, resend bool) {
 	var run *primaryRun
 	stop := "end"
 	defer func() {
@@ -333,10 +379,10 @@ func conformPlant(t *testing.T, name string, set func(r *primaryRun), seed uint6
 			t.Fatal(err)
 		}
 	}()
-	if err := runPrimaries(t, seed, &peerPlant{set: func(r *primaryRun) {
+	if _, err := runPrimaryRunOn(t, seed, &peerPlant{set: func(r *primaryRun) {
 		run, r.runOn = r, os.Getenv("CONFORM_RUNON") != ""
 		set(r)
-	}}); err != nil {
+	}}, false, 2, false, resend); err != nil {
 		stop = err.Error()
 	}
 }
@@ -353,7 +399,36 @@ func TestPlantsKeepTraces(t *testing.T) {
 		}
 		for _, p := range conformPlants {
 			if len(want) == 0 || slices.Contains(want, p.name) {
-				conformPlant(t, p.name, p.set, seed)
+				conformPlant(t, p.name, p.set, seed, false)
+			}
+		}
+	})
+}
+
+// resendPlants are the resend table's plants that scripts/conform.sh runs in the resending primary-change run.
+var resendPlants = []struct {
+	name string
+	set  func(r *primaryRun)
+}{
+	{"noResendTable", func(r *primaryRun) { r.c.replicaPlants.noResendTable = true }},
+	{"resendAtOnce", func(r *primaryRun) { r.c.replicaPlants.resendAtOnce = true }},
+	{"writerAtLog", func(r *primaryRun) { r.c.storePlants.writerAtLog = true }},
+	{"noWatermark", func(r *primaryRun) { r.c.storePlants.noWatermark = true }},
+	{"trimOnAnswer", func(r *primaryRun) { r.c.storePlants.trimOnAnswer = true }},
+	{"recoveryForgetsIds", func(r *primaryRun) { r.c.storePlants.recoveryForgetsIds = true }},
+	{"recoveryLiveOnly", func(r *primaryRun) { r.c.storePlants.recoveryLiveOnly = true }},
+}
+
+// Keeps, for scripts/conform.sh plants, each seed's resending trace under each resend plant CONFORM_PLANTS names, or every one.
+func TestResendPlantsKeepTraces(t *testing.T) {
+	if os.Getenv("CONFORM_DIR") == "" {
+		t.Skip("CONFORM_DIR not set")
+	}
+	want := strings.Fields(os.Getenv("CONFORM_PLANTS"))
+	seeds.Run(t, 0, 10, func(seed uint64) {
+		for _, p := range resendPlants {
+			if len(want) == 0 || slices.Contains(want, p.name) {
+				conformPlant(t, p.name, p.set, seed, true)
 			}
 		}
 	})

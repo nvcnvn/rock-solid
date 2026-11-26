@@ -111,6 +111,8 @@ type rclient struct {
 	// route, when set, takes each event first, but a reply the client does not report taking,
 	// which it takes once it has checked it.
 	route func(ctx *core.Context, ev *core.Event, out []core.Action) ([]core.Action, bool)
+	// heard, when set, sees each write's answer OK that the client takes, its first final one.
+	heard func(id core.RequestID, version uint64)
 }
 
 func (c *rclient) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
@@ -139,6 +141,9 @@ func (c *rclient) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) 
 	}
 	if !dup || !final(old.Status) {
 		c.replies[rp.ID] = rp
+		if c.heard != nil && rp.Kind == KindReply && rp.Status == StatusOK {
+			c.heard(rp.ID, rp.Version)
+		}
 	}
 	if c.route != nil {
 		if out, ok := c.route(ctx, ev, out); ok {

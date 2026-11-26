@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -126,8 +127,10 @@ type primaryRun struct {
 	duringPeering bool
 	// runOn keeps a planted run going past its first broken invariant.
 	runOn bool
-	ended bool
-	ops   map[core.RequestID]faultOp
+	// resend has each client write as its own session, sending a write again under its request ID until it has a final answer, and name its oldest outstanding one.
+	resend bool
+	ended  bool
+	ops    map[core.RequestID]faultOp
 	// version is each write's version once a primary ordered it, kept each activated interval's decision, and tainted the disks that may lack writes.
 	version map[core.RequestID]uint64
 	kept    map[uint32][]keptChunk
@@ -157,7 +160,14 @@ type primaryClient struct {
 	pipe int
 	ids  []core.RequestID
 	at   map[core.RequestID]core.Tick
+	// session is the client's own session when the run resends, and sends how often it sent each write.
+	session uint64
+	sends   map[core.RequestID]int
 }
+
+// maxSends is how often a client of the resending primary-change run sends a write before it gives up on it, still
+// naming it outstanding: a write to a chunk unfound for good would otherwise be sent every resendRefusedAfter.
+const maxSends = 4
 
 // abandonAfter is how long a client waits for a reply before it counts the write as unanswered and sends another: a write to a crashed primary, or held on a chunk the primary lacks, gets none.
 const abandonAfter = 2_000_000
@@ -165,6 +175,10 @@ const abandonAfter = 2_000_000
 func (pc *primaryClient) Ready() bool {
 	if pc.left == 0 {
 		return false
+	}
+	if pc.r.resend {
+		id, out := pc.due()
+		return id != 0 || out < pc.pipe
 	}
 	out := 0
 	for _, id := range pc.ids {
@@ -175,25 +189,64 @@ func (pc *primaryClient) Ready() bool {
 	return out < pc.pipe
 }
 
+// due is, when the run resends, the lowest request ID to send again now, and outstanding the writes with no final answer.
+func (pc *primaryClient) due() (id core.RequestID, outstanding int) {
+	c, now := pc.r.c, pc.r.c.s.Time()
+	for k, at := range pc.at {
+		rp, done := c.cl.replies[k]
+		if done && final(rp.Status) {
+			delete(pc.at, k)
+			continue
+		}
+		if pc.sends[k] >= maxSends {
+			continue
+		}
+		outstanding++
+		if (now-at >= abandonAfter || done && now-at >= resendRefusedAfter) && (id == 0 || k < id) {
+			id = k
+		}
+	}
+	return id, outstanding
+}
+
 func (pc *primaryClient) Next(ctx *core.Context, acts []core.Action) []core.Action {
-	pc.left--
 	r, c := pc.r, pc.r.c
-	off := uint32(pc.rng.Below(faultSpan))
-	n := min(1+uint32(pc.rng.Below(300)), core.ChunkSize-off)
-	if pc.rng.Chance(1, 4) {
-		off, n = uint32(pc.rng.Below(3))*core.BlockSize, uint32(1+pc.rng.Below(2))*core.BlockSize
+	var id core.RequestID
+	if r.resend {
+		id, _ = pc.due()
 	}
-	data := make([]byte, n)
-	for i := range data {
-		data[i] = byte(pc.rng.Below(255) + 1)
+	if id == 0 {
+		pc.left--
+		off := uint32(pc.rng.Below(faultSpan))
+		n := min(1+uint32(pc.rng.Below(300)), core.ChunkSize-off)
+		if pc.rng.Chance(1, 4) {
+			off, n = uint32(pc.rng.Below(3))*core.BlockSize, uint32(1+pc.rng.Below(2))*core.BlockSize
+		}
+		data := make([]byte, n)
+		for i := range data {
+			data[i] = byte(pc.rng.Below(255) + 1)
+		}
+		c.nextID++
+		id = c.nextID
+		pc.ids = append(pc.ids, id)
+		pc.at[id] = c.s.Time()
+		r.ops[id] = faultOp{c: r.chunks[pc.rng.Below(2)], off: off, n: n, data: data}
+	} else {
+		if b, ok := c.cl.sent[id]; ok {
+			c.cl.detach(b)
+			ctx.Pool.Free(b)
+		}
+		delete(c.cl.replies, id)
+		pc.at[id] = c.s.Time()
 	}
-	c.nextID++
-	id := c.nextID
-	pc.ids = append(pc.ids, id)
-	pc.at[id] = c.s.Time()
-	op := faultOp{c: r.chunks[pc.rng.Below(2)], off: off, n: n, data: data}
-	r.ops[id] = op
-	u := Update{Kind: KindWrite, ID: id, Oldest: sendOnceOldest(id), PG: c.pgFields(pg0), Session: 1, Incarnation: 1, Chunk: op.c, Off: off, Len: n}
+	pc.sends[id]++
+	op := r.ops[id]
+	off, n, data := op.off, op.n, op.data
+	session, oldest := uint64(1), sendOnceOldest(id)
+	if r.resend {
+		session, oldest = pc.session, uint64(slices.Min(slices.Collect(maps.Keys(pc.at))))
+	}
+	u := Update{Kind: KindWrite, ID: id, Oldest: oldest, PG: c.pgFields(pg0), Session: session, Incarnation: 1, Chunk: op.c, Off: off, Len: n}
 	a := core.Action{Kind: core.ActNetSend, Peer: core.NodeID{Node: uint32(max(0, c.primary(pg0)))}}
 	a.Msg.Len = uint16(copy(a.Msg.Body[:], AppendUpdate(nil, &u)))
 	buf, err := ctx.Pool.AllocZeroed(dataBytes(off, n))
@@ -659,11 +712,11 @@ func runPrimaryRun(t *testing.T, seed uint64, plant *peerPlant, crashLeaving boo
 
 // runPrimaryRunAt is runPrimaryRun on a pool with min_live minLive.
 func runPrimaryRunAt(t *testing.T, seed uint64, plant *peerPlant, crashLeaving bool, minLive int) (*primaryRun, error) {
-	return runPrimaryRunOn(t, seed, plant, crashLeaving, minLive, false)
+	return runPrimaryRunOn(t, seed, plant, crashLeaving, minLive, false, false)
 }
 
 // runPrimaryRunOn is runPrimaryRunAt, on the real control plane if real.
-func runPrimaryRunOn(t *testing.T, seed uint64, plant *peerPlant, crashLeaving bool, minLive int, real bool) (*primaryRun, error) {
+func runPrimaryRunOn(t *testing.T, seed uint64, plant *peerPlant, crashLeaving bool, minLive int, real, resend bool) (*primaryRun, error) {
 	s := sim.New(seed, sim.DefaultSettings())
 	a := &authority{pool: Pool{Replicas: 3, MinLive: minLive, FailureDomain: DomainNode, MaxPerDomain: 1, Locality: LocalitySpread, Overcommit: true, WriteLimit: 90, PGCount: 4},
 		down: map[uint32]core.Tick{}, drain: map[uint32]bool{}, moves: true}
@@ -693,7 +746,16 @@ func runPrimaryRunOn(t *testing.T, seed uint64, plant *peerPlant, crashLeaving b
 	r := &primaryRun{c: c, a: a, rng: core.NewRand(seed ^ 0x9e3), chunks: [2]core.ChunkID{chunkIn(pg0, 4, 0), chunkIn(pg0, 4, 1)}, ops: map[core.RequestID]faultOp{},
 		version: map[core.RequestID]uint64{}, kept: map[uint32][]keptChunk{}, tainted: map[uint32]bool{},
 		sent: map[[2]uint64]Update{}, acked: map[blockVersion][]byte{}, errs: map[string]error{}}
-	r.returns, r.crashLeaving = r.rng.Chance(1, 2), crashLeaving
+	r.returns, r.crashLeaving, r.resend = r.rng.Chance(1, 2), crashLeaving, resend
+	if resend {
+		c.sessions = SessionTable{Next: 3, Live: []uint64{1, 2}}
+		for n := range c.reps {
+			c.reps[n].Store().SetSessions(c.sessions)
+		}
+		c.cl.detach = func(b core.IOBuf) { c.s.Detach(c.client.Node, b) }
+		c.inv.Register(invAppliedOnce, func() error { return c.cl.once })
+		c.inv.Register(invStaleOnlyHeard, func() error { return c.cl.stale })
+	}
 	for _, inv := range []string{invAckedWhole, invOneVersion, invRemoval, invAckedKept, invKeptWritten, invRecovered} {
 		c.inv.Register(inv, func() error { return r.errs[inv] })
 	}
@@ -740,7 +802,7 @@ func runPrimaryRunOn(t *testing.T, seed uint64, plant *peerPlant, crashLeaving b
 		writes = 192
 	}
 	for range 2 {
-		pc := &primaryClient{r: r, rng: r.rng.Fork(), left: writes, pipe: 8, at: map[core.RequestID]core.Tick{}}
+		pc := &primaryClient{r: r, rng: r.rng.Fork(), left: writes, pipe: 8, at: map[core.RequestID]core.Tick{}, session: uint64(len(r.clients) + 1), sends: map[core.RequestID]int{}}
 		r.clients = append(r.clients, pc)
 		c.addClient(pc)
 	}
@@ -788,6 +850,10 @@ func runPrimaryRunOn(t *testing.T, seed uint64, plant *peerPlant, crashLeaving b
 		if real {
 			name = "real-" + name
 		}
+		if resend {
+			name = "resend"
+			c.noteResends()
+		}
 		conformWrite(t, fmt.Sprintf("%s-%d", name, seed), c)
 	}
 	if err := c.inv.Check(); err != nil {
@@ -813,7 +879,7 @@ func TestPeeringKeepsAcknowledgedWritesAcrossPrimaries(t *testing.T) {
 // version the other members hold whole, as TestAMemberHoldingAVersionInPartDoesNotVetoIt scripts.
 func TestPeeringKeepsAcknowledgedWritesAcrossPrimariesOnTheRealGroup(t *testing.T) {
 	seeds.Run(t, 0, 10, func(seed uint64) {
-		if _, err := runPrimaryRunOn(t, seed, nil, false, 2, true); err != nil {
+		if _, err := runPrimaryRunOn(t, seed, nil, false, 2, true, false); err != nil {
 			t.Fatalf("seed %d: %v", seed, err)
 		}
 	})
@@ -836,7 +902,7 @@ func TestALeftMemberDownAtItsMovesEndKeepsAcknowledgedWritesOnTheRealGroup(t *te
 func runLeftDown(t *testing.T, real bool) {
 	run, left := 0, 0
 	seeds.Run(t, 0, 10, func(seed uint64) {
-		r, err := runPrimaryRunOn(t, seed, nil, true, 2, real)
+		r, err := runPrimaryRunOn(t, seed, nil, true, 2, real, false)
 		if err != nil {
 			t.Fatalf("seed %d: %v", seed, err)
 		}
