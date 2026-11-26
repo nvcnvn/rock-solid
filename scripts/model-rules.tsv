@@ -95,7 +95,7 @@ purge/neg-orphan-in-grace	open	Owner failover and grace period
 purge/neg-overwrite-entry	open	Purger
 purge/neg-progress-before-punch	open	Purger
 purge/neg-purger-no-term	open	Purger
-purge/neg-raise-after-write	open	Filesystem client
+purge/neg-raise-after-write	fsclient.raiseAfterWrite	TestAWriteBeforeItsRaiseLeavesAChunkThePurgeMisses
 purge/neg-release-on-commit	open	Inode owner's open registry
 purge/neg-skip-partial-block	open	Truncate
 purge/neg-tail-in-memory	open	Truncate

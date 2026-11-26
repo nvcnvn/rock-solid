@@ -3,6 +3,7 @@ package fsclient
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
@@ -529,5 +530,56 @@ func TestSetattrChangesModeAndTimesAndRefusesASizeChange(t *testing.T) {
 	h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpSetattr, NodeID: d, Setattr: fuseproto.Setattr{Valid: fuseproto.AttrMode, Mode: 0o700}}))
 	if a := h.attr(d); a.Mode != meta.ModeDir|0o700 {
 		t.Fatalf("directory setattr stored %+v", a)
+	}
+}
+
+const invPurgeMisses = "a purge never misses a chunk written before a crash"
+
+// purgeMisses checks that every chunk holding data of an inode lies below its alloc_end, or, once
+// the inode is removed, within its purge entry.
+func (h *mount) purgeMisses() error {
+	for ino, b := range h.data {
+		last := (uint64(len(b)) - 1) / core.ChunkSize
+		if len(b) == 0 {
+			continue
+		}
+		k, _ := meta.AppendKey(nil, &meta.Key{Space: meta.SpaceFS, Volume: vol, Inode: ino, Tag: meta.InodeAttr})
+		var r meta.ScanResult
+		if err := h.s.Scan(k, append(bytes.Clone(k), 0), 1, &r); err != nil {
+			return err
+		}
+		var a meta.Attr
+		if len(r.KVs) == 1 && meta.DecodeAttr(r.KVs[0].Value, &a) == nil && a.AllocEnd > last {
+			continue
+		}
+		p, _ := meta.AppendKey(nil, &meta.Key{Space: meta.SpaceFS, Volume: vol, Inode: ino >> meta.SeqBits << meta.SeqBits, Tag: meta.SlotPurge, ID: ino})
+		if err := h.s.Scan(p, append(bytes.Clone(p), 0), 1, &r); err != nil {
+			return err
+		}
+		if len(r.KVs) == 1 {
+			if e, err := meta.DecodePurge(r.KVs[0].Value); err == nil && e.Start == 0 && e.End > last {
+				continue
+			}
+		}
+		return fmt.Errorf("%s: chunk %d of inode %x lies past its alloc_end and its purge entry", invPurgeMisses, last, ino)
+	}
+	return nil
+}
+
+func TestAWriteBeforeItsRaiseLeavesAChunkThePurgeMisses(t *testing.T) {
+	for _, planted := range []bool{false, true} {
+		h := newMount(t, Config{})
+		h.m.plant.raiseAfterWrite = planted
+		ino, fh := h.create(meta.RootInode, "f")
+		h.held = true
+		h.write(ino, fh, 0, []byte("x"))
+		for _, c := range h.chunks {
+			h.answerChunk(c)
+		}
+		h.m, h.out, h.held = New(h.m.cfg), Output{}, false
+		h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpUnlink, NodeID: meta.RootInode, Name: []byte("f")}))
+		if err := h.purgeMisses(); (err != nil) != planted {
+			t.Fatalf("planted %v: %v", planted, err)
+		}
 	}
 }
