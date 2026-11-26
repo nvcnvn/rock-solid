@@ -338,7 +338,7 @@ func TestNamespaceRequestsAnswerTheirChecksErrnos(t *testing.T) {
 	d := h.mkdir(meta.RootInode, "d")
 	h.create(d, "g")
 	n := len(h.txns)
-	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpCreate, NodeID: meta.RootInode, Name: []byte("f"), Mode: uint32(meta.ModeFile | 0o644)}), EEXIST)
+	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpCreate, NodeID: meta.RootInode, Name: []byte("f"), Mode: uint32(meta.ModeFile | 0o644), Flags: oExcl}), EEXIST)
 	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpMkdir, NodeID: meta.RootInode, Name: []byte("d"), Mode: 0o755}), EEXIST)
 	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpRmdir, NodeID: meta.RootInode, Name: []byte("d")}), ENOTEMPTY)
 	if len(h.txns) != n+3 {
@@ -581,5 +581,93 @@ func TestAWriteBeforeItsRaiseLeavesAChunkThePurgeMisses(t *testing.T) {
 		if err := h.purgeMisses(); (err != nil) != planted {
 			t.Fatalf("planted %v: %v", planted, err)
 		}
+	}
+}
+
+// A CREATE without O_EXCL whose name another node created first opens that file, as open(2)
+// would; with O_EXCL it fails EEXIST.
+func TestACreateWithoutExclOpensTheFileAnotherNodeCreatedFirst(t *testing.T) {
+	h := newMount(t, Config{})
+	other := *h
+	other.m, other.out, other.replies = New(Config{Volume: vol, Session: 8, Mount: 1, SlotLimit: 1 << 20}), Output{}, nil
+	ino, _ := other.create(meta.RootInode, "f")
+	if got, fh := h.create(meta.RootInode, "f"); got != ino || fh == 0 {
+		t.Fatalf("create opened inode %x handle %d, want inode %x", got, fh, ino)
+	}
+	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpCreate, NodeID: meta.RootInode, Name: []byte("f"), Mode: uint32(meta.ModeFile | 0o644), Flags: oExcl}), EEXIST)
+	other.mkdir(meta.RootInode, "d")
+	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpCreate, NodeID: meta.RootInode, Name: []byte("d"), Mode: uint32(meta.ModeFile | 0o644)}), EISDIR)
+}
+
+// A request served from answers the machine has seen before allocates nothing: lookups,
+// attributes, an open, a write within alloc_end, its commit at flush, a read and a release.
+func TestTheRequestPathAllocatesNothing(t *testing.T) {
+	h := newMount(t, Config{})
+	ino, fh := h.create(meta.RootInode, "f")
+	h.write(ino, fh, 0, []byte("x"))
+	h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpFlush, NodeID: ino, Fh: fh}))
+	kvs := map[string][]meta.KV{}
+	ok := meta.Result{FailedCheck: -1}
+	data := make([]byte, 4096)
+	reqs := []fuseproto.Request{
+		{Opcode: fuseproto.OpLookup, NodeID: meta.RootInode, Name: []byte("f")},
+		{Opcode: fuseproto.OpGetattr, NodeID: ino},
+		{Opcode: fuseproto.OpOpen, NodeID: ino},
+		{Opcode: fuseproto.OpWrite, NodeID: ino, Fh: fh, Offset: 0, Size: 4096, Data: data},
+		{Opcode: fuseproto.OpFlush, NodeID: ino, Fh: fh},
+		{Opcode: fuseproto.OpRead, NodeID: ino, Fh: fh, Offset: 0, Size: 4096},
+		{Opcode: fuseproto.OpRelease, NodeID: ino},
+	}
+	var out, next Output
+	buf, err := h.ctx.Pool.AllocZeroed(4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cycle := func() {
+		for i := range reqs {
+			h.unique += 2
+			reqs[i].Unique = h.unique
+			if reqs[i].Opcode == fuseproto.OpRelease {
+				reqs[i].Fh = h.m.nextFh
+			}
+			out.Reset()
+			h.m.Request(&h.ctx, h.now, &reqs[i], &out)
+			for len(out.Reads)+len(out.Txns)+len(out.Chunks) > 0 {
+				next.Reset()
+				for _, rd := range out.Reads {
+					got, seen := kvs[string(rd.Start)]
+					if !seen {
+						var r meta.ScanResult
+						if err := h.s.Scan(rd.Start, rd.End, rd.Limit, &r); err != nil {
+							t.Fatal(err)
+						}
+						for _, kv := range r.KVs {
+							got = append(got, meta.KV{Key: bytes.Clone(kv.Key), Value: bytes.Clone(kv.Value)})
+						}
+						kvs[string(bytes.Clone(rd.Start))] = got
+					}
+					h.m.ReadDone(&h.ctx, rd.Token, got, &next)
+				}
+				for _, s := range out.Txns {
+					h.m.TxnDone(&h.ctx, s.Token, &ok, nil, &next)
+				}
+				for _, c := range out.Chunks {
+					done := chunkstore.Completion{Token: c.Token, Off: c.Off, Len: c.N, Status: chunkstore.StatusOK, Buf: core.NoBuf}
+					if c.Read {
+						done.Buf, buf = buf, core.NoBuf
+					} else {
+						done.Len = uint32(len(c.Data))
+					}
+					h.m.ChunkDone(&h.ctx, &done, &next)
+					if c.Read {
+						buf, _ = h.ctx.Pool.AllocZeroed(4096)
+					}
+				}
+				out, next = next, out
+			}
+		}
+	}
+	if n := testing.AllocsPerRun(100, cycle); n != 0 {
+		t.Fatalf("%v allocations a cycle of %d requests", n, len(reqs))
 	}
 }

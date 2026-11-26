@@ -37,9 +37,42 @@ func (m *Machine) build(o *op, err error, out *Output) {
 }
 
 // create serves CREATE and MKDIR.
+// The steps of a CREATE without O_EXCL whose name another node created first, which opens that file.
+const (
+	createOpen = iota + 20
+	createFetch
+	createOpened
+)
+
 func (m *Machine) create(o *op, out *Output) {
 	dir, mkdir := o.req.NodeID, o.req.Opcode == fuseproto.OpMkdir
 	switch o.step {
+	case createOpen:
+		m.get(o, 0, dir, meta.InodeEntry, o.req.Name, out)
+		o.step = createFetch
+	case createFetch:
+		if !m.child(o, out) {
+			return
+		}
+		if o.mode == meta.ModeDir {
+			m.fail(o, EISDIR, out)
+			return
+		}
+		m.node(o.child).last = max(m.node(o.child).last, o.seq)
+		m.fetch(o, o.child, false, out)
+		o.step = createOpened
+	case createOpened:
+		if m.stale(o, o.child) {
+			m.fetch(o, o.child, false, out)
+			return
+		}
+		n, ok := m.took(o, o.child)
+		if !ok {
+			o.step = 0
+			m.run(o, out)
+			return
+		}
+		m.handOut(o, n, o.child, true, out)
 	case 0:
 		if len(o.req.Name) > NameMax {
 			m.fail(o, ENAMETOOLONG, out)
@@ -77,18 +110,15 @@ func (m *Machine) create(o *op, out *Output) {
 			m.alloc.Adopt(o.slot)
 		}
 		n := m.node(o.child)
-		n.attr, n.lookups = o.attr, n.lookups+1
-		e := m.entry(o.child, &o.attr)
+		n.attr = o.attr
 		if mkdir {
-			n.parent = dir
+			n.parent, n.lookups = dir, n.lookups+1
+			e := m.entry(o.child, &o.attr)
 			out.Replies = fuseproto.AppendEntry(out.Replies, o.req.Unique, &e)
+			m.end(o, out)
 		} else {
-			n.opened, n.opens = o.attr, n.opens+1
-			m.nextFh++
-			m.handles[m.nextFh] = &handle{ino: o.child}
-			out.Replies = fuseproto.AppendCreate(out.Replies, o.req.Unique, &e, fuseproto.Open{Fh: m.nextFh})
+			m.handOut(o, n, o.child, true, out)
 		}
-		m.end(o, out)
 	}
 }
 

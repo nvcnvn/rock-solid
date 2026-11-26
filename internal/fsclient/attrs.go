@@ -136,15 +136,27 @@ func (m *Machine) open(o *op, out *Output) {
 		m.fail(o, ENOENT, out)
 		return
 	}
+	m.handOut(o, n, ino, false, out)
+}
+
+// handOut gives o a handle of ino, answering an OPEN, or a CREATE with ino's entry; keep_cache
+// only when the attributes are those of the node's previous open.
+func (m *Machine) handOut(o *op, n *node, ino uint64, create bool, out *Output) {
 	var flags uint32
-	if n.opened == n.attr {
+	if n.opened == n.attr && !create {
 		flags = fuseproto.OpenKeepCache
 	}
 	n.opened = n.attr
 	n.opens++
-	m.nextFh++
-	m.handles[m.nextFh] = &handle{ino: ino}
-	out.Replies = fuseproto.AppendOpen(out.Replies, o.req.Unique, fuseproto.Open{Fh: m.nextFh, Flags: flags})
+	fh := m.handle(ino)
+	if create {
+		n.lookups++
+		a := shown(n)
+		e := m.entry(ino, &a)
+		out.Replies = fuseproto.AppendCreate(out.Replies, o.req.Unique, &e, fuseproto.Open{Fh: fh})
+	} else {
+		out.Replies = fuseproto.AppendOpen(out.Replies, o.req.Unique, fuseproto.Open{Fh: fh, Flags: flags})
+	}
 	m.end(o, out)
 }
 

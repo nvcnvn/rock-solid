@@ -32,6 +32,9 @@ const (
 	EOPNOTSUPP   fuseproto.Errno = 95
 )
 
+// oExcl is open(2)'s O_EXCL.
+const oExcl = 0o200
+
 // NameMax is the longest name a directory entry takes.
 const NameMax = 255
 
@@ -101,6 +104,7 @@ type Machine struct {
 	alloc   meta.Allocator
 	nodes   map[uint64]*node
 	handles map[uint64]*handle
+	freeFh  []*handle
 	nextFh  uint64
 	// ops are the requests in hand, the oldest first.
 	ops     []*op
@@ -217,6 +221,21 @@ func (m *Machine) node(ino uint64) *node {
 	return n
 }
 
+// handle opens a handle of ino and returns its number.
+func (m *Machine) handle(ino uint64) uint64 {
+	var h *handle
+	if k := len(m.freeFh); k > 0 {
+		h, m.freeFh = m.freeFh[k-1], m.freeFh[:k-1]
+		*h = handle{last: h.last[:0]}
+	} else {
+		h = &handle{}
+	}
+	h.ino = ino
+	m.nextFh++
+	m.handles[m.nextFh] = h
+	return m.nextFh
+}
+
 func (m *Machine) newOp() *op {
 	var o *op
 	if k := len(m.free); k > 0 {
@@ -236,7 +255,7 @@ func (m *Machine) done(o *op) {
 			break
 		}
 	}
-	*o = op{scan: o.scan[:0], vbuf: o.vbuf[:0], names: o.names[:0], data: o.data[:0], reply: o.reply[:0], fs: meta.FS{Txn: meta.Txn{Ops: o.fs.Txn.Ops[:0]}}}
+	*o = op{scan: o.scan[:0], vbuf: o.vbuf[:0], names: o.names[:0], data: o.data[:0], reply: o.reply[:0], fs: o.fs}
 	m.free = append(m.free, o)
 }
 
@@ -312,7 +331,7 @@ func (m *Machine) Request(ctx *core.Context, now int64, r *fuseproto.Request, ou
 // mutating gives o's Txns its replay key.
 func (m *Machine) mutating(o *op) {
 	o.mreq = meta.Request{Session: m.cfg.Session, Mount: m.cfg.Mount, ID: o.req.Unique &^ fuseproto.UniqueResend}
-	o.fs = meta.FS{Volume: m.cfg.Volume, CaseIndex: m.cfg.CaseIndex, Req: &o.mreq, Txn: o.fs.Txn}
+	o.fs.Volume, o.fs.CaseIndex, o.fs.Req = m.cfg.Volume, m.cfg.CaseIndex, &o.mreq
 }
 
 func (m *Machine) forget(ino, n uint64) {
@@ -443,6 +462,9 @@ func (m *Machine) TxnDone(ctx *core.Context, token uint64, r *meta.Result, err e
 			m.run(o, out)
 		case c.Kind == meta.OpCheckEmpty:
 			m.fail(o, ENOTEMPTY, out)
+		case c.Absent && o.req.Opcode == fuseproto.OpCreate && o.req.Flags&oExcl == 0:
+			o.step = createOpen
+			m.run(o, out)
 		case c.Absent:
 			m.fail(o, EEXIST, out)
 		default:
@@ -466,7 +488,7 @@ func (m *Machine) internalDone(o *op, out *Output) {
 func (m *Machine) internal(kind fuseproto.Opcode, slot uint32, out *Output) *op {
 	o := m.newOp()
 	o.req.Opcode, o.slot = kind, slot
-	o.fs = meta.FS{Volume: m.cfg.Volume, Txn: o.fs.Txn}
+	o.fs.Volume, o.fs.CaseIndex, o.fs.Req = m.cfg.Volume, false, nil
 	switch kind {
 	case opReserveInodes:
 		_ = o.fs.ReserveInodes(slot)
@@ -543,15 +565,14 @@ func (m *Machine) run(o *op, out *Output) {
 	case fuseproto.OpOpen:
 		m.open(o, out)
 	case fuseproto.OpOpendir:
-		m.nextFh++
-		m.handles[m.nextFh] = &handle{ino: o.req.NodeID}
-		out.Replies = fuseproto.AppendOpen(out.Replies, o.req.Unique, fuseproto.Open{Fh: m.nextFh})
+		out.Replies = fuseproto.AppendOpen(out.Replies, o.req.Unique, fuseproto.Open{Fh: m.handle(o.req.NodeID)})
 		m.done(o)
 	case fuseproto.OpReaddirplus:
 		m.readdir(o, out)
 	case fuseproto.OpRelease, fuseproto.OpReleasedir:
 		if h := m.handles[o.req.Fh]; h != nil {
 			delete(m.handles, o.req.Fh)
+			m.freeFh = append(m.freeFh, h)
 			if n := m.nodes[h.ino]; n != nil && o.req.Opcode == fuseproto.OpRelease {
 				n.opens--
 				defer m.drop(h.ino, n)
