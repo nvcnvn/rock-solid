@@ -35,7 +35,10 @@ type Rounds struct {
 	dead                    []disklog.BlobRef
 	deleted                 bool
 	// told is the LSN of the oldest blob a restart needs that ReplayLSN last reported, 0 for none.
-	told uint64
+	// runs is the replica's round whose snapshot's data is in its runs, 0 for none, until a later
+	// round of the replica's is durable: a restart on runs older than the snapshot drops it and
+	// needs the rounds its hard state freed, so ReplayLSN holds meanwhile.
+	told, runs uint64
 	// share is the share of twice max_replay_bytes the disk's owner last mailed, 0 for none yet.
 	share uint64
 }
@@ -49,13 +52,18 @@ func NewRounds(owner uint32, st *Storage, maxBlob uint64) *Rounds {
 
 // Write queues round flush, whose contents r stay valid until Durable returns it, for Ready, after
 // any round of Rounds' own; a round 0, or one while another of the replica's is queued or in
-// flight, is a broken invariant of the caller.
+// flight, is a broken invariant of the caller. After a round whose snapshot's data is in the
+// replica's runs, the replica's next round may be durable only once every manifest a restart may
+// load names runs holding that snapshot.
 func (r *Rounds) Write(flush uint64, rd *Round) {
 	if flush == 0 || r.flush != 0 || r.out != 0 || r.deleted {
 		panic(fmt.Sprintf("raftshard: round %d written with round %d queued, %d in flight, deleted %v", flush, r.flush, r.out, r.deleted))
 	}
 	r.flush, r.round = flush, *rd
 	r.hd.flying += payloadBytes(rd)
+	if rd.Runs {
+		r.runs = flush
+	}
 }
 
 // HasReady reports whether blobs wait for Ready: nothing is in flight, and a round of Rounds' own
@@ -151,6 +159,9 @@ func (r *Rounds) Durable(err error, refs []disklog.BlobRef) (uint64, error) {
 	if err != nil {
 		return round, err
 	}
+	if round != r.runs {
+		r.runs = 0
+	}
 	r.hd.refs = append(r.hd.refs, refs...)
 	if r.bytes > 0 {
 		r.hd.landed = append(r.hd.taken(), landedRound{round, r.bytes})
@@ -229,7 +240,7 @@ func (r *Rounds) Replayed() { r.dead = r.hd.recovered(r.dead) }
 // the one before its oldest blob a restart still needs. The shard tells the disk's owner, whose
 // checkpoints name it with that LSN.
 func (r *Rounds) ReplayLSN() (uint64, bool) {
-	if len(r.hd.refs) == 0 || r.hd.refs[0].LSN == r.told {
+	if r.runs != 0 || len(r.hd.refs) == 0 || r.hd.refs[0].LSN == r.told {
 		return 0, false
 	}
 	r.told = r.hd.refs[0].LSN

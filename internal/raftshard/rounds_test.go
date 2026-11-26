@@ -212,6 +212,65 @@ func TestRoundsReplayDropsASnapshotRoundTheRunsDoNotHold(t *testing.T) {
 	}
 }
 
+// TestRoundsKeepTheVoteASnapshotRoundTheRunsDoNotHoldWouldDrop writes a round holding a vote for 2
+// in term 3, then a round restoring a snapshot whose data is in the replica's runs, whose hard
+// state frees the first round. A restart on runs older than the snapshot, replaying after the LSN
+// ReplayLSN reports, drops the snapshot's round and must still find the vote, so ReplayLSN moves
+// past the first round only once a later round of the replica is durable, which the replica writes
+// once a manifest naming runs that hold the snapshot is.
+func TestRoundsKeepTheVoteASnapshotRoundTheRunsDoNotHoldWouldDrop(t *testing.T) {
+	pool := sim.NewPool(1<<20, 0)
+	st := NewStorage()
+	rs := NewRounds(3, st, 1<<20)
+	var lsn uint64
+	var landed []landedBlob
+	write := func(round uint64, rd *Round) {
+		rs.Write(round, rd)
+		items, err := rs.Ready(pool, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []landedBlob
+		for _, it := range items {
+			lsn++
+			out = append(out, landedBlob{disklog.BlobRef{Segment: 1, Block: uint32(lsn), LSN: lsn}, it.Entry.BlobKind, slices.Clone(pool.Bytes(it.Buf)[:it.Entry.Length])})
+			pool.Free(it.Buf)
+		}
+		landed = append(landed, out...)
+		if got, err := rs.Durable(nil, refsOf(out)); err != nil || got != round {
+			t.Fatal(got, err)
+		}
+	}
+	vote := raftpb.HardState{Term: 3, Vote: 2}
+	write(1, &Round{HardState: vote})
+	st.SetHardState(vote)
+	st.Took(1)
+	write(2, &Round{Snapshot: raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: 8, Term: 3, ConfState: raftpb.ConfState{Voters: []uint64{1, 2, 3}}}},
+		HardState: raftpb.HardState{Term: 3, Vote: 2, Commit: 8}, Runs: true})
+	if dead := rs.Dead(nil); !reflect.DeepEqual(dead, refsOf(landed[:1])) {
+		t.Fatalf("dead %v once the snapshot's round is durable, want the vote's round %v", dead, refsOf(landed[:1]))
+	}
+	replay, _ := rs.ReplayLSN()
+	st2 := NewStorage()
+	r2 := NewRounds(3, st2, 1<<20)
+	for _, b := range landed {
+		if b.ref.LSN <= replay {
+			continue
+		}
+		if err := r2.Replay(b.ref, b.kind, b.data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r2.Replayed()
+	if hs := st2.HardState(); hs != vote {
+		t.Fatalf("a restart on older runs after replay LSN %d restored hard state %+v, want %+v", replay, hs, vote)
+	}
+	write(3, &Round{})
+	if replay, ok := rs.ReplayLSN(); !ok || replay != landed[1].ref.LSN-1 {
+		t.Fatalf("replay LSN %d %v once a round after the snapshot's is durable, want %d", replay, ok, landed[1].ref.LSN-1)
+	}
+}
+
 // TestRoundsPanicOnABrokenCallOrder checks that each call out of order panics rather than lose or
 // double count a round.
 func TestRoundsPanicOnABrokenCallOrder(t *testing.T) {
