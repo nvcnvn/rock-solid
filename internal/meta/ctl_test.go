@@ -393,7 +393,7 @@ func TestAPlanIsHandedOutOnlyOnceCommitted(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := r.step(in)
-	if len(out.Plans) != 2 || len(out.Plans[0].Voters) != 3 || out.Plans[0].LastID != 3 {
+	if len(out.Plans) != 2 || len(out.Plans[1].Voters) != 3 || out.Plans[1].LastID != 3 {
 		t.Fatalf("the plans handed out are %+v", out.Plans)
 	}
 	r.c.cut[oldL] = false

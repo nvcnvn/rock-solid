@@ -117,6 +117,9 @@ func TestASilentDiskIsMarkedDownThenRefilled(t *testing.T) {
 		t.Fatalf("%d PGs keep disk 1 after refill_after", n)
 	}
 	for i, g := range r.ctl.ShardMap().Groups {
+		if i == 0 {
+			continue
+		}
 		if len(g.Voters) != Voters || slices.ContainsFunc(g.Voters, func(v Replica) bool { return v.Disk == 1 }) {
 			t.Fatalf("group %d keeps voters %+v", g.ID, g.Voters)
 		}
@@ -255,7 +258,7 @@ func TestAMetaOnlyNodeHoldsVotersAndNoMember(t *testing.T) {
 	if n := members(r.ctl.Table(), 6); n != 0 {
 		t.Fatalf("%d PGs have a member on the role meta node", n)
 	}
-	for _, g := range r.ctl.ShardMap().Groups {
+	for _, g := range r.ctl.ShardMap().Groups[1:] {
 		if ns := voterNodes(&g); !slices.Contains(ns, 5) || slices.ContainsFunc(ns, func(n uint32) bool { return n < 3 }) {
 			t.Fatalf("group %d has voters on nodes %v", g.ID, ns)
 		}
@@ -546,18 +549,18 @@ func TestAHaltIsCountedFromTheAgeItsNodeReports(t *testing.T) {
 	r, in := poolRun(t)
 	// A leader counts a halt from no earlier than its own clock's zero.
 	r.run(chunkstore.RefillAfter)
-	v := r.ctl.ShardMap().Groups[0].Voters[0]
+	v := r.ctl.ShardMap().Groups[1].Voters[0]
 	halt := func(age core.Tick) {
-		r.heartbeat(&NodeReport{Node: v.Node, Meta: true, Halts: []HaltReport{{Group: 1, ID: v.ID, Index: 7, Age: age}}})
+		r.heartbeat(&NodeReport{Node: v.Node, Meta: true, Halts: []HaltReport{{Group: 2, ID: v.ID, Index: 7, Age: age}}})
 		r.settle(in)
 	}
 	halt(chunkstore.RefillAfter - sec)
-	if g := r.ctl.ShardMap().Groups[0]; g.Voters[0] != v {
+	if g := r.ctl.ShardMap().Groups[1]; g.Voters[0] != v {
 		t.Fatalf("a voter halted short of refill_after was replaced: %+v", g.Voters)
 	}
 	r.run(sec)
 	halt(chunkstore.RefillAfter)
-	if g := r.ctl.ShardMap().Groups[0]; slices.Contains(g.Voters, v) || slices.Contains(voterNodes(&g), v.Node) {
+	if g := r.ctl.ShardMap().Groups[1]; slices.Contains(g.Voters, v) || slices.Contains(voterNodes(&g), v.Node) {
 		t.Fatalf("a voter halted for refill_after stays: %+v", g.Voters)
 	}
 }
@@ -622,13 +625,13 @@ func TestAPlannedVoterThatNeverReportsItsPlanIsReplaced(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r, in := poolRun(t)
-			was := slices.Clone(r.ctl.ShardMap().Groups[0].Voters)
+			was := slices.Clone(r.ctl.ShardMap().Groups[1].Voters)
 			v := was[2]
 			r.reportReplicas(func(g *Group, w Replica) *ReplicaReport {
 				switch {
 				case w == v:
 					return tc.v(g, w.ID)
-				case g.ID == 1:
+				case g.ID == 2:
 					return tc.others(g, w.ID)
 				}
 				return left(g, w.ID)
@@ -636,16 +639,16 @@ func TestAPlannedVoterThatNeverReportsItsPlanIsReplaced(t *testing.T) {
 			r.settle(in)
 			r.run(chunkstore.RefillAfter - sec)
 			r.settle(in)
-			if g := r.ctl.ShardMap().Groups[0]; g.Voters[2] != v {
+			if g := r.ctl.ShardMap().Groups[1]; g.Voters[2] != v {
 				t.Fatalf("replaced short of refill_after: %+v", g.Voters)
 			}
 			r.run(sec)
 			r.settle(in)
-			g := r.ctl.ShardMap().Groups[0]
+			g := r.ctl.ShardMap().Groups[1]
 			if gone := !slices.Contains(g.Voters, v) && !slices.Contains(voterNodes(&g), v.Node); gone != tc.replaced {
 				t.Fatalf("after refill_after replaced %v, want %v: %+v", gone, tc.replaced, g.Voters)
 			}
-			if g.Voters[0] != was[0] || g.Voters[1] != was[1] || r.ctl.ShardMap().Groups[1].LastID != Voters {
+			if g.Voters[0] != was[0] || g.Voters[1] != was[1] || len(r.ctl.ShardMap().Groups[0].Voters) != 0 {
 				t.Fatalf("a voter that holds its configuration was replaced: %+v", r.ctl.ShardMap().Groups)
 			}
 		})
@@ -660,7 +663,13 @@ func TestAVoterOnADownDiskMovesToItsNodesOtherDisk(t *testing.T) {
 	nr := r.reports[0]
 	nr.Opened = append(slices.Clone(nr.Opened), OpenedDisk{Device: devOf(9), Log: logOf(9)})
 	r.heartbeat(&nr)
-	v := r.ctl.ShardMap().Groups[0].Voters[0]
+	for _, n := range []uint32{1, 2} {
+		other := r.reports[n]
+		other.Meta = false
+		r.heartbeat(&other)
+	}
+	k := slices.IndexFunc(r.ctl.ShardMap().Groups[1].Voters, func(v Replica) bool { return v.Node == 0 })
+	v := r.ctl.ShardMap().Groups[1].Voters[k]
 	r.reportReplicas(func(g *Group, w Replica) *ReplicaReport {
 		if w == v {
 			return nil
@@ -672,15 +681,15 @@ func TestAVoterOnADownDiskMovesToItsNodesOtherDisk(t *testing.T) {
 		r.settle(in)
 		r.run(sec, 0)
 	}
-	if g := r.ctl.ShardMap().Groups[0]; g.Voters[0].Node != v.Node || g.Voters[0].Disk == v.Disk {
-		t.Fatalf("the voter on down disk %d of node %d went to %+v", v.Disk, v.Node, g.Voters[0])
+	if g := r.ctl.ShardMap().Groups[1]; g.Voters[k].Node != v.Node || g.Voters[k].Disk == v.Disk {
+		t.Fatalf("the voter on down disk %d of node %d went to %+v", v.Disk, v.Node, g.Voters[k])
 	}
 }
 
 // The count of a voter that does not hold its plan is the leader's own: a new leader starts it over.
 func TestAFailoverStartsAStuckVotersCountOver(t *testing.T) {
 	r, in := poolRun(t)
-	v := r.ctl.ShardMap().Groups[0].Voters[2]
+	v := r.ctl.ShardMap().Groups[1].Voters[2]
 	r.reportReplicas(func(g *Group, w Replica) *ReplicaReport {
 		if w == v {
 			return nil
@@ -697,12 +706,12 @@ func TestAFailoverStartsAStuckVotersCountOver(t *testing.T) {
 	from := r.now
 	r.run(chunkstore.RefillAfter - sec)
 	r.settle(in)
-	if g := r.ctl.ShardMap().Groups[0]; g.Voters[2] != v {
+	if g := r.ctl.ShardMap().Groups[1]; g.Voters[2] != v {
 		t.Fatalf("replaced short of refill_after since the failover at %d: %+v", from, g.Voters)
 	}
 	r.run(sec)
 	r.settle(in)
-	if g := r.ctl.ShardMap().Groups[0]; slices.Contains(g.Voters, v) {
+	if g := r.ctl.ShardMap().Groups[1]; slices.Contains(g.Voters, v) {
 		t.Fatalf("still planned refill_after after the failover: %+v", g.Voters)
 	}
 }
@@ -932,5 +941,30 @@ func recordRun(t *testing.T, seed uint64) {
 		if err := inv.Check(); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// With no shard map, the leader commits one once metadata nodes report: the control-plane
+// group's entry as its configuration, which placement leaves as it is however few its voters, and
+// the first data group, filled with three voters that boot together.
+func TestTheLeaderAddsTheFirstDataGroup(t *testing.T) {
+	r := newCtlRun(t)
+	ctl := Group{ID: 7, Voters: []Replica{{ID: 1, Node: 100}}, LastID: 1}
+	in := &ControlInputs{Ctl: &ctl}
+	if !r.settle(in) {
+		t.Fatal("nothing committed")
+	}
+	m := r.ctl.ShardMap()
+	if err := m.CheckRanges(); err != nil || len(m.Groups) != 2 {
+		t.Fatalf("the map is %+v (%v)", m, err)
+	}
+	if g := m.Groups[0]; g.ID != 7 || g.LastID != 1 || !slices.Equal(g.Voters, ctl.Voters) {
+		t.Fatalf("the control-plane group's entry is %+v, want %+v", g, ctl)
+	}
+	if g := m.Groups[1]; g.ID != 8 || len(g.Voters) != Voters || g.Boot != Voters {
+		t.Fatalf("the first data group is %+v", g)
+	}
+	if r.settle(in) {
+		t.Fatalf("a second map committed: %+v", r.ctl.ShardMap())
 	}
 }

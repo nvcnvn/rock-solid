@@ -26,13 +26,18 @@ type PoolRecord struct {
 
 // ControlInputs are what a step is computed from beside what the control plane committed and
 // heard: the leader's two clocks and whether it holds its leader lease, each disk's capacity
-// figures as last reported, a pool taking those of its class, and the balance moves.
+// figures as last reported, a pool taking those of its class, the balance moves, and the
+// control-plane group's own entry.
 type ControlInputs struct {
 	Now    core.Tick
 	Raw    core.Tick
 	Leased bool
 	Disks  []chunkstore.Disk
 	Moves  int
+	// Ctl is the control-plane group's entry as its applied configuration holds it, for the first
+	// shard map, which the leader commits once a metadata node reports and no map is committed or
+	// staged; nil while the configuration is joint.
+	Ctl *Group
 }
 
 // ControlOutput is what one call into a Control hands its driver: a Txn to propose to the
@@ -355,12 +360,21 @@ func (c *Control) Step(in *ControlInputs, token uint64, out *ControlOutput) erro
 	c.pin = pin
 	c.det.View(&c.table, pin)
 	base := &c.smap
-	if c.stagedMap != nil {
+	switch {
+	case c.stagedMap != nil:
 		base, p.mapStaged = c.stagedMap, true
+	case len(c.smap.Groups) == 0 && in.Ctl != nil && len(c.metaNodes()) > 0:
+		base = &ShardMap{Groups: []Group{*in.Ctl, {ID: in.Ctl.ID + 1, Start: ctlEnd}}}
 	}
 	live := c.liveRecord()
 	c.countStuck(in.Now, live)
 	n.smap = PlaceVoters(base, c.metaNodes(), live, append(c.halts(), c.stuck...), in.Now)
+	if len(base.Groups) > 0 {
+		// The control-plane group's voters are rock-solid ctl processes, on no storage disk: only a staged map moves them.
+		g := base.Groups[0]
+		g.Voters = slices.Clone(g.Voters)
+		n.smap.Groups[0] = g
+	}
 	n.smapV = c.smapV
 	n.disks, n.diskV, n.format, n.sess = c.diskView(live, in.Now), c.diskV, max(c.format, c.stagedFormat), c.sess
 	var ops []Op

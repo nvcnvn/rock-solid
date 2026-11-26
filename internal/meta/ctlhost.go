@@ -657,7 +657,11 @@ func (h *CtlHost) step(ctx *core.Context, out *CtlHostOutput) {
 	h.token++
 	h.cout.Reset()
 	h.disks = h.ctl.AppendDisks(h.disks[:0])
-	if err := h.ctl.Step(&ControlInputs{Now: ctx.Now, Raw: ctx.Raw, Leased: h.leased(ctx), Disks: h.disks, Moves: max(0, MaxMoves-moving(h.ctl.Table()))}, h.token, &h.cout); err != nil {
+	in := ControlInputs{Now: ctx.Now, Raw: ctx.Raw, Leased: h.leased(ctx), Disks: h.disks, Moves: max(0, MaxMoves-moving(h.ctl.Table()))}
+	if len(h.ctl.ShardMap().Groups) == 0 {
+		in.Ctl = h.ctlEntry()
+	}
+	if err := h.ctl.Step(&in, h.token, &h.cout); err != nil {
 		out.Errs = append(out.Errs, err)
 	}
 	h.handOut(ctx, out)
@@ -667,6 +671,25 @@ func (h *CtlHost) step(ctx *core.Context, out *CtlHostOutput) {
 	if err := h.shard.Txn(ctx, &h.cout.Txn, h.cout.Token, &h.sout); err != nil {
 		h.answer(ctx, &Answer{Token: h.cout.Token, Result: Result{FailedCheck: -1}, Err: err}, out)
 	}
+}
+
+// ctlEntry is the group's shard-map entry as its applied configuration holds it, each voter on its
+// node, or nil while that configuration is joint or names a voter of no known node.
+func (h *CtlHost) ctlEntry() *Group {
+	_, cs := h.shard.Applied()
+	if len(cs.VotersOutgoing) > 0 {
+		return nil
+	}
+	g := &Group{ID: h.group}
+	for _, id := range slices.Sorted(slices.Values(cs.Voters)) {
+		at, ok := h.shard.Raft().Node(id)
+		if !ok {
+			return nil
+		}
+		g.Voters = append(g.Voters, Replica{ID: id, Node: at.Node})
+		g.LastID = max(g.LastID, id)
+	}
+	return g
 }
 
 func (h *CtlHost) answer(ctx *core.Context, a *Answer, out *CtlHostOutput) {
