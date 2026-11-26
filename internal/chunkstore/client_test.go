@@ -498,7 +498,9 @@ func windowRun(t *testing.T, plant clientPlants) error {
 	}
 	h := newTClient(t, tbl)
 	h.ids, h.c.plant = newIDRules(h.ctx.Pool), plant
-	chunk := func(pg uint32) uint64 { return uint64(chunkIn(core.PGID{Pool: testPool, Index: pg}, 2, 0).Index) * core.ChunkSize }
+	chunk := func(pg uint32) uint64 {
+		return uint64(chunkIn(core.PGID{Pool: testPool, Index: pg}, 2, 0).Index) * core.ChunkSize
+	}
 	h.write(1, chunk(0), []byte("stuck"))
 	for i := range 2 * RequestWindow {
 		h.write(uint64(i+2), chunk(1), []byte("x"))
