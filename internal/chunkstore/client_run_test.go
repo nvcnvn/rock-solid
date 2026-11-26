@@ -137,7 +137,7 @@ func (w *clientWriter) call(ctx *core.Context, acts []core.Action, rp *Response,
 }
 
 // answers reports how completion d breaks the client's word to its caller: d is the part rp
-// answers, with rp's status and version, and its token has that part outstanding.
+// answers, rp is final, d has its status and version, and d's token has that part outstanding.
 func (w *clientWriter) answers(rp *Response, d Completion) error {
 	var p clientPart
 	if rp != nil {
@@ -146,6 +146,8 @@ func (w *clientWriter) answers(rp *Response, d Completion) error {
 	switch {
 	case rp == nil || p != (clientPart{off: d.Off, n: d.Len}):
 		return fmt.Errorf("%s: client %d completed %d bytes at %d of request %d, an answer to none of them", invClientAnswers, w.i, d.Len, d.Off, d.Token)
+	case rp.Status == StatusRefused || rp.Kind == KindReply && !final(rp.Status):
+		return fmt.Errorf("%s: client %d completed request %d on an answer %v, which is sent again", invClientAnswers, w.i, d.Token, rp.Status)
 	case d.Status != rp.Status || d.Version != rp.Version:
 		return fmt.Errorf("%s: client %d completed request %d %v at version %#x, its primary answered %v at %#x", invClientAnswers, w.i, d.Token, d.Status, d.Version, rp.Status, rp.Version)
 	case d.Len > w.left[d.Token]:
@@ -279,12 +281,12 @@ func TestChunkClientsWriteAcrossPrimaryChangesAndAFence(t *testing.T) {
 	})
 }
 
-// Planted in the clients of the run, a write sent again under a new request ID (4 of the first 30
-// seeds), a refusal taken as a write's final answer (1 of 30) and a write naming its own ID as the
-// oldest outstanding (26 of 30) each have a primary answer a write stale before its client heard
-// a final answer to it: the client has named as final an ID it never heard answered. A refused
-// write completed OK and sent again tells its caller what no primary answered, and a write sent
-// again after its final answer completes twice (each 10 of the first 10).
+// Planted in the clients of the run, a write sent again under a new request ID (1 of the first 30
+// seeds) and a write naming its own ID as the oldest outstanding (26 of 30) each have a primary
+// answer a write stale before its client heard a final answer to it: the client has named as final
+// an ID it never heard answered. A refusal taken as final, and a refused write completed OK and
+// sent again (each 27 of 30), tell the caller what no final answer said, and a write sent again
+// after its final answer completes twice (30 of 30).
 func TestPlantedClientBugsBreakTheClientRun(t *testing.T) {
 	for _, p := range []struct {
 		name  string
@@ -292,8 +294,8 @@ func TestPlantedClientBugsBreakTheClientRun(t *testing.T) {
 		plant clientPlants
 		inv   string
 	}{
-		{"a write sent again under a new ID", 12, clientPlants{resendNewID: true}, invStaleOnlyHeard},
-		{"a refusal taken as final", 24, clientPlants{refusedFinal: true}, invStaleOnlyHeard},
+		{"a write sent again under a new ID", 18, clientPlants{resendNewID: true}, invStaleOnlyHeard},
+		{"a refusal taken as final", 0, clientPlants{refusedFinal: true}, invClientAnswers},
 		{"a write naming its own ID as the oldest", 0, clientPlants{oldestOwn: true}, invStaleOnlyHeard},
 		{"a refused write completed OK", 0, clientPlants{refusedOK: true}, invClientAnswers},
 		{"a write sent again after its final answer", 0, clientPlants{keepAnswered: true}, invClientAnswers},

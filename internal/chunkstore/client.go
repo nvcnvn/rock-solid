@@ -12,9 +12,13 @@ import (
 const ClientTimer core.TimerID = 0x636c6e74
 
 const (
-	// ClientRetryAfter is how long a client waits to send again a request a primary refused without
-	// naming a newer table, or one whose PG has no primary it can reach: 100 ms.
+	// ClientRetryAfter is how long a client waits to send again a request whose PG has no primary it
+	// can reach, and the first wait of one a primary refused without naming a newer table or
+	// answered unfound: 100 ms.
 	ClientRetryAfter = core.Tick(100_000)
+	// ClientRetryMax is the longest wait of a request refused or answered unfound again and again,
+	// each wait doubling the last: 3.2 s.
+	ClientRetryMax = 32 * ClientRetryAfter
 	// ClientResendAfter is how long a client waits for an answer before it sends a request again: 2 s.
 	ClientResendAfter = core.Tick(2_000_000)
 )
@@ -66,7 +70,8 @@ type ClientOutput struct {
 func (o *ClientOutput) Reset() { o.Actions, o.Done, o.Fetch = o.Actions[:0], o.Done[:0], 0 }
 
 // clientOp is one chunk's part of a request: id 0 until a write is given one; sent once it went to
-// peer, due again at at, or once the client holds table epoch wait.
+// peer, due again at at, or once the client holds table epoch wait; retry its last wait after a
+// refusal.
 type clientOp struct {
 	token   uint64
 	id      core.RequestID
@@ -80,6 +85,7 @@ type clientOp struct {
 	sent    bool
 	peer    core.NodeID
 	at      core.Tick
+	retry   core.Tick
 	wait    uint64
 }
 
@@ -148,7 +154,7 @@ func (c *Client) SetTable(ctx *core.Context, t Table, out *ClientOutput) {
 				op.wait, op.at = 0, 0
 			}
 			if to, ok := c.primary(op); !op.sent || !ok || to != op.peer {
-				op.at = 0
+				op.at, op.retry = 0, 0
 			}
 		}
 	}
@@ -286,7 +292,8 @@ func (c *Client) recv(ctx *core.Context, ev *core.Event, out *ClientOutput) {
 			op.wait = rp.Epoch
 			out.Fetch = max(out.Fetch, rp.Epoch)
 		} else {
-			op.at = ctx.Now + ClientRetryAfter
+			op.retry = min(max(2*op.retry, ClientRetryAfter), ClientRetryMax)
+			op.at = ctx.Now + op.retry
 		}
 	case c.plant.keepAnswered && rp.Kind == KindReply:
 		out.Done = append(out.Done, Completion{Token: op.token, Off: op.file, Len: op.n, Status: rp.Status, Version: rp.Version})

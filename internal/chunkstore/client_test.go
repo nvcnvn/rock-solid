@@ -262,6 +262,30 @@ func TestARefusalNamingANewerTableWaitsForIt(t *testing.T) {
 	}
 }
 
+// A write refused without a newer table, or answered unfound, goes again after an interval that
+// doubles per attempt from ClientRetryAfter up to ClientRetryMax.
+func TestARefusedWriteBacksOff(t *testing.T) {
+	h := newTClient(t, rtable(1, 2))
+	h.write(1, 0, []byte("a"))
+	_, as := h.updates()
+	for i, wait := range []core.Tick{1, 2, 4, 8, 16, 32, 32} {
+		rp := refused(1)
+		if i%2 == 1 {
+			rp = Response{Kind: KindReply, Status: StatusUnfound}
+		}
+		h.answer(as[0], rp)
+		then := h.ctx.Now
+		h.at(then + wait*ClientRetryAfter - 1)
+		if us, _ := h.updates(); len(us) != 0 {
+			t.Fatalf("attempt %d sent again before %d ms", i+2, wait*100)
+		}
+		h.at(then + wait*ClientRetryAfter)
+		if _, as = h.updates(); len(as) != 1 {
+			t.Fatalf("attempt %d not sent after %d ms", i+2, wait*100)
+		}
+	}
+}
+
 // The client asks for the table a refusal names.
 func TestAClientAsksForTheTableARefusalNames(t *testing.T) {
 	h := newTClient(t, rtable(1, 2))
