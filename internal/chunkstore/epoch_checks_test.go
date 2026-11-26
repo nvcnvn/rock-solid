@@ -6,6 +6,7 @@ import (
 	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/trace"
 )
 
 const (
@@ -147,7 +148,7 @@ type epochChecks struct {
 	writes  map[core.RequestID]core.ChunkID
 	updates map[updateAt]core.ChunkID
 	held    map[heldAt]bool
-	// acked is the newest version of each chunk acknowledged to a client; clean the newest each disk held listing nothing of the chunk as it was acknowledged.
+	// acked is the newest version of each chunk acknowledged to a client; clean the newest each disk held listing nothing of the chunk as it was acknowledged or as a recovery brought it.
 	acked map[core.ChunkID]uint64
 	clean map[diskChunk]uint64
 	// prims is the primary disk of each PG interval the cluster's table recorded.
@@ -267,6 +268,26 @@ func (x *epochChecks) event(d int, ev *core.Event, done bool) {
 	x.forward(d)
 	x.decided(r)
 	x.answers(d)
+	x.recovered(d)
+}
+
+// recovered notes each acknowledged chunk node d's last pass recovered as clean on d's disk at the version the recovery brought, while its index lists nothing of it.
+func (x *epochChecks) recovered(d int) {
+	o := x.c.reps[d]
+	for _, n := range x.c.notes[d] {
+		if n.Name != trace.OutRecovered || !o.Store().Serving() {
+			continue
+		}
+		for ch := range x.acked {
+			if ch.Hash() != n.Fields[0] {
+				continue
+			}
+			if c, _ := o.Store().Index().Chunk(o.st.cfg.Pool, ch); c.ListedIn == 0 && c.Whole >= n.Fields[1] {
+				k := diskChunk{o.cfg.Disk, ch}
+				x.clean[k] = max(x.clean[k], n.Fields[1])
+			}
+		}
+	}
 }
 
 // answers notes the versions node d acknowledged as a member in its last pass, and checks the disks holding each version it acknowledged to a client.
@@ -451,7 +472,7 @@ func (x *epochChecks) activations() error {
 	return nil
 }
 
-// sources checks each activated lead of its table's interval: a chunk it kept that it lacks, and does not call unfound, has an up member listing nothing, or one not running to say; while the disk record has lost no disk, an unfound one with an acknowledged write has a member of any mark that held the newest clean when it was acknowledged and lists nothing, or only a version above it that it lacks as that version's primary, or one not running to say (property 19).
+// sources checks each activated lead of its table's interval: a chunk it kept that it lacks, and does not call unfound, has an up member listing nothing, or one not running to say; while the disk record has lost no disk, an unfound one with an acknowledged write has a member of any mark that held the newest clean when it was acknowledged or since a recovery and lists nothing, or only a version above it that it lacks as that version's primary, or one not running to say (property 19).
 func (x *epochChecks) sources() error {
 	claimed := !x.tears && x.rec != nil && !slices.ContainsFunc(x.rec.Disks(), func(d RecordedDisk) bool { return d.Gone })
 	for _, r := range x.c.reps {
@@ -477,7 +498,7 @@ func (x *epochChecks) sources() error {
 	return nil
 }
 
-// canSource reports whether member m can serve chunk ch of PG pg: if acked is 0, an up member that lists nothing of it or runs no store to say; otherwise one of any mark that held version acked clean when it was acknowledged and lists nothing, lists only a version above it that it lacks though it was that version's primary, or runs no store to say.
+// canSource reports whether member m can serve chunk ch of PG pg: if acked is 0, an up member that lists nothing of it or runs no store to say; otherwise one of any mark that held version acked clean when it was acknowledged or since a recovery and lists nothing, lists only a version above it that it lacks though it was that version's primary, or runs no store to say.
 func (x *epochChecks) canSource(m Member, pg core.PGID, ch core.ChunkID, acked uint64) bool {
 	if m.Mark != MarkUp && acked == 0 {
 		return false

@@ -53,6 +53,8 @@ type rcluster struct {
 	orderErr error
 	// passes is each pass of each replica's loop: the actions it emitted.
 	passes [][][]core.Action
+	// notes is the trace records of each replica's last pass.
+	notes [][]trace.Record
 	// counting adds the heap allocations each replica's OnEvent makes to mallocs.
 	counting bool
 	mallocs  uint64
@@ -173,6 +175,7 @@ func newRClusterOnDisks(t *testing.T, tbl Table, s *sim.Scheduler, edit func(*Co
 		}
 	}
 	c.reps, c.loops, c.fetch, c.whole, c.passes = make([]*Replica, disks), make([]core.NodeID, disks), make([]uint64, disks), make([]bool, disks), make([][][]core.Action, disks)
+	c.notes = make([][]trace.Record, disks)
 	c.fetches = make([]int, disks)
 	c.sessionAsks = make([]uint64, disks)
 	c.pages = make([]*looptest.Pages, disks)
@@ -291,6 +294,7 @@ func (c *rcluster) took(d int, out *ReplicaOutput, acts []core.Action) []core.Ac
 		c.s.Node(uint32(d)).Output(c.loops[d], out.Trace[i])
 	}
 	c.passes[d] = append(c.passes[d], slices.Clone(out.Actions))
+	c.notes[d] = out.Trace
 	if c.onPass != nil {
 		c.onPass(d, out.Actions)
 	}
