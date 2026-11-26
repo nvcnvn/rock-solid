@@ -121,9 +121,7 @@ func (x *Index) versionEntry(e *disklog.Entry) {
 }
 
 // writer applies a writer entry: the table names the request's version unless the request is at
-// or below its session's watermark, and the session's entries in the PG and its ancestors below
-// its oldest outstanding request go, the watermark at each rising to the one before it. The
-// oldest ID is the session's, so an ancestor's watermark holds for the PG's split sibling too.
+// or below its session's watermark, and the entry trims its session.
 func (x *Index) writer(e *disklog.Entry) {
 	pgs := uint32(e.Length)
 	top := uint8(bits.TrailingZeros32(pgs))
@@ -134,6 +132,15 @@ func (x *Index) writer(e *disklog.Entry) {
 		x.val = binary.LittleEndian.AppendUint64(e.Chunk.AppendTo(x.val[:0]), e.Version)
 		x.must(x.tree.Put(k, x.val))
 	}
+	x.trim(e, wm)
+}
+
+// trim removes writer entry e's session's entries in its PG and its ancestors below its oldest
+// outstanding request, the watermark at each, wm before, rising to the one before it. The oldest
+// ID is the session's, so an ancestor's watermark holds for the PG's split sibling too, and the
+// client heard every request below it, so the trim holds whatever becomes of e's version.
+func (x *Index) trim(e *disklog.Entry, wm uint64) {
+	pgs := uint32(e.Length)
 	oldest := e.Oldest
 	if x.plant != nil && x.plant.trimOnAnswer {
 		oldest = max(oldest, e.Request+1)
@@ -145,6 +152,8 @@ func (x *Index) writer(e *disklog.Entry) {
 	x.trims[len(x.trims)-1].Oldest = oldest
 	noWatermark := x.plant != nil && x.plant.noWatermark
 	x.val = binary.LittleEndian.AppendUint64(x.val[:0], oldest-1)
+	// Put first so that the walk reaches e's PG count in a table holding none of it.
+	x.must(x.tree.Put(x.watermarkKey(e.Pool, uint8(bits.TrailingZeros32(pgs)), core.PGIndexOf(e.Chunk.Hash(), pgs), e.Session, e.Incarnation), x.val))
 	x.ancestors(e.Pool, e.Chunk, pgs, func(level uint8, pg uint32) bool {
 		x.lo = append(x.lo[:0], x.watermarkKey(e.Pool, level, pg, e.Session, e.Incarnation)...)
 		x.hi = binary.BigEndian.AppendUint64(append(x.hi[:0], x.lo...), oldest)

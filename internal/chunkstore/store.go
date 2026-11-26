@@ -2081,6 +2081,9 @@ func (s *Store) replay(ev *disklog.Event) error {
 	for i := range ev.Entries {
 		e := &ev.Entries[i]
 		if s.gates(e) {
+			if e.Kind == disklog.EntryWriter {
+				s.ix.trim(e, s.ix.watermark(e.Pool, e.Chunk, uint32(e.Length), e.Session, e.Incarnation))
+			}
 			s.held = append(s.held, item{entry: *e, state: itemDurable, lba: ev.LBA, headerBlocks: ev.HeaderBlocks, payload: ev.Payloads[i], lsn: ev.LSN})
 			continue
 		}

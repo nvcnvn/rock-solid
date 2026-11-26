@@ -527,3 +527,36 @@ func TestARecoveryTakesOnlyItsOwnChunksCopies(t *testing.T) {
 		t.Errorf("the end of replay left %d torn copies", len(x.copies))
 	}
 }
+
+// A member logs X as 2.1 and W as 2.2, W naming W as its session's oldest outstanding request, so X is trimmed;
+// replay then holds both, interval 2 being its newest decision's, and decision 3 keeps 2.1 alone. A trim holds
+// whatever happens to the version that carried it, so X stays stale throughout (seed 3 of TestConformResendSeeds).
+func TestATrimHoldsWhenReplayHoldsOrDropsItsVersion(t *testing.T) {
+	h := newHarness(t, testConfig())
+	c := chunk(2)
+	h.sync(h.persist(0, 1, 2, nil))
+	for i, req := range []uint64{5, 6} {
+		buf, err := h.pool.Alloc(core.BlockSize)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.changed = true
+		h.s.Write(&h.ctx, Request{ID: h.id(), Chunk: c, Len: core.BlockSize, Buf: buf, Version: MakeVersion(2, uint32(i+1)),
+			Request: req, Oldest: req, PGs: 1, Session: 7, Incarnation: 1}, &h.out)
+		h.take()
+		h.settle()
+	}
+	stale := func(when string) {
+		t.Helper()
+		if v, ok := h.s.Index().Resent(testPool, c, 1, 7, 1, 5); !ok {
+			t.Fatalf("%s: X names %#x, not stale", when, v)
+		}
+	}
+	stale("logged")
+	h.inv.Off(invReplay)
+	restart(h)
+	stale("replayed")
+	h.sync(h.persist(0, 1, 3, nil))
+	h.settleChunk(c, MakeVersion(2, 1))
+	stale("2.2 dropped")
+}
