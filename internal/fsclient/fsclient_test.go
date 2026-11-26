@@ -1,0 +1,533 @@
+package fsclient
+
+import (
+	"bytes"
+	"encoding/binary"
+	"testing"
+
+	"github.com/nvcnvn/rock-solid/internal/chunkstore"
+	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/fuseproto"
+	"github.com/nvcnvn/rock-solid/internal/lsm"
+	"github.com/nvcnvn/rock-solid/internal/meta"
+	"github.com/nvcnvn/rock-solid/internal/sim"
+)
+
+const vol = 5
+
+var rootAttr = meta.Attr{Mode: meta.ModeDir | 0o755, Nlink: 2, Mtime: 10, Ctime: 10}
+
+// mount is one machine over a real State, its chunks in memory; it answers every read, Txn and
+// chunk call at once unless held.
+type mount struct {
+	t      *testing.T
+	m      *Machine
+	s      *meta.State
+	ctx    core.Context
+	out    Output
+	unique uint64
+	now    int64
+	data   map[uint64][]byte
+	// held keeps the calls of the next requests for the test to answer.
+	held    bool
+	reads   []Read
+	txns    []meta.Txn
+	sent    []TxnSend
+	chunks  []ChunkCall
+	replies [][]byte
+}
+
+func newMount(t *testing.T, cfg Config) *mount {
+	s, err := meta.NewState(lsm.Config{MaxPiece: 64 << 10}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	var f meta.FS
+	f.Volume = vol
+	if err := f.Root(&rootAttr); err != nil {
+		t.Fatal(err)
+	}
+	var r meta.Result
+	if err := s.Apply(&f.Txn, &r); err != nil || r.FailedCheck != -1 {
+		t.Fatal(err, r)
+	}
+	cfg.Volume, cfg.Session, cfg.Mount = vol, 7, 1
+	if cfg.SlotLimit == 0 {
+		cfg.SlotLimit = 1 << 20
+	}
+	return &mount{t: t, m: New(cfg), s: s, ctx: core.Context{Pool: sim.NewPool(64<<20, 1<<16)}, now: 1_000_000_000, data: map[uint64][]byte{}}
+}
+
+func (h *mount) apply(t *meta.Txn) meta.Result {
+	var r meta.Result
+	if err := h.s.Apply(t, &r); err != nil {
+		h.t.Fatal(err)
+	}
+	return r
+}
+
+func (h *mount) answerRead(rd Read) {
+	var r meta.ScanResult
+	if err := h.s.Scan(rd.Start, rd.End, rd.Limit, &r); err != nil {
+		h.t.Fatal(err)
+	}
+	h.m.ReadDone(&h.ctx, rd.Token, r.KVs, &h.out)
+}
+
+func (h *mount) answerTxn(s TxnSend) {
+	r := h.apply(s.Txn)
+	h.m.TxnDone(&h.ctx, s.Token, &r, nil, &h.out)
+}
+
+func (h *mount) answerChunk(c ChunkCall) {
+	b := h.data[uint64(c.File.Inode)]
+	if !c.Read {
+		if end := c.Off + uint64(len(c.Data)); end > uint64(len(b)) {
+			b = append(b, make([]byte, end-uint64(len(b)))...)
+		}
+		copy(b[c.Off:], c.Data)
+		h.data[uint64(c.File.Inode)] = b
+	}
+	end := c.Off + uint64(c.N)
+	if !c.Read {
+		end = c.Off + uint64(len(c.Data))
+	}
+	for off := c.Off; off < end; off = (off/core.ChunkSize + 1) * core.ChunkSize {
+		n := min(end, (off/core.ChunkSize+1)*core.ChunkSize) - off
+		done := chunkstore.Completion{Token: c.Token, Off: off, Len: uint32(n), Status: chunkstore.StatusOK}
+		if c.Read {
+			buf, err := h.ctx.Pool.AllocZeroed(int(off%core.BlockSize + n))
+			if err != nil {
+				h.t.Fatal(err)
+			}
+			if off < uint64(len(b)) {
+				copy(h.ctx.Pool.Bytes(buf)[off%core.BlockSize:], b[off:min(uint64(len(b)), off+n)])
+			}
+			done.Buf = buf
+		}
+		h.m.ChunkDone(&h.ctx, &done, &h.out)
+	}
+}
+
+// serve answers what the machine emitted until it emits nothing more, or keeps it when held.
+func (h *mount) serve() {
+	for {
+		o := h.out
+		h.out = Output{}
+		for b := o.Replies; len(b) > 0; b = b[binary.LittleEndian.Uint32(b):] {
+			h.replies = append(h.replies, bytes.Clone(b[:binary.LittleEndian.Uint32(b)]))
+		}
+		for _, s := range o.Txns {
+			h.txns = append(h.txns, *s.Txn)
+		}
+		if h.held {
+			h.reads = append(h.reads, o.Reads...)
+			h.sent = append(h.sent, o.Txns...)
+			h.chunks = append(h.chunks, o.Chunks...)
+			return
+		}
+		if len(o.Reads)+len(o.Txns)+len(o.Chunks) == 0 {
+			return
+		}
+		for _, rd := range o.Reads {
+			h.answerRead(rd)
+		}
+		for _, s := range o.Txns {
+			h.answerTxn(s)
+		}
+		for _, c := range o.Chunks {
+			h.answerChunk(c)
+		}
+	}
+}
+
+// send hands the machine r and serves it.
+func (h *mount) send(r fuseproto.Request) uint64 {
+	h.unique += 2
+	r.Unique = h.unique
+	h.now++
+	h.m.Request(&h.ctx, h.now, &r, &h.out)
+	h.serve()
+	return r.Unique
+}
+
+// reply is the reply to unique: its errno and body.
+func (h *mount) reply(unique uint64) (int32, []byte) {
+	h.t.Helper()
+	for _, b := range h.replies {
+		if binary.LittleEndian.Uint64(b[8:]) == unique {
+			return -int32(binary.LittleEndian.Uint32(b[4:])), b[fuseproto.OutHeaderSize:]
+		}
+	}
+	h.t.Fatalf("no reply to %d", unique)
+	return 0, nil
+}
+
+func (h *mount) ok(unique uint64) []byte {
+	h.t.Helper()
+	errno, b := h.reply(unique)
+	if errno != 0 {
+		h.t.Fatalf("request %d failed with errno %d", unique, errno)
+	}
+	return b
+}
+
+func (h *mount) errno(unique uint64, want fuseproto.Errno) {
+	h.t.Helper()
+	if errno, _ := h.reply(unique); errno != int32(want) {
+		h.t.Fatalf("request %d: errno %d, want %d", unique, errno, want)
+	}
+}
+
+func (h *mount) entry(unique uint64) fuseproto.Entry {
+	h.t.Helper()
+	b := h.ok(unique)
+	e, err := fuseproto.DecodeEntry(b[:min(len(b), 128)])
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return e
+}
+
+func (h *mount) lookup(dir uint64, name string) uint64 {
+	return h.send(fuseproto.Request{Opcode: fuseproto.OpLookup, NodeID: dir, Name: []byte(name)})
+}
+
+// create makes a file and returns its inode and handle.
+func (h *mount) create(dir uint64, name string) (uint64, uint64) {
+	h.t.Helper()
+	u := h.send(fuseproto.Request{Opcode: fuseproto.OpCreate, NodeID: dir, Name: []byte(name), Mode: uint32(meta.ModeFile | 0o644)})
+	b := h.ok(u)
+	e, _ := fuseproto.DecodeEntry(b[:128])
+	o, _ := fuseproto.DecodeOpen(b[128:])
+	return e.NodeID, o.Fh
+}
+
+func (h *mount) mkdir(dir uint64, name string) uint64 {
+	h.t.Helper()
+	return h.entry(h.send(fuseproto.Request{Opcode: fuseproto.OpMkdir, NodeID: dir, Name: []byte(name), Mode: 0o755})).NodeID
+}
+
+func (h *mount) write(ino, fh, off uint64, data []byte) uint64 {
+	return h.send(fuseproto.Request{Opcode: fuseproto.OpWrite, NodeID: ino, Fh: fh, Offset: off, Size: uint32(len(data)), Data: data})
+}
+
+func (h *mount) read(ino, fh, off uint64, n uint32) []byte {
+	h.t.Helper()
+	return h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpRead, NodeID: ino, Fh: fh, Offset: off, Size: n}))
+}
+
+func (h *mount) open(ino uint64) fuseproto.Open {
+	h.t.Helper()
+	o, err := fuseproto.DecodeOpen(h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpOpen, NodeID: ino})))
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return o
+}
+
+func (h *mount) attr(ino uint64) meta.Attr {
+	h.t.Helper()
+	k, _ := meta.AppendKey(nil, &meta.Key{Space: meta.SpaceFS, Volume: vol, Inode: ino, Tag: meta.InodeAttr})
+	var r meta.ScanResult
+	if err := h.s.Scan(k, append(bytes.Clone(k), 0), 1, &r); err != nil || len(r.KVs) != 1 {
+		h.t.Fatalf("no attributes of %x: %v", ino, err)
+	}
+	var a meta.Attr
+	if err := meta.DecodeAttr(r.KVs[0].Value, &a); err != nil {
+		h.t.Fatal(err)
+	}
+	return a
+}
+
+func (h *mount) setAttr(ino uint64, b meta.Attr) {
+	h.t.Helper()
+	a := h.attr(ino)
+	f := meta.FS{Volume: vol}
+	if err := f.SetAttr(ino, &a, &b, nil); err != nil {
+		h.t.Fatal(err)
+	}
+	if r := h.apply(&f.Txn); r.FailedCheck != -1 {
+		h.t.Fatal(r)
+	}
+}
+
+func TestLookupAnswersCurrentAttributesAndAMissingNameWithENOENT(t *testing.T) {
+	h := newMount(t, Config{})
+	h.errno(h.lookup(meta.RootInode, "f"), ENOENT)
+	ino, _ := h.create(meta.RootInode, "f")
+	e := h.entry(h.lookup(meta.RootInode, "f"))
+	if e.NodeID != ino || e.EntryValid != 0 || e.AttrValid != 1 || e.Attr.Mode != uint32(meta.ModeFile|0o644) {
+		t.Fatalf("file entry %+v", e)
+	}
+	b := h.attr(ino)
+	b.Size, b.Mtime = 77, 5e9
+	h.setAttr(ino, b)
+	if e := h.entry(h.lookup(meta.RootInode, "f")); e.Attr.Size != 77 || e.Attr.Mtime != 5 {
+		t.Fatalf("a lookup after another node's change answered %+v", e.Attr)
+	}
+	d := h.mkdir(meta.RootInode, "d")
+	if e := h.entry(h.lookup(meta.RootInode, "d")); e.NodeID != d || e.EntryValid != 1 {
+		t.Fatalf("directory entry %+v", e)
+	}
+	s := newMount(t, Config{Strict: true})
+	s.mkdir(meta.RootInode, "d")
+	if e := s.entry(s.lookup(meta.RootInode, "d")); e.EntryValid != 0 || e.AttrValid != 0 {
+		t.Fatalf("strict entry %+v", e)
+	}
+}
+
+func TestAnAttributeReplyFetchedBeforeALaterRequestIsFetchedAgain(t *testing.T) {
+	for _, later := range []string{"getattr", "lookup"} {
+		h := newMount(t, Config{})
+		ino, _ := h.create(meta.RootInode, "f")
+		h.held, h.replies = true, nil
+		first := h.send(fuseproto.Request{Opcode: fuseproto.OpGetattr, NodeID: ino})
+		if len(h.reads) != 1 {
+			t.Fatalf("getattr read %d keys", len(h.reads))
+		}
+		rd := h.reads[0]
+		h.reads = nil
+		if later == "getattr" {
+			h.send(fuseproto.Request{Opcode: fuseproto.OpGetattr, NodeID: ino})
+		} else {
+			h.lookup(meta.RootInode, "f")
+		}
+		b := h.attr(ino)
+		b.Size = 99
+		h.setAttr(ino, b)
+		h.answerRead(rd)
+		if len(h.out.Replies) != 0 || len(h.out.Reads) != 1 {
+			t.Fatalf("%s: the first getattr answered with what it fetched before the later request", later)
+		}
+		h.held = false
+		h.serve()
+		for _, r := range h.reads {
+			h.answerRead(r)
+		}
+		h.serve()
+		va, _, a, err := fuseproto.DecodeAttrOut(h.ok(first))
+		if err != nil || a.Size != 99 || va != 1 {
+			t.Fatalf("%s: first getattr answered %+v %v", later, a, err)
+		}
+	}
+}
+
+func TestAnOpenAfterAChangeDropsTheCache(t *testing.T) {
+	h := newMount(t, Config{})
+	ino, _ := h.create(meta.RootInode, "f")
+	if o := h.open(ino); o.Flags&fuseproto.OpenKeepCache == 0 {
+		t.Fatal("an open of an unchanged file dropped the cache")
+	}
+	b := h.attr(ino)
+	b.Ctime++
+	h.setAttr(ino, b)
+	if o := h.open(ino); o.Flags&fuseproto.OpenKeepCache != 0 {
+		t.Fatal("an open after another node's change kept the cache")
+	}
+	if o := h.open(ino); o.Flags&fuseproto.OpenKeepCache == 0 {
+		t.Fatal("a second open with no change between dropped the cache")
+	}
+}
+
+func TestNamespaceRequestsAnswerTheirChecksErrnos(t *testing.T) {
+	h := newMount(t, Config{})
+	h.create(meta.RootInode, "f")
+	d := h.mkdir(meta.RootInode, "d")
+	h.create(d, "g")
+	n := len(h.txns)
+	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpCreate, NodeID: meta.RootInode, Name: []byte("f"), Mode: uint32(meta.ModeFile | 0o644)}), EEXIST)
+	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpMkdir, NodeID: meta.RootInode, Name: []byte("d"), Mode: 0o755}), EEXIST)
+	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpRmdir, NodeID: meta.RootInode, Name: []byte("d")}), ENOTEMPTY)
+	if len(h.txns) != n+3 {
+		t.Fatalf("%d Txns for 3 failed requests", len(h.txns)-n)
+	}
+	n = len(h.txns)
+	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpRename, NodeID: meta.RootInode, Name: []byte("d"), NewDir: meta.RootInode, NewName: []byte("f")}), ENOTDIR)
+	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpRename, NodeID: meta.RootInode, Name: []byte("f"), NewDir: meta.RootInode, NewName: []byte("d")}), EISDIR)
+	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpRename, NodeID: meta.RootInode, Name: []byte("f"), NewDir: d, NewName: []byte("f")}), EXDEV)
+	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpUnlink, NodeID: meta.RootInode, Name: []byte("d")}), EISDIR)
+	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpRmdir, NodeID: meta.RootInode, Name: []byte("f")}), ENOTDIR)
+	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpUnlink, NodeID: meta.RootInode, Name: []byte("x")}), ENOENT)
+	if len(h.txns) != n {
+		t.Fatalf("%d Txns sent for requests refused before one", len(h.txns)-n)
+	}
+	h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpRename, NodeID: meta.RootInode, Name: []byte("f"), NewDir: meta.RootInode, NewName: []byte("h")}))
+	h.errno(h.lookup(meta.RootInode, "f"), ENOENT)
+	h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpUnlink, NodeID: d, Name: []byte("g")}))
+	h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpRmdir, NodeID: meta.RootInode, Name: []byte("d")}))
+	h.errno(h.lookup(meta.RootInode, "d"), ENOENT)
+	for _, tx := range h.txns {
+		if tx.Replay == nil && len(tx.Ops) > 0 && tx.Ops[0].Kind != meta.OpUpdate {
+			t.Fatalf("a client request's Txn without its replay key: %+v", tx)
+		}
+	}
+}
+
+func TestTheFirstCreateInASlotWaitsForOneReservation(t *testing.T) {
+	h := newMount(t, Config{})
+	h.create(meta.RootInode, "a")
+	if len(h.txns) != 2 || h.txns[0].Replay != nil || h.txns[1].Replay == nil {
+		t.Fatalf("first create sent %d Txns", len(h.txns))
+	}
+	h.create(meta.RootInode, "b")
+	if len(h.txns) != 3 {
+		t.Fatalf("second create sent %d Txns", len(h.txns)-2)
+	}
+	d := h.mkdir(meta.RootInode, "d")
+	if d>>meta.SeqBits == 0 || d&(1<<meta.SeqBits-1) != 1 {
+		t.Fatalf("mkdir made %x, not sequence 1 of a fresh slot", d)
+	}
+	n := len(h.txns)
+	h.create(d, "f")
+	h.mkdir(d, "e")
+	if len(h.txns) != n+2 {
+		t.Fatalf("creates in a fresh slot sent %d Txns", len(h.txns)-n)
+	}
+}
+
+func TestReaddirplusListsEveryNameAcrossCalls(t *testing.T) {
+	h := newMount(t, Config{})
+	names := map[string]bool{}
+	for _, n := range []string{"a", "bb", "ccc", "dddd", "eeeee"} {
+		h.create(meta.RootInode, n)
+		names[n] = true
+	}
+	fh, _ := fuseproto.DecodeOpen(h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpOpendir, NodeID: meta.RootInode})))
+	off := uint64(0)
+	for range 10 {
+		b := h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpReaddirplus, NodeID: meta.RootInode, Fh: fh.Fh, Offset: off, Size: 2 * 160}))
+		if len(b) == 0 {
+			break
+		}
+		for len(b) > 0 {
+			nl := binary.LittleEndian.Uint32(b[128+16:])
+			name := string(b[128+24 : 128+24+nl])
+			if binary.LittleEndian.Uint64(b) != 0 || !names[name] {
+				t.Fatalf("listed %q with node %d", name, binary.LittleEndian.Uint64(b))
+			}
+			delete(names, name)
+			off = binary.LittleEndian.Uint64(b[128+8:])
+			b = b[fuseproto.DirentPlusSize(int(nl)):]
+		}
+	}
+	if len(names) != 0 {
+		t.Fatalf("never listed %v", names)
+	}
+}
+
+func TestWritesRaiseAllocEndFirstByDoublingSteps(t *testing.T) {
+	h := newMount(t, Config{})
+	ino, fh := h.create(meta.RootInode, "f")
+	block := make([]byte, 4096)
+	var ends []uint64
+	written := uint64(0)
+	for c := uint64(0); c < 40; c++ {
+		h.ok(h.write(ino, fh, c*core.ChunkSize, block))
+		if a := h.attr(ino); len(ends) == 0 || a.AllocEnd != ends[len(ends)-1] {
+			ends = append(ends, a.AllocEnd)
+			if a.Size != written {
+				t.Fatalf("the raise to %d committed size %d, want %d written before it", a.AllocEnd, a.Size, written)
+			}
+		}
+		written = c*core.ChunkSize + 4096
+	}
+	want := []uint64{1, 3, 7, 15, 31, 47}
+	if len(ends) != len(want) {
+		t.Fatalf("alloc_end went %v, want %v", ends, want)
+	}
+	for i := range want {
+		if ends[i] != want[i] {
+			t.Fatalf("alloc_end went %v, want %v", ends, want)
+		}
+	}
+	h.held = true
+	h.write(ino, fh, 60*core.ChunkSize, block)
+	if len(h.chunks) != 0 || len(h.sent) != 1 {
+		t.Fatalf("a write past alloc_end sent %d chunk writes and %d Txns before its raise answered", len(h.chunks), len(h.sent))
+	}
+}
+
+func TestCloseCommitsSizeAndMtimeAndReadsAreClamped(t *testing.T) {
+	h := newMount(t, Config{})
+	ino, fh := h.create(meta.RootInode, "f")
+	h.ok(h.write(ino, fh, 0, []byte("hello world")))
+	if a := h.attr(ino); a.Size != 0 {
+		t.Fatalf("size %d committed before close", a.Size)
+	}
+	if got := h.read(ino, fh, 6, 100); string(got) != "world" {
+		t.Fatalf("read %q", got)
+	}
+	if got := h.read(ino, fh, 11, 100); len(got) != 0 {
+		t.Fatalf("read past the size gave %q", got)
+	}
+	stored := h.attr(ino).Mtime
+	h.now = stored - 100
+	h.ok(h.write(ino, fh, 11, []byte("!")))
+	h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpFlush, NodeID: ino, Fh: fh}))
+	a := h.attr(ino)
+	if a.Size != 12 || a.Mtime != stored+1 {
+		t.Fatalf("close committed size %d mtime %d, want 12 and %d", a.Size, a.Mtime, stored+1)
+	}
+	h.now = 50e9
+	h.ok(h.write(ino, fh, 0, []byte("H")))
+	h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpFsync, NodeID: ino, Fh: fh}))
+	if a := h.attr(ino); a.Size != 12 || a.Mtime != 50e9+1 {
+		t.Fatalf("fsync committed size %d mtime %d", a.Size, a.Mtime)
+	}
+	n := len(h.txns)
+	h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpFlush, NodeID: ino, Fh: fh}))
+	if len(h.txns) != n {
+		t.Fatal("a close with nothing written sent a Txn")
+	}
+	b := h.attr(ino)
+	b.Size = 5
+	h.setAttr(ino, b)
+	h.open(ino)
+	if got := h.read(ino, fh, 0, 100); string(got) != "Hello" {
+		t.Fatalf("read after another node's truncate gave %q", got)
+	}
+}
+
+func TestPerCallAnswersOfOpcodesTheKernelRemembers(t *testing.T) {
+	h := newMount(t, Config{})
+	ino, _ := h.create(meta.RootInode, "f")
+	h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpAccess, NodeID: ino}))
+	h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpFsyncdir, NodeID: meta.RootInode}))
+	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpRename2, NodeID: meta.RootInode}), EINVAL)
+	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpTmpfile, NodeID: meta.RootInode}), EOPNOTSUPP)
+	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpLink, NodeID: meta.RootInode}), EPERM)
+	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpGetxattr, NodeID: ino}), ENODATA)
+	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpRemovexattr, NodeID: ino}), ENODATA)
+	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpSetxattr, NodeID: ino}), EOPNOTSUPP)
+	if b := h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpListxattr, NodeID: ino})); len(b) != 8 || binary.LittleEndian.Uint64(b) != 0 {
+		t.Fatalf("listxattr's length %x", b)
+	}
+	if b := h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpListxattr, NodeID: ino, Size: 100})); len(b) != 0 {
+		t.Fatalf("listxattr %x", b)
+	}
+	_, _, a, err := fuseproto.DecodeStatxOut(h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpStatx, NodeID: ino})))
+	if err != nil || a.Ino != ino || a.Mode != uint32(meta.ModeFile|0o644) {
+		t.Fatalf("statx %+v %v", a, err)
+	}
+}
+
+func TestSetattrChangesModeAndTimesAndRefusesASizeChange(t *testing.T) {
+	h := newMount(t, Config{})
+	ino, _ := h.create(meta.RootInode, "f")
+	u := h.send(fuseproto.Request{Opcode: fuseproto.OpSetattr, NodeID: ino, Setattr: fuseproto.Setattr{Valid: fuseproto.AttrMode | fuseproto.AttrMtime, Mode: 0o600, Mtime: 3}})
+	if _, _, a, err := fuseproto.DecodeAttrOut(h.ok(u)); err != nil || a.Mode != uint32(meta.ModeFile|0o600) || a.Mtime != 3 {
+		t.Fatalf("setattr answered %+v %v", a, err)
+	}
+	if a := h.attr(ino); a.Mode != meta.ModeFile|0o600 || a.Mtime != 3e9 {
+		t.Fatalf("setattr stored %+v", a)
+	}
+	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpSetattr, NodeID: ino, Setattr: fuseproto.Setattr{Valid: fuseproto.AttrSize, Size: 10}}), EOPNOTSUPP)
+	h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpSetattr, NodeID: ino, Setattr: fuseproto.Setattr{Valid: fuseproto.AttrSize, Size: 0}}))
+	d := h.mkdir(meta.RootInode, "d")
+	h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpSetattr, NodeID: d, Setattr: fuseproto.Setattr{Valid: fuseproto.AttrMode, Mode: 0o700}}))
+	if a := h.attr(d); a.Mode != meta.ModeDir|0o700 {
+		t.Fatalf("directory setattr stored %+v", a)
+	}
+}

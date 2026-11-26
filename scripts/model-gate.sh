@@ -14,7 +14,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 map=scripts/model-rules.tsv
-protocol='^(internal/(chunkstore|lease|meta|node|raftshard)|third_party/raft)/.*\.go$'
+protocol='^(internal/(chunkstore|fsclient|lease|meta|node|raftshard)|third_party/raft)/.*\.go$'
 exclude='_test\.go$|^internal/chunkstore/(admission|capacity|cleaner|detector|disks|index|pool)\.go$|^internal/meta/txn\.go$'
 tab=$'\t'
 shape="^[^$tab]+$tab(open$tab.+|none$tab.+|[a-z]+\.[A-Za-z]+(,[A-Za-z]+)*${tab}Test[A-Za-z0-9_]+)\$"
