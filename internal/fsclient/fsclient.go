@@ -361,8 +361,10 @@ func (m *Machine) oldest() uint64 {
 }
 
 func (m *Machine) sendTxn(o *op, out *Output) {
-	o.mreq.Oldest = m.oldest()
-	o.fs.Txn.Oldest = o.mreq.Oldest
+	if o.fs.Txn.Replay != nil {
+		o.mreq.Oldest = m.oldest()
+		o.fs.Txn.Oldest = o.mreq.Oldest
+	}
 	out.Txns = append(out.Txns, TxnSend{Token: m.token(o, 0), Txn: &o.fs.Txn})
 }
 

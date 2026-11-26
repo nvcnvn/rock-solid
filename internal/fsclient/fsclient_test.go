@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"maps"
+	"slices"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
@@ -60,7 +62,12 @@ func newMount(t *testing.T, cfg Config) *mount {
 	return &mount{t: t, m: New(cfg), s: s, ctx: core.Context{Pool: sim.NewPool(64<<20, 1<<16)}, now: 1_000_000_000, data: map[uint64][]byte{}}
 }
 
+// apply applies t as a shard does, refusing it first if it does not pass Check.
 func (h *mount) apply(t *meta.Txn) meta.Result {
+	h.t.Helper()
+	if _, err := t.Check(); err != nil {
+		h.t.Fatalf("a shard refuses %+v: %v", *t, err)
+	}
 	var r meta.Result
 	if err := h.s.Apply(t, &r); err != nil {
 		h.t.Fatal(err)
@@ -535,35 +542,47 @@ func TestSetattrChangesModeAndTimesAndRefusesASizeChange(t *testing.T) {
 
 const invPurgeMisses = "a purge never misses a chunk written before a crash"
 
-// purgeMisses checks that every chunk holding data of an inode lies below its alloc_end, or, once
-// the inode is removed, within its purge entry.
-func (h *mount) purgeMisses() error {
-	for ino, b := range h.data {
-		last := (uint64(len(b)) - 1) / core.ChunkSize
-		if len(b) == 0 {
-			continue
-		}
+// scanner reads at most limit keys of [start, end) from a MetaStore state.
+type scanner func(start, end []byte, limit int, r *meta.ScanResult) error
+
+// purgeMisses checks that every chunk last names as holding data of an inode, up to and
+// including its chunk index, lies below the inode's alloc_end, or, once the inode is removed,
+// within its purge entry.
+func purgeMisses(scan scanner, last map[uint64]uint64) error {
+	for _, ino := range slices.Sorted(maps.Keys(last)) {
+		chunk := last[ino]
 		k, _ := meta.AppendKey(nil, &meta.Key{Space: meta.SpaceFS, Volume: vol, Inode: ino, Tag: meta.InodeAttr})
 		var r meta.ScanResult
-		if err := h.s.Scan(k, append(bytes.Clone(k), 0), 1, &r); err != nil {
+		if err := scan(k, append(bytes.Clone(k), 0), 1, &r); err != nil {
 			return err
 		}
 		var a meta.Attr
-		if len(r.KVs) == 1 && meta.DecodeAttr(r.KVs[0].Value, &a) == nil && a.AllocEnd > last {
+		if len(r.KVs) == 1 && meta.DecodeAttr(r.KVs[0].Value, &a) == nil && a.AllocEnd > chunk {
 			continue
 		}
 		p, _ := meta.AppendKey(nil, &meta.Key{Space: meta.SpaceFS, Volume: vol, Inode: ino >> meta.SeqBits << meta.SeqBits, Tag: meta.SlotPurge, ID: ino})
-		if err := h.s.Scan(p, append(bytes.Clone(p), 0), 1, &r); err != nil {
+		if err := scan(p, append(bytes.Clone(p), 0), 1, &r); err != nil {
 			return err
 		}
 		if len(r.KVs) == 1 {
-			if e, err := meta.DecodePurge(r.KVs[0].Value); err == nil && e.Start == 0 && e.End > last {
+			if e, err := meta.DecodePurge(r.KVs[0].Value); err == nil && e.Start == 0 && e.End > chunk {
 				continue
 			}
 		}
-		return fmt.Errorf("%s: chunk %d of inode %x lies past its alloc_end and its purge entry", invPurgeMisses, last, ino)
+		return fmt.Errorf("%s: chunk %d of inode %x lies past its alloc_end and its purge entry", invPurgeMisses, chunk, ino)
 	}
 	return nil
+}
+
+// purgeMisses checks the chunks the mount wrote against its state.
+func (h *mount) purgeMisses() error {
+	last := map[uint64]uint64{}
+	for ino, b := range h.data {
+		if len(b) > 0 {
+			last[ino] = (uint64(len(b)) - 1) / core.ChunkSize
+		}
+	}
+	return purgeMisses(h.s.Scan, last)
 }
 
 func TestAWriteBeforeItsRaiseLeavesAChunkThePurgeMisses(t *testing.T) {
