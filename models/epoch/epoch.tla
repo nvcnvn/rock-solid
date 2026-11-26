@@ -2882,7 +2882,7 @@ RefillLostPlans == {RefillLostSecond}
 \* neg-drop-all-leaving: both members leaving, one lost, and the other holds what
 \* no member can serve.
 DropAllPlans == {Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), AddM(2, 2, 4), LostM(3), DropM(2)>>, Partial2, {})}
-\* deep-parks, on 4 nodes: disk 3 down and refilled onto disk 1, which fills before
+\* heavy-parks, on 4 nodes: disk 3 down and refilled onto disk 1, which fills before
 \* it recovers, so disk 4 joins with disk 1 parked beside disk 3, both leaving,
 \* then removed on the recovered report; or disk 2 down and lost instead.
 \* ci-parks has the first write alone and the removal; ci-parks-lost too, with
