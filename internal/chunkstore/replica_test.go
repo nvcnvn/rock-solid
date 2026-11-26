@@ -480,6 +480,7 @@ func (c *rcluster) update(pgf PGFields, ch core.ChunkID, off uint32, data []byte
 	if edit != nil {
 		edit(&u)
 	}
+	id = u.ID
 	c.s.Node(c.client.Node).Call(c.client, func(ctx *core.Context, acts []core.Action) []core.Action {
 		a := core.Action{Kind: core.ActNetSend, Peer: core.NodeID{Node: lead - 1}}
 		a.Msg.Len = uint16(copy(a.Msg.Body[:], AppendUpdate(nil, &u)))
@@ -501,6 +502,12 @@ func (c *rcluster) update(pgf PGFields, ch core.ChunkID, off uint32, data []byte
 
 func (c *rcluster) write(pg core.PGID, ch core.ChunkID, off uint32, data []byte) core.RequestID {
 	return c.update(c.pgFields(pg), ch, off, data, 0, nil)
+}
+
+// resend sends client write id again under its request ID, forgetting any answer the client heard.
+func (c *rcluster) resend(id core.RequestID, pg core.PGID, ch core.ChunkID, off uint32, data []byte) {
+	delete(c.cl.replies, id)
+	c.update(c.pgFields(pg), ch, off, data, 0, func(u *Update) { u.ID = id })
 }
 
 func (c *rcluster) read(pg core.PGID, ch core.ChunkID, off, n uint32, to int) core.RequestID {

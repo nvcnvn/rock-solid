@@ -3686,8 +3686,8 @@ invariants](#placement-faults-and-invariants) (phase 3) unless the row names ano
 | 21 | A left PG's gated versions settle: with every step that is due taken in time, once the newest table names a disk in no interval of a PG since the last activated one, the running node on it, unless cut off from the control plane, keeps no version of the PG gated, which would hold its log's replay point short of the version for good | `LeftGatesSettle` | "no running disk keeps a write gated of a PG its table names it in no interval of since the last activated" (`invLeftGated`), registered in every run of the primary-change seeds and of `TestALeftMemberDownAtItsMovesEndKeepsAcknowledgedWrites` by [Gated versions of a PG the disk left](build-checklist.md#phase-4-embedded-metastore) |
 | 22 | A write held for its chunk's copies is ordered in the end: with every step that is due taken in time, no active primary holds for ever a write it would order but that its chunk has fewer than `min_live` clean copies or that it lists the chunk itself, since recovery reaches the chunk, the primary's own copy included | `HeldWritesOrdered` | "once the run settles, no active primary holds a client write" (`invHeldOrdered`), an end check of the primary-change and fault runs, which `writeOnUnfound` breaks at seed 3 of the fault run (53 of 500), with `invRecovered`, which sees a chunk recovery never reaches. `TestAWriteToAChunkWithOneCleanCopyWaitsForRecovery` and `TestAWriteWaitsWhileThePrimaryListsTheChunk` cover it as regression tests |
 | 23 | A give-up loses only what no disk left holds: when an operator gives up a PG's interval, no disk that is not gone nor removed with every member that took its place gone, but an up member of that interval, holds any acknowledged version of a chunk of the PG, and no such disk can serve all of the acknowledged writes, holding them and listing nothing, of a chunk the give-up drops; a removed disk does not count, for 18's reason | `GiveUpOnlyLost` | "a give-up loses only what no disk left holds" (`invOnlyLost`), checked over every acknowledged version of every chunk as each give-up of the sole-copy runs and of the seeded give-up run (`TestGiveUpsUnderFaultsLoseOnlyWhatIsLost`) commits |
-| 24 | A client write takes effect once, however often it is sent: no two committed versions of a chunk, acknowledged or kept by an activated interval, carry the same write. A reissue under a new incarnation is another write. With `MaxSend` 2, the spec without the resend table breaks it in 13 states: X ordered as 1.1, sent again and ordered as 1.2, both acknowledged | `AppliedOnce` | none yet: the [consistency check](#consistency-check-of-chunk-histories) counts each attempt as its own write until the primary answers resends |
-| 25 | A write is answered stale only once its client heard an earlier attempt's answer, since the client takes a stale answer as final and has no other outcome to give | `StaleOnlyHeard` | none yet ([Resend table](build-checklist.md#phase-3-replication-and-placement)) |
+| 24 | A client write takes effect once, however often it is sent: no two committed versions of a chunk, acknowledged or kept by an activated interval, carry the same write. A reissue under a new incarnation is another write. With `MaxSend` 2, the spec without the resend table breaks it in 13 states: X ordered as 1.1, sent again and ordered as 1.2, both acknowledged | `AppliedOnce` | `TestAResentWriteIsAppliedOnce`, whose resend is answered 1.1 and whose history, the two attempts one write, the [consistency check](#consistency-check-of-chunk-histories) passes; `TestAResendWaitsForItsPendingVersion`, `TestAResendOfADroppedVersionIsOrderedAgain`, `TestATrimmedWriteSentAgainIsStale` and `TestANewPrimaryAnswersAResendFromItsTable`. No seeded run resends yet |
+| 25 | A write is answered stale only once its client heard an earlier attempt's answer, since the client takes a stale answer as final and has no other outcome to give | `StaleOnlyHeard` | `TestAWriteIsStaleOnlyOnceItsClientHeard`: X's answer is lost, and X sent again is answered 1.1, not stale |
 
 **Counterexamples.** Each row is a variant of the spec with one rule removed (`neg-*.cfg`). TLC must
 find a violation of the named property, which is never the property that only restates the removed
@@ -6693,14 +6693,13 @@ test's alone.
   or not, ran Porcupine past its timeout on histories of 50 operations. An undecided one is
   concurrent with everything after its call, so once an operation showing a later version of its
   chunk completes, where it could only be no operation, its return is moved there.
-- **Resent writes.** Each attempt of a write sent again is its own operation, until the primary
-  answers resends from its [resend table](design.md#data-layer-chunkstore).
-  `TestAResendAfterALostAcknowledgmentIsASecondWrite` plants the case: client A's write of X
-  commits as 1.1 and its reply is lost, a read sees X, client B writes Y as 1.2, a read sees Y, A
-  sends X again, which commits as 1.3, and a read sees X. As two writes the history is
-  linearizable. As one operation, answered 1.3, no write takes 1.1, which the first read returned,
-  so no order fits; the reads' X, Y, X are the bytes a client sees. So today a
-  client gets the weaker guarantee, and the check passes only because it counts each attempt.
+- **Resent writes.** A write sent again keeps its request ID and is one operation, which the
+  primary answers from its [resend table](design.md#data-layer-chunkstore).
+  `TestAResentWriteIsAppliedOnce`: client A's write of X commits as 1.1 and its reply is lost, a
+  read sees X, client B writes Y as 1.2, a read sees Y, and A sends X again, which is answered 1.1,
+  and a read still sees Y. With the table planted away (`noResendTable`) X commits again as 1.3:
+  the reads see X, Y, X, and with the one operation answered 1.3, no write takes the 1.1 the first
+  read returned, so no order fits.
 - Porcupine finds a linearizable order for every chunk of every history the runs record, over the
   seeds `scripts/seeds.sh` gives them: 1,000 fault seeds, 500 each of the primary-change, read and
   sub-block runs and 200 write-limit seeds. The scripted rows P1 to P22 of [Placement faults and

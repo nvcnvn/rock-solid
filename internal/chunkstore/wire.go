@@ -58,6 +58,7 @@ const (
 	StatusMismatch
 	StatusMissing
 	StatusUnfound
+	StatusStale
 )
 
 func replyTakes(k Kind, st Status) bool {
@@ -66,7 +67,7 @@ func replyTakes(k Kind, st Status) bool {
 	case KindAck:
 		set = 1<<StatusOK | 1<<StatusNoSpace | 1<<StatusRefused
 	case KindReply:
-		set = 1<<StatusOK | 1<<StatusNoSpace | 1<<StatusRefused | 1<<StatusMismatch | 1<<StatusUnfound
+		set = 1<<StatusOK | 1<<StatusNoSpace | 1<<StatusRefused | 1<<StatusMismatch | 1<<StatusUnfound | 1<<StatusStale
 	case KindReadReply:
 		set = 1<<StatusOK | 1<<StatusRefused | 1<<StatusMissing | 1<<StatusUnfound
 	}
@@ -142,6 +143,11 @@ type Update struct {
 	// Granted marks a client's flush of buffered data under a space grant, which write_limit admits.
 	Granted bool
 	Source  uint32
+	// Oldest is the oldest request ID the client's session still has outstanding. A client's request
+	// ID is the update's ID, kept across resends; a member's update, whose ID is the send's, carries
+	// it as Request.
+	Oldest  uint64
+	Request uint64
 }
 
 // Read asks for a chunk's committed bytes, or for version At when HasAt; with Recover (KindRecoverRead), a primary asks a member for the whole chunk's live image as a recovery buffer.
@@ -375,8 +381,13 @@ func AppendUpdate(dst []byte, u *Update) []byte {
 	dst = le.AppendUint64(le.AppendUint64(le.AppendUint64(dst, u.Snapshot), u.Shard), u.Term)
 	dst = le.AppendUint64(dst, u.Version)
 	dst = le.AppendUint64(append(dst, flagIf(u.HasExpect, expectFlag)|flagIf(u.Granted, grantedFlag)), u.Expect)
-	if u.Kind == KindRecover {
+	switch u.Kind {
+	case KindRecover:
 		dst = le.AppendUint32(dst, u.Source)
+	case KindReplicaWrite, KindReplicaPunch:
+		dst = le.AppendUint64(le.AppendUint64(dst, u.Request), u.Oldest)
+	default:
+		dst = le.AppendUint64(dst, u.Oldest)
 	}
 	return dst
 }
@@ -392,9 +403,14 @@ func DecodeUpdate(b []byte, data int, u *Update) error {
 	u.Snapshot, u.Shard, u.Term, u.Version = r.u64(), r.u64(), r.u64(), r.u64()
 	flags := r.u8()
 	u.HasExpect, u.Granted, u.Expect = flags&expectFlag != 0, flags&grantedFlag != 0, r.u64()
-	u.Source = 0
-	if r.kind == KindRecover {
+	u.Source, u.Request, u.Oldest = 0, 0, 0
+	switch r.kind {
+	case KindRecover:
 		u.Source = r.u32()
+	case KindReplicaWrite, KindReplicaPunch:
+		u.Request, u.Oldest = r.u64(), r.u64()
+	default:
+		u.Oldest = r.u64()
 	}
 	if flags&^(expectFlag|grantedFlag) != 0 || !validVersion(u.Expect) || !u.HasExpect && u.Expect != 0 || u.Granted && u.Kind != KindWrite {
 		r.bad = true

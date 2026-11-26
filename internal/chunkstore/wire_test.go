@@ -32,8 +32,12 @@ type wireCase struct {
 func wireCases() []wireCase {
 	v := MakeVersion(41, 7)
 	upd := func(k Kind, off, n uint32, ver uint64, hasExpect bool, expect uint64) *Update {
-		return &Update{Kind: k, ID: 5, PG: wirePG, Session: 9, Incarnation: 1_000_000, Chunk: wireChunk,
-			Off: off, Len: n, Snapshot: 2, Version: ver, HasExpect: hasExpect, Expect: expect}
+		u := &Update{Kind: k, ID: 5, PG: wirePG, Session: 9, Incarnation: 1_000_000, Chunk: wireChunk,
+			Off: off, Len: n, Snapshot: 2, Version: ver, HasExpect: hasExpect, Expect: expect, Oldest: 3}
+		if k == KindReplicaWrite || k == KindReplicaPunch {
+			u.Request = 4
+		}
+		return u
 	}
 	return []wireCase{
 		{"hello", &Hello{ID: 1, Session: 9, Incarnation: 1_000_000}, 0},
@@ -44,12 +48,13 @@ func wireCases() []wireCase {
 		{"punch_expect_absent_chunk", upd(KindPunch, 8192, 1, 0, true, 0), 0},
 		{"replica_punch", upd(KindReplicaPunch, 0, core.ChunkSize, v, false, 0), 0},
 		{"purger_punch", &Update{Kind: KindPunch, ID: 5, PG: wirePG, Session: 9, Incarnation: 1_000_000, Chunk: wireChunk,
-			Len: core.ChunkSize, Snapshot: 2, Shard: 0x51, Term: 6}, 0},
+			Len: core.ChunkSize, Snapshot: 2, Shard: 0x51, Term: 6, Oldest: 3}, 0},
 		{"ack", &Response{Kind: KindAck, ID: 5, Version: v, Fill: 123_456}, 0},
 		{"ack_no_space", &Response{Kind: KindAck, ID: 5, Status: StatusNoSpace, Fill: 900_000}, 0},
 		{"reply", &Response{Kind: KindReply, ID: 5, Version: v}, 0},
 		{"reply_refused", &Response{Kind: KindReply, ID: 5, Status: StatusRefused, Epoch: 80, Interval: 42}, 0},
 		{"reply_mismatch", &Response{Kind: KindReply, ID: 5, Status: StatusMismatch, Version: v}, 0},
+		{"reply_stale", &Response{Kind: KindReply, ID: 5, Status: StatusStale}, 0},
 		{"read", &Read{ID: 6, PG: wirePG, Chunk: wireChunk, Off: 100, Len: 5000}, 0},
 		{"read_at", &Read{ID: 6, PG: wirePG, Chunk: wireChunk, Off: 0, Len: 4096, HasAt: true, At: v}, 0},
 		{"read_reply", &Response{Kind: KindReadReply, ID: 6, Version: v}, 2 * core.BlockSize},
@@ -406,7 +411,7 @@ func TestWireRejectsBadFields(t *testing.T) {
 	for _, c := range []struct {
 		k  Kind
 		st Status
-	}{{KindAck, StatusMismatch}, {KindAck, StatusMissing}, {KindReply, StatusMissing}, {KindReadReply, StatusNoSpace}, {KindReadReply, StatusMismatch}, {KindReply, 6}, {KindAck, 255}} {
+	}{{KindAck, StatusMismatch}, {KindAck, StatusMissing}, {KindReply, StatusMissing}, {KindReadReply, StatusNoSpace}, {KindReadReply, StatusMismatch}, {KindAck, StatusStale}, {KindReadReply, StatusStale}, {KindReply, 7}, {KindAck, 255}} {
 		mustMalformed(t, "a status its reply kind does not take", AppendResponse(nil, &Response{Kind: c.k, Status: c.st, Interval: 1}), 0)
 	}
 	mustMalformed(t, "an expected version on a recovery write", AppendUpdate(nil, &Update{Kind: KindRecover, PG: wirePG, Len: core.ChunkSize, Version: MakeVersion(1, 1), HasExpect: true, Expect: MakeVersion(1, 1)}), 0)

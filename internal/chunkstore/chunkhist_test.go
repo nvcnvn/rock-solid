@@ -45,9 +45,8 @@ type histOp struct {
 
 // chunkHist records the client writes, punches and reads of a cluster's run in the scheduler's
 // history: an operation's input is {kind, chunk key, off<<32 | n, its index in ops}, a write's or
-// punch's output {version, status} and a read's {version, status, FNV-1a of the bytes}. Each attempt
-// of a write sent again is its own operation, until the open question on resent chunk writes is
-// settled.
+// punch's output {version, status} and a read's {version, status, FNV-1a of the bytes}. A write sent
+// again keeps its request ID and is one operation, which the resend table applies once.
 type chunkHist struct {
 	c       *rcluster
 	h       *sim.History
@@ -135,6 +134,9 @@ func (x *chunkHist) invoke(ctx *core.Context, client uint32, a *core.Action) {
 		}
 		op, id = histOp{kind: histRead, pg: rd.PG.PG, chunk: rd.Chunk, off: rd.Off, n: rd.Len, at: rd.At, hasAt: rd.HasAt}, rd.ID
 	default:
+		return
+	}
+	if _, again := x.byID[id]; again && op.kind != histRead {
 		return
 	}
 	x.byID[id] = x.h.Invoke(client, [sim.OpWords]uint64{op.kind, x.key(op.chunk), uint64(op.off)<<32 | uint64(op.n), uint64(len(x.ops))})

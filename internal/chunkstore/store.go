@@ -98,6 +98,12 @@ type Request struct {
 	// replicated write, at the Version its primary ordered, is checked against the session table alone.
 	Session     uint64
 	Incarnation uint64
+	// Request and Oldest are a client write's or punch's request ID and its session's oldest
+	// outstanding one, logged with the version in a writer entry when Request and PGs, its pool's PG
+	// count, are set, for the resend table.
+	Request uint64
+	Oldest  uint64
+	PGs     uint32
 	// Recover makes a Write a recovery write of the whole chunk in PG interval Interval, whose Buf is
 	// a recovery buffer, or none when it only ends the chunk's listing, and a Read one of the chunk's
 	// live image as a recovery buffer. A recovery write takes no version of its own: a member's is
@@ -274,6 +280,13 @@ type loadingRun struct {
 }
 
 type plants struct {
+	// writerAtLog puts a gated version's writer into the resend table once logged rather than once
+	// mapped, so a version peering drops keeps its entry.
+	writerAtLog bool
+	// trimOnAnswer has a disk trim a write's entry once it maps the write's version, whether or not
+	// its client heard the answer; noWatermark trims a session's entries and keeps no watermark.
+	trimOnAnswer bool
+	noWatermark  bool
 	// clearListed has a persisted missing list clear, in the index alone, every listing of its PG
 	// from an earlier peering that it leaves out.
 	clearListed bool
@@ -526,6 +539,7 @@ func (s *Store) newIndex(maxPiece uint64, geo disklog.Geometry) error {
 		sched.Add(r.sh.Tree())
 	}
 	s.ix, s.sched = NewIndex(tree, geo.SegmentBlocks, geo.SegmentCount), sched
+	s.ix.plant = &s.plant
 	return nil
 }
 
@@ -960,6 +974,9 @@ func (s *Store) submit(ctx *core.Context, oi int32, out *Output) {
 	if o.req.Epoch > cs.epoch {
 		o.items = append(o.items, item{entry: disklog.FreezeEntry(pool, c, cs.version, o.req.Epoch)})
 		cs.epoch = o.req.Epoch
+	}
+	if o.req.Request != 0 && o.req.PGs != 0 && o.req.Session != 0 && !o.req.Recover {
+		o.items = append(o.items, item{entry: disklog.WriterEntry(pool, c, o.version, o.req.PGs, o.req.Session, o.req.Incarnation, o.req.Request, o.req.Oldest)})
 	}
 	cs.version = o.version
 	first, last := spanOf(o.req.Off, o.req.Len)
@@ -2067,10 +2084,10 @@ func (s *Store) replay(ev *disklog.Event) error {
 	return nil
 }
 
-// gates reports whether replay holds entry e back: a write or punch of an interval at or past the
+// gates reports whether replay holds entry e back: a write, punch or writer of an interval at or past the
 // newest decision the disk persisted for a PG holding its chunk, at any PG count.
 func (s *Store) gates(e *disklog.Entry) bool {
-	if e.Kind != disklog.EntryWrite && e.Kind != disklog.EntryPunch && e.Kind != disklog.EntrySlot || s.plant.mapOnReplay {
+	if e.Kind != disklog.EntryWrite && e.Kind != disklog.EntryPunch && e.Kind != disklog.EntrySlot && e.Kind != disklog.EntryWriter || s.plant.mapOnReplay {
 		return false
 	}
 	// ponytail: up to 32 index lookups per replayed entry; cache per PG if replay time matters.
@@ -2158,6 +2175,9 @@ func (s *Store) gateHeld() {
 			cs.version, cs.ordered = it.entry.Version, it.entry.Version
 		}
 		o := &s.ops[cs.pending[len(cs.pending)-1]]
+		if len(o.items) == 1 && o.items[0].entry.Kind == disklog.EntryWriter && it.entry.Kind == disklog.EntryPunch {
+			o.kind = opPunch
+		}
 		o.items = append(o.items, *it)
 		if it.entry.Kind == disklog.EntrySlot {
 			s.pinned[s.ix.slotLBA(&it.entry)]++
@@ -2224,6 +2244,9 @@ func (s *Store) durable(ctx *core.Context, ev *disklog.Event, out *Output) {
 		}
 		if s.ops[si.op].req.Gated {
 			s.unmappedLive(it, -1)
+			if s.plant.writerAtLog && it.entry.Kind == disklog.EntryWriter {
+				s.mapItem(it)
+			}
 		}
 		if s.itemDone(si.op, out) {
 			s.mapResolved(ctx, s.ops[si.op].chunk, out)
@@ -2288,7 +2311,7 @@ func (s *Store) memberFailed(o *op) {
 
 func (o *op) holdsVersion() bool {
 	for j := range o.items {
-		if it := &o.items[j]; it.state == itemDurable && it.entry.Kind != disklog.EntryFreeze {
+		if it := &o.items[j]; it.state == itemDurable && it.entry.Kind != disklog.EntryFreeze && it.entry.Kind != disklog.EntryWriter {
 			return true
 		}
 	}
@@ -2309,7 +2332,7 @@ func (s *Store) mapResolved(ctx *core.Context, ci int32, out *Output) {
 		}
 		for j := range o.items {
 			it := &o.items[j]
-			if it.state == itemDurable && s.rec == nil && !mapped {
+			if it.state == itemDurable && s.rec == nil && !mapped && (o.err == nil || it.entry.Kind != disklog.EntryWriter) {
 				if o.req.Gated {
 					s.unmappedLive(it, 1)
 				}

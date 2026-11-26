@@ -137,7 +137,9 @@ func decodeExtent(key, v []byte) (Extent, bool) {
 	}, true
 }
 
-func reserved(pool core.PoolID) bool { return pool == RecordPool || pool == DecisionPool }
+func reserved(pool core.PoolID) bool {
+	return pool == RecordPool || pool == DecisionPool || pool == ResendPool
+}
 
 // Chunk is a chunk's entry: its current version, the snapshot epoch of its last freeze, the newest
 // version whose last entry the index applied, which the disk holds whole, and the kept version
@@ -186,6 +188,8 @@ type Index struct {
 	// unmarked is the missing-list entries applied since the last decision marker, which take effect
 	// only with their PG's marker: a member persists a peering's whole list or none of it.
 	unmarked []disklog.Entry
+	// plant is the store's planted bugs, nil for none.
+	plant *plants
 }
 
 // LiveChange is a change of Delta to the blocks the maps refer to in the record at Header, past
@@ -208,6 +212,8 @@ func Prefix(k []byte) int {
 		return recordSize
 	case len(k) >= decisionSize && core.PoolID(binary.BigEndian.Uint32(k)) == DecisionPool:
 		return decisionSize
+	case len(k) >= resendWatermarkSize && core.PoolID(binary.BigEndian.Uint32(k)) == ResendPool:
+		return len(k)
 	case len(k) >= chunkKeySize:
 		return chunkKeySize
 	}
@@ -306,7 +312,7 @@ func (x *Index) must(err error) {
 	}
 }
 
-// Apply maps a Durable or Replayed record's entries in order: writes and punches into the live map, freezes as copies of it, copies wherever a map still stores the copied blocks at their source, missing-list entries once their PG's decision marker follows, recovery's end, and drops.
+// Apply maps a Durable or Replayed record's entries in order: writes and punches into the live map, freezes as copies of it, copies wherever a map still stores the copied blocks at their source, missing-list entries once their PG's decision marker follows, writers into the resend table, recovery's end, and drops.
 func (x *Index) Apply(ev *disklog.Event) error {
 	for i := range ev.Entries {
 		e := &ev.Entries[i]
@@ -346,6 +352,8 @@ func (x *Index) Apply(ev *disklog.Event) error {
 			x.unmarked = append(x.unmarked, *e)
 		case disklog.EntryDecision:
 			x.decide(e)
+		case disklog.EntryWriter:
+			x.writer(e)
 		case disklog.EntryRecovered:
 			x.recovered(e)
 		case disklog.EntryDropped:
@@ -1113,6 +1121,11 @@ func (x *Index) Check() error {
 		case len(k) == decisionSize && core.PoolID(binary.BigEndian.Uint32(k)) == DecisionPool:
 			if len(v) != 4 || binary.LittleEndian.Uint32(v) == 0 || k[8] > 31 || binary.BigEndian.Uint32(k[9:]) >= 1<<k[8] {
 				return fmt.Errorf("decision %x: interval %x", k, v)
+			}
+			prefix = prefix[:0]
+		case core.PoolID(binary.BigEndian.Uint32(k)) == ResendPool && (len(k) == resendWatermarkSize && len(v) == 8 || len(k) == resendKeySize && len(v) == resendValueSize):
+			if k[8] > 31 || binary.BigEndian.Uint32(k[9:]) >= 1<<k[8] {
+				return fmt.Errorf("resend table key %x outside its PGs", k)
 			}
 			prefix = prefix[:0]
 		case len(k) == chunkKeySize:

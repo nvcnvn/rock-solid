@@ -562,3 +562,17 @@ func TestTornSlotRecord(t *testing.T) {
 		}
 	}
 }
+
+// A writer entry round-trips its identity and needs a version, a session and a power of two of PGs.
+func TestWriterEntry(t *testing.T) {
+	w := WriterEntry(1, testChunk, 0x100000002, 8, 7, 3, 41, 40)
+	tr := encodeRecord(t, Record{Place: testPlace, LSN: 12, Durable: 11}, []Entry{w}, [][]byte{nil})
+	if d := decodeExact(t, tr); d.Entries[0] != w {
+		t.Fatalf("decoded %+v, want %+v", d.Entries[0], w)
+	}
+	for _, e := range []Entry{WriterEntry(1, testChunk, 0, 8, 7, 3, 41, 40), WriterEntry(1, testChunk, 1, 8, 0, 3, 41, 40),
+		WriterEntry(1, testChunk, 1, 6, 7, 3, 41, 40), WriterEntry(1, testChunk, 1, 0, 7, 3, 41, 40)} {
+		_, err := LayoutOf([]Entry{e})
+		wantErr(t, "layout", err, ErrMalformed)
+	}
+}

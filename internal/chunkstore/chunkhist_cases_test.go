@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"bytes"
+	"fmt"
 	"math"
 	"slices"
 	"strings"
@@ -139,43 +140,51 @@ func TestPlantedBugsBreakChunkHistories(t *testing.T) {
 	}
 }
 
-// A planted resend after a lost acknowledgment, with another client's write between: client A's
-// write of X commits as 1.1 and its reply is lost, a read sees X, client B writes Y as 1.2, a read
-// sees Y, A sends X again, which commits as 1.3, and a read sees X. With each attempt its own write,
-// as the recorder logs them, the history is linearizable; with the two attempts one write answered
-// 1.3, no write takes the 1.1 the first read returned, so no order fits.
-func TestAResendAfterALostAcknowledgmentIsASecondWrite(t *testing.T) {
+// A resend after a lost acknowledgment, with another client's write between: client A's write of X
+// commits as 1.1 and its reply is lost, a read sees X, client B writes Y as 1.2, a read sees Y, and A
+// sends X again under its request ID. The resend table answers it 1.1 and orders nothing, so a read
+// still sees Y, and the history, the two attempts one write, is linearizable. Without the table
+// (noResendTable, the epoch change model's NoResendTable) X is ordered again as 1.3: X, Y, X, and the
+// one write answered 1.3 leaves no write to take the 1.1 the first read returned.
+func TestAResentWriteIsAppliedOnce(t *testing.T) {
+	if err := resentOnce(t, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := resentOnce(t, true); err == nil {
+		t.Fatal("ordered again with no resend table, the resend passed")
+	}
+}
+
+func resentOnce(t *testing.T, noTable bool) error {
 	c := newRCluster(t, rtable(4, 2))
+	for _, r := range c.reps {
+		r.plant.noResendTable = noTable
+	}
 	x := c.record()
 	ch := chunkIn(pg0, 4, 0)
 	xs, ys := bytes.Repeat([]byte{'x'}, 100), bytes.Repeat([]byte{'y'}, 100)
 	lost := c.nextID + 1
+	dropped := false
 	c.drop = func(_ int, a *core.Action) bool {
 		var rp Response
-		return a.Reply && DecodeResponse(a.Msg.Inline(), 0, &rp) == nil && rp.Kind == KindReply && rp.ID == lost
+		drop := !dropped && a.Reply && DecodeResponse(a.Msg.Inline(), 0, &rp) == nil && rp.Kind == KindReply && rp.ID == lost
+		dropped = dropped || drop
+		return drop
 	}
-	var attempts []core.RequestID
-	for _, data := range [][]byte{xs, ys, xs} {
-		id := c.write(pg0, ch, 0, data)
-		if !bytes.Equal(data, ys) {
-			attempts = append(attempts, id)
-		}
+	for _, data := range [][]byte{xs, ys} {
+		c.write(pg0, ch, 0, data)
 		c.settle()
 		if got := c.readNow(pg0, ch, 0, 100); !bytes.Equal(got, data) {
-			t.Fatalf("read %q after writing %q", got[:1], data[:1])
+			return fmt.Errorf("read %q after writing %q", got[:1], data[:1])
 		}
 	}
-	if _, ok := c.cl.replies[lost]; ok || c.reply(attempts[1]).Version != MakeVersion(1, 3) {
-		t.Fatalf("the first attempt answered, or the second answered %+v", c.reply(attempts[1]))
+	c.resend(lost, pg0, ch, 0, xs)
+	c.settle()
+	if rp := c.reply(lost); rp.Status != StatusOK || rp.Version != MakeVersion(1, 1) {
+		return fmt.Errorf("the resend answered %+v, want 1.1", rp)
 	}
-	if err := x.check(); err != nil {
-		t.Fatalf("each attempt its own write: %v", err)
+	if got := c.readNow(pg0, ch, 0, 100); !bytes.Equal(got, ys) {
+		return fmt.Errorf("read %q after the resend, want Y", got[:1])
 	}
-	ops := lincheck.Operations(x.h)
-	first, again := x.byID[attempts[0]], x.byID[attempts[1]]
-	ops[first].Return, ops[first].Output = ops[again].Return, ops[again].Output
-	ops = slices.Delete(ops, again, again+1)
-	if porcupine.CheckOperations(x.model(), ops) {
-		t.Fatal("the two attempts as one write: a linearizable order found")
-	}
+	return x.check()
 }

@@ -590,6 +590,10 @@ type replicaPlants struct {
 	readBelowMinLive  bool
 	freshGrantNoCheck bool
 	noLeaseCheck      bool
+	// noResendTable orders a client write sent again as a new one; resendAtOnce answers one a
+	// pending version took with that version at once, before it commits.
+	noResendTable bool
+	resendAtOnce  bool
 }
 
 // NewReplica runs st, a serving store, as disk cfg.Disk, drawing its first run ID; it grants no lease until its restart wait is over.
@@ -1349,17 +1353,48 @@ func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		l.held = append(l.held, heldMsg{peer: ev.Peer, msg: ev.Msg, hold: l.interval})
 		return
 	default:
-		r.order(ctx, ev, u, r.leads[i].interval)
+		if !r.resent(ctx, ev, u, uint32(len(p.PGs)), out) {
+			r.order(ctx, ev, u, r.leads[i].interval, uint32(len(p.PGs)))
+		}
 		return
 	}
 	freeBuf(ctx, ev.Msg.Buf)
 	r.reply(ctx, ev.Peer, u.ID, r.refusal(u.PG.PG), out)
 }
 
-func (r *Replica) order(ctx *core.Context, ev *core.Event, u *Update, interval uint32) {
+// resent answers a client write sent again from the resend table, after the holds every write
+// waits on, rather than ordering it again: one at or below its session's watermark Stale, since its
+// client heard an earlier attempt's answer; one a version this primary has pending took, with that
+// version's outcome; and one a version its disk has mapped took, OK with that version.
+func (r *Replica) resent(ctx *core.Context, ev *core.Event, u *Update, pgs uint32, out *ReplicaOutput) bool {
+	if r.plant.noResendTable {
+		return false
+	}
+	ver, stale := r.st.Index().Resent(r.st.cfg.Pool, u.Chunk, pgs, u.Session, u.Incarnation, uint64(u.ID))
+	j := slices.IndexFunc(r.vers, func(v version) bool {
+		return !v.recover && !v.done && v.msgID == u.ID && v.u.Chunk == u.Chunk && v.u.Session == u.Session && v.u.Incarnation == u.Incarnation
+	})
+	switch {
+	case stale:
+		r.reply(ctx, ev.Peer, u.ID, Response{Status: StatusStale}, out)
+	case j >= 0 && r.plant.resendAtOnce && r.vers[j].ordered:
+		r.reply(ctx, ev.Peer, u.ID, Response{Version: r.vers[j].u.Version}, out)
+	case j >= 0:
+		r.dups = append(r.dups, dup{orig: r.vers[j].req, peer: ev.Peer, msgID: u.ID})
+	case ver != 0:
+		r.reply(ctx, ev.Peer, u.ID, Response{Version: ver}, out)
+	default:
+		return false
+	}
+	freeBuf(ctx, ev.Msg.Buf)
+	return true
+}
+
+func (r *Replica) order(ctx *core.Context, ev *core.Event, u *Update, interval, pgs uint32) {
 	id := r.newReq(storeReq{kind: reqClient, peer: ev.Peer, msgID: u.ID, pg: u.PG.PG, chunk: u.Chunk})
 	req := Request{ID: id, Chunk: u.Chunk, Off: u.Off, Len: u.Len, Buf: ev.Msg.Buf, HasVer: u.HasExpect, Ver: u.Expect,
-		Epoch: u.Snapshot, Interval: interval, Gated: true, Session: u.Session, Incarnation: u.Incarnation}
+		Epoch: u.Snapshot, Interval: interval, Gated: true, Session: u.Session, Incarnation: u.Incarnation,
+		Request: uint64(u.ID), Oldest: u.Oldest, PGs: pgs}
 	if l := r.lead(u.PG.PG); l >= 0 {
 		req.Lacking = r.leads[l].lacks(u.Chunk)
 	}
@@ -1377,7 +1412,7 @@ func (r *Replica) order(ctx *core.Context, ev *core.Event, u *Update, interval u
 
 // memberUpdate takes a write or punch the PG's primary ordered: accepted only in the PG's current interval, by an up member, and refused once an earlier version of its chunk in the interval failed here, so the member logs a chunk's versions without a gap. A version sent again while its first copy is in flight is answered with that copy's outcome; one whose copy is done is refused, since after a failure or a restart the member may hold only some of its records.
 func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out *ReplicaOutput) {
-	_, e, wait := r.namedFor(u.PG, u.Chunk)
+	p, e, wait := r.namedFor(u.PG, u.Chunk)
 	if wait || e != nil && u.PG.Interval > e.Interval && u.PG.Epoch > r.table.Epoch {
 		r.park(ctx, ev, u.PG.Epoch, out)
 		return
@@ -1433,7 +1468,8 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 		out.note(trace.OutAccepted, u.Chunk.Hash(), u.Version, 0, 0, 0)
 	}
 	id := r.newReq(storeReq{kind: reqMember, peer: ev.Peer, msgID: u.ID, pg: u.PG.PG, chunk: u.Chunk, version: u.Version, recover: recover, source: u.Source, interval: u.PG.Interval})
-	req := Request{ID: id, Chunk: u.Chunk, Off: u.Off, Len: u.Len, Buf: ev.Msg.Buf, Epoch: u.Snapshot, Version: u.Version, Session: u.Session}
+	req := Request{ID: id, Chunk: u.Chunk, Off: u.Off, Len: u.Len, Buf: ev.Msg.Buf, Epoch: u.Snapshot, Version: u.Version, Session: u.Session,
+		Incarnation: u.Incarnation, Request: u.Request, Oldest: u.Oldest, PGs: uint32(len(p.PGs))}
 	if r.plant.memberNoFence {
 		req.Session = 0
 	}
@@ -1465,7 +1501,7 @@ type baseFetch struct {
 	asked core.NodeID
 }
 
-// dup is a write sent again to a member while its first copy, store request orig, is in flight; it is answered as that copy is.
+// dup is a write sent again to a member, or by a client to the primary, while its first copy, store request orig, is in flight; it is answered as that copy is.
 type dup struct {
 	orig  uint64
 	peer  core.NodeID
@@ -1664,6 +1700,9 @@ const sendShift = 56
 func (r *Replica) send(v *version, k int, out *ReplicaOutput) {
 	v.sends[k]++
 	u := v.u
+	if !v.recover {
+		u.Request = uint64(v.msgID)
+	}
 	u.ID, u.HasExpect, u.Expect, u.Granted = core.RequestID(v.req)|core.RequestID(v.sends[k])<<sendShift, false, 0, false
 	u.PG.Epoch, u.PG.Interval = v.epoch, v.interval
 	switch u.Kind {
@@ -1890,6 +1929,7 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 			r.release(ctx, i)
 		}
 		r.answer(ctx, q.peer, q.msgID, &resp, core.NoBuf, out)
+		r.answerDups(ctx, q.id, &resp, out)
 	case reqMember:
 		fill := r.fill(ctx)
 		if q.recover {
@@ -1914,14 +1954,7 @@ func (r *Replica) finished(ctx *core.Context, rp Reply, out *ReplicaOutput) {
 			out.note(trace.OutLogged, q.chunk.Hash(), rp.Version, 0, 0, 0)
 		}
 		r.answer(ctx, q.peer, q.msgID, &resp, core.NoBuf, out)
-		for j := 0; j < len(r.dups); {
-			if d := r.dups[j]; d.orig == q.id {
-				r.answer(ctx, d.peer, d.msgID, &resp, core.NoBuf, out)
-				r.dups = slices.Delete(r.dups, j, j+1)
-				continue
-			}
-			j++
-		}
+		r.answerDups(ctx, q.id, &resp, out)
 	case reqRead:
 		resp := Response{Kind: KindReadReply, Version: rp.Version}
 		switch {
@@ -1952,6 +1985,9 @@ func (r *Replica) release(ctx *core.Context, i int) {
 func (r *Replica) counterSpent(ctx *core.Context, i int, buf core.IOBuf, out *ReplicaOutput) {
 	v := r.vers[i]
 	r.vers = slices.Delete(r.vers, i, i+1)
+	ref := r.refusal(v.u.PG.PG)
+	ref.Kind = KindReply
+	r.answerDups(ctx, v.req, &ref, out)
 	l := r.lead(v.u.PG.PG)
 	if l < 0 {
 		freeBuf(ctx, buf)
@@ -2071,6 +2107,19 @@ func (r *Replica) answerClient(ctx *core.Context, v *version, rp Response, out *
 	}
 	rp.Kind = KindReply
 	r.answer(ctx, v.client, v.msgID, &rp, core.NoBuf, out)
+	r.answerDups(ctx, v.req, &rp, out)
+}
+
+// answerDups answers each update sent again while store request orig was in flight as orig was answered.
+func (r *Replica) answerDups(ctx *core.Context, orig uint64, rp *Response, out *ReplicaOutput) {
+	for j := 0; j < len(r.dups); {
+		if d := r.dups[j]; d.orig == orig {
+			r.answer(ctx, d.peer, d.msgID, rp, core.NoBuf, out)
+			r.dups = slices.Delete(r.dups, j, j+1)
+			continue
+		}
+		j++
+	}
 }
 
 // reply answers a client's write or punch.
