@@ -23,6 +23,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/driver/tcp"
 	"github.com/nvcnvn/rock-solid/internal/driver/uring"
+	"github.com/nvcnvn/rock-solid/internal/loop"
 	"github.com/nvcnvn/rock-solid/internal/meta"
 )
 
@@ -109,22 +110,30 @@ func testDir(t *testing.T) string {
 // runCtl runs a single-voter control plane of group ctlGroup in the test process, on a disk file
 // in dir, listening on a port of its own.
 func runCtl(t *testing.T, dir string) *ctl {
+	p, _ := runCtlOn(t, dir, 0, true)
+	return p
+}
+
+// runCtlOn is runCtl listening on port, formatting its disk only if format, and returns what stops
+// it as well.
+func runCtlOn(t *testing.T, dir string, port int, format bool) (*ctl, func()) {
 	disk := filepath.Join(dir, "node-ctl-disk")
 	t.Cleanup(func() { _ = os.Remove(disk) })
-	local := netip.MustParseAddrPort("127.0.0.1:0")
-	p, err := newCtl(ctlConfig{Node: 1, Voters: []voter{{1, local}}, Group: ctlGroup, Listen: local, Disk: disk, Format: true, DiskBytes: 512 << 20, MaxReplayBytes: 64 << 20})
+	local := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(port))
+	p, err := newCtl(ctlConfig{Node: 1, Voters: []voter{{1, local}}, Group: ctlGroup, Listen: local, Disk: disk, Format: format, DiskBytes: 512 << 20, MaxReplayBytes: 64 << 20})
 	if err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
 	go func() { done <- p.Run() }()
-	t.Cleanup(func() {
+	stop := sync.OnceFunc(func() {
 		p.Stop()
 		if err := <-done; err != nil {
 			t.Error(err)
 		}
 	})
-	return p
+	t.Cleanup(stop)
+	return p, stop
 }
 
 // onCtl runs f on the voter's loop with its Control, nil while it does not lead.
@@ -295,4 +304,183 @@ func TestANodeStartsItsDevicesAndTakesItsDisksAndTablesOverTCP(t *testing.T) {
 	}) {
 		t.Fatalf("the replicas never held epoch %d; the node said:\n%s", epoch, out.String())
 	}
+}
+
+// A storage node hosts the MetaStore replica the control plane's shard map places on its disk, the
+// one voter of a data group on one metadata node, which reports it running; killed and started
+// again, the node restores it from its disk with the settings the map gives, and it runs again.
+func TestANodeHostsTheMetaStoreReplicaItsShardMapPlacesAcrossAKill(t *testing.T) {
+	dir := testDir(t)
+	p := runCtl(t, dir)
+	a := filepath.Join(dir, "node-meta-dev")
+	device(t, a, false)
+	t.Cleanup(func() { _ = os.Remove(a) })
+	base := freeBase(t, 2)
+	args := fmt.Sprintf("-node 2 -ctl 1=127.0.0.1:%d -group %d -listen 127.0.0.1:%d -device %s", p.Port, ctlGroup, base, a)
+	var out output
+	cmd := startNode(t, args, &out)
+	if !within(60*time.Second, func() bool {
+		return onCtl(t, p, func(_ *core.Context, c *meta.Control) bool { return c != nil && len(upDisks(c, 2)) == 1 })
+	}) {
+		t.Fatalf("the node's disk never came up; the node said:\n%s", out.String())
+	}
+	ctlEntry := meta.Group{ID: ctlGroup, LastID: 102, Voters: []meta.Replica{{ID: 1, Node: 1}, {ID: 101, Node: 101}, {ID: 102, Node: 102}}}
+	if err := onCtl(t, p, func(_ *core.Context, c *meta.Control) error {
+		return c.SetShardMap(&meta.ShardMap{Groups: []meta.Group{ctlEntry, {ID: 2, Start: meta.PrefixEnd([]byte{meta.SpaceCtl})}}})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runs := func() bool {
+		return within(60*time.Second, func() bool {
+			return onCtl(t, p, func(_ *core.Context, c *meta.Control) bool {
+				if c == nil {
+					return false
+				}
+				rs := c.Reported(2)
+				return len(rs) == 1 && rs[0].Group == 2 && rs[0].ID == 1 && slices.Equal(rs[0].Voters, []uint64{1})
+			})
+		})
+	}
+	if !runs() {
+		t.Fatalf("the node never reported the replica the map placed; the node said:\n%s", out.String())
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = cmd.Wait()
+	if !within(30*time.Second, func() bool {
+		return onCtl(t, p, func(_ *core.Context, c *meta.Control) bool { return c != nil && len(c.Reported(2)) == 0 })
+	}) {
+		t.Fatal("the killed node's report outlived it")
+	}
+	var again output
+	startNode(t, args, &again)
+	if !runs() {
+		t.Fatalf("the restarted node never reported the replica its disk holds; the node said:\n%s", again.String())
+	}
+}
+
+// A data group's two voters, on two storage nodes, elect and take a Txn after a cold start of the
+// whole cluster: both nodes start again before the control plane, so the first membership each
+// gets, with which its device restores its replica, names no disk of the other, and the replicas
+// learn each other's loop from the memberships that follow.
+func TestAGroupOnTwoNodesTakesATxnAfterAColdStart(t *testing.T) {
+	dir := testDir(t)
+	base := freeBase(t, 5)
+	p, stop := runCtlOn(t, dir, base, true)
+	starts := func(fresh bool) ([]*exec.Cmd, []*output) {
+		var cmds []*exec.Cmd
+		var outs []*output
+		for i, n := range []int{2, 3} {
+			dev := filepath.Join(dir, fmt.Sprintf("node-cold-dev%d", n))
+			if fresh {
+				device(t, dev, false)
+			}
+			args := fmt.Sprintf("-node %d -ctl 1=127.0.0.1:%d -group %d -listen 127.0.0.1:%d -peers %d=127.0.0.1:%d -device %s",
+				n, base, ctlGroup, base+1+2*i, 5-n, base+3-2*i, dev)
+			outs = append(outs, &output{})
+			cmds = append(cmds, startNode(t, args, outs[i]))
+		}
+		return cmds, outs
+	}
+	said := func(outs []*output) string { return outs[0].String() + "\n---- node 3:\n" + outs[1].String() }
+	cmds, outs := starts(true)
+	if !within(60*time.Second, func() bool {
+		return onCtl(t, p, func(_ *core.Context, c *meta.Control) bool {
+			return c != nil && len(upDisks(c, 2)) == 1 && len(upDisks(c, 3)) == 1
+		})
+	}) {
+		t.Fatalf("the nodes' disks never came up; node 2 said:\n%s", said(outs))
+	}
+	ctlEntry := meta.Group{ID: ctlGroup, LastID: 102, Voters: []meta.Replica{{ID: 1, Node: 1}, {ID: 101, Node: 101}, {ID: 102, Node: 102}}}
+	if err := onCtl(t, p, func(_ *core.Context, c *meta.Control) error {
+		return c.SetShardMap(&meta.ShardMap{Groups: []meta.Group{ctlEntry, {ID: 2, Start: meta.PrefixEnd([]byte{meta.SpaceCtl})}}})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	x := newTxner(t, 2, base, core.NodeID{Node: 2, Loop: 1}, core.NodeID{Node: 3, Loop: 1})
+	if !x.applies(60 * time.Second) {
+		t.Fatalf("the group never took a Txn; node 2 said:\n%s", said(outs))
+	}
+	for _, cmd := range cmds {
+		if err := cmd.Process.Kill(); err != nil {
+			t.Fatal(err)
+		}
+		_ = cmd.Wait()
+	}
+	stop()
+	_, outs = starts(false)
+	time.Sleep(time.Second)
+	runCtlOn(t, dir, base, false)
+	if !x.applies(90 * time.Second) {
+		t.Fatalf("after the cold start the group never took a Txn; node 2 said:\n%s", said(outs))
+	}
+}
+
+// txner is a client's loop as far as a test needs: every 100 ms it sends a Txn putting a key to
+// group's replica at each of at, and keeps whether one was applied since applies began.
+type txner struct {
+	t       *testing.T
+	l       *loop.Loop
+	group   uint64
+	at      []core.NodeID
+	token   uint64
+	applied bool
+}
+
+func (x *txner) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
+	switch ev.Kind {
+	case core.EvTimer:
+		for _, at := range x.at {
+			x.token++
+			a := core.Action{Kind: core.ActNetSend, Peer: at}
+			tx := meta.Txn{Ops: []meta.Op{meta.Put([]byte{meta.SpaceVolume, 'k'}, []byte("v"))}}
+			if err := meta.EncodeTxn(ctx.Pool, x.group, x.token, &tx, &a.Msg); err != nil {
+				x.t.Error(err)
+			}
+			out = append(out, a)
+		}
+		out = append(out, core.Action{Kind: core.ActSetTimer, Timer: probeTimer, At: ctx.Now + 100_000})
+	case core.EvNetRecv:
+		var a meta.Answer
+		if group, kind, _, ok := meta.Peek(&ev.Msg); ok && group == x.group && kind == meta.KindAnswer && meta.DecodeAnswer(ctx.Pool, &ev.Msg, &a) == nil {
+			x.applied = x.applied || a.Err == nil
+			return out
+		}
+		if ev.Msg.Buf != core.NoBuf {
+			ctx.Pool.Free(ev.Msg.Buf)
+		}
+	}
+	return out
+}
+
+// newTxner starts a txner on node 9, reaching loop k of node n at port base + 2(n-2) + 1 + k.
+func newTxner(t *testing.T, group uint64, base int, at ...core.NodeID) *txner {
+	k, err := loop.NewEpoll("/nonexistent/vmclock0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(k.Close)
+	pool, err := loop.NewPool(16<<20, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pool.Close() })
+	x := &txner{t: t, group: group, at: at}
+	td := tcp.New(tcp.Config{Self: core.NodeID{Node: 9}, Seed: 9, Dial: func(id core.NodeID) (int, error) {
+		return tcp.DialTCP(netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(base+2*(int(id.Node)-2)+1+int(id.Loop))))
+	}})
+	x.l = loop.New(loop.Config{Node: 9, Pool: pool}, k, x, td)
+	td.L = x.l
+	x.l.Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: probeTimer})
+	return x
+}
+
+// applies runs the txner until a Txn sent from now on is applied, within d.
+func (x *txner) applies(d time.Duration) bool {
+	x.applied = false
+	for end := time.Now().Add(d); time.Now().Before(end) && !x.applied; {
+		x.l.Pass()
+	}
+	return x.applied
 }

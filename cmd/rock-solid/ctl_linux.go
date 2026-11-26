@@ -39,6 +39,9 @@ type ctl struct {
 	k     *loop.Epoll
 	m     *ctlMachine
 	mail  mail
+	// lfd is the listening socket, closed with the rest once Run ends, so a voter started again in
+	// the same process can listen on its port.
+	lfd int
 	// Port is the port the voter listens on.
 	Port int
 	mu   sync.Mutex
@@ -109,6 +112,7 @@ func newCtl(cfg ctlConfig) (_ *ctl, err error) {
 	if err != nil {
 		return nil, err
 	}
+	p.lfd = lfd
 	if err := td.Listen(lfd); err != nil {
 		return nil, err
 	}
@@ -197,6 +201,9 @@ func (p *ctl) fail(err error) {
 }
 
 func (p *ctl) close() {
+	if p.lfd > 0 {
+		_ = unix.Close(p.lfd)
+	}
 	if p.ring != nil {
 		p.ring.Close()
 	}

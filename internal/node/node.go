@@ -47,8 +47,10 @@ type Hand struct {
 // Output is what a call into the node asks of its loop: actions; session tables to hand
 // replicas; a placement table or delta to hand every replica, with SetTable or ApplyDelta; the
 // committed disk membership and the pools' grants outstanding to hand every device; whether the node moved to another
-// control-plane voter, Ctl, which every replica then reports to with SetAuthority; and the
-// metadata replicas to delete, each of which its last report showed had learned its removal.
+// control-plane voter, Ctl, which every replica then reports to with SetAuthority; the metadata
+// replicas to delete, each of which its last report showed had learned its removal; and with the
+// membership, Member, the shard map's plans, unless an answer carried a newer map before, for
+// Device.Plans.
 type Output struct {
 	Actions []core.Action
 	Hands   []Hand
@@ -56,6 +58,8 @@ type Output struct {
 	Delta   *chunkstore.Delta
 	Disks   []meta.DiskAddr
 	Grants  []meta.PoolGrant
+	Plans   []meta.Group
+	Member  bool
 	Moved   bool
 	Ctl     core.NodeID
 	Deletes []meta.ReplicaRef
@@ -66,10 +70,12 @@ func (o *Output) Reset() {
 	*o = Output{Actions: o.Actions[:0], Hands: o.Hands[:0], Deletes: o.Deletes[:0]}
 }
 
-// Clone is o without its actions, copied whole, since its table, delta and membership alias the
-// node's buffers, which the next message overwrites; false when it holds nothing for a device.
+// Clone is o without its actions, copied whole, since its table, delta, membership and deletes
+// alias the node's buffers, which the next message overwrites; false when it holds nothing for a
+// device.
 func (o *Output) Clone() (Output, bool) {
-	c := Output{Disks: slices.Clone(o.Disks), Grants: slices.Clone(o.Grants), Moved: o.Moved, Ctl: o.Ctl}
+	c := Output{Disks: slices.Clone(o.Disks), Grants: slices.Clone(o.Grants), Plans: slices.Clone(o.Plans), Member: o.Member, Moved: o.Moved, Ctl: o.Ctl,
+		Deletes: slices.Clone(o.Deletes)}
 	for _, h := range o.Hands {
 		h.Table.Live = slices.Clone(h.Table.Live)
 		c.Hands = append(c.Hands, h)
@@ -88,7 +94,7 @@ func (o *Output) Clone() (Output, bool) {
 		}
 		c.Delta = &d
 	}
-	return c, c.Hands != nil || c.Table != nil || c.Delta != nil || c.Disks != nil || c.Moved
+	return c, c.Hands != nil || c.Table != nil || c.Delta != nil || c.Member || c.Moved || c.Deletes != nil
 }
 
 // replica is a device opened: its log, whether its replica runs, as it may once the node has
@@ -130,9 +136,12 @@ type Node struct {
 	delta   chunkstore.Delta
 	epoch   uint64
 	disks   meta.Membership
-	// metas are the metadata replicas as the loop last reported them, and dels a delete received.
-	metas []meta.ReplicaReport
-	dels  []meta.ReplicaRef
+	// metas are the metadata replicas as each device last reported them, reps their report, dels a
+	// delete received, and mapV the newest shard map version received.
+	metas   []heldMeta
+	metaRep []meta.ReplicaReport
+	dels    []meta.ReplicaRef
+	mapV    uint64
 	// sess is the client session, if the node holds one, startAt when its start request sent may go
 	// again, and beat and ans a heartbeat and an answer.
 	sess    *meta.SessionClient
@@ -229,14 +238,21 @@ func (n *Node) Opened(d meta.OpenedDisk, out *Output) {
 func (n *Node) Remove(device uint64) {
 	n.reps = slices.DeleteFunc(n.reps, func(r replica) bool { return r.device == device })
 	n.opened = slices.DeleteFunc(n.opened, func(d meta.OpenedDisk) bool { return d.Device == device })
+	n.metas = slices.DeleteFunc(n.metas, func(h heldMeta) bool { return h.device == device })
 }
 
-// Replicas reports the node's metadata replicas, which its heartbeats carry from then on.
-func (n *Node) Replicas(rs []meta.ReplicaReport) {
-	n.metas = n.metas[:0]
+// heldMeta is a metadata replica a device reported.
+type heldMeta struct {
+	device uint64
+	rep    meta.ReplicaReport
+}
+
+// Replicas reports the metadata replicas on device, which the node's heartbeats carry from then on.
+func (n *Node) Replicas(device uint64, rs []meta.ReplicaReport) {
+	n.metas = slices.DeleteFunc(n.metas, func(h heldMeta) bool { return h.device == device })
 	for _, r := range rs {
 		r.Voters = slices.Clone(r.Voters)
-		n.metas = append(n.metas, r)
+		n.metas = append(n.metas, heldMeta{device: device, rep: r})
 	}
 }
 
@@ -378,7 +394,7 @@ func (n *Node) recv(ctx *core.Context, ev *core.Event, out *Output) {
 	case meta.KindDelete:
 		if n.dels, err = meta.DecodeDelete(ctx.Pool, &ev.Msg, n.dels); err == nil {
 			for _, d := range n.dels {
-				if slices.ContainsFunc(n.metas, func(r meta.ReplicaReport) bool { return r.Group == d.Group && r.ID == d.ID && r.Removed }) {
+				if slices.ContainsFunc(n.metas, func(h heldMeta) bool { return h.rep.Group == d.Group && h.rep.ID == d.ID && h.rep.Removed }) {
 					out.Deletes = append(out.Deletes, d)
 				}
 			}
@@ -397,7 +413,10 @@ func (n *Node) recv(ctx *core.Context, ev *core.Event, out *Output) {
 		return
 	case meta.KindDisks:
 		if err = meta.DecodeDisks(ctx.Pool, &ev.Msg, &n.disks); err == nil {
-			out.Disks, out.Grants = n.disks.Disks, n.disks.Grants
+			out.Disks, out.Grants, out.Member = n.disks.Disks, n.disks.Grants, true
+			if n.disks.MapV >= n.mapV {
+				n.mapV, out.Plans = n.disks.MapV, n.disks.Plans
+			}
 			for i := range n.reps {
 				r := &n.reps[i]
 				r.runs = r.runs || slices.ContainsFunc(n.disks.Disks, func(a meta.DiskAddr) bool { return a.Log == r.log })
@@ -467,6 +486,9 @@ func (n *Node) Take(ctx *core.Context, device uint64, o *DeviceOutput, out *Outp
 	}
 	n.Held(device, o.Held)
 	n.HeldEpoch(device, o.Epoch)
+	if o.Reported {
+		n.Replicas(device, o.Metas)
+	}
 }
 
 // heartbeat sends the control plane the node's report and arms the next.
@@ -474,7 +496,11 @@ func (n *Node) heartbeat(ctx *core.Context, out *Output) {
 	nr := &n.report
 	// With no replica running this reports the version only received, safe while a store's fence
 	// table starts empty in memory: a replica that starts later is handed n.table before any write.
-	*nr = meta.NodeReport{Node: n.cfg.Node, Release: n.cfg.Release, Meta: !n.cfg.Client, MetaOnly: n.cfg.MetaOnly, Epoch: n.epoch, Sessions: n.table.Version, Opened: n.opened, Failed: n.failed, Replicas: n.metas}
+	n.metaRep = n.metaRep[:0]
+	for _, h := range n.metas {
+		n.metaRep = append(n.metaRep, h.rep)
+	}
+	*nr = meta.NodeReport{Node: n.cfg.Node, Release: n.cfg.Release, Meta: !n.cfg.Client, MetaOnly: n.cfg.MetaOnly, Epoch: n.epoch, Sessions: n.table.Version, Opened: n.opened, Failed: n.failed, Replicas: n.metaRep}
 	for _, r := range n.reps {
 		if r.runs {
 			nr.Sessions, nr.Epoch = min(nr.Sessions, r.held), min(nr.Epoch, r.epoch)

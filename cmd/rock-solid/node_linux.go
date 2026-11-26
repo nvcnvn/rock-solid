@@ -14,8 +14,12 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/driver/tcp"
 	"github.com/nvcnvn/rock-solid/internal/driver/uring"
+	"github.com/nvcnvn/rock-solid/internal/lease"
 	"github.com/nvcnvn/rock-solid/internal/loop"
+	"github.com/nvcnvn/rock-solid/internal/lsm"
+	"github.com/nvcnvn/rock-solid/internal/meta"
 	"github.com/nvcnvn/rock-solid/internal/node"
+	"github.com/nvcnvn/rock-solid/internal/raftshard"
 )
 
 // storageNode is a storage node's process: loop 0 runs its node.Node, and loop k its k-th device's
@@ -197,7 +201,7 @@ func (m *nodeMachine) OnEvent(ctx *core.Context, ev *core.Event, acts []core.Act
 	for _, nl := range m.p.loops[1:] {
 		if o, ok := m.out.Clone(); ok {
 			dm := nl.dm
-			nl.mail.post(func(ctx *core.Context) { dm.d.Take(ctx, &o, &dm.out) })
+			nl.mail.post(func(ctx *core.Context) { dm.take(ctx, &o) })
 		}
 	}
 	return append(acts, m.out.Actions...)
@@ -219,7 +223,8 @@ func (m *nodeMachine) take(ctx *core.Context, device uint64, o *node.DeviceOutpu
 
 // deviceMachine runs one device's node.Device on its loop and mails the node's loop what it
 // outputs for the node. Its loop owns the store's log, served to the loop whenever the store opens,
-// formats or rebuilds one.
+// formats or rebuilds one. The device starts once the node hands it a membership, whose shard map
+// gives the settings of the MetaStore replicas its disk may hold.
 type deviceMachine struct {
 	p   *storageNode
 	cfg node.DeviceConfig
@@ -230,14 +235,39 @@ type deviceMachine struct {
 
 func (m *deviceMachine) OnEvent(ctx *core.Context, ev *core.Event, acts []core.Action) []core.Action {
 	m.out.Reset()
-	if m.d == nil {
-		m.d = node.NewDevice(ctx, m.cfg, &m.out)
-	}
 	m.p.loops[m.cfg.Loop].mail.run(ctx)
-	if !wake(ev) {
+	switch {
+	case wake(ev):
+	case m.d != nil:
 		m.d.OnEvent(ctx, ev, &m.out)
+	case ev.Kind == core.EvNetRecv && ev.Msg.Buf != core.NoBuf:
+		ctx.Pool.Free(ev.Msg.Buf)
 	}
 	return m.done(acts)
+}
+
+// take hands the device what the node's machine output, starting it on the first membership.
+func (m *deviceMachine) take(ctx *core.Context, o *node.Output) {
+	if m.d == nil {
+		if !o.Member {
+			return
+		}
+		m.cfg.Meta = meta.RoundConfig{Shard: meta.Config{
+			Raft: raftshard.Config{Seed: rand.Uint64(), Holder: lease.NewHolder(lease.DefaultConfig), Grantor: lease.NewGrantor(lease.DefaultConfig, rand.Uint64(), lease.Now(ctx))},
+			Tree: lsm.Config{MaxPiece: 32 << 10, StepBytes: int(m.cfg.Store.Log.CompactionStepBytes), Pages: m.cfg.Store.Pages},
+		}}
+		m.cfg.Metas = node.MetaSettingsOf(m.cfg.Meta, m.cfg.Group, o.Plans, o.Disks)
+		m.d = node.NewDevice(ctx, m.cfg, &m.out)
+		for _, r := range m.d.Unmapped() {
+			log.Printf("device %#x keeps MetaStore replica %d of group %d closed: the shard map names no such group", m.cfg.Device, r.ID, r.Group)
+		}
+	}
+	for _, r := range o.Deletes {
+		if a := m.d.Meta(r.Group); a != nil && a.ReplicaID() == r.ID {
+			log.Printf("device %#x deletes MetaStore replica %d of group %d", m.cfg.Device, r.ID, r.Group)
+		}
+	}
+	m.d.Take(ctx, o, &m.out)
 }
 
 func (m *deviceMachine) OnLog(ctx *core.Context, _ *loop.Log, ev *disklog.Event, acts []core.Action) []core.Action {
@@ -251,7 +281,7 @@ func (m *deviceMachine) OnReply(_ *loop.Log, r loop.Reply) { m.d.OnReply(r) }
 
 // done serves the loop the store's log and hands on what the device output.
 func (m *deviceMachine) done(acts []core.Action) []core.Action {
-	if m.lg != nil {
+	if m.lg != nil && m.d != nil {
 		var log *disklog.Log
 		if st := m.d.Store(); st != nil {
 			log = st.Log()

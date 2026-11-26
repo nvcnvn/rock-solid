@@ -841,3 +841,18 @@ func BenchmarkProposal(b *testing.B) {
 		n.settle()
 	}
 }
+
+// SetPeer moves a member of the applied configuration to the node it names, and names none for a
+// replica outside it.
+func TestSetPeerNamesTheNodeOfAMember(t *testing.T) {
+	s := newNet(t, 3, 1).r[0].s
+	at := core.NodeID{Node: 9, Loop: 2}
+	s.SetPeer(2, at)
+	s.SetPeer(4, at)
+	if got, _ := s.Node(2); got != at {
+		t.Fatalf("member 2 is at %v, want %v", got, at)
+	}
+	if got, ok := s.Node(4); ok {
+		t.Fatalf("replica 4, outside the configuration, is at %v", got)
+	}
+}

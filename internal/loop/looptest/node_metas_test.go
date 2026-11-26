@@ -14,6 +14,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
 	"github.com/nvcnvn/rock-solid/internal/chunkstore/storetest"
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/lease"
 	"github.com/nvcnvn/rock-solid/internal/loop"
 	"github.com/nvcnvn/rock-solid/internal/lsm"
@@ -58,6 +59,10 @@ type nodeMetas struct {
 	// cr is the crash run's, nil elsewhere: the store's settings, a voter on loop 0 and what it
 	// watches the device by.
 	cr *metaCrash
+	// taking is what the device takes at nodeMetaTake, as from the node's loop, and reported the
+	// replicas it reported then.
+	taking   node.Output
+	reported []meta.ReplicaReport
 }
 
 const nodeMetaGroup = 10
@@ -81,6 +86,12 @@ func (m *metaDevice) OnEvent(ctx *core.Context, ev *core.Event, out []core.Actio
 	}
 	if ev.Kind == core.EvTimer && ev.Timer >= node.MetaTimer {
 		m.nm.slots = max(m.nm.slots, ev.Timer-node.MetaTimer+1)
+	}
+	if ev.Kind == core.EvTimer && ev.Timer == nodeMetaTake {
+		m.out.Reset()
+		m.d.Take(ctx, &m.nm.taking, &m.out)
+		m.nm.reported = slices.Clone(m.out.Metas)
+		return m.done(out)
 	}
 	if ev.Kind == core.EvTimer && ev.Timer == nodeMetaRemove {
 		m.out.Reset()
@@ -168,6 +179,14 @@ func (nm *nodeMetas) replicaOf(group uint64) meta.RoundConfig {
 	}
 }
 
+// metaTemplate is the settings a device gives the replicas its plans place, its tree's and leases.
+func metaTemplate() meta.RoundConfig {
+	return meta.RoundConfig{Shard: meta.Config{
+		Raft: raftshard.Config{Seed: 1, Holder: lease.NewHolder(lease.DefaultConfig), Grantor: lease.NewGrantor(lease.DefaultConfig, 1, lease.Time{})},
+		Tree: lsm.Config{MaxPiece: 4 << 10, StepBytes: 4 << 10, Check: true},
+	}}
+}
+
 // bootAt is the storage of a group's one voter whose configuration is at index.
 func bootAt(t *testing.T, index uint64) *raftshard.Storage {
 	storage := raftshard.NewStorage()
@@ -199,7 +218,7 @@ func (nm *nodeMetas) boot(metas []meta.RoundConfig) {
 	if nm.cr != nil {
 		cfg = nm.cr.cfg
 	}
-	nm.m = &metaDevice{nm: nm, deviceOnLoop: deviceOnLoop{cfg: node.DeviceConfig{Device: 7, Blocks: nm.sd.Blocks(), Loop: 1, Store: cfg, Seed: 1}}}
+	nm.m = &metaDevice{nm: nm, deviceOnLoop: deviceOnLoop{cfg: node.DeviceConfig{Device: 7, Blocks: nm.sd.Blocks(), Loop: 1, Store: cfg, Seed: 1, Meta: metaTemplate()}}}
 	if nm.blocks != 0 {
 		nm.m.cfg.Blocks = nm.blocks
 	}
@@ -668,12 +687,41 @@ func TestARestartRestoresTheReplicasItsDiskHolds(t *testing.T) {
 	}
 	nm.lead()
 	nm.check()
+}
+
+// A restart whose disk holds a replica of a group the shard map no longer names serves: the device
+// keeps the replica closed, never leading, and deletes nothing, so a restart whose map names the
+// group again restores every Txn it answered.
+func TestARestartKeepsAReplicaOfAGroupTheMapDroppedClosed(t *testing.T) {
+	nm := newNodeMetas(t)
+	cfg := nm.replica()
+	if err := nm.m.d.AddMeta(cfg); err != nil {
+		t.Fatal(err)
+	}
+	nm.lead()
+	nm.send(20, 100)
 
 	nm.sd.Restart()
-	nm.start([]meta.RoundConfig{other})
-	if nm.m.d.Store() != nil {
-		t.Fatal("a disk holding a replica the device has no settings for served")
+	nm.start(nil)
+	if nm.m.d.Store() == nil {
+		t.Fatal("a disk holding a replica of a group the map dropped failed its start")
 	}
+	if nm.m.d.Meta(nodeMetaGroup) == nil || !slices.Equal(nm.m.d.Unmapped(), []disklog.Replica{{Group: nodeMetaGroup, ID: 1}}) {
+		t.Fatalf("the replica is not kept closed: unmapped %v", nm.m.d.Unmapped())
+	}
+	nm.ticking = true
+	nm.l.Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: node.MetaTimer})
+	for i := 0; i < 1_000_000 && nm.s.Step(); i++ {
+	}
+	nm.ticking = false
+	if a := nm.m.d.Meta(nodeMetaGroup); a.Shard() != nil && a.Shard().Raft().Leader() != 0 {
+		t.Fatal("the closed replica led")
+	}
+
+	nm.sd.Restart()
+	nm.start([]meta.RoundConfig{cfg})
+	nm.lead()
+	nm.check()
 }
 
 // A new replica starts, and so can acknowledge anything, only once a durable manifest names it,
@@ -1024,5 +1072,119 @@ func TestARestartAfterARemovalNeverRestoresTheRemovedReplicaGone(t *testing.T) {
 	}
 	if restoredRemoved == 0 {
 		t.Fatal("no crash came before a named manifest left the removed replica out")
+	}
+}
+
+const nodeMetaTake core.TimerID = 0x74616b
+
+// take has the device take o at its loop's next pass, as the node's loop hands it a membership
+// with the shard map's plans, or deletes, and settles.
+func (nm *nodeMetas) take(o node.Output) {
+	nm.taking = o
+	nm.l.Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: nodeMetaTake})
+	nm.settle()
+}
+
+// disks is the membership naming the device's disk, disk 1, at its loop.
+func (nm *nodeMetas) disks() []meta.DiskAddr {
+	return []meta.DiskAddr{{Disk: 1, Log: nm.m.d.Store().Log().Superblock().LogID, At: core.NodeID{Node: nm.node, Loop: 1}}}
+}
+
+// planOf is group's shard map entry: Boot boot, and voter id on the device's disk.
+func planOf(group, boot, id uint64) meta.Group {
+	return meta.Group{ID: group, LastID: max(boot, id), Boot: boot, Voters: []meta.Replica{{ID: id, Disk: 1}}}
+}
+
+// placed is the membership with plans, as the node hands it on.
+func (nm *nodeMetas) placed(plans ...meta.Group) node.Output {
+	return node.Output{Disks: nm.disks(), Plans: plans, Member: true}
+}
+
+// A plan that places a replica on the device's disk hosts it once: a group's first voter boots
+// with its Boot voters' configuration and leads, a voter a later plan added joins with empty
+// storage, the same plans again host nothing more, and the device reports both. A restart whose
+// settings are the plans' restores each with its own, the voter its configuration and the joiner
+// none, and the plans then host nothing more.
+func TestAPlanHostsItsReplicaOnceAcrossARepeatAndARestart(t *testing.T) {
+	nm := newNodeMetas(t)
+	joiner := uint64(nodeMetaGroup + 1)
+	plans := []meta.Group{planOf(nodeMetaGroup, 1, 1), planOf(joiner, 1, 2)}
+	nm.take(nm.placed(plans...))
+	a, j := nm.m.d.Meta(nodeMetaGroup), nm.m.d.Meta(joiner)
+	if a == nil || a.ReplicaID() != 1 || j == nil || j.ReplicaID() != 2 || a.Owner() == j.Owner() {
+		t.Fatalf("the plans hosted %v and %v", a, j)
+	}
+	if base := j.Storage().Base(); base.Index != 0 || len(base.ConfState.Voters) != 0 {
+		t.Fatalf("a joining replica booted from %+v", base)
+	}
+	nm.lead()
+	nm.send(4, 100)
+	nm.take(nm.placed(plans...))
+	if nm.m.d.Meta(nodeMetaGroup) != a || nm.m.d.Meta(joiner) != j || nm.m.d.Removing() != 0 {
+		t.Fatal("the same plans again changed the replicas hosted")
+	}
+	if len(nm.reported) != 2 || nm.reported[0].Group != nodeMetaGroup || nm.reported[0].ID != 1 || !slices.Equal(nm.reported[0].Voters, []uint64{1}) || nm.reported[1].ID != 2 {
+		t.Fatalf("the device reported %+v", nm.reported)
+	}
+	if at, ok := a.Shard().Raft().Node(1); !ok || at != (core.NodeID{Node: nm.node, Loop: 1}) {
+		t.Fatalf("the replica's peer is at %v, %v", at, ok)
+	}
+
+	ds := nm.disks()
+	nm.sd.Restart()
+	nm.start(node.MetaSettingsOf(metaTemplate(), 0, plans, ds))
+	a, j = nm.m.d.Meta(nodeMetaGroup), nm.m.d.Meta(joiner)
+	if a == nil || a.ReplicaID() != 1 || j == nil || j.ReplicaID() != 2 {
+		t.Fatalf("the restart restored %v and %v", a, j)
+	}
+	if base := j.Storage().Base(); base.Index != 0 || len(base.ConfState.Voters) != 0 {
+		t.Fatalf("the restored joiner holds %+v", base)
+	}
+	nm.lead()
+	nm.check()
+	nm.take(nm.placed(plans...))
+	if nm.m.d.Meta(nodeMetaGroup) != a || nm.m.d.Meta(joiner) != j {
+		t.Fatal("the plans hosted another replica after the restart")
+	}
+	nm.send(1, 10)
+	if err := nm.answers[nm.next]; err != nil {
+		t.Fatalf("the restored replica answered %v", err)
+	}
+}
+
+// A delete removes the replica it names, and one naming a replica the device never hosted, or
+// another replica of a group it hosts, removes nothing. A delete wins over a plan: one taken with
+// it, or a stale one after the removal is done, never hosts the deleted replica again.
+func TestADeleteRemovesItsReplicaForGood(t *testing.T) {
+	nm := newNodeMetas(t)
+	plan := planOf(nodeMetaGroup, 1, 1)
+	nm.take(nm.placed(plan))
+	nm.lead()
+	nm.send(4, 100)
+	nm.take(node.Output{Deletes: []meta.ReplicaRef{{Group: nodeMetaGroup + 5, ID: 1}, {Group: nodeMetaGroup, ID: 2}}})
+	if nm.m.d.Meta(nodeMetaGroup) == nil || nm.m.d.Removing() != 0 {
+		t.Fatal("a delete of a replica the device does not host removed one")
+	}
+	o := nm.placed(plan)
+	o.Deletes = []meta.ReplicaRef{{Group: nodeMetaGroup, ID: 1}}
+	nm.take(o)
+	if nm.m.d.Meta(nodeMetaGroup) != nil {
+		t.Fatal("the deleted replica is hosted")
+	}
+	for nm.m.d.Removing() != 0 {
+		if !nm.s.Step() {
+			t.Fatal("the removal never ended")
+		}
+	}
+	nm.take(nm.placed(plan))
+	if nm.m.d.Meta(nodeMetaGroup) != nil {
+		t.Fatal("a stale plan hosted the deleted replica again")
+	}
+	if !nm.goneNow(nodeMetaGroup, 1) {
+		t.Fatal("the device never answered Gone for the replica it deleted")
+	}
+	nm.take(nm.placed(planOf(nodeMetaGroup, 1, 3)))
+	if a := nm.m.d.Meta(nodeMetaGroup); a == nil || a.ReplicaID() != 3 {
+		t.Fatalf("a plan placing a new replica of the group hosted %v", a)
 	}
 }

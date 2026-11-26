@@ -400,3 +400,48 @@ func TestTheControlPlaneGroupsRemovedVoterHoldingTheNewestEntryLeadsAndHandsOff(
 		t.Fatalf("within %v C led %v, and a voter of the plan %v", bound.Duration(), cLed, led)
 	}
 }
+
+// A control-plane leader cut off from its group past its lease, which keeps its Control until it
+// hears of a later term, answers a node's report with no membership: a node that restarted would
+// take from it a shard map older than one a leased leader since committed, which may place a
+// replica a delete since removed.
+func TestALeaderPastItsLeaseAnswersAReportWithNoMembership(t *testing.T) {
+	r := newHostGroupWith(t, 3, ctlLogConfig(), func(r *hostRun) { r.leasing = true })
+	l := r.controlled()
+	answered := func() bool {
+		var m core.Msg
+		if err := EncodeNodeReport(r.pool, hostGroup, &NodeReport{Node: 9}, &m); err != nil {
+			t.Fatal(err)
+		}
+		r.sent = r.sent[:0]
+		r.recvAt(l, core.NodeID{Node: 9, Loop: 1}, m)
+		got := false
+		for _, a := range r.sent {
+			_, k, _, _ := Peek(&a.Msg)
+			got = got || k == KindDisks
+			free(&core.Context{Pool: r.pool}, &a.Msg)
+		}
+		r.sent = r.sent[:0]
+		return got
+	}
+	if !answered() {
+		t.Fatal("a leased leader sent no membership")
+	}
+	for i := range r.hs {
+		r.down[i] = i != l
+	}
+	leased := true
+	for n := 0; leased; n++ {
+		if n == 2000 {
+			t.Fatal("the cut-off leader's lease never lapsed")
+		}
+		r.run(raftshard.TickInterval)
+		r.do(l, func(ctx *core.Context, _ *CtlHostOutput) { leased = r.hs[l].leased(ctx) })
+	}
+	if r.hs[l].Control() == nil {
+		t.Fatal("the cut-off leader dropped its Control before its lease lapsed")
+	}
+	if answered() {
+		t.Fatal("a leader past its lease sent a membership")
+	}
+}

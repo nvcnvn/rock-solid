@@ -245,6 +245,22 @@ func (s *Shard) Start(ctx *core.Context, out *Output) {
 // SetPlan hands the shard its group's voters in the shard map. While it leads, it adds each planned replica the configuration lacks as a learner, swaps a caught-up learner for a voter the plan dropped in one joint change, and removes a learner the plan dropped, one change at a time.
 func (s *Shard) SetPlan(voters []Peer) { s.plan = append(s.plan[:0], voters...) }
 
+// SetPeer names node as where replica id, a member of the applied configuration, runs: a replica
+// restored with no address for a member, or one that restarted on another loop, learns it
+// otherwise only from that member's own messages.
+func (s *Shard) SetPeer(id uint64, node core.NodeID) {
+	if !member(&s.conf, id) {
+		return
+	}
+	switch i := s.peer(id); {
+	case i < 0:
+		s.cfg.Peers = append(s.cfg.Peers, Peer{ID: id, Node: node})
+		s.fort = append(s.fort, fortified{})
+	case s.cfg.Peers[i].Node != node:
+		s.cfg.Peers[i].Node, s.fort[i] = node, fortified{}
+	}
+}
+
 // Stats returns the shard's drop counts.
 func (s *Shard) Stats() Stats { return s.stats }
 

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"slices"
 
+	"go.etcd.io/raft/v3/raftpb"
+
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
@@ -24,10 +26,11 @@ const MetaTimer core.TimerID = 0x6d657461 << 32
 // the operating system at each start, so a format a crash cut short is formatted again under
 // another log ID, the control-plane group's ID, the voter its replica reports to until
 // Authority names another, and the error opening the device, if any, which leaves it failed;
-// Host is the loop that owns the device, Rounds its log there, and Metas the settings of the
+// Host is the loop that owns the device, Rounds its log there, Metas the settings of the
 // MetaStore replicas the disk may hold, one per group: a store opened restores each replica its
 // manifest names, under the group, replica ID and owner the disk records, with the rest of the
-// settings of its group's entry here.
+// settings of its group's entry here, or closed if none (Unmapped); and Meta the settings Plans
+// gives a new replica its own on, its tree's and the leases of the device's loop.
 type DeviceConfig struct {
 	Device uint64
 	Blocks uint64
@@ -41,24 +44,28 @@ type DeviceConfig struct {
 	Host   *loop.Loop
 	Rounds *loop.Log
 	Metas  []meta.RoundConfig
+	Meta   meta.RoundConfig
 }
 
 // DeviceOutput is what a call into a Device asks of its loop and of the node's machine: actions;
-// once its start ends, the disk Opened for Node.Opened, or Failed for Node.Failed; and from its
+// once its start ends, the disk Opened for Node.Opened, or Failed for Node.Failed; from its
 // replica, a session ask for Node.Ask, a table fetch for Node.FetchTable, and the session version
-// and placement epoch it holds when they changed, for Node.Held and Node.HeldEpoch.
+// and placement epoch it holds when they changed, for Node.Held and Node.HeldEpoch; and, if
+// Reported, its MetaStore replicas' reports, for Node.Replicas.
 type DeviceOutput struct {
-	Actions []core.Action
-	Opened  *meta.OpenedDisk
-	Failed  bool
-	Ask     uint64
-	Fetch   bool
-	Held    uint64
-	Epoch   uint64
+	Actions  []core.Action
+	Opened   *meta.OpenedDisk
+	Failed   bool
+	Ask      uint64
+	Fetch    bool
+	Held     uint64
+	Epoch    uint64
+	Reported bool
+	Metas    []meta.ReplicaReport
 }
 
 // Reset empties the output for reuse.
-func (o *DeviceOutput) Reset() { *o = DeviceOutput{Actions: o.Actions[:0]} }
+func (o *DeviceOutput) Reset() { *o = DeviceOutput{Actions: o.Actions[:0], Metas: o.Metas[:0]} }
 
 // Clone is o without its actions, for the node's loop; false when it holds nothing for the node.
 func (o *DeviceOutput) Clone() (DeviceOutput, bool) {
@@ -68,7 +75,8 @@ func (o *DeviceOutput) Clone() (DeviceOutput, bool) {
 		d := *o.Opened
 		c.Opened = &d
 	}
-	return c, c.Opened != nil || c.Failed || c.Ask != 0 || c.Fetch || c.Held != 0 || c.Epoch != 0
+	c.Metas = slices.Clone(o.Metas)
+	return c, c.Opened != nil || c.Failed || c.Ask != 0 || c.Fetch || c.Held != 0 || c.Epoch != 0 || c.Reported
 }
 
 type devicePhase uint8
@@ -119,6 +127,13 @@ type Device struct {
 	groups  map[uint64]int
 	sv      *meta.Server
 	removed []removedMeta
+	// deleted are the replicas a delete removed, which no plan hosts again, as a stale one may
+	// still name them.
+	deleted []meta.ReplicaRef
+	// unmapped are the replicas a restart restored of a group Metas has no settings for, as the
+	// shard map no longer names it: hosted with no peers, so the store keeps their runs and
+	// checkpoints, but closed, taking no timer, so none leads; what dropped the group deletes them.
+	unmapped []disklog.Replica
 }
 
 // removedMeta is a removed MetaStore replica: its group, replica ID and owner key, and whether
@@ -143,18 +158,22 @@ func NewDevice(ctx *core.Context, cfg DeviceConfig, out *DeviceOutput) *Device {
 	return d
 }
 
-// ErrNoSettings stops a restart whose disk holds a MetaStore replica of a group Metas has no
-// settings for, or two of one group.
-var ErrNoSettings = errors.New("node: the disk holds a MetaStore replica with no settings")
+// ErrTwoOfAGroup stops a restart whose disk holds two MetaStore replicas of one group.
+var ErrTwoOfAGroup = errors.New("node: the disk holds two MetaStore replicas of one group")
 
 // restore hosts the replica the manifest a restart loaded names, before the replay, under the
 // blob bound of the log the disk holds, which a volume grown since its format keeps.
 func (d *Device) restore(owner uint32, rep disklog.Replica, maxBlob uint64) error {
-	i := slices.IndexFunc(d.cfg.Metas, func(c meta.RoundConfig) bool { return c.Shard.Raft.Group == rep.Group })
-	if _, hosted := d.groups[rep.Group]; i < 0 || hosted {
-		return fmt.Errorf("%w: replica %d of group %d", ErrNoSettings, rep.ID, rep.Group)
+	if _, hosted := d.groups[rep.Group]; hosted {
+		return fmt.Errorf("%w: replica %d of group %d", ErrTwoOfAGroup, rep.ID, rep.Group)
 	}
-	cfg := d.cfg.Metas[i]
+	var cfg meta.RoundConfig
+	if i := slices.IndexFunc(d.cfg.Metas, func(c meta.RoundConfig) bool { return c.Shard.Raft.Group == rep.Group }); i >= 0 {
+		cfg = d.cfg.Metas[i]
+	} else {
+		cfg = MetaSettings(d.cfg.Meta, &meta.Group{ID: rep.Group}, nil)
+		d.unmapped = append(d.unmapped, rep)
+	}
 	cfg.Owner, cfg.Shard.Raft.ID, cfg.Open, cfg.MaxBlob = owner, rep.ID, true, maxBlob
 	d.host(cfg)
 	return nil
@@ -233,8 +252,12 @@ func (d *Device) leftOut(group, id uint64) bool {
 }
 
 // host puts the replica cfg describes on the device's loop and makes it known to the store, in
-// one call.
+// one call. A replica its storage's boot configuration does not name, one its group added after its
+// first plan, joins with empty storage.
 func (d *Device) host(cfg meta.RoundConfig) {
+	if !slices.Contains(cfg.Shard.Raft.Storage.Base().ConfState.Voters, cfg.Shard.Raft.ID) {
+		cfg.Shard.Raft.Storage = raftshard.NewStorage()
+	}
 	i := slices.Index(d.metas, nil)
 	if i < 0 {
 		i = len(d.metas)
@@ -261,6 +284,18 @@ func (d *Device) dropMetas() {
 // Replica is the device's replica, nil until the membership names its log.
 func (d *Device) Replica() *chunkstore.Replica { return d.rep }
 
+// closed reports whether the replica in slot i is unmapped.
+func (d *Device) closed(i int) bool {
+	return slices.ContainsFunc(d.unmapped, func(r disklog.Replica) bool {
+		j, ok := d.groups[r.Group]
+		return ok && j == i
+	})
+}
+
+// Unmapped is each MetaStore replica a restart restored closed, as the shard map names no group
+// of it.
+func (d *Device) Unmapped() []disklog.Replica { return d.unmapped }
+
 // Store is the device's store, nil once its start failed.
 func (d *Device) Store() *chunkstore.Store { return d.st }
 
@@ -272,7 +307,7 @@ func (d *Device) OnEvent(ctx *core.Context, ev *core.Event, out *DeviceOutput) {
 		out.Actions = d.recvGroup(ctx, ev, out.Actions)
 		return
 	case ev.Kind == core.EvTimer && ev.Timer >= MetaTimer && ev.Timer-MetaTimer < core.TimerID(len(d.metas)):
-		if a := d.metas[ev.Timer-MetaTimer]; a != nil {
+		if a := d.metas[ev.Timer-MetaTimer]; a != nil && !d.closed(int(ev.Timer-MetaTimer)) {
 			out.Actions = a.OnEvent(ctx, ev, out.Actions)
 		}
 		return
@@ -518,13 +553,23 @@ func (d *Device) Delta(ctx *core.Context, dl *chunkstore.Delta, out *DeviceOutpu
 }
 
 // Take hands the device what the node's machine output, o, holds for it: the voter it moved to,
-// the membership, the session tables for this device, and a placement table or delta.
+// the membership, the metadata replicas to delete, the plans, the session tables for this device,
+// and a placement table or delta. Each membership has the device report its MetaStore replicas.
 func (d *Device) Take(ctx *core.Context, o *Output, out *DeviceOutput) {
 	if o.Moved {
 		d.Authority(ctx, o.Ctl, out)
 	}
-	if o.Disks != nil {
+	if o.Member {
 		d.Disks(ctx, o.Disks, o.Grants, out)
+	}
+	for _, r := range o.Deletes {
+		if a := d.Meta(r.Group); a != nil && a.ReplicaID() == r.ID && d.RemoveMeta(ctx, r.Group, out) == nil {
+			d.deleted = append(d.deleted, r)
+		}
+	}
+	if o.Member {
+		d.Plans(o.Plans, o.Disks)
+		d.report(out)
 	}
 	for i := range o.Hands {
 		if o.Hands[i].Device == d.cfg.Device {
@@ -537,6 +582,108 @@ func (d *Device) Take(ctx *core.Context, o *Output, out *DeviceOutput) {
 	if o.Delta != nil {
 		d.Delta(ctx, o.Delta, out)
 	}
+}
+
+// Plans hosts each MetaStore replica the plans place on the device's disk, as ds names it, that it
+// does not host yet, and hands each replica it hosts its group's plan, which it acts on while it
+// leads, and the loop ds names for each voter of the plan. A plan naming a replica of a group the
+// device still hosts another of, or removed one of that a restart may restore, waits for the next;
+// one naming a replica a delete removed hosts nothing.
+func (d *Device) Plans(ps []meta.Group, ds []meta.DiskAddr) {
+	if d.phase != opened {
+		return
+	}
+	k := slices.IndexFunc(ds, func(a meta.DiskAddr) bool { return a.Log == d.log })
+	for i := range ps {
+		g := &ps[i]
+		if g.ID == d.cfg.Group {
+			continue
+		}
+		if a := d.Meta(g.ID); a != nil {
+			if sh := a.Shard(); sh != nil {
+				ps := metaPeers(g, ds)
+				for _, p := range ps {
+					sh.Raft().SetPeer(p.ID, p.Node)
+				}
+				sh.Raft().SetPlan(ps)
+			}
+			continue
+		}
+		j := -1
+		if k >= 0 {
+			j = slices.IndexFunc(g.Voters, func(v meta.Replica) bool { return v.Disk == ds[k].Disk })
+		}
+		if j < 0 || slices.Contains(d.deleted, meta.ReplicaRef{Group: g.ID, ID: g.Voters[j].ID}) {
+			continue
+		}
+		cfg := MetaSettings(d.cfg.Meta, g, ds)
+		cfg.Shard.Raft.ID, cfg.Owner = g.Voters[j].ID, d.freeOwner()
+		_ = d.AddMeta(cfg)
+	}
+}
+
+// freeOwner is the lowest owner key above the store's own index that the store may give a new
+// shard.
+func (d *Device) freeOwner() uint32 {
+	o := uint32(2)
+	for !d.st.Reusable(o) {
+		o++
+	}
+	return o
+}
+
+// report has the device report each MetaStore replica it hosts that runs.
+func (d *Device) report(out *DeviceOutput) {
+	out.Reported = true
+	for i, a := range d.metas {
+		if a != nil && a.Shard() != nil && !slices.ContainsFunc(d.removed, func(r removedMeta) bool { return !r.reported && r.slot == i }) {
+			out.Metas = append(out.Metas, a.Shard().Report(nil))
+		}
+	}
+}
+
+// MetaSettings is the settings of group g's replica on a device: tmpl's, with g's voters as its
+// peers, each at the loop ds names for its disk, and as its storage the group's boot state, its
+// Boot voters' configuration, of which a replica outside it takes none.
+func MetaSettings(tmpl meta.RoundConfig, g *meta.Group, ds []meta.DiskAddr) meta.RoundConfig {
+	cfg := tmpl
+	cfg.Shard.Raft.Group, cfg.Shard.Raft.Seed = g.ID, tmpl.Shard.Raft.Seed^g.ID
+	cfg.Shard.Raft.Peers = metaPeers(g, ds)
+	cfg.Shard.Raft.Storage = raftshard.NewStorage()
+	if g.Boot > 0 {
+		cs := raftpb.ConfState{}
+		for id := uint64(1); id <= g.Boot; id++ {
+			cs.Voters = append(cs.Voters, id)
+		}
+		if err := cfg.Shard.Raft.Storage.ApplySnapshot(raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: 1, Term: 1, ConfState: cs}}); err != nil {
+			panic(err)
+		}
+	}
+	return cfg
+}
+
+// metaPeers is g's voters, each at the loop ds names for its disk; one on a disk ds lacks is left
+// out, and its replica learns it from the voter's own messages.
+func metaPeers(g *meta.Group, ds []meta.DiskAddr) []raftshard.Peer {
+	var ps []raftshard.Peer
+	for _, v := range g.Voters {
+		if k := slices.IndexFunc(ds, func(a meta.DiskAddr) bool { return a.Disk == v.Disk }); k >= 0 {
+			ps = append(ps, raftshard.Peer{ID: v.ID, Node: ds[k].At})
+		}
+	}
+	return ps
+}
+
+// MetaSettingsOf is MetaSettings of each group in ps but the control-plane group's, for
+// DeviceConfig.Metas.
+func MetaSettingsOf(tmpl meta.RoundConfig, ctlGroup uint64, ps []meta.Group, ds []meta.DiskAddr) []meta.RoundConfig {
+	var cs []meta.RoundConfig
+	for i := range ps {
+		if ps[i].ID != ctlGroup {
+			cs = append(cs, MetaSettings(tmpl, &ps[i], ds))
+		}
+	}
+	return cs
 }
 
 // Authority points the replica's reports at the control-plane voter at.

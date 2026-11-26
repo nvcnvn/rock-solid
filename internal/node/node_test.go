@@ -611,12 +611,15 @@ func TestTheDiskMembershipIsHandedOn(t *testing.T) {
 	}
 }
 
-// The heartbeat carries the metadata replicas the loop last reported, and a delete from the voter
-// the node talks to reaches the loop only for a replica that report showed had learned its removal.
+// The heartbeat carries the metadata replicas each device last reported, and a delete from the
+// voter the node talks to reaches the loop only for a replica that report showed had learned its
+// removal.
 func TestADeleteReachesOnlyAReplicaThatLearnedItsRemoval(t *testing.T) {
 	r := newRun(t, 1)
 	reps := []meta.ReplicaReport{{Group: 5, ID: 3, ConfIndex: 4, Joint: true, Removed: true, Voters: []uint64{1, 2, 4}}, {Group: 5, ID: 7, ConfIndex: 4}, {Group: 6, ID: 3}}
-	r.n.Replicas(reps)
+	r.n.Replicas(1, reps[2:])
+	r.n.Replicas(2, reps[:1])
+	r.n.Replicas(1, reps[1:])
 	reps[0].Voters[0] = 9
 	if nr := r.report(); len(nr.Replicas) != 3 || nr.Replicas[0].Voters[0] != 1 || !nr.Replicas[0].Removed || nr.Replicas[1].ConfIndex != 4 {
 		t.Fatalf("the heartbeat reports %+v", nr.Replicas)
@@ -631,6 +634,50 @@ func TestADeleteReachesOnlyAReplicaThatLearnedItsRemoval(t *testing.T) {
 	r.from(ctl, del)
 	if !slices.Equal(r.out.Deletes, []meta.ReplicaRef{{Group: 5, ID: 3}}) {
 		t.Fatalf("handed the loop deletes %v, want replica 3 of group 5 alone", r.out.Deletes)
+	}
+	if r.ctx.Pool.(*sim.Pool).Live() != 0 {
+		t.Fatal("a buffer left")
+	}
+}
+
+// A membership, even an empty one, is handed on, with its shard map's plans unless an answer
+// carried a newer map before, so a stale plan that still names a replica a later map dropped, and
+// a delete then removed, never places it again; a clone keeps the plans and the deletes once the next messages overwrite the
+// node's buffers.
+func TestAPlanOlderThanTheNewestMapIsNotHandedOn(t *testing.T) {
+	r := newRun(t, 1)
+	plan := func(v uint64, ids ...uint64) func(pool core.BufPool, m *core.Msg) error {
+		g := meta.Group{ID: 5, LastID: 4, Boot: 3}
+		for _, id := range ids {
+			g.Voters = append(g.Voters, meta.Replica{ID: id, Node: 4, Disk: 1})
+		}
+		return func(pool core.BufPool, m *core.Msg) error {
+			return meta.EncodeDisks(pool, group, &meta.Membership{Disks: []meta.DiskAddr{{Disk: 1, Log: 7}}, MapV: v, Plans: []meta.Group{g}}, m)
+		}
+	}
+	r.from(ctl, func(pool core.BufPool, m *core.Msg) error {
+		return meta.EncodeDisks(pool, group, &meta.Membership{}, m)
+	})
+	if c, ok := r.out.Clone(); !ok || !c.Member {
+		t.Fatal("an empty membership, the first a node gets before its disks open, was not handed on")
+	}
+	r.n.Replicas(10, []meta.ReplicaReport{{Group: 5, ID: 3, Removed: true}})
+	r.from(ctl, plan(2, 4))
+	planned, _ := r.out.Clone()
+	r.from(ctl, func(pool core.BufPool, m *core.Msg) error {
+		return meta.EncodeDelete(pool, group, []meta.ReplicaRef{{Group: 5, ID: 3}}, m)
+	})
+	deleted, ok := r.out.Clone()
+	r.from(ctl, plan(1, 3))
+	if !r.out.Member || r.out.Plans != nil {
+		t.Fatalf("an answer at an older map handed the loop plans %+v", r.out.Plans)
+	}
+	r.from(ctl, plan(2, 4))
+	if len(r.out.Plans) != 1 || r.out.Plans[0].Voters[0].ID != 4 {
+		t.Fatalf("an answer at the newest map handed the loop plans %+v", r.out.Plans)
+	}
+	if !ok || !slices.Equal(deleted.Deletes, []meta.ReplicaRef{{Group: 5, ID: 3}}) || len(planned.Plans) != 1 || planned.Plans[0].Voters[0].ID != 4 {
+		t.Fatalf("the clones hold deletes %v and plans %+v", deleted.Deletes, planned.Plans)
 	}
 	if r.ctx.Pool.(*sim.Pool).Live() != 0 {
 		t.Fatal("a buffer left")

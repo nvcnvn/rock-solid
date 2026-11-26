@@ -306,7 +306,7 @@ func TestTheNodesOutputFeedsADevice(t *testing.T) {
 	r.settle()
 	pg := chunkstore.PGEntry{Members: []chunkstore.Member{{Disk: 5}}, Interval: 1}
 	o := Output{
-		Moved: true, Ctl: ctl,
+		Moved: true, Ctl: ctl, Member: true,
 		Disks: []meta.DiskAddr{{Disk: 5, Log: r.opened.Log, At: core.NodeID{Node: 4, Loop: 3}}},
 		Hands: []Hand{{Device: 8, Table: chunkstore.SessionTable{Version: 6, Next: 7}}, {Device: 7, Table: chunkstore.SessionTable{Version: 3, Next: 4}}},
 		Table: &chunkstore.Table{Epoch: 2, Pools: []chunkstore.PoolTable{{ID: 1, Replicas: 1, MinLive: 1, PGs: []chunkstore.PGEntry{pg}}}},

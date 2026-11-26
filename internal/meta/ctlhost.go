@@ -386,7 +386,9 @@ func (h *CtlHost) report(ctx *core.Context, ev *core.Event, out *CtlHostOutput) 
 			out.Actions = append(out.Actions, a)
 		}
 	}
-	h.sendDisks(ctx, ev.Peer, out)
+	if h.leased(ctx) {
+		h.sendDisks(ctx, ev.Peer, out)
+	}
 }
 
 // reportOwn reports the host's replica every reportInterval: to its Control while it has one, or
@@ -455,6 +457,9 @@ func (h *CtlHost) deleted(ctx *core.Context, refs []ReplicaRef, out *CtlHostOutp
 // sendDisks answers a node's report with the membership: each committed disk not gone that its
 // node's last report opened, at the loop that report names for it, so the node learns its own
 // disks' IDs and its replicas the loops, sizes and fills of their members, and the pools' grants.
+// It is sent only while the leader's lease runs, as deletes are: a leader cut off from its group
+// keeps its Control until it hears of a later term, and its older shard map could place, on a node
+// that restarted and so knows no newer map, a replica a delete since removed.
 func (h *CtlHost) sendDisks(ctx *core.Context, to core.NodeID, out *CtlHostOutput) {
 	h.ctl.Membership(lease.Now(ctx), &h.member, func(d *DiskEntry) (core.NodeID, bool) {
 		i, ok := slices.BinarySearchFunc(h.nodes, d.Node, func(n heardNode, id uint32) int { return cmp.Compare(n.at.Node, id) })
