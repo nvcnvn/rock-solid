@@ -69,13 +69,15 @@ type SessionAnswer struct {
 	Grants  []PoolGrant
 }
 
-// SessionEntry is a session as the table commits it: its node, its newest incarnation, and the
-// table version that fenced it, 0 while it is live.
+// SessionEntry is a session as the table commits it: its node, its newest incarnation, the table
+// version that fenced it, 0 while it is live, and the client's start request, which a resent start
+// is answered from.
 type SessionEntry struct {
 	ID          uint64
 	Node        uint32
 	Incarnation uint64
 	Fenced      uint64
+	Start       uint64
 }
 
 // SessionTable is the committed session table: its version, which counts fence commits, the
@@ -118,9 +120,13 @@ type sessTimer struct {
 // SessionTable is the committed session table.
 func (c *Control) SessionTable() *SessionTable { return &c.sess }
 
-// StartSession stages a session for a daemon on node, which the next Step commits with a new ID.
+// StartSession stages a session for a daemon on node's start request, which the next Step commits
+// with a new ID, or answers with the session that request already started.
 func (c *Control) StartSession(node uint32, request uint64) {
-	c.starts = append(c.starts, SessionStart{Node: node, Request: request})
+	s := SessionStart{Node: node, Request: request}
+	if !slices.Contains(c.starts, s) {
+		c.starts = append(c.starts, s)
+	}
 }
 
 // FetchAnswer is the session table at t as storage nodes hold it, for a node's fetch, or false
@@ -338,6 +344,14 @@ func (c *Control) sessionStep(t lease.Time, token uint64, head bool, out *Contro
 	if !c.leased {
 		return false, nil
 	}
+	c.starts = slices.DeleteFunc(c.starts, func(s SessionStart) bool {
+		i := slices.IndexFunc(c.sess.Sessions, func(e SessionEntry) bool { return e.Node == s.Node && e.Start == s.Request })
+		if i >= 0 {
+			s.ID = c.sess.Sessions[i].ID
+			out.Started = append(out.Started, s)
+		}
+		return i >= 0
+	})
 	p := &commit{token: token, next: c.ctlState, session: true}
 	n := &p.next.sess
 	n.Sessions = slices.Clone(c.sess.Sessions)
@@ -368,7 +382,7 @@ func (c *Control) sessionStep(t lease.Time, token uint64, head bool, out *Contro
 		}
 		s.ID = max(n.Next, 1)
 		n.Next = s.ID + 1
-		e := SessionEntry{ID: s.ID, Node: s.Node, Incarnation: 1}
+		e := SessionEntry{ID: s.ID, Node: s.Node, Incarnation: 1, Start: s.Request}
 		n.Sessions = append(n.Sessions, e)
 		p.started = append(p.started, s)
 		ops = append(ops, Put(sessionKey(s.ID), appendSession(nil, &e)))
@@ -402,17 +416,21 @@ func appendSessionHead(dst []byte, t *SessionTable) []byte {
 	return bigEndian.AppendUint64(bigEndian.AppendUint64(bigEndian.AppendUint64(dst, t.Next), t.Version), t.Acked)
 }
 
-// A session's entry: its node, its incarnation and the version that fenced it, as uvarints.
+// A session's entry: its node, its incarnation, the version that fenced it and its start request,
+// as uvarints.
 func appendSession(dst []byte, e *SessionEntry) []byte {
-	return binary.AppendUvarint(binary.AppendUvarint(binary.AppendUvarint(dst, uint64(e.Node)), e.Incarnation), e.Fenced)
+	for _, v := range [...]uint64{uint64(e.Node), e.Incarnation, e.Fenced, e.Start} {
+		dst = binary.AppendUvarint(dst, v)
+	}
+	return dst
 }
 
 // decodeSession decodes session id's entry; ErrMalformed for a node over 32 bits, incarnation 0,
 // or anything appendSession would not write.
 func decodeSession(id uint64, b []byte) (SessionEntry, error) {
 	d := decoder{b: b}
-	node, inc, fenced := d.uvarint(), d.uvarint(), d.uvarint()
-	e := SessionEntry{ID: id, Node: uint32(node), Incarnation: inc, Fenced: fenced}
+	node, inc, fenced, start := d.uvarint(), d.uvarint(), d.uvarint(), d.uvarint()
+	e := SessionEntry{ID: id, Node: uint32(node), Incarnation: inc, Fenced: fenced, Start: start}
 	if d.bad || len(d.b) != 0 || node > math.MaxUint32 || inc == 0 || !bytes.Equal(appendSession(nil, &e), b) {
 		return SessionEntry{}, ErrMalformed
 	}

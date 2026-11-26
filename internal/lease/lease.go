@@ -24,6 +24,15 @@ type Config struct {
 	MaxMargin uint64
 	// Resume is how much sooner than its margin alone a holder ends each lease, for a suspend too short to deliver Resumed; a production holder takes core.ResumeThreshold, and only a test that draws no such suspend may leave it 0.
 	Resume core.Tick
+	// Plants plants bugs in a holder, which only its owners' tests ask for.
+	Plants Plants
+}
+
+// Plants are bugs a test of a holder's owner plants, each the sessions model's counterexample:
+// the lease counted from the grant's arrival rather than its ask's send, a margin without
+// lease_drift, and the step check at 1 + lease_drift / 2.
+type Plants struct {
+	CountFromReply, NoDrift, HalfStep bool
 }
 
 // DefaultConfig is a 4 s lease, a 1 s heartbeat, a 100 ms rate gap, a 10 s rate window, a lease_drift of 1%, a max_margin of 50% and core.ResumeThreshold for a suspend that delivers no Resumed.
@@ -58,8 +67,9 @@ type held struct {
 	win     []sample
 	bound   uint64
 	newestG core.Tick
-	// last is the last grant: its ask on both clocks, the grantor's raw reading, the margin and support epoch of the lease it gave, if it gave one.
+	// last is the last grant: its ask on both clocks, the grantor's raw reading, the margin and support epoch of the lease it gave, if it gave one; cs and csB are where the lease's count starts, its ask.
 	as, asB, ag core.Tick
+	cs, csB     core.Tick
 	am          uint64
 	support     uint64
 	gave        bool
@@ -88,10 +98,15 @@ type plants struct {
 	slowerClock, beforeBound, widenLate, marginExact, noRunWindow, keepOnNewRun bool
 	noResumedEnd, noStepCheck, stepOnGrantsOnly, halfStep, checkBeforeBound     bool
 	fasterClock, noRestartWait                                                  bool
+	countFromReply, noDrift                                                     bool
 }
 
 // NewHolder holds no lease.
-func NewHolder(cfg Config) *Holder { return &Holder{cfg: cfg} }
+func NewHolder(cfg Config) *Holder {
+	h := &Holder{cfg: cfg}
+	h.plant.countFromReply, h.plant.noDrift, h.plant.halfStep = cfg.Plants.CountFromReply, cfg.Plants.NoDrift, cfg.Plants.HalfStep
+	return h
+}
 
 func (h *Holder) find(g core.NodeID) *held {
 	i, ok := slices.BinarySearchFunc(h.peers, g, func(x held, g core.NodeID) int { return compareNode(x.peer, g) })
@@ -185,6 +200,10 @@ func (h *Holder) OnGrant(g core.NodeID, gr Grant, t Time) (tripped bool) {
 	}
 	p.newestG = gr.Raw
 	p.as, p.asB, p.ag, p.support = p.askS, p.askSB, gr.Raw, gr.Support
+	p.cs, p.csB = p.as, p.asB
+	if h.plant.countFromReply {
+		p.cs, p.csB = t.Raw, t.Boot
+	}
 	p.am = h.cfg.Drift
 	switch {
 	case p.bound == 0:
@@ -192,6 +211,8 @@ func (h *Holder) OnGrant(g core.NodeID, gr Grant, t Time) (tripped bool) {
 		p.am = h.cfg.Drift + max(p.bound, PPM+2*h.cfg.Drift) - (PPM + 2*h.cfg.Drift)
 	case h.plant.marginExact:
 		p.am = max(h.cfg.Drift, (max(p.bound, PPM)-PPM)*PPM/max(p.bound, PPM))
+	case h.plant.noDrift:
+		p.am = h.cfg.Margin(p.bound) - h.cfg.Drift
 	default:
 		p.am = h.cfg.Margin(p.bound)
 	}
@@ -290,9 +311,9 @@ func (h *Holder) valid(p *held, t Time) bool {
 	}
 	left := h.left(p)
 	if h.plant.slowerClock {
-		return sub(t.Raw, p.as) < left || sub(t.Boot, p.asB) < left
+		return sub(t.Raw, p.cs) < left || sub(t.Boot, p.csB) < left
 	}
-	return sub(t.Raw, p.as) < left && sub(t.Boot, p.asB) < left
+	return sub(t.Raw, p.cs) < left && sub(t.Boot, p.csB) < left
 }
 
 // left is the lease less the margin, rounded down, and less Resume.
@@ -305,7 +326,7 @@ func (h *Holder) left(p *held) core.Tick {
 // end is the boot time at which the lease from p ends, the earlier of the two clocks' ends read as boot ticks.
 func (h *Holder) end(p *held, t Time) core.Tick {
 	left := h.left(p)
-	return min(p.asB+left, t.Boot+sub(p.as+left, t.Raw))
+	return min(p.csB+left, t.Boot+sub(p.cs+left, t.Raw))
 }
 
 // Margin is the margin of the lease from g's last grant, in parts per million, and whether it widened past lease_drift, which the holder reports with the pair; a margin of max_margin or more gave no lease.

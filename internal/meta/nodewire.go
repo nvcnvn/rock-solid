@@ -25,7 +25,11 @@ import (
 // order, each pool's ID and grants outstanding.
 // A replica's asks for new intervals are a count and each ask's epoch, pool, PG index and interval,
 // with no token. The leader's answer that a node delete metadata replicas is a count and each
-// replica's group and ID, with no token.
+// replica's group and ID, with no token. A session heartbeat's token is its request and its body
+// its session, send time, the answer it names and that answer's arrival, its issuer's term and
+// start, and a count and each pool's ID, ask, buffered, held and flushed blocks; its answer's token
+// is the request it answers and its body the leader's run ID and raw time, the status, the issuer's
+// term and start, and a count and each pool's ID and grant.
 const (
 	KindNodeReport   byte = 0x42
 	KindSessionFetch byte = 0x43
@@ -39,6 +43,8 @@ const (
 	KindDisks        byte = 0x4b
 	KindAsks         byte = 0x4c
 	KindDelete       byte = 0x4f
+	KindSessionBeat  byte = 0x50
+	KindRenewed      byte = 0x51
 )
 
 // Membership is the leader's answer to a node's report: the committed disks, and each pool's
@@ -446,4 +452,81 @@ func DecodeAsks(pool core.BufPool, msg *core.Msg, dst []chunkstore.PGFields) ([]
 		return dst[:0], ErrMalformed
 	}
 	return dst, nil
+}
+
+// EncodeSessionBeat writes a client's session heartbeat b into msg, or returns the pool's error.
+func EncodeSessionBeat(pool core.BufPool, group uint64, b *SessionBeat, msg *core.Msg) error {
+	body := binary.AppendUvarint(nil, b.Session)
+	for _, v := range [...]uint64{uint64(b.Sent), b.Answered, uint64(b.Arrived), b.Issuer.Term, uint64(b.Issuer.Start), uint64(len(b.Pools))} {
+		body = binary.AppendUvarint(body, v)
+	}
+	for _, p := range b.Pools {
+		for _, v := range [...]uint64{uint64(p.Pool), p.Ask, p.Buffered, p.Held, p.Flushed} {
+			body = binary.AppendUvarint(body, v)
+		}
+	}
+	return encodeBody(pool, group, KindSessionBeat, b.Request, body, msg)
+}
+
+// DecodeSessionBeat decodes a session heartbeat into b, reusing its Pools; one that does not
+// decode, names session 0 or request 0, or a pool ID over 32 bits, is ErrMalformed.
+func DecodeSessionBeat(pool core.BufPool, msg *core.Msg, b *SessionBeat) error {
+	_, _, request, _ := Peek(msg)
+	body, err := msgBody(pool, KindSessionBeat, msg)
+	if err != nil {
+		return err
+	}
+	d := decoder{b: body}
+	*b = SessionBeat{Session: d.uvarint(), Request: request, Sent: core.Tick(d.uvarint()), Answered: d.uvarint(), Arrived: core.Tick(d.uvarint()),
+		Issuer: Issuer{Term: d.uvarint(), Start: core.Tick(d.uvarint())}, Pools: b.Pools[:0]}
+	for range d.count() {
+		var p PoolBeat
+		id := d.uvarint()
+		p.Pool, p.Ask, p.Buffered, p.Held, p.Flushed = core.PoolID(id), d.uvarint(), d.uvarint(), d.uvarint(), d.uvarint()
+		d.bad = d.bad || id > 0xffffffff
+		b.Pools = append(b.Pools, p)
+	}
+	if d.bad || len(d.b) != 0 || b.Session == 0 || request == 0 {
+		b.Pools = b.Pools[:0]
+		return ErrMalformed
+	}
+	return nil
+}
+
+// EncodeRenewed writes the leader's answer a to a session heartbeat, from its loop's run ID run,
+// into msg, or returns the pool's error.
+func EncodeRenewed(pool core.BufPool, group, run uint64, a *SessionAnswer, msg *core.Msg) error {
+	body := binary.AppendUvarint(nil, run)
+	for _, v := range [...]uint64{uint64(a.Raw), uint64(a.Status), a.Issuer.Term, uint64(a.Issuer.Start), uint64(len(a.Grants))} {
+		body = binary.AppendUvarint(body, v)
+	}
+	for _, g := range a.Grants {
+		body = binary.AppendUvarint(binary.AppendUvarint(body, uint64(g.Pool)), g.Grant)
+	}
+	return encodeBody(pool, group, KindRenewed, a.Request, body, msg)
+}
+
+// DecodeRenewed decodes the answer to a session heartbeat into a, reusing its Grants, and returns
+// the leader's run ID; one that does not decode, answers request 0, or has an unknown status or a
+// pool ID over 32 bits, is ErrMalformed.
+func DecodeRenewed(pool core.BufPool, msg *core.Msg, a *SessionAnswer) (uint64, error) {
+	_, _, request, _ := Peek(msg)
+	body, err := msgBody(pool, KindRenewed, msg)
+	if err != nil {
+		return 0, err
+	}
+	d := decoder{b: body}
+	run := d.uvarint()
+	raw, status := core.Tick(d.uvarint()), d.uvarint()
+	*a = SessionAnswer{Request: request, Raw: raw, Status: SessionStatus(status), Issuer: Issuer{Term: d.uvarint(), Start: core.Tick(d.uvarint())}, Grants: a.Grants[:0]}
+	for range d.count() {
+		id, g := d.uvarint(), d.uvarint()
+		d.bad = d.bad || id > 0xffffffff
+		a.Grants = append(a.Grants, PoolGrant{Pool: core.PoolID(id), Grant: g})
+	}
+	if d.bad || len(d.b) != 0 || request == 0 || status < uint64(SessionRenewed) || status > uint64(SessionFenced) {
+		a.Grants = a.Grants[:0]
+		return 0, ErrMalformed
+	}
+	return run, nil
 }

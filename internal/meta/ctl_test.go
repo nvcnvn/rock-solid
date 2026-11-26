@@ -22,9 +22,11 @@ type ctlRun struct {
 	now   core.Tick
 	// raw is the leader's CLOCK_MONOTONIC_RAW, which only session tests move.
 	raw core.Tick
-	// txn is the last Txn proposed, out the output of the last answer.
-	txn Txn
-	out ControlOutput
+	// txn is the last Txn proposed, out the output of the last answer, and started the starts the
+	// last step answered from the table.
+	txn     Txn
+	out     ControlOutput
+	started []SessionStart
 	// reports is each node's last report, which run sends again each second.
 	reports map[uint32]NodeReport
 	// classes is the class node n's disk reports, if n is in range.
@@ -116,6 +118,7 @@ func (r *ctlRun) propose(in *ControlInputs) bool {
 	if err := r.ctl.Step(in, r.token, &out); err != nil {
 		r.t.Fatal(err)
 	}
+	r.started = append(r.started[:0], out.Started...)
 	if !out.Propose {
 		return false
 	}

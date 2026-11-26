@@ -459,3 +459,41 @@ func TestEveryMessageKindIsDistinct(t *testing.T) {
 		t.Fatalf("found %d kinds: %v", len(seen), seen)
 	}
 }
+
+func FuzzDecodeSessionBeat(f *testing.F) {
+	fuzzNodeWire(f, func(pool core.BufPool, m *core.Msg) {
+		b := SessionBeat{Session: 3, Request: 1<<32 | 5, Sent: 70, Answered: 1<<32 | 4, Arrived: 60, Issuer: Issuer{Term: 2, Start: 9},
+			Pools: []PoolBeat{{Pool: 1, Ask: 2, Buffered: 3, Held: 4, Flushed: 5}}}
+		_ = EncodeSessionBeat(pool, 1, &b, m)
+	}, func(pool core.BufPool, m *core.Msg) (core.Msg, bool) {
+		var b SessionBeat
+		var again core.Msg
+		g, _, _, _ := Peek(m)
+		if DecodeSessionBeat(pool, m, &b) != nil {
+			return again, false
+		}
+		if err := EncodeSessionBeat(pool, g, &b, &again); err != nil {
+			panic(err)
+		}
+		return again, true
+	})
+}
+
+func FuzzDecodeRenewed(f *testing.F) {
+	fuzzNodeWire(f, func(pool core.BufPool, m *core.Msg) {
+		a := SessionAnswer{Request: 1<<32 | 5, Raw: 80, Status: SessionRenewed, Issuer: Issuer{Term: 2, Start: 9}, Grants: []PoolGrant{{Pool: 1, Grant: 7}}}
+		_ = EncodeRenewed(pool, 1, 6, &a, m)
+	}, func(pool core.BufPool, m *core.Msg) (core.Msg, bool) {
+		var a SessionAnswer
+		var again core.Msg
+		g, _, _, _ := Peek(m)
+		run, err := DecodeRenewed(pool, m, &a)
+		if err != nil {
+			return again, false
+		}
+		if err := EncodeRenewed(pool, g, run, &a, &again); err != nil {
+			panic(err)
+		}
+		return again, true
+	})
+}

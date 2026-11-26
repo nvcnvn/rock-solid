@@ -82,7 +82,12 @@ type CtlHost struct {
 	// loop that asked.
 	starting []starter
 	// admins are the operator's commands the Control took and the host has not yet answered.
-	admins  []adminWait
+	admins []adminWait
+	// grantor is the loop's, whose run ID every answer to a session heartbeat carries; beat and
+	// renewed are the last heartbeat taken and its answer.
+	grantor *lease.Grantor
+	beat    SessionBeat
+	renewed SessionAnswer
 	member  Membership
 	sout    Output
 	cout    ControlOutput
@@ -200,7 +205,7 @@ func (h *CtlHost) start(ctx *core.Context, out *CtlHostOutput) error {
 	if err != nil {
 		return err
 	}
-	h.shard, h.cfg = s, Config{}
+	h.shard, h.grantor, h.cfg = s, h.cfg.Raft.Grantor, Config{}
 	h.shard.Start(ctx, &h.sout)
 	h.arm(ctx, out)
 	return nil
@@ -304,7 +309,7 @@ func (h *CtlHost) recvGroup(ctx *core.Context, ev *core.Event, out *CtlHostOutpu
 		if h.asks, err = DecodeAsks(ctx.Pool, &ev.Msg, h.asks); err == nil && h.ctl != nil {
 			h.ctl.Asked(ev.Peer.Node, h.asks)
 		}
-	case kind != KindSessionFetch && kind != KindTableFetch && kind != KindSessionStart && kind != KindAdmin:
+	case kind != KindSessionFetch && kind != KindTableFetch && kind != KindSessionStart && kind != KindAdmin && kind != KindSessionBeat:
 	case h.ctl == nil:
 		h.redirect(ctx, ev.Peer, out)
 	case kind == KindTableFetch:
@@ -313,6 +318,8 @@ func (h *CtlHost) recvGroup(ctx *core.Context, ev *core.Event, out *CtlHostOutpu
 		h.admin(ctx, ev, token, out)
 	case kind == KindSessionStart:
 		h.startSession(ctx, ev.Peer, token)
+	case kind == KindSessionBeat:
+		h.renew(ctx, ev, out)
 	default:
 		if t, ok := h.ctl.FetchAnswer(lease.Now(ctx), h.leased(ctx)); ok {
 			h.push(ctx, ev.Peer, token, &t, out)
@@ -470,6 +477,18 @@ func (h *CtlHost) startSession(ctx *core.Context, at core.NodeID, request uint64
 	}
 	h.starting = append(h.starting, s)
 	h.ctl.StartSession(at.Node, request)
+}
+
+// renew answers a client's session heartbeat from the Control, which leaves unanswered one it
+// may not answer, under the loop's run ID.
+func (h *CtlHost) renew(ctx *core.Context, ev *core.Event, out *CtlHostOutput) {
+	if DecodeSessionBeat(ctx.Pool, &ev.Msg, &h.beat) != nil || !h.ctl.Renew(lease.Now(ctx), h.leased(ctx), &h.beat, &h.renewed) {
+		return
+	}
+	a := core.Action{Kind: core.ActNetSend, Peer: ev.Peer, Reply: true}
+	if EncodeRenewed(ctx.Pool, h.group, h.grantor.Run(), &h.renewed, &a.Msg) == nil {
+		out.Actions = append(out.Actions, a)
+	}
 }
 
 // admin hands the Control an operator's command while the leader holds its lease, once per request
