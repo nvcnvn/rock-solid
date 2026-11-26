@@ -202,6 +202,9 @@ func parseCtl(args []string) (ctlConfig, error) {
 	if *node >= daemonNodes {
 		return cfg, fmt.Errorf("-node %d is not below %d, where a daemon's node lies", *node, daemonNodes)
 	}
+	if cfg.Group == math.MaxUint64 {
+		return cfg, errors.New("-group leaves no ID for the first data group, the next one")
+	}
 	if cfg.Memory < 0 || cfg.Memory >= 1<<43 {
 		return cfg, fmt.Errorf("-memory %d MiB is not 0 or a budget", cfg.Memory)
 	}
@@ -291,6 +294,9 @@ func parseNode(args []string) (nodeConfig, error) {
 	cfg.MetaOnly, cfg.Client = *role == "meta", *role == "client"
 	if *node >= daemonNodes || *pool > math.MaxUint32 {
 		return cfg, fmt.Errorf("-node %d is not below %d, where a daemon's node lies, or -pool %d is past 32 bits", *node, daemonNodes, *pool)
+	}
+	if cfg.Group == math.MaxUint64 {
+		return cfg, errors.New("-group leaves no ID for the first data group, the next one")
 	}
 	if cfg.Memory < 0 || cfg.Memory >= 1<<43 {
 		return cfg, fmt.Errorf("-memory %d MiB is not 0 or a budget", cfg.Memory)

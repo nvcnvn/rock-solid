@@ -78,34 +78,27 @@ func parseVolume(args []string) (volumeConfig, error) {
 }
 
 // createVolume creates a volume with cfg's record and a root directory of time now, and returns
-// its ID. It reads the shard map and the disks' loops from the control-plane leader, sends the
-// create to the data group's leader under a replay key, sending the same Txn again until it is
-// answered, and builds it again only for the ID a failed counter check answers with.
+// its ID. It reads the shard map and the disks' loops from the control-plane leader until they
+// place the create, sends it to the data group's leader under a replay key, sending the same Txn
+// again until it is answered, and builds it again only for the ID a failed counter check answers
+// with.
 func createVolume(cfg volumeConfig, now int64) (uint32, error) {
-	var m meta.Membership
-	if _, err := sendAdmin(cfg.adminConfig, &meta.Admin{Op: meta.AdminMembership}, &m); err != nil {
-		return 0, err
-	}
-	if !slices.ContainsFunc(m.Grants, func(g meta.PoolGrant) bool { return g.Pool == cfg.Volume.Pool }) {
-		return 0, fmt.Errorf("pool %d does not exist", cfg.Volume.Pool)
-	}
-	smap := meta.ShardMap{Groups: m.Plans}
-	if err := smap.CheckRanges(); err != nil {
-		return 0, fmt.Errorf("the control plane has no shard map yet: %w", err)
-	}
 	root := meta.Attr{Mode: meta.ModeDir | 0o755, Nlink: 2, Atime: now, Mtime: now, Ctime: now}
 	f := meta.FS{Volume: 1, Req: &meta.Request{ID: rand.Uint64()}}
 	end := time.Now().Add(cfg.Timeout)
+	var m meta.Membership
 	for {
 		if err := f.CreateVolume(&cfg.Volume, &root); err != nil {
 			return 0, err
 		}
-		group, err := smap.Route(&f.Txn)
+		g, err := placed(cfg, &m, &f.Txn, end)
 		if err != nil {
 			return 0, err
 		}
-		r, err := sendTxn(cfg.Peers, &m, &smap.Groups[slices.IndexFunc(smap.Groups, func(g meta.Group) bool { return g.ID == group })], &f.Txn, end)
+		r, err := sendTxn(cfg.Peers, &m, g, &f.Txn, end)
 		switch {
+		case errors.Is(err, errUnanswered):
+			return 0, fmt.Errorf("%w; volume %d may exist, and a second create would make another: no command lists volumes yet, its record is volume/%d/record in group %d", err, f.Volume, f.Volume, g.ID)
 		case err != nil:
 			return 0, err
 		case r.FailedCheck == -1:
@@ -124,6 +117,51 @@ func createVolume(cfg volumeConfig, now int64) (uint32, error) {
 	}
 }
 
+// errNotYet is a membership that does not yet say where a create goes.
+var errNotYet = errors.New("not yet known")
+
+// placed reads the membership into m until it places t, or until end, and returns the group t routes to.
+func placed(cfg volumeConfig, m *meta.Membership, t *meta.Txn, end time.Time) (*meta.Group, error) {
+	for {
+		if _, err := sendAdmin(cfg.adminConfig, &meta.Admin{Op: meta.AdminMembership}, m); err != nil {
+			return nil, err
+		}
+		g, err := target(m, cfg.Volume.Pool, t)
+		if !errors.Is(err, errNotYet) || !time.Now().Before(end) {
+			return g, err
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// target is the group of m that t routes to. It refuses a pool m's grants do not hold, unless they
+// hold none, as a control-plane leader's do until its first grant step; that, no shard map or a
+// group with no voter, as one committed before its node's disk was up, wraps errNotYet.
+func target(m *meta.Membership, pool core.PoolID, t *meta.Txn) (*meta.Group, error) {
+	switch {
+	case len(m.Grants) == 0:
+		return nil, fmt.Errorf("%w: the control plane knows no pool", errNotYet)
+	case !slices.ContainsFunc(m.Grants, func(g meta.PoolGrant) bool { return g.Pool == pool }):
+		return nil, fmt.Errorf("pool %d does not exist", pool)
+	}
+	smap := meta.ShardMap{Groups: m.Plans}
+	if err := smap.CheckRanges(); err != nil {
+		return nil, fmt.Errorf("%w: no shard map: %w", errNotYet, err)
+	}
+	id, err := smap.Route(t)
+	if err != nil {
+		return nil, err
+	}
+	g := &m.Plans[slices.IndexFunc(m.Plans, func(g meta.Group) bool { return g.ID == id })]
+	if len(g.Voters) == 0 {
+		return nil, fmt.Errorf("%w: group %d has no voter", errNotYet, id)
+	}
+	return g, nil
+}
+
+// errUnanswered is a Txn sent and never answered, which may have committed.
+var errUnanswered = errors.New("sent and not answered")
+
 // sendTxn sends t to group g's leader and returns its result. It tries g's voters in turn at the
 // loops m names for their disks, each at its node's first-loop address in peers plus the loop,
 // goes to the leader a NotLeader names, and sends t again, unchanged, after a dropped answer, a
@@ -132,12 +170,8 @@ func sendTxn(peers []voter, m *meta.Membership, g *meta.Group, t *meta.Txn, end 
 	pool := core.NewPool([][]byte{make([]byte, tcp.MaxData+core.BlockSize)}, 0)
 	self := core.NodeID{Node: 1<<31 | rand.Uint32()>>1}
 	token := rand.Uint64() >> 1
-	last := errors.New("no voter tried")
+	last, sent := errors.New("no voter tried"), false
 	for at := 0; time.Now().Before(end); time.Sleep(200 * time.Millisecond) {
-		if len(g.Voters) == 0 {
-			last = fmt.Errorf("group %d has no voter yet", g.ID)
-			continue
-		}
 		v := g.Voters[at%len(g.Voters)]
 		at++
 		addr, err := loopAddr(peers, m, v)
@@ -149,7 +183,8 @@ func sendTxn(peers []voter, m *meta.Membership, g *meta.Group, t *meta.Txn, end 
 		if deadline.After(end) {
 			deadline = end
 		}
-		a, err := tryTxn(pool, addr, self, g.ID, token, t, deadline)
+		a, out, err := tryTxn(pool, addr, self, g.ID, token, t, deadline)
+		sent = sent || out
 		var nl meta.NotLeader
 		switch {
 		case err != nil:
@@ -172,6 +207,9 @@ func sendTxn(peers []voter, m *meta.Membership, g *meta.Group, t *meta.Txn, end 
 			return a.Result, nil
 		}
 	}
+	if sent {
+		return meta.Result{}, fmt.Errorf("%w by group %d's leader: %w", errUnanswered, g.ID, last)
+	}
 	return meta.Result{}, fmt.Errorf("no answer from group %d's leader: %w", g.ID, last)
 }
 
@@ -189,30 +227,31 @@ func loopAddr(peers []voter, m *meta.Membership, v meta.Replica) (netip.AddrPort
 	return netip.AddrPortFrom(peers[j].Addr.Addr(), peers[j].Addr.Port()+uint16(at.Loop)), nil
 }
 
-// tryTxn sends t under token to the loop at addr and waits until deadline for its answer.
-func tryTxn(pool core.BufPool, addr netip.AddrPort, self core.NodeID, group, token uint64, t *meta.Txn, deadline time.Time) (meta.Answer, error) {
+// tryTxn sends t under token to the loop at addr and waits until deadline for its answer; it
+// reports whether it sent t.
+func tryTxn(pool core.BufPool, addr netip.AddrPort, self core.NodeID, group, token uint64, t *meta.Txn, deadline time.Time) (meta.Answer, bool, error) {
 	c, err := tcp.Dial(addr, self, pool, time.Until(deadline))
 	if err != nil {
-		return meta.Answer{}, err
+		return meta.Answer{}, false, err
 	}
 	defer func() { _ = c.Close() }()
 	var msg core.Msg
 	if err := meta.EncodeTxn(pool, group, token, t, &msg); err != nil {
-		return meta.Answer{}, err
+		return meta.Answer{}, false, err
 	}
 	if err := c.Send(&msg); err != nil {
-		return meta.Answer{}, err
+		return meta.Answer{}, true, err
 	}
 	for {
 		if err := c.Recv(deadline, &msg); err != nil {
-			return meta.Answer{}, err
+			return meta.Answer{}, true, err
 		}
 		g, kind, tok, ok := meta.Peek(&msg)
 		if ok && g == group && kind == meta.KindAnswer && tok == token {
 			var a meta.Answer
 			err := meta.DecodeAnswer(pool, &msg, &a)
 			freeMsg(pool, &msg)
-			return a, err
+			return a, true, err
 		}
 		freeMsg(pool, &msg)
 	}

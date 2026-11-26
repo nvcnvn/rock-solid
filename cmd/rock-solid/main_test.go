@@ -43,6 +43,7 @@ func TestParseNodeRefusesABadConfiguration(t *testing.T) {
 		"-node 2 -ctl 1=127.0.0.1:7000 -device /dev/a",
 		"-node 2 -ctl 1=127.0.0.1:7000 -listen 127.0.0.1:7100 -device /dev/a -role data",
 		"-node 2 -ctl 1=127.0.0.1:7000 -listen 127.0.0.1:7100 -device /dev/a -role client",
+		"-node 2 -group 18446744073709551615 -ctl 1=127.0.0.1:7000 -listen 127.0.0.1:7100 -device /dev/a",
 	} {
 		if _, err := parseNode(strings.Fields(args)); err == nil {
 			t.Errorf("%q taken", args)
@@ -51,7 +52,7 @@ func TestParseNodeRefusesABadConfiguration(t *testing.T) {
 }
 
 // A voter's node ID past 32 bits, or in the upper half the command line draws its own from, is
-// refused.
+// refused, as is a group ID with no next ID for the first data group.
 func TestParseCtlRefusesANodeOutOfRange(t *testing.T) {
 	if _, err := parseCtl(strings.Fields("-node 1 -voters 1=127.0.0.1:7000 -disk d")); err != nil {
 		t.Fatal(err)
@@ -60,6 +61,7 @@ func TestParseCtlRefusesANodeOutOfRange(t *testing.T) {
 		"-node 4294967297 -voters 1=127.0.0.1:7000 -disk d",
 		"-node 2147483648 -voters 2147483648=127.0.0.1:7000 -disk d",
 		"-node 1 -voters 1=127.0.0.1:7000,2147483649=127.0.0.1:7001 -disk d",
+		"-node 1 -group 18446744073709551615 -voters 1=127.0.0.1:7000 -disk d",
 	} {
 		if _, err := parseCtl(strings.Fields(args)); err == nil {
 			t.Errorf("%q taken", args)

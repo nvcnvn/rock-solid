@@ -9609,6 +9609,9 @@ From [Key layout](design.md#metadata-layer-metastore) and [Sharding](design.md#m
 - A create writes the record, the counter past its ID and the root; sent again after its answer was
   lost, it is answered from its replay record and makes one volume; a stale ID fails the counter
   check, whose answer gives the next.
+- `rock-solid volume create` reads the membership again while it knows no pool, has no shard map
+  or routes to a group with no voter, and refuses a pool the grants do not hold; a create sent and
+  never answered fails saying the volume may exist, one never sent does not.
 - Over TCP and io_uring: `rock-solid volume create` on one storage node whose shard map gains its
   data group, a second create taking the next ID, and both the group and the volumes kept across a
   restart of the node and the control plane.
