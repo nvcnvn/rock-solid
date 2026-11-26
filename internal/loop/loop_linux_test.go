@@ -57,12 +57,12 @@ type counted struct {
 	afterWait func()
 }
 
-func (c *counted) Watch(fd int, token uint32) error {
+func (c *counted) Watch(fd int, token uint64) error {
 	c.ctl++
 	return c.Epoll.Watch(fd, token)
 }
 
-func (c *counted) Modify(fd int, token uint32, in, out bool) error {
+func (c *counted) Modify(fd int, token uint64, in, out bool) error {
 	c.ctl++
 	return c.Epoll.Modify(fd, token, in, out)
 }
@@ -682,4 +682,70 @@ func TestASlowReaderGetsEveryFrameInOrder(t *testing.T) {
 		t.Fatalf("the reader was not slow enough: %d mutes, %d unmutes, %d blocked writes, %d partial writes", muted, unmuted, blocked, partial)
 	}
 	t.Logf("%d frames echoed in order in %d passes: %d mutes, %d unmutes, %d blocked writes, %d partial writes", frames, l.Passes(), muted, unmuted, blocked, partial)
+}
+
+// A muted client that hangs up, closed and its slot taken by a new client after Wait reported the
+// hang-up but before the pass handles it, closes only itself: the event names the whole ID of the
+// connection it was reported for, not its slot.
+func TestAHangUpClosesNoReplacementInItsSlot(t *testing.T) {
+	k, err := loop.NewEpoll(loop.VMClockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ck := &counted{Epoll: k}
+	pool, err := loop.NewPool(8<<20, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, m := &looptest.Wire{}, &echo{}
+	l := loop.New(loop.Config{Pool: pool, ReadBudget: realBudget, QueueCap: 64 << 10}, ck, m, w)
+	w.L = l
+	pair := func() [2]int {
+		p, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = unix.Close(p[1]) })
+		return [2]int{p[0], p[1]}
+	}
+	add := func(fd int, peer bool) loop.ConnID {
+		c, err := l.AddConn(fd, peer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Connect(c, core.NodeID{Node: uint32(c.Slot())})
+		return c
+	}
+	p, old, fresh := pair(), pair(), pair()
+	t.Cleanup(func() {
+		k.Close()
+		_ = pool.Close()
+	})
+	add(p[0], true)
+	gone := add(old[0], false)
+	b, err := pool.Alloc(4 << 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !l.Queue(0, b, 4<<20, true) {
+		t.Fatal("queue refused")
+	}
+	l.Pass()
+	if err := unix.Shutdown(old[1], unix.SHUT_RDWR); err != nil {
+		t.Fatal(err)
+	}
+	var next loop.ConnID
+	ck.afterWait = func() {
+		ck.afterWait = nil
+		l.Close(gone)
+		next = add(fresh[0], false)
+	}
+	l.Pass()
+	if next.Slot() != gone.Slot() || next == gone {
+		t.Fatalf("the new client took %#x after %#x", next, gone)
+	}
+	if _, err := unix.FcntlInt(uintptr(fresh[0]), unix.F_GETFD, 0); err != nil || w.Lost != 0 {
+		t.Fatalf("the new client's descriptor: %v, %d connections closed under the driver", err, w.Lost)
+	}
+	l.Close(next)
 }

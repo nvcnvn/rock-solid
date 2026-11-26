@@ -58,7 +58,7 @@ func NewEpoll(vmclock string) (*Epoll, error) {
 	}
 	for _, w := range []struct {
 		fd  int
-		tok uint32
+		tok uint64
 	}{{e.wake, TokenWake}, {e.timer, TokenTimer}} {
 		if err := e.Watch(w.fd, w.tok); err != nil {
 			e.Close()
@@ -85,8 +85,8 @@ func (e *Epoll) Close() {
 	_ = e.vm.Close()
 }
 
-func (e *Epoll) ctl(op, fd int, token uint32, events uint32) error {
-	ev := unix.EpollEvent{Events: events, Fd: int32(token)}
+func (e *Epoll) ctl(op, fd int, token uint64, events uint32) error {
+	ev := unix.EpollEvent{Events: events, Fd: int32(uint32(token)), Pad: int32(token >> 32)}
 	if err := unix.EpollCtl(e.ep, op, fd, &ev); err != nil {
 		return fmt.Errorf("loop: epoll_ctl of fd %d: %w", fd, err)
 	}
@@ -94,12 +94,12 @@ func (e *Epoll) ctl(op, fd int, token uint32, events uint32) error {
 }
 
 // Watch adds fd, level-triggered, so a connection left unread past its budget is reported again.
-func (e *Epoll) Watch(fd int, token uint32) error {
+func (e *Epoll) Watch(fd int, token uint64) error {
 	return e.ctl(unix.EPOLL_CTL_ADD, fd, token, unix.EPOLLIN|unix.EPOLLRDHUP)
 }
 
 // Modify sets whether fd is reported when readable, half-closed by its peer, or writable.
-func (e *Epoll) Modify(fd int, token uint32, in, out bool) error {
+func (e *Epoll) Modify(fd int, token uint64, in, out bool) error {
 	var ev uint32
 	if in {
 		ev |= unix.EPOLLIN | unix.EPOLLRDHUP
@@ -131,7 +131,7 @@ func (e *Epoll) Wait(ready []Ready, block bool) []Ready {
 	}
 	for i := range n {
 		ev := &e.events[i]
-		tok := uint32(ev.Fd)
+		tok := uint64(uint32(ev.Fd)) | uint64(uint32(ev.Pad))<<32
 		switch tok {
 		case TokenWake:
 			_, _ = rawRead(e.wake, e.drain[:])

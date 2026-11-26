@@ -17,7 +17,7 @@ type Kernel struct {
 	s      *sim.Scheduler
 	node   uint32
 	fds    []unix.PollFd
-	tokens []uint32
+	tokens []uint64
 	woken  bool
 	armed  core.Tick
 	l      *loop.Loop
@@ -34,7 +34,7 @@ func (k *Kernel) Attach(l *loop.Loop) { k.l = l }
 func (k *Kernel) Err() error { return k.err }
 
 // Watch adds fd.
-func (k *Kernel) Watch(fd int, token uint32) error {
+func (k *Kernel) Watch(fd int, token uint64) error {
 	k.fds = append(k.fds, unix.PollFd{Fd: int32(fd), Events: unix.POLLIN})
 	k.tokens = append(k.tokens, token)
 	return nil
@@ -50,7 +50,7 @@ func (k *Kernel) find(fd int) int {
 }
 
 // Modify sets whether fd is polled for reading and for writing.
-func (k *Kernel) Modify(fd int, _ uint32, in, out bool) error {
+func (k *Kernel) Modify(fd int, _ uint64, in, out bool) error {
 	i := k.find(fd)
 	if i < 0 {
 		return fmt.Errorf("looptest: fd %d is not watched", fd)

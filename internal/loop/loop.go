@@ -3,6 +3,7 @@ package loop
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sync/atomic"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -58,10 +59,11 @@ type Enter struct {
 
 // ConnID is the number a loop gives a connection, the one its trace records name it by: its
 // slot in the low 32 bits and, above them, how many connections held the slot before it, so an
-// ID kept past its connection's close names nothing.
+// ID kept past its connection's close names nothing; it is also the connection's epoll token, so a
+// readiness reported for a connection closed in the same pass names nothing either.
 type ConnID uint64
 
-// Slot is c's slot, the index of its entry in the loop's connections and its epoll token.
+// Slot is c's slot, the index of its entry in the loop's connections.
 func (c ConnID) Slot() int { return int(uint32(c)) }
 
 // Config sets up a loop; zero fields take their defaults.
@@ -212,7 +214,7 @@ func (l *Loop) AddConn(fd int, peer bool) (ConnID, error) {
 			break
 		}
 	}
-	if id >= int(TokenDisk) {
+	if id >= int(TokenDisk&math.MaxUint32) {
 		return 0, errors.New("loop: out of connection IDs")
 	}
 	c := ConnID(id)
@@ -222,7 +224,7 @@ func (l *Loop) AddConn(fd int, peer bool) (ConnID, error) {
 		c = l.conns[id].id + 1<<32
 	}
 	l.syscall(trace.SysEpollCtl, uint64(c), 1, 0)
-	if err := l.k.Watch(fd, uint32(id)); err != nil {
+	if err := l.k.Watch(fd, uint64(c)); err != nil {
 		return 0, err
 	}
 	l.conns[id] = conn{id: c, fd: fd, open: true, peer: peer}
@@ -576,9 +578,9 @@ func (l *Loop) handle(peer bool) {
 		if r.Token >= TokenDisk {
 			continue
 		}
-		cn := &l.conns[r.Token]
-		c := cn.id
-		if !cn.open || cn.peer != peer {
+		c := ConnID(r.Token)
+		cn := l.conn(c)
+		if cn == nil || cn.peer != peer {
 			continue
 		}
 		if cn.listen {
@@ -702,7 +704,7 @@ func (l *Loop) applyCap() {
 func (l *Loop) interest(c ConnID) {
 	cn := &l.conns[c.Slot()]
 	l.syscall(trace.SysEpollCtl, uint64(c), b2u(!cn.muted), b2u(cn.out))
-	if err := l.k.Modify(cn.fd, uint32(c.Slot()), !cn.muted, cn.out); err != nil {
+	if err := l.k.Modify(cn.fd, uint64(c), !cn.muted, cn.out); err != nil {
 		panic(fmt.Sprintf("loop: changing what connection %d is watched for: %v", c, err))
 	}
 }
