@@ -73,6 +73,7 @@ internal/meta TestNoSessionIsFencedWhileItsClientsLeaseRuns 2000
 internal/meta TestNoGrantedFlushIsRefusedForSpace 1000
 internal/meta TestTheFilesystemWorkloadKeepsItsInvariantsAcrossElections 100
 internal/loop/nettest TestSuiteOnTheSimulatedNetwork 100
+internal/fsclient TestAMountsHistoriesKeepTheirInvariantsAcrossCrashes 300
 "
 
 cpus=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN)

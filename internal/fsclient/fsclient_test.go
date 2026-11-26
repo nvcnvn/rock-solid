@@ -569,7 +569,7 @@ func purgeMisses(scan scanner, last map[uint64]uint64) error {
 				continue
 			}
 		}
-		return fmt.Errorf("%s: chunk %d of inode %x lies past its alloc_end and its purge entry", invPurgeMisses, chunk, ino)
+		return fmt.Errorf("chunk %d of inode %x lies past its alloc_end and its purge entry", chunk, ino)
 	}
 	return nil
 }
