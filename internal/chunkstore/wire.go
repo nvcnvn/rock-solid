@@ -212,6 +212,9 @@ type DiskState struct {
 	Pools  []PoolLive
 }
 
+// RequestWindow is how far past its session's oldest outstanding request ID a client write or punch may name its own: a session's resend entries for a chunk then fill under a sixtieth of a recovery frame.
+const RequestWindow = 4096
+
 // MaxDiskPools is the most pools a disk heartbeat reports live blocks of.
 const MaxDiskPools = 256
 
@@ -413,7 +416,7 @@ func DecodeUpdate(b []byte, data int, u *Update) error {
 		u.Oldest = r.u64()
 	}
 	if flags&^(expectFlag|grantedFlag) != 0 || !validVersion(u.Expect) || !u.HasExpect && u.Expect != 0 || u.Granted && u.Kind != KindWrite ||
-		u.Oldest > uint64(u.ID) && (u.Kind == KindWrite || u.Kind == KindPunch) || u.Oldest > u.Request && (u.Kind == KindReplicaWrite || u.Kind == KindReplicaPunch) {
+		(u.Oldest > uint64(u.ID) || uint64(u.ID)-u.Oldest > RequestWindow) && (u.Kind == KindWrite || u.Kind == KindPunch) || u.Oldest > u.Request && (u.Kind == KindReplicaWrite || u.Kind == KindReplicaPunch) {
 		r.bad = true
 	}
 	replica := u.Kind == KindReplicaWrite || u.Kind == KindReplicaPunch || u.Kind == KindRecover

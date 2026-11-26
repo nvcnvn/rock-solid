@@ -183,7 +183,7 @@ func (fc *faultClient) Next(ctx *core.Context, acts []core.Action) []core.Action
 	fc.ids = append(fc.ids, id)
 	f.ops[id] = op
 	f.to[id] = f.p()
-	u := Update{Kind: KindPunch, ID: id, PG: c.pgFields(pg0), Session: 1, Incarnation: 1, Chunk: op.c, Off: op.off, Len: op.n}
+	u := Update{Kind: KindPunch, ID: id, Oldest: sendOnceOldest(id), PG: c.pgFields(pg0), Session: 1, Incarnation: 1, Chunk: op.c, Off: op.off, Len: op.n}
 	a := core.Action{Kind: core.ActNetSend, Peer: core.NodeID{Node: uint32(f.p())}}
 	if op.data != nil {
 		u.Kind = KindWrite

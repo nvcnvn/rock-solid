@@ -249,7 +249,7 @@ func TestAWriteWaitingWhenAnotherChunkEndsTheIntervalIsRefused(t *testing.T) {
 	c.nextID++
 	spend := c.nextID
 	c.call(0, func(ctx *core.Context, r *Replica, out *ReplicaOutput) {
-		u := Update{Kind: KindWrite, ID: spend, PG: c.pgFields(pg0), Session: 1, Incarnation: 1, Chunk: b, Len: core.BlockSize}
+		u := Update{Kind: KindWrite, ID: spend, Oldest: sendOnceOldest(spend), PG: c.pgFields(pg0), Session: 1, Incarnation: 1, Chunk: b, Len: core.BlockSize}
 		ev := core.Event{Kind: core.EvNetRecv, Peer: c.client}
 		ev.Msg.Len = uint16(copy(ev.Msg.Body[:], AppendUpdate(nil, &u)))
 		ev.Msg.Buf, _ = ctx.Pool.AllocZeroed(core.BlockSize)

@@ -383,6 +383,23 @@ func TestWireRejectsAClientWriteOrPunchWithoutASession(t *testing.T) {
 	mustMalformed(t, "member write naming an oldest request past its write's", AppendUpdate(nil, &Update{Kind: KindReplicaWrite, ID: 9, PG: wirePG, Len: 1, Version: 1<<32 | 1, Request: 5, Oldest: 6}), core.BlockSize)
 }
 
+// A client write or punch may name a request ID at most RequestWindow past its session's oldest.
+func TestWireRefusesAClientRequestPastTheWindow(t *testing.T) {
+	for _, k := range []Kind{KindWrite, KindPunch} {
+		data := 0
+		if k == KindWrite {
+			data = core.BlockSize
+		}
+		at := Update{Kind: k, ID: 3 + RequestWindow, PG: wirePG, Session: 1, Len: 1, Oldest: 3}
+		var u Update
+		if err := DecodeUpdate(AppendUpdate(nil, &at), data, &u); err != nil {
+			t.Fatalf("%v at the window: %v", k, err)
+		}
+		at.ID++
+		mustMalformed(t, "a request past the window", AppendUpdate(nil, &at), data)
+	}
+}
+
 // A report's pg_count is a power of two above its PG's number.
 func TestWireRejectsAReportOutsideItsPGCount(t *testing.T) {
 	for _, n := range []uint32{0, 48, 16} {

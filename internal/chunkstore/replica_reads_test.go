@@ -492,6 +492,10 @@ func (w *incWriter) Next(ctx *core.Context, acts []core.Action) []core.Action {
 		}
 	}
 	id, _ := w.due(c.s.Time())
+	if id == 0 && len(w.at) > 0 && c.nextID+1-slices.Min(slices.Collect(maps.Keys(w.at))) > RequestWindow {
+		w.idle = c.s.Time() + 1_000
+		return acts
+	}
 	var op faultOp
 	switch {
 	case id != 0:

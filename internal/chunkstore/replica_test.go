@@ -488,6 +488,9 @@ func (c *rcluster) node(disk uint32) int {
 	return slices.Index(c.ids, disk)
 }
 
+// sendOnceOldest is the oldest outstanding request ID a client that never sends a write again names with request id: it takes every ID more than RequestWindow below id as final.
+func sendOnceOldest(id core.RequestID) uint64 { return uint64(id) - min(uint64(id), RequestWindow) }
+
 // update sends a client's write (data set) or punch of chunk ch to the PG's primary, tagged as pgf.
 func (c *rcluster) update(pgf PGFields, ch core.ChunkID, off uint32, data []byte, n uint32, edit func(*Update)) core.RequestID {
 	c.nextID++
@@ -506,6 +509,7 @@ func (c *rcluster) update(pgf PGFields, ch core.ChunkID, off uint32, data []byte
 		edit(&u)
 	}
 	id = u.ID
+	u.Oldest = max(u.Oldest, sendOnceOldest(id))
 	c.s.Node(c.client.Node).Call(c.client, func(ctx *core.Context, acts []core.Action) []core.Action {
 		a := core.Action{Kind: core.ActNetSend, Peer: core.NodeID{Node: lead - 1}}
 		a.Msg.Len = uint16(copy(a.Msg.Body[:], AppendUpdate(nil, &u)))

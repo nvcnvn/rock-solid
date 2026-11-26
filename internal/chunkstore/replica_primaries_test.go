@@ -193,7 +193,7 @@ func (pc *primaryClient) Next(ctx *core.Context, acts []core.Action) []core.Acti
 	pc.at[id] = c.s.Time()
 	op := faultOp{c: r.chunks[pc.rng.Below(2)], off: off, n: n, data: data}
 	r.ops[id] = op
-	u := Update{Kind: KindWrite, ID: id, PG: c.pgFields(pg0), Session: 1, Incarnation: 1, Chunk: op.c, Off: off, Len: n}
+	u := Update{Kind: KindWrite, ID: id, Oldest: sendOnceOldest(id), PG: c.pgFields(pg0), Session: 1, Incarnation: 1, Chunk: op.c, Off: off, Len: n}
 	a := core.Action{Kind: core.ActNetSend, Peer: core.NodeID{Node: uint32(max(0, c.primary(pg0)))}}
 	a.Msg.Len = uint16(copy(a.Msg.Body[:], AppendUpdate(nil, &u)))
 	buf, err := ctx.Pool.AllocZeroed(dataBytes(off, n))

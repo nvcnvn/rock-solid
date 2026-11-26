@@ -64,7 +64,7 @@ func (sc *subClient) Next(ctx *core.Context, acts []core.Action) []core.Action {
 	sc.ops[id] = subOp{off: off, data: data}
 	sc.ids = append(sc.ids, id)
 	ch := chunkIn(pg0, 4, 0)
-	u := Update{Kind: KindWrite, ID: id, PG: sc.c.pgFields(pg0), Session: 1, Incarnation: 1, Chunk: ch, Off: off, Len: n}
+	u := Update{Kind: KindWrite, ID: id, Oldest: sendOnceOldest(id), PG: sc.c.pgFields(pg0), Session: 1, Incarnation: 1, Chunk: ch, Off: off, Len: n}
 	a := core.Action{Kind: core.ActNetSend, Peer: core.NodeID{Node: uint32(sc.c.primary(pg0))}}
 	a.Msg.Len = uint16(copy(a.Msg.Body[:], AppendUpdate(nil, &u)))
 	buf, err := ctx.Pool.AllocZeroed(dataBytes(off, n))

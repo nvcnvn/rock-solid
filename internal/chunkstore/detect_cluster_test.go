@@ -210,7 +210,7 @@ func (dc *dclient) Next(ctx *core.Context, acts []core.Action) []core.Action {
 	c.nextID++
 	id := c.nextID
 	dc.at[id] = c.s.Time()
-	u := Update{Kind: KindWrite, ID: id, PG: c.pgFields(pg), Session: 1, Incarnation: 1, Chunk: ch, Off: uint32(dc.rng.Below(8)) * core.BlockSize, Len: core.BlockSize}
+	u := Update{Kind: KindWrite, ID: id, Oldest: sendOnceOldest(id), PG: c.pgFields(pg), Session: 1, Incarnation: 1, Chunk: ch, Off: uint32(dc.rng.Below(8)) * core.BlockSize, Len: core.BlockSize}
 	a := core.Action{Kind: core.ActNetSend, Peer: core.NodeID{Node: uint32(c.node(lead))}}
 	a.Msg.Len = uint16(copy(a.Msg.Body[:], AppendUpdate(nil, &u)))
 	buf, err := ctx.Pool.AllocZeroed(core.BlockSize)

@@ -311,7 +311,7 @@ func (lc *limitClient) Next(ctx *core.Context, acts []core.Action) []core.Action
 	c.nextID++
 	id := c.nextID
 	lc.at[id] = c.s.Time()
-	u := Update{Kind: KindPunch, ID: id, PG: c.pgFields(pg), Session: 1, Incarnation: 1, Chunk: b.chunk, Off: b.block * core.BlockSize, Len: (1 + uint32(lc.rng.Below(4))) * core.BlockSize}
+	u := Update{Kind: KindPunch, ID: id, Oldest: sendOnceOldest(id), PG: c.pgFields(pg), Session: 1, Incarnation: 1, Chunk: b.chunk, Off: b.block * core.BlockSize, Len: (1 + uint32(lc.rng.Below(4))) * core.BlockSize}
 	a := core.Action{Kind: core.ActNetSend, Peer: core.NodeID{Node: uint32(c.node(lead))}}
 	if k != 0 {
 		u.Kind, u.Len, u.Granted = KindWrite, core.BlockSize, k == 4
