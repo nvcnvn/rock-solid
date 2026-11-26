@@ -55,6 +55,9 @@ type nodeMetas struct {
 	stalled    int
 	// askFirst has start ask about replica 1 as the device starts, before its store serves.
 	askFirst bool
+	// cr is the crash run's, nil elsewhere: the store's settings, a voter on loop 0 and what it
+	// watches the device by.
+	cr *metaCrash
 }
 
 const nodeMetaGroup = 10
@@ -71,6 +74,9 @@ type metaDevice struct {
 
 func (m *metaDevice) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
 	if ev.Kind == core.EvTimer && ev.Timer >= node.MetaTimer && !m.nm.ticking {
+		if m.nm.cr != nil {
+			m.nm.cr.parked = append(m.nm.cr.parked, ev.Timer)
+		}
 		return out
 	}
 	if ev.Kind == core.EvTimer && ev.Timer >= node.MetaTimer {
@@ -81,13 +87,26 @@ func (m *metaDevice) OnEvent(ctx *core.Context, ev *core.Event, out []core.Actio
 		m.nm.removed, m.nm.removeErr = true, m.d.RemoveMeta(ctx, m.nm.removing, &m.out)
 		return m.done(out)
 	}
-	return m.deviceOnLoop.OnEvent(ctx, ev, out)
+	if m.nm.cr != nil && ev.Kind == core.EvTimer && ev.Timer == crashWriteTimer {
+		m.out.Reset()
+		m.nm.cr.write(ctx, ev, &m.out)
+		return m.done(out)
+	}
+	fresh := m.d == nil
+	out = m.deviceOnLoop.OnEvent(ctx, ev, out)
+	if fresh && m.nm.cr != nil {
+		m.nm.cr.opened()
+	}
+	return out
 }
 
 func (m *metaDevice) OnReply(_ *loop.Log, r loop.Reply) {
 	if m.nm.stall && r.Kind == loop.ReplyPiece && r.Owner == m.nm.stallOwner {
 		m.nm.stalled++
 		return
+	}
+	if m.nm.cr != nil {
+		m.nm.cr.replied(r)
 	}
 	m.d.OnReply(r)
 }
@@ -104,9 +123,15 @@ func (d metaDeviceDriver) Execute(a *core.Action) {
 		return
 	}
 	pool := d.nm.l.Context().Pool
+	if d.nm.cr != nil && d.nm.cr.forward(a, 1) {
+		return
+	}
 	var an meta.Answer
 	if a.Peer == nodeMetaPeer && meta.DecodeAnswer(pool, &a.Msg, &an) == nil {
 		d.nm.answers[an.Token] = an.Err
+		if d.nm.cr != nil && an.Err == nil {
+			d.nm.cr.answered(an.Token)
+		}
 	}
 	if in := a.Msg.Inline(); a.Peer == nodeMetaAsker && len(in) > 9 && in[9] == raftKindGone {
 		d.nm.gone++
@@ -171,6 +196,9 @@ func (nm *nodeMetas) boot(metas []meta.RoundConfig) {
 	}
 	nm.t.Cleanup(dr.Close)
 	cfg := shardReplay()
+	if nm.cr != nil {
+		cfg = nm.cr.cfg
+	}
 	nm.m = &metaDevice{nm: nm, deviceOnLoop: deviceOnLoop{cfg: node.DeviceConfig{Device: 7, Blocks: nm.sd.Blocks(), Loop: 1, Store: cfg, Seed: 1}}}
 	if nm.blocks != 0 {
 		nm.m.cfg.Blocks = nm.blocks
@@ -182,11 +210,17 @@ func (nm *nodeMetas) boot(metas []meta.RoundConfig) {
 	nm.m.lg = nm.l.AttachLog(nil, cfg.Log, chunkstore.FirstLogIO, chunkstore.EndLogIO, 2)
 	nm.m.cfg.Host, nm.m.cfg.Rounds = nm.l, nm.m.lg
 	for _, c := range metas {
-		c.Shard.Raft.Peers = []raftshard.Peer{{ID: 1, Node: core.NodeID{Node: n.ID(), Loop: 1}}}
+		c.Shard.Raft.Peers = slices.Clone(c.Shard.Raft.Peers)
+		for i := range c.Shard.Raft.Peers {
+			c.Shard.Raft.Peers[i].Node.Node = n.ID()
+		}
 		c.Shard.Raft.Holder, c.Shard.Raft.Grantor = lease.NewHolder(lease.DefaultConfig), lease.NewGrantor(lease.DefaultConfig, 1, lease.Time{})
 		nm.m.cfg.Metas = append(nm.m.cfg.Metas, c)
 	}
 	AddWithDisk(n, k, nm.l, dr)
+	if nm.cr != nil {
+		nm.cr.boot(n)
+	}
 	nm.l.Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: 1})
 	if nm.askFirst {
 		nm.postAsk(1)
