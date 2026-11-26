@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"encoding/binary"
 	"math/bits"
+	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
@@ -91,6 +92,31 @@ func (x *Index) Resent(pool core.PoolID, c core.ChunkID, pgs uint32, session, in
 		return true
 	})
 	return version, false
+}
+
+// waitWhole applies writer entry e once its version's last entry is applied, so the table never
+// names a version the disk holds in part or not at all; a writer entry marked last has none after it.
+func (x *Index) waitWhole(e *disklog.Entry) {
+	if e.Last {
+		x.writer(e)
+		return
+	}
+	x.writers = slices.DeleteFunc(x.writers, func(w disklog.Entry) bool { return w.Pool == e.Pool && w.Chunk == e.Chunk })
+	x.writers = append(x.writers, *e)
+}
+
+// versionEntry applies the writer entry waiting on write, slot or punch entry e's version if e is
+// its last, and forgets one of another version of e's chunk, which a crash or a failure left in part.
+func (x *Index) versionEntry(e *disklog.Entry) {
+	i := slices.IndexFunc(x.writers, func(w disklog.Entry) bool { return w.Pool == e.Pool && w.Chunk == e.Chunk })
+	if i < 0 || x.writers[i].Version == e.Version && !e.Last {
+		return
+	}
+	w := x.writers[i]
+	x.writers = slices.Delete(x.writers, i, i+1)
+	if w.Version == e.Version {
+		x.writer(&w)
+	}
 }
 
 // writer applies a writer entry: the table names the request's version unless the request is at

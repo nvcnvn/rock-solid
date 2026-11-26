@@ -188,6 +188,9 @@ type Index struct {
 	// unmarked is the missing-list entries applied since the last decision marker, which take effect
 	// only with their PG's marker: a member persists a peering's whole list or none of it.
 	unmarked []disklog.Entry
+	// writers is the writer entries applied whose versions' last entries are not yet: a version's
+	// entries follow its writer entry in log order, so a later entry of the chunk resolves it.
+	writers []disklog.Entry
 	// plant is the store's planted bugs, nil for none.
 	plant *plants
 }
@@ -330,6 +333,9 @@ func (x *Index) Apply(ev *disklog.Event) error {
 	}
 	for i := range ev.Entries {
 		e := &ev.Entries[i]
+		if e.Kind == disklog.EntryWrite || e.Kind == disklog.EntrySlot || e.Kind == disklog.EntryPunch {
+			x.versionEntry(e)
+		}
 		switch e.Kind {
 		case disklog.EntryWrite:
 			lba := ev.LBA + core.LBA(ev.HeaderBlocks) + core.LBA(ev.Payloads[i]/core.BlockSize)
@@ -353,7 +359,7 @@ func (x *Index) Apply(ev *disklog.Event) error {
 		case disklog.EntryDecision:
 			x.decide(e)
 		case disklog.EntryWriter:
-			x.writer(e)
+			x.waitWhole(e)
 		case disklog.EntryRecovered:
 			x.recovered(e)
 		case disklog.EntryDropped:

@@ -8,6 +8,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
+	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
 // dropRefusals drops every refusal the client would hear for request id.
@@ -212,12 +213,87 @@ func TestANewPrimaryAnswersAResendFromItsTable(t *testing.T) {
 func TestASplitHalfsTrimKeepsItsSiblingsWritesStale(t *testing.T) {
 	x := newIndex(t)
 	a, b := chunkIn(core.PGID{Index: 0}, 2, 0), chunkIn(core.PGID{Index: 1}, 2, 0)
-	apply(t, x, record(1, disklog.WriterEntry(1, b, 1, 1, 7, 1, 3, 3)))
-	apply(t, x, record(2, disklog.WriterEntry(1, b, 2, 1, 7, 1, 5, 4)))
-	apply(t, x, record(3, disklog.WriterEntry(1, a, 1, 2, 7, 1, 12, 12)))
+	whole := func(e disklog.Entry) disklog.Entry { e.Last = true; return e }
+	apply(t, x, record(1, whole(disklog.WriterEntry(1, b, 1, 1, 7, 1, 3, 3))))
+	apply(t, x, record(2, whole(disklog.WriterEntry(1, b, 2, 1, 7, 1, 5, 4))))
+	apply(t, x, record(3, whole(disklog.WriterEntry(1, a, 1, 2, 7, 1, 12, 12))))
 	for _, req := range []uint64{3, 5} {
 		if v, stale := x.Resent(1, b, 2, 7, 1, req); !stale {
 			t.Errorf("request %d at half 1: version %d, not stale", req, v)
 		}
+	}
+}
+
+// A client write of four records, its writer entry in the first, crashed at every disk action
+// with no unflushed block landing, a seeded half of them, and all of them: after recovery, the
+// resend table names its version only if the disk holds the version whole.
+func TestAWriterEntryMapsOnlyWithItsWholeVersion(t *testing.T) {
+	ch := crashChunks[0]
+	workload := func(h *harness) {
+		h.writeReq(ch, 0, fill(core.ChunkSize-core.BlockSize, 1), Request{Request: 5, Oldest: 5, PGs: 1, Session: 7, Incarnation: 1})
+		h.settle()
+	}
+	full := newHarness(t, crashConfig())
+	workload(full)
+	if v, _ := full.s.Index().Resent(testPool, ch, 1, 7, 1, 5); v == 0 {
+		t.Fatal("the write left no entry")
+	}
+	torn := 0
+	for k := 0; k <= full.executed; k++ {
+		for landing := range 3 {
+			h := newHarness(t, crashConfig())
+			h.oracle = sim.NewOracle[writtenRecord](0, newStoreModel())
+			h.crashAt = k
+			func() {
+				defer func() {
+					if r := recover(); r != nil && r != errCrash {
+						panic(r)
+					}
+				}()
+				workload(h)
+			}()
+			switch landing {
+			case 0:
+				h.disk.Crash(func(int, core.LBA) bool { return false })
+			case 1:
+				h.disk.CrashRandom(core.NewRand(uint64(k)))
+			default:
+				h.disk.Crash(func(int, core.LBA) bool { return true })
+			}
+			h.crashAt = -1
+			h.recoverStore(disklog.ModeOpen)
+			c, _ := h.s.Index().Chunk(testPool, ch)
+			if c.Version > c.Whole {
+				torn++
+			}
+			if v, _ := h.s.Index().Resent(testPool, ch, 1, 7, 1, 5); v != 0 && c.Whole < v {
+				t.Fatalf("crash at action %d, landing %d: the table names %#x, the disk holds %+v", k, landing, v, c)
+			}
+		}
+	}
+	if torn == 0 {
+		t.Fatal("no crash tore the version")
+	}
+}
+
+// A client write whose writer entry is durable and whose data item failed is answered with the
+// failure and leaves no entry in the resend table.
+func TestAFailedWriteLeavesNoResendEntry(t *testing.T) {
+	h := newHarness(t, testConfig())
+	ci := h.s.chunkSlot(chunkC)
+	oi := h.s.newOp(opWrite, Request{Chunk: chunkC, Request: 5, Oldest: 5, PGs: 1, Session: 7, Incarnation: 1})
+	o := &h.s.ops[oi]
+	v := MakeVersion(0, 1)
+	o.chunk, o.version, o.left = ci, v, 1
+	o.items = append(o.items, item{entry: disklog.WriterEntry(testPool, chunkC, v, 1, 7, 1, 5, 5), state: itemDurable},
+		item{entry: disklog.WriteEntry(testPool, chunkC, v, 0, 1)})
+	o.items[1].entry.Last = true
+	h.s.chunks[ci].pending = append(h.s.chunks[ci].pending, oi)
+	if h.s.itemFailed(&h.ctx, oi, 1, disklog.ErrNoSpace, &h.out) {
+		h.s.mapResolved(&h.ctx, ci, &h.out)
+	}
+	h.take()
+	if got, _ := h.s.Index().Resent(testPool, chunkC, 1, 7, 1, 5); got != 0 {
+		t.Fatalf("the failed write's request names %#x", got)
 	}
 }

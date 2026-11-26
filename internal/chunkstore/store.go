@@ -2255,7 +2255,9 @@ func (s *Store) durable(ctx *core.Context, ev *disklog.Event, out *Output) {
 		if s.ops[si.op].req.Gated {
 			s.unmappedLive(it, -1)
 			if s.plant.writerAtLog && it.entry.Kind == disklog.EntryWriter {
-				s.mapItem(it)
+				whole := *it
+				whole.entry.Last = true
+				s.mapItem(&whole)
 			}
 		}
 		if s.itemDone(si.op, out) {
@@ -2342,7 +2344,7 @@ func (s *Store) mapResolved(ctx *core.Context, ci int32, out *Output) {
 		}
 		for j := range o.items {
 			it := &o.items[j]
-			if it.state == itemDurable && s.rec == nil && !mapped && (o.err == nil || it.entry.Kind != disklog.EntryWriter) {
+			if it.state == itemDurable && s.rec == nil && !mapped {
 				if o.req.Gated {
 					s.unmappedLive(it, 1)
 				}
