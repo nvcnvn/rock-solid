@@ -111,8 +111,10 @@ type Device struct {
 	rp      chunkstore.Report
 	frame   []byte
 	// metas are the MetaStore replicas by the slot their Raft timer names, a removed one keeping
-	// its slot and taking no event, groups each hosted one's slot by its group, sv the server of
-	// their Txns, and removed the replicas removed that a manifest a restart may load still names.
+	// its slot, taking no event, until the store takes its removal, and nil in a free slot (a timer
+	// it armed may reach the next one there, harmless as a replica ticks by the clock); groups
+	// each hosted one's slot by its group, sv the server of their Txns, and removed the replicas
+	// removed that a manifest a restart may load still names.
 	metas   []*meta.RoundShard
 	groups  map[uint64]int
 	sv      *meta.Server
@@ -124,6 +126,7 @@ type Device struct {
 type removedMeta struct {
 	group, id uint64
 	owner     uint32
+	slot      int
 	reported  bool
 }
 
@@ -156,8 +159,9 @@ func (d *Device) restore(owner uint32, rep disklog.Replica) error {
 	return nil
 }
 
-// ErrHosted refuses a MetaStore replica of a group the device hosts one of, or whose owner key
-// its store may not give a new shard yet.
+// ErrHosted refuses a MetaStore replica of a group the device hosts one of, or removed one of
+// whose removal its store has yet to take, or whose owner key its store may not give a new shard
+// yet.
 var ErrHosted = errors.New("node: the device hosts the group, or its owner key is not reusable")
 
 // ErrBlobBound fails a device whose log's blob bound is not the one a log formatted at its size
@@ -169,11 +173,13 @@ var ErrNotServing = errors.New("node: the device's store does not serve")
 
 // AddMeta hosts a new MetaStore replica, which writes its group's boot state as its first round.
 func (d *Device) AddMeta(cfg meta.RoundConfig) error {
-	_, hosted := d.groups[cfg.Shard.Raft.Group]
-	switch {
-	case d.phase != opened:
+	if d.phase != opened {
 		return ErrNotServing
-	case hosted || !d.st.Reusable(cfg.Owner):
+	}
+	group := cfg.Shard.Raft.Group
+	_, hosted := d.groups[group]
+	d.forget()
+	if hosted || slices.ContainsFunc(d.removed, func(r removedMeta) bool { return r.group == group && !r.reported }) || !d.st.Reusable(cfg.Owner) {
 		return ErrHosted
 	}
 	cfg.Open = false
@@ -189,33 +195,44 @@ func (d *Device) Meta(group uint64) *meta.RoundShard {
 	return nil
 }
 
+// ErrNoReplica refuses to remove a MetaStore replica of a group the device hosts none of.
+var ErrNoReplica = errors.New("node: the device hosts no replica of the group")
+
 // RemoveMeta takes the device's replica of group off its loop and deletes it, answering every Txn
-// it holds dropped; false when the device hosts none. The disk's next manifest leaves it out.
-func (d *Device) RemoveMeta(ctx *core.Context, group uint64, out *DeviceOutput) bool {
+// it holds dropped. The disk's next manifest leaves it out.
+func (d *Device) RemoveMeta(ctx *core.Context, group uint64, out *DeviceOutput) error {
+	if d.phase != opened {
+		return ErrNotServing
+	}
 	i, ok := d.groups[group]
 	if !ok {
-		return false
+		return ErrNoReplica
 	}
 	a := d.metas[i]
 	delete(d.groups, group)
-	d.removed = append(d.removed, removedMeta{group: group, id: a.ReplicaID(), owner: a.Owner()})
+	d.removed = append(d.removed, removedMeta{group: group, id: a.ReplicaID(), owner: a.Owner(), slot: i})
 	out.Actions = a.Remove(ctx, out.Actions)
-	return true
+	return nil
+}
+
+// Removing is the number of replicas the device removed that a restart may still restore.
+func (d *Device) Removing() int {
+	d.forget()
+	return len(d.removed)
+}
+
+// forget drops the removals a restart would restore no more: the store took each one, and the
+// manifest a restart loads leaves its replica out. An ask about one is answered Gone then, as
+// about a replica the device never held.
+func (d *Device) forget() {
+	d.removed = slices.DeleteFunc(d.removed, func(r removedMeta) bool { return r.reported && d.st.LeftOut(r.owner) })
 }
 
 // leftOut reports whether a restart would restore replica id of group no more, if the device
-// removed it: the manifest a restart loads leaves it out.
+// removed it.
 func (d *Device) leftOut(group, id uint64) bool {
-	keep, ok := 0, true
-	for _, r := range d.removed {
-		if !r.reported || !d.st.LeftOut(r.owner) {
-			ok = ok && (r.group != group || r.id != id)
-			d.removed[keep] = r
-			keep++
-		}
-	}
-	d.removed = d.removed[:keep]
-	return ok
+	d.forget()
+	return !slices.ContainsFunc(d.removed, func(r removedMeta) bool { return r.group == group && r.id == id })
 }
 
 // host puts the replica cfg describes on the device's loop and makes it known to the store, in
@@ -225,11 +242,15 @@ func (d *Device) host(cfg meta.RoundConfig) {
 	if err != nil {
 		panic(err)
 	}
-	i := len(d.metas)
+	i := slices.Index(d.metas, nil)
+	if i < 0 {
+		i = len(d.metas)
+		d.metas = append(d.metas, nil)
+	}
 	cfg.Shard.Raft.Timer, cfg.MaxBlob, cfg.Answered = MetaTimer+core.TimerID(i), maxBlob, d.sv.Reply
 	a := meta.NewRoundShard(d.cfg.Host, d.cfg.Rounds, cfg)
 	d.st.AddRemote(cfg.Owner, int(d.cfg.Loop), uint32(a.ID()), disklog.Replica{Group: cfg.Shard.Raft.Group, ID: cfg.Shard.Raft.ID})
-	d.metas = append(d.metas, a)
+	d.metas[i] = a
 	d.groups[cfg.Shard.Raft.Group] = i
 }
 
@@ -265,7 +286,9 @@ func (d *Device) OnEvent(ctx *core.Context, ev *core.Event, out *DeviceOutput) {
 		out.Actions = d.recvGroup(ctx, ev, out.Actions)
 		return
 	case ev.Kind == core.EvTimer && ev.Timer >= MetaTimer && ev.Timer-MetaTimer < core.TimerID(len(d.metas)):
-		out.Actions = d.metas[ev.Timer-MetaTimer].OnEvent(ctx, ev, out.Actions)
+		if a := d.metas[ev.Timer-MetaTimer]; a != nil {
+			out.Actions = a.OnEvent(ctx, ev, out.Actions)
+		}
 		return
 	case d.rep != nil:
 		d.rep.OnEvent(ctx, ev, &d.rout)
@@ -328,7 +351,9 @@ func (d *Device) OnReply(r loop.Reply) {
 	case loop.ReplyRemoved:
 		d.st.RemoveRemote(r.Owner, r.LSN)
 		for i := range d.removed {
-			d.removed[i].reported = d.removed[i].reported || d.removed[i].owner == r.Owner
+			if rm := &d.removed[i]; !rm.reported && rm.owner == r.Owner {
+				rm.reported, d.metas[rm.slot] = true, nil
+			}
 		}
 	}
 }

@@ -39,8 +39,10 @@ type Host struct {
 	// unnamed is the owners of shards removed from the round driver that a manifest a restart may
 	// load can still name.
 	unnamed []unnamedOwner
-	// leaving says the running checkpoint is the first to leave out a removed shard.
-	leaving bool
+	// leaving says the running checkpoint is the first to leave out a removed shard, leaver that
+	// shard's owner, and naming that its manifest is durable and no segment header names it yet.
+	leaving, naming bool
+	leaver          uint32
 	// remote is the shards on the round driver, remoteAt each one's place by owner, and mail
 	// what a restart's replay sends them.
 	remote   []remoteShard
@@ -357,11 +359,11 @@ func (h *Host) Mail(dst []Mail) []Mail {
 // the log to name it in a segment header (disklog.Log.NameNewest), as only one a header names is
 // the one a restart loads, so a round the shard starts after the mail is durable only once a
 // restart restores the shard; so does the first manifest leaving out a removed one, so a restart
-// soon restores it no more.
+// soon restores it no more, and Retry writes a round to open that segment (name).
 func (h *Host) Checkpointed(base uint64) {
 	h.cp = 0
 	if h.leaving {
-		h.leaving = false
+		h.leaving, h.naming = false, true
 		h.Log.NameNewest()
 	}
 	for i := range h.remote {
@@ -770,6 +772,9 @@ func (hd *hosted) taken() []landedRound {
 // pool buffers that now fit, in order, but for those waiting behind their shard's rewrite; the
 // driver calls it on its timer.
 func (h *Host) Retry(ctx *core.Context, out *disklog.Output) error {
+	if err := h.name(ctx, out); err != nil {
+		return err
+	}
 	for k := range h.shards {
 		if err := h.step(ctx, &h.shards[k], out); err != nil {
 			return err
@@ -797,6 +802,35 @@ func (h *Host) Retry(ctx *core.Context, out *disklog.Output) error {
 		keep++
 	}
 	h.waiting = h.waiting[:keep]
+	return nil
+}
+
+// name writes an empty round under the owner of a removed shard, once the manifest first leaving
+// it out is durable and until a segment header names that manifest, as the round opens a segment
+// whose header does (NameNewest) even when nothing else would write on the log. A restart that
+// finds the round loads that manifest or a later one, so takes its blob as one of an owner it
+// does not know, dead; and the owner is reused only once the blob is durable (Reusable).
+func (h *Host) name(ctx *core.Context, out *disklog.Output) error {
+	if !h.naming || h.LeftOut(h.leaver) {
+		h.naming = false
+		return nil
+	}
+	h.rec = AppendRound(h.rec[:0], &Round{})
+	items, err := RoundItems(ctx.Pool, h.leaver, h.Log.MaxBlobBytes(), h.rec, h.items[:0])
+	h.items = items[:0]
+	if errors.Is(err, core.ErrPoolExhausted) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	t, err := h.Log.Submit(ctx, disklog.Hot, items[0], out)
+	if err != nil {
+		ctx.Pool.Free(items[0].Buf)
+		return err
+	}
+	h.flights = append(h.flights, flight{ticket: t, owner: h.leaver, after: h.Log.DurableLSN()})
+	h.naming = false
 	return nil
 }
 
@@ -1079,7 +1113,7 @@ func (h *Host) Indexes(dst []disklog.CheckpointIndex, durable uint64) []disklog.
 func (h *Host) RemoteIndexes(dst []disklog.CheckpointIndex, durable uint64) []disklog.CheckpointIndex {
 	for i := range h.unnamed {
 		if h.unnamed[i].after == 0 {
-			h.unnamed[i].after, h.leaving = durable, true
+			h.unnamed[i].after, h.leaving, h.leaver = durable, true, h.unnamed[i].owner
 		}
 	}
 	for _, rs := range h.remote {

@@ -41,8 +41,18 @@ type nodeMetas struct {
 	groups  map[uint64]uint64
 	next    uint64
 	gone    int
-	// removing is the group whose replica the device removes at nodeMetaRemove.
-	removing uint64
+	// removing is the group whose replica the device removes at nodeMetaRemove, removed whether
+	// that ran and removeErr what RemoveMeta returned.
+	removing  uint64
+	removed   bool
+	removeErr error
+	// slots is the number of the device's replica timer slots that a timer fired in.
+	slots core.TimerID
+	// stall drops each piece the replica of owner stallOwner replies for a checkpoint, which then
+	// never ends; stalled counts them.
+	stall      bool
+	stallOwner uint32
+	stalled    int
 	// askFirst has start ask about replica 1 as the device starts, before its store serves.
 	askFirst bool
 }
@@ -63,17 +73,24 @@ func (m *metaDevice) OnEvent(ctx *core.Context, ev *core.Event, out []core.Actio
 	if ev.Kind == core.EvTimer && ev.Timer >= node.MetaTimer && !m.nm.ticking {
 		return out
 	}
+	if ev.Kind == core.EvTimer && ev.Timer >= node.MetaTimer {
+		m.nm.slots = max(m.nm.slots, ev.Timer-node.MetaTimer+1)
+	}
 	if ev.Kind == core.EvTimer && ev.Timer == nodeMetaRemove {
 		m.out.Reset()
-		if !m.d.RemoveMeta(ctx, m.nm.removing, &m.out) {
-			m.nm.t.Fatalf("the device hosts no replica of group %d", m.nm.removing)
-		}
+		m.nm.removed, m.nm.removeErr = true, m.d.RemoveMeta(ctx, m.nm.removing, &m.out)
 		return m.done(out)
 	}
 	return m.deviceOnLoop.OnEvent(ctx, ev, out)
 }
 
-func (m *metaDevice) OnReply(_ *loop.Log, r loop.Reply) { m.d.OnReply(r) }
+func (m *metaDevice) OnReply(_ *loop.Log, r loop.Reply) {
+	if m.nm.stall && r.Kind == loop.ReplyPiece && r.Owner == m.nm.stallOwner {
+		m.nm.stalled++
+		return
+	}
+	m.d.OnReply(r)
+}
 
 // metaDeviceDriver keeps the device's answers to the client and hands its disk actions to its disk.
 type metaDeviceDriver struct {
@@ -138,6 +155,12 @@ func bootAt(t *testing.T, index uint64) *raftshard.Storage {
 
 // start starts a process whose device restores metas, and settles.
 func (nm *nodeMetas) start(metas []meta.RoundConfig) {
+	nm.boot(metas)
+	nm.settle()
+}
+
+// boot starts a process whose device restores metas, without settling.
+func (nm *nodeMetas) boot(metas []meta.RoundConfig) {
 	nm.s = sim.New(1, sim.Settings{PoolBytes: 1 << 20})
 	n := nm.s.AddNode(sim.DefaultClock, nil, func(*sim.Node) {})
 	nm.node = n.ID()
@@ -168,7 +191,6 @@ func (nm *nodeMetas) start(metas []meta.RoundConfig) {
 	if nm.askFirst {
 		nm.postAsk(1)
 	}
-	nm.settle()
 }
 
 func (nm *nodeMetas) settle() {
@@ -551,8 +573,22 @@ const nodeMetaRemove core.TimerID = 0x72656d
 
 // remove has the device remove its replica of group at its loop's next pass.
 func (nm *nodeMetas) remove(group uint64) {
-	nm.removing = group
+	nm.removing, nm.removed = group, false
 	nm.l.Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: nodeMetaRemove})
+}
+
+// removeNow has the device remove its replica of group, stepping until it has, and fails unless
+// RemoveMeta returned want.
+func (nm *nodeMetas) removeNow(group uint64, want error) {
+	nm.remove(group)
+	for !nm.removed {
+		if !nm.s.Step() {
+			nm.t.Fatal("the removal never ran")
+		}
+	}
+	if nm.removeErr != want {
+		nm.t.Fatalf("RemoveMeta returned %v", nm.removeErr)
+	}
 }
 
 // A restart restores the MetaStore replicas its disk's manifest names, not those the device has
@@ -644,7 +680,7 @@ func TestRemovingAReplicaAnswersTheTxnsItHolds(t *testing.T) {
 	for range 3 {
 		nm.s.Step()
 	}
-	nm.remove(nodeMetaGroup)
+	nm.removeNow(nodeMetaGroup, nil)
 	nm.settle()
 	dropped := 0
 	for tok := range nm.keys {
@@ -672,24 +708,167 @@ func TestRemovingAReplicaAnswersTheTxnsItHolds(t *testing.T) {
 	}
 }
 
-// The device soon answers an ask about a replica it removed Gone: the removal has the store begin
-// a checkpoint whose manifest leaves the replica out, and the disk's next ordinary round opens a
-// segment, whose header names that manifest, the one a restart then loads.
+// The device soon answers an ask about a replica it removed Gone, though nothing else writes on its
+// disk: the removal has the store begin a checkpoint whose manifest leaves the replica out, and
+// once that manifest is durable the store writes a round of its own, which opens a segment whose
+// header names that manifest, the one a restart then loads.
 func TestARemovedReplicaIsSoonGone(t *testing.T) {
 	nm := newNodeMetas(t)
-	other := uint64(nodeMetaGroup + 1)
-	for _, g := range []uint64{other, nodeMetaGroup} {
-		if err := nm.m.d.AddMeta(nm.replicaOf(g)); err != nil {
-			t.Fatal(err)
-		}
+	if err := nm.m.d.AddMeta(nm.replica()); err != nil {
+		t.Fatal(err)
 	}
-	nm.lead(other)
-	nm.remove(nodeMetaGroup)
+	nm.lead()
+	nm.send(4, 100)
+	nm.removeNow(nodeMetaGroup, nil)
 	nm.settle()
-	nm.sendTo(other, 1, 10)
 	if !nm.goneNow(nodeMetaGroup, 1) {
 		t.Fatal("the device never answered Gone for the replica it removed")
 	}
+}
+
+// The device refuses a new replica of a group until its store has taken the removal of the one it
+// removed, which waits for that one's rounds in flight: a checkpoint begun before then names the
+// removed replica still, and naming a new one of the group too would leave a restart that loads
+// it two replicas of one group. Crashed at every step after the new replica's add, the device
+// starts again.
+func TestARemovedReplicasGroupTakesANewReplicaOnlyOnceTheStoreTookTheRemoval(t *testing.T) {
+	refused := 0
+	for k := 0; k < 12; k++ {
+		nm := newNodeMetas(t)
+		cfg := nm.replica()
+		if err := nm.m.d.AddMeta(cfg); err != nil {
+			t.Fatal(err)
+		}
+		nm.lead()
+		nm.send(20, 100)
+		nm.post(nodeMetaGroup, 4, 100)
+		nm.s.Step()
+		nm.removeNow(nodeMetaGroup, nil)
+		again := nm.replica()
+		again.Owner = cfg.Owner + 1
+		for {
+			err := nm.m.d.AddMeta(again)
+			if err == nil {
+				break
+			}
+			if err != node.ErrHosted {
+				t.Fatal(err)
+			}
+			refused++
+			if !nm.s.Step() {
+				t.Fatal("the store never took the removal")
+			}
+		}
+		for range k {
+			if !nm.s.Step() {
+				break
+			}
+		}
+		nm.sd.Crash(core.NewRand(uint64(k)))
+		nm.start([]meta.RoundConfig{nm.replica()})
+		if nm.m.d.Store() == nil {
+			t.Fatalf("crashed %d steps after the new replica's add, the device did not start", k)
+		}
+	}
+	if refused == 0 {
+		t.Fatal("no new replica came while the store had yet to take the removal")
+	}
+}
+
+// A device removes no replica before its store serves, as it hosts none then: a removal asked
+// during a restart's replay is refused ErrNotServing and the restored replica keeps its Txns.
+func TestADeviceRemovesNoReplicaBeforeItServes(t *testing.T) {
+	nm := newNodeMetas(t)
+	cfg := nm.replica()
+	if err := nm.m.d.AddMeta(cfg); err != nil {
+		t.Fatal(err)
+	}
+	nm.lead()
+	nm.send(20, 100)
+
+	nm.sd.Restart()
+	nm.boot([]meta.RoundConfig{cfg})
+	for nm.m.d == nil || nm.m.d.Meta(nodeMetaGroup) == nil {
+		if !nm.s.Step() {
+			t.Fatal("the replica was not restored")
+		}
+	}
+	if nm.m.d.Store().Serving() {
+		t.Fatal("the store served before the removal could come during the replay")
+	}
+	nm.removeNow(nodeMetaGroup, node.ErrNotServing)
+	nm.settle()
+	nm.lead()
+	nm.check()
+}
+
+// Removing a replica and adding a new one of its group, over and over, leaves the device holding
+// what it holds for one: each removed replica's timer slot goes to the next, and the device
+// forgets each removal once a restart would no longer restore its replica.
+func TestRemovingAndAddingReplicasKeepsTheDevicesTablesBounded(t *testing.T) {
+	nm := newNodeMetas(t)
+	cfg := nm.replica()
+	for i := range 20 {
+		if err := nm.m.d.AddMeta(cfg); err != nil {
+			t.Fatalf("add %d: %v", i, err)
+		}
+		if n := nm.m.d.Removing(); n != 0 {
+			t.Fatalf("add %d: the device keeps %d removals", i, n)
+		}
+		nm.lead()
+		nm.send(2, 10)
+		nm.removeNow(nodeMetaGroup, nil)
+		nm.settle()
+		cfg.Owner++
+	}
+	if nm.slots != 1 {
+		t.Fatalf("the replicas took %d timer slots", nm.slots)
+	}
+}
+
+// A removed replica's owner key goes to no new replica while a manifest a restart may load names
+// the removed one, as a restart would restore it under that key and hand it the new replica's
+// blobs: with the checkpoint running at the removal stalled, so that none leaving the removed
+// replica out begins, the key is refused, and a crash restores the removed replica whole, holding
+// no blob of another.
+func TestARemovedOwnerWaitsForAManifestLeavingItsReplicaOut(t *testing.T) {
+	nm := newNodeMetas(t)
+	other := uint64(nodeMetaGroup + 1)
+	cfgs := []meta.RoundConfig{nm.replicaOf(other), nm.replicaOf(nodeMetaGroup)}
+	for _, c := range cfgs {
+		if err := nm.m.d.AddMeta(c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	nm.lead(other, nodeMetaGroup)
+	nm.send(20, 100)
+	nm.stall, nm.stallOwner = true, cfgs[0].Owner
+	for nm.stalled == 0 {
+		nm.sendTo(other, 20, 900)
+	}
+	nm.removeNow(nodeMetaGroup, nil)
+	nm.settle()
+	if owner := cfgs[1].Owner; nm.m.d.Store().Reusable(owner) {
+		next := nm.replicaOf(nodeMetaGroup + 2)
+		next.Owner, next.Shard.Raft.Storage = owner, bootAt(t, 100)
+		if err := nm.m.d.AddMeta(next); err != nil {
+			t.Fatal(err)
+		}
+		nm.settle()
+		cfgs = append(cfgs, next)
+	}
+	nm.stall = false
+	nm.sd.Crash(core.NewRand(1))
+	nm.start(cfgs)
+	back := nm.m.d.Meta(nodeMetaGroup)
+	if back == nil {
+		t.Fatal("the removed replica was not restored, though no manifest leaving it out began")
+	}
+	if last, _ := back.Storage().LastIndex(); back.Storage().Base().Index >= 100 || last >= 100 {
+		t.Fatalf("the restored replica holds another's blobs: base %d, last %d", back.Storage().Base().Index, last)
+	}
+	nm.lead(other, nodeMetaGroup)
+	nm.check()
 }
 
 // A restart after a removal never brings back a replica its device answered Gone, and never hands
