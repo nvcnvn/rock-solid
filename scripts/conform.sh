@@ -19,6 +19,8 @@
 #                                       catches passes
 # Each trace is one light TLC process with its own directory: one worker, HEAP (default 2g), TLC_SECONDS
 # (default 400). JOBS (default 1) of them run at once, and the lines print in order when all are done.
+# DEADLINE=seconds ends the run that long after it starts: a trace still unchecked then gives no verdict,
+# so every line prints before a job's timeout, and the run fails.
 # KEEP=dir keeps the traces and data, and skips a check whose spec and data have not changed.
 # A run ends with what its passing traces covered: "cover" rows of each action taken and the actions no
 # trace took, and each trace's rows stay in its directory's cover file.
@@ -28,11 +30,20 @@ cd "$(dirname "$0")/.."
 version=1.7.4
 jar=${XDG_CACHE_HOME:-$HOME/.cache}/rock-solid/tla2tools-$version.jar
 [ -f "$jar" ] || scripts/models.sh fetch
+end=
+[ -z "${DEADLINE:-}" ] || end=$(($(date +%s) + DEADLINE))
+
+# late reports, with a FAIL line, whether the deadline cut or skipped a trace's check.
+late() {
+	[ -f "$tmp/late" ] || return 1
+	echo "FAIL the run passed its deadline of ${DEADLINE}s: a trace it had not checked gives no verdict"
+}
 
 tmp=${KEEP:-$(mktemp -d)}
 mkdir -p "$tmp/traces"
 [ -n "${KEEP:-}" ] || trap 'rm -rf "$tmp"' EXIT
 tmp=$(cd "$tmp" && pwd)
+rm -f "$tmp/late"
 
 # model prints the model trace $1 is checked against.
 model() { case $(basename "$1") in voters-*) echo voters ;; *) echo epoch ;; esac; }
@@ -69,9 +80,20 @@ check() {
 	cp "$@" "$dir"
 	total=$(steps "$dir/trace_data.tla" | wc -l | tr -d ' ')
 	start=$SECONDS
+	limit=${TLC_SECONDS:-400}
+	[ -z "$end" ] || limit=$((end - $(date +%s) < limit ? end - $(date +%s) : limit))
+	if [ "$limit" -le 0 ]; then
+		echo "no verdict, the run passed its deadline" >"$dir/verdict"
+		rm -f "$dir/key"
+		: >"$tmp/late"
+		return 1
+	fi
 	# TLC unpacks its standard modules into java.io.tmpdir and deletes them on exit, so a shared one fails a parse beside it.
 	mkdir -p "$dir/tmp"
-	(cd "$dir" && perl -e 'alarm shift; exec @ARGV' "${TLC_SECONDS:-400}" java -Xmx"${HEAP:-2g}" -Djava.io.tmpdir="$dir/tmp" -XX:+UseSerialGC -cp "$jar" tlc2.TLC -workers 1 -config "trace_$m.cfg" "trace_$m.tla") >"$dir/out" 2>&1 || true
+	rc=0
+	(cd "$dir" && perl -e 'alarm shift; exec @ARGV' "$limit" java -Xmx"${HEAP:-2g}" -Djava.io.tmpdir="$dir/tmp" -XX:+UseSerialGC -cp "$jar" tlc2.TLC -workers 1 -config "trace_$m.cfg" "trace_$m.tla") >"$dir/out" 2>&1 || rc=$?
+	# 142 is the alarm's SIGALRM: TLC ran out of the limit, which the deadline cut short.
+	[ "$rc" != 142 ] || [ "$limit" -ge "${TLC_SECONDS:-400}" ] || : >"$tmp/late"
 	rm -rf "$dir/states" "$dir/tmp"
 	secs=$((SECONDS - start))
 	broken=$(sed -n 's/^Error: Invariant \([A-Za-z]*\) is violated.*/\1/p' "$dir/out" | head -1)
@@ -229,7 +251,7 @@ each() {
 	[ $# -gt 0 ] || return 0
 	export -f steps data check cover plain planted
 	export -f model
-	export tmp jar
+	export tmp jar end
 	printf '%s\0' "$@" | xargs -0 -n 1 -P "${JOBS:-1}" "$BASH" -c 'set -euo pipefail; "$@"' each "$fn"
 }
 
@@ -347,6 +369,7 @@ if [ "${1:-}" = plants ]; then
 		fi
 	done
 	coverage "$tmp"/traces/voters-*.trace
+	! late || failed=1
 	exit $failed
 fi
 
@@ -369,4 +392,5 @@ for f in "$@"; do
 	grep -q '^ok' "$line" || failed=1
 done
 coverage "$@"
+! late || failed=1
 exit $failed

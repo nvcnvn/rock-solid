@@ -4543,8 +4543,10 @@ other six pass with it empty, as the Go run counts a drop in 4 of these 10 seeds
 Not yet run, and owed by the [checklist](build-checklist.md): `TestReplicatedWritesSurviveFaults`, the lease half and the give-up.
 
 The `conform` workflow runs this check nightly on a window of 500 seeds that moves each day, from seed
-40 up, of the primary-change run and of the voter model's replacement run, with 40 minutes per trace,
-the SYS-2's time for a trace that takes 1,200 s on the M4 Pro, where a local run gives 400 s, and the plants over seeds 0 to 39. A failure names its seed,
+40 up, of the primary-change run and of the voter model's replacement run, and the plants over seeds 0 to
+39. A trace gets 40 minutes there, where a local run gives it 400 s: the SYS-2 runs TLC at about half the
+M4 Pro's speed, so that covers a trace taking 1,200 s on the M4 Pro. A run stops checking at 320
+minutes, before the job's 340, so its lines print, and a trace not yet checked gives no verdict. A failure names its seed,
 and `RUN='^TestPeeringKeepsAcknowledgedWritesAcrossPrimaries$|^TestConformReplacementSeeds$' FIRST=<seed>
 COUNT=1 scripts/conform.sh` replays it. The real-group runs' traces (`real-primaries-<seed>`) are not in it. For a change to
 the epoch or voter model, its trace spec, `internal/chunkstore`, `internal/lease`, `internal/raftshard`, `internal/trace`,
