@@ -9602,11 +9602,16 @@ and [Key layout](design.md#metadata-layer-metastore).
 
 From [Key layout](design.md#metadata-layer-metastore) and [Sharding](design.md#metadata-layer-metastore).
 
-- Open: the key of a volume's record and of the volume ID counter.
-- With no data group in the shard map, the leader adds one once a metadata node reports, and
-  `PlaceVoters` fills its voters.
-- `rock-solid volume create` writes the record and the root; sent again after a lost answer, it
-  makes one volume.
+- `volume/{id}/record` and the counter at `volume/{0}/record` encode as the golden keys say.
+- With no shard map, the leader commits one once a metadata node reports: the control-plane
+  group's entry as its configuration, which `PlaceVoters` never fills onto a storage disk, and the
+  first data group, whose voters `PlaceVoters` fills.
+- A create writes the record, the counter past its ID and the root; sent again after its answer was
+  lost, it is answered from its replay record and makes one volume; a stale ID fails the counter
+  check, whose answer gives the next.
+- Over TCP and io_uring: `rock-solid volume create` on one storage node whose shard map gains its
+  data group, a second create taking the next ID, and both the group and the volumes kept across a
+  restart of the node and the control plane.
 
 ## FUSE mount on one node
 
