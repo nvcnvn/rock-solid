@@ -9582,18 +9582,34 @@ model](#sessions-and-fencing-model).
 ## Filesystem client
 
 From [Client design](design.md#client-design), [Cache coherence tiers](design.md#cache-coherence-tiers)
-and [Key layout](design.md#metadata-layer-metastore).
+and [Key layout](design.md#metadata-layer-metastore). Scripted in `internal/fsclient` against a real
+`meta.State`, chunks in memory.
 
 - Each namespace operation sends the `Txn` the design's table gives, built by `meta.FS`, with its
   replay key; a failed final check returns `EEXIST`, `ENOENT` or `ENOTEMPTY`; a directory renamed
-  over a non-directory is `ENOTDIR` and the reverse `EISDIR`, with nothing sent.
+  over a non-directory is `ENOTDIR` and the reverse `EISDIR`, with nothing sent
+  (`TestNamespaceRequestsAnswerTheirChecksErrnos`). A `create` without `O_EXCL` that loses the
+  name to another node opens that node's file, `EISDIR` for a directory
+  (`TestACreateWithoutExclOpensTheFileAnotherNodeCreatedFirst`).
 - A write past `alloc_end` raises it by 1, 2, 4, … up to 16 chunks first, committing the size
-  written so far in the same `Txn`; `close` and `fsync` commit size and
-  `mtime = max(last write's time, mtime + 1 ns)`.
-- A read past the size is clamped; an open after the attributes changed is answered without
-  `keep_cache`.
+  written so far in the same `Txn` (`TestWritesRaiseAllocEndFirstByDoublingSteps`); `close` and
+  `fsync` commit size and `mtime = max(last write's time, mtime + 1 ns)`, and a read past the size
+  is clamped (`TestCloseCommitsSizeAndMtimeAndReadsAreClamped`).
+- `LOOKUP` answers current attributes and a missing name `ENOENT`
+  (`TestLookupAnswersCurrentAttributesAndAMissingNameWithENOENT`); an attribute reply fetched
+  before a later request for its inode is fetched again
+  (`TestAnAttributeReplyFetchedBeforeALaterRequestIsFetchedAgain`); an open after the attributes
+  changed is answered without `keep_cache` (`TestAnOpenAfterAChangeDropsTheCache`);
+  `READDIRPLUS` lists every name across calls (`TestReaddirplusListsEveryNameAcrossCalls`).
 - The first create in a slot waits for one reservation `Txn`; a `mkdir` in a fresh slot creates in
-  it with no further reservation.
+  it with no further reservation (`TestTheFirstCreateInASlotWaitsForOneReservation`).
+- The opcodes whose `ENOSYS` the kernel remembers get their per-call answers
+  (`TestPerCallAnswersOfOpcodesTheKernelRemembers`); `setattr` changes mode and times and refuses a
+  size change (`TestSetattrChangesModeAndTimesAndRefusesASizeChange`).
+- A cycle of lookup, getattr, open, write, flush, read and release allocates nothing
+  (`TestTheRequestPathAllocatesNothing`).
+- The plant `neg-raise-after-write` leaves a chunk past `alloc_end` that the purge of the file,
+  unlinked after a crash, misses (`TestAWriteBeforeItsRaiseLeavesAChunkThePurgeMisses`).
 - **[property]** Seeded one-node runs of simulated clients against a real shard and replicas, with
   crashes and elections: histories pass close-to-open, the filesystem invariants hold, and the plant
   `neg-raise-after-write` fails "a purge never misses a chunk written before a crash".
