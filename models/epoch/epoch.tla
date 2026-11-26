@@ -811,7 +811,11 @@ Held(d, c) == dlog[d][c] \ (DropsOf(d, c) \cup Uncopied(d, c))
 \* request ID and raises the session's watermark (Trim); a write at or below
 \* it is answered stale, never ordered (Stale). Each write is its own
 \* session's request here, so a watermark is a set of writes. KeepDroppedIds
-\* answers from an entry whose version was dropped.
+\* answers from an entry whose version was dropped. The code removes a
+\* version's entry at the decision marker that drops it, where Persist's drops
+\* take only gated versions, so a disk listing the chunk keeps a mapped,
+\* dropped version in Known until recovery's filter: conformance compares the
+\* store's table with this only on chunks the disk does not list.
 Known(d, c) ==
     {g.v : g \in {y \in ids[d] : y.c = c /\ (y.v \notin DropsOf(d, c) \cup Uncopied(d, c) \/ Bug("KeepDroppedIds"))}}
 AddIds(d, c, v, w) == IF w \in wm[d] THEN ids ELSE [ids EXCEPT ![d] = @ \cup {[c |-> c, v |-> v, w |-> w]}]
