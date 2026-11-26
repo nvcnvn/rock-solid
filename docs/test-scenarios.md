@@ -9528,9 +9528,13 @@ model](#sessions-and-fencing-model).
 - Request IDs rise with every send, a resend included, and across a restart.
 - A fence learned from a renewal or a refused write starts a new session.
 - A start resent after a lost answer, and one resent to a new leader, give one session.
-- **[property]** Plants `neg-count-from-reply`, `neg-no-drift`, `neg-ignore-resumed`,
-  `neg-fixed-step-check` and `neg-window-per-run` each fail "no session is fenced while its
-  client's own lease still runs" on the session run's seeds.
+- **[property]** The session run's clients are `meta.SessionClient`s, with VMs that stand still,
+  leader nodes that start a run at another rate or rise within the headroom, delayed answers and
+  lost start answers. Plants `neg-count-from-reply` and `neg-ignore-resumed` fail "no session is
+  fenced while its client's own lease still runs", and `neg-fixed-step-check` and
+  `neg-window-per-run` fail "the step check never trips for a client that never stood still", on
+  the run's seeds; `neg-no-drift` fails the first in a scenario with exact rate bounds, since the
+  run's leader bound overshoots by its round trips more than a rise within the headroom.
 
 ## Filesystem client
 

@@ -79,11 +79,11 @@ sessions/neg-up-with-old-table	meta.upWithOldTable	TestPlantedLockBugsBreakTheLo
 sessions/neg-peering-skipped	chunkstore.stopPreviousOnly,lastActivatedOnly	TestPlantedBugsBreakTheirTraces
 sessions/neg-ack-reachable-only	meta.ackReachableOnly	TestPlantedLockBugsBreakTheLockInvariants
 sessions/neg-ack-waits-down	meta.ackWaitsDown	TestPlantedLockBugsBreakTheLockInvariants
-sessions/neg-count-from-reply	open	Client sessions
-sessions/neg-no-drift	open	Client sessions
-sessions/neg-ignore-resumed	open	Client sessions
-sessions/neg-fixed-step-check	open	Client sessions
-sessions/neg-window-per-run	open	Client sessions
+sessions/neg-count-from-reply	meta.countFromReply	TestPlantedClientSessionBugs
+sessions/neg-no-drift	meta.noDrift	TestPlantedClientSessionBugs
+sessions/neg-ignore-resumed	meta.ignoreResumed	TestPlantedClientSessionBugs
+sessions/neg-fixed-step-check	meta.fixedStepCheck	TestPlantedClientSessionBugs
+sessions/neg-window-per-run	meta.windowPerNode	TestPlantedClientSessionBugs
 purge/neg-daemon-punch	open	Truncate
 purge/neg-extend-over-purge	open	Truncate
 purge/neg-grace-by-time	open	Owner failover and grace period
