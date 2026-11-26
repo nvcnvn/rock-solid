@@ -112,8 +112,10 @@ type nodeConfig struct {
 	Pool    uint32
 	// Memory is the daemon's memory budget in MiB, 0 for none.
 	Memory int64
-	// MetaOnly is role meta: the node holds metadata and no PG member.
+	// MetaOnly is role meta: the node holds metadata and no PG member; Client is role client: it
+	// holds a client session and neither metadata nor a PG member.
 	MetaOnly bool
+	Client   bool
 }
 
 // release is the format level this build's nodes report.
@@ -121,7 +123,7 @@ const release = 1
 
 // machine is the configuration of cfg's node machine.
 func (cfg nodeConfig) machine() node.Config {
-	nc := node.Config{Node: cfg.Node, Release: release, Group: cfg.Group, Seed: rand.Uint64(), MetaOnly: cfg.MetaOnly}
+	nc := node.Config{Node: cfg.Node, Release: release, Group: cfg.Group, Seed: rand.Uint64(), MetaOnly: cfg.MetaOnly, Client: cfg.Client}
 	for _, v := range cfg.Ctls {
 		nc.Ctls = append(nc.Ctls, core.NodeID{Node: v.Node})
 	}
@@ -277,14 +279,14 @@ func parseNode(args []string) (nodeConfig, error) {
 	fs.StringVar(&cfg.Class, "class", "ssd", "the class of the node's devices")
 	pool := fs.Uint("pool", 1, "the pool the node's stores serve")
 	fs.Int64Var(&cfg.Memory, "memory", 0, "the daemon's memory budget in MiB, which GOMEMLIMIT is held at less the slabs mapped outside the Go heap; 0 leaves GOMEMLIMIT alone")
-	role := fs.String("role", "storage", "storage, holding PG members and metadata, or meta, holding metadata alone")
+	role := fs.String("role", "storage", "storage, holding PG members and metadata, meta, holding metadata alone, or client, holding a client session and no device")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
-	if *role != "storage" && *role != "meta" {
-		return cfg, fmt.Errorf("-role %q is neither storage nor meta", *role)
+	if *role != "storage" && *role != "meta" && *role != "client" {
+		return cfg, fmt.Errorf("-role %q is not storage, meta or client", *role)
 	}
-	cfg.MetaOnly = *role == "meta"
+	cfg.MetaOnly, cfg.Client = *role == "meta", *role == "client"
 	if *node >= daemonNodes || *pool > math.MaxUint32 {
 		return cfg, fmt.Errorf("-node %d is not below %d, where a daemon's node lies, or -pool %d is past 32 bits", *node, daemonNodes, *pool)
 	}
@@ -314,8 +316,10 @@ func parseNode(args []string) (nodeConfig, error) {
 		return slices.ContainsFunc(cfg.Ctls, func(c voter) bool { return c.Node == v.Node })
 	}):
 		return cfg, errors.New("-peers names a voter")
-	case len(cfg.Devices) == 0:
+	case len(cfg.Devices) == 0 && !cfg.Client:
 		return cfg, errors.New("no -device")
+	case len(cfg.Devices) != 0 && cfg.Client:
+		return cfg, errors.New("a -device on role client")
 	case len(slices.Compact(slices.Sorted(slices.Values(cfg.Devices)))) != len(cfg.Devices):
 		return cfg, errors.New("a -device is named twice")
 	case int(cfg.Listen.Port())+len(cfg.Devices) > 65535 || cfg.Listen.Port() == 0:

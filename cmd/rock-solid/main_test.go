@@ -23,6 +23,9 @@ func TestParseNodeRefusesABadConfiguration(t *testing.T) {
 	if cfg, err := parseNode(strings.Fields(ok + " -role meta")); err != nil || !cfg.machine().MetaOnly {
 		t.Fatalf("-role meta: %v, the node machine's role meta %v", err, cfg.machine().MetaOnly)
 	}
+	if cfg, err := parseNode(strings.Fields("-node 2 -ctl 1=127.0.0.1:7000 -listen 127.0.0.1:7100 -role client")); err != nil || !cfg.machine().Client {
+		t.Fatalf("-role client with no device: %v, the node machine's role client %v", err, cfg.machine().Client)
+	}
 	for _, args := range []string{
 		"-node 4294967298 -ctl 1=127.0.0.1:7000 -listen 127.0.0.1:7100 -device /dev/a",
 		"-node 2147483648 -ctl 1=127.0.0.1:7000 -listen 127.0.0.1:7100 -device /dev/a",
@@ -39,6 +42,7 @@ func TestParseNodeRefusesABadConfiguration(t *testing.T) {
 		"-node 2 -listen 127.0.0.1:7100 -device /dev/a",
 		"-node 2 -ctl 1=127.0.0.1:7000 -device /dev/a",
 		"-node 2 -ctl 1=127.0.0.1:7000 -listen 127.0.0.1:7100 -device /dev/a -role data",
+		"-node 2 -ctl 1=127.0.0.1:7000 -listen 127.0.0.1:7100 -device /dev/a -role client",
 	} {
 		if _, err := parseNode(strings.Fields(args)); err == nil {
 			t.Errorf("%q taken", args)

@@ -7,6 +7,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/lease"
 	"github.com/nvcnvn/rock-solid/internal/meta"
 )
 
@@ -18,12 +19,14 @@ const Interval = core.Tick(1_000_000)
 const (
 	HeartbeatTimer core.TimerID = 0x6e626561
 	FetchTimer     core.TimerID = 0x6e666574
+	SessionTimer   core.TimerID = 0x6e736573
 )
 
 // Config is a node's place in the cluster: its ID, the release its format level is, the loops of
 // the control-plane group's voters and its group ID, the seed of the source its start draws
-// from, which the daemon takes from the operating system at each start, and whether its role is
-// meta, holding metadata and no PG member; every node holds metadata.
+// from, which the daemon takes from the operating system at each start, and its role: meta,
+// holding metadata and no PG member, client, holding a client session and neither metadata nor a
+// PG member, or else storage, holding both.
 type Config struct {
 	Node     uint32
 	Release  uint32
@@ -31,6 +34,7 @@ type Config struct {
 	Group    uint64
 	Seed     uint64
 	MetaOnly bool
+	Client   bool
 }
 
 // Hand is a session table for the replica on Device, answering its ask Answers, 0 when unasked.
@@ -129,6 +133,13 @@ type Node struct {
 	// metas are the metadata replicas as the loop last reported them, and dels a delete received.
 	metas []meta.ReplicaReport
 	dels  []meta.ReplicaRef
+	// sess is the client session, if the node holds one, startAt when its start request sent may go
+	// again, and beat and ans a heartbeat and an answer.
+	sess    *meta.SessionClient
+	startAt core.Tick
+	sent    uint64
+	beat    meta.SessionBeat
+	ans     meta.SessionAnswer
 }
 
 // Ctl is the control-plane voter the node talks to.
@@ -147,6 +158,8 @@ func (n *Node) move(ctx *core.Context, at core.NodeID, known bool, out *Output) 
 	}
 	n.ctl, n.moveAt = i, ctx.Now+Interval
 	out.Moved, out.Ctl = true, n.Ctl()
+	n.startAt = 0
+	n.session(ctx, out)
 	if n.fetching {
 		n.fetching = false
 		n.fetch(ctx, out)
@@ -176,6 +189,9 @@ func (n *Node) FetchTable(ctx *core.Context, out *Output) {
 func New(cfg Config) *Node {
 	n := &Node{cfg: cfg, rng: core.NewRand(cfg.Seed)}
 	n.start = uint64(n.rng.Uint32()) << 32
+	if cfg.Client {
+		n.sess = meta.NewSessionClient(meta.ClientLease, cfg.Node, n.start)
+	}
 	return n
 }
 
@@ -229,6 +245,49 @@ func (n *Node) Replicas(rs []meta.ReplicaReport) {
 func (n *Node) Start(ctx *core.Context, out *Output) {
 	n.heartbeat(ctx, out)
 	n.FetchTable(ctx, out)
+	n.session(ctx, out)
+}
+
+// Session is the node's client session and whether it holds its lease now; every request waits
+// until it does.
+func (n *Node) Session(ctx *core.Context) (uint64, bool) {
+	if n.sess == nil {
+		return 0, false
+	}
+	return n.sess.Session(), n.sess.Leased(lease.Now(ctx))
+}
+
+// Fenced takes a write refused because session is fenced: if it is the node's, the node starts a
+// new session.
+func (n *Node) Fenced(ctx *core.Context, session uint64, out *Output) {
+	if n.sess != nil {
+		n.sess.Fenced(session)
+		n.session(ctx, out)
+	}
+}
+
+// session sends the session's start, again each Interval until answered, or its heartbeat to the
+// voter the node talks to when one is due, and arms SessionTimer for the next.
+func (n *Node) session(ctx *core.Context, out *Output) {
+	if n.sess == nil {
+		return
+	}
+	var at core.Tick
+	a := core.Action{Kind: core.ActNetSend, Peer: n.Ctl()}
+	if req, ok := n.sess.Starting(); ok {
+		if (ctx.Now >= n.startAt || req != n.sent) && meta.EncodeSessionStart(ctx.Pool, n.cfg.Group, req, &a.Msg) == nil {
+			n.startAt, n.sent = ctx.Now+Interval, req
+			out.Actions = append(out.Actions, a)
+		}
+		at = n.startAt
+	} else {
+		t := lease.Now(ctx)
+		if n.sess.Beat(n.Ctl(), t, &n.beat) && meta.EncodeSessionBeat(ctx.Pool, n.cfg.Group, &n.beat, &a.Msg) == nil {
+			out.Actions = append(out.Actions, a)
+		}
+		at = n.sess.Next(n.Ctl(), t)
+	}
+	out.Actions = append(out.Actions, core.Action{Kind: core.ActSetTimer, Timer: SessionTimer, At: max(at, ctx.Now+1)})
 }
 
 // Held records that the store on device holds session version v, as its replica's SetSessions
@@ -272,8 +331,15 @@ func (n *Node) OnEvent(ctx *core.Context, ev *core.Event, out *Output) {
 		}
 	case core.EvNetRecv:
 		n.recv(ctx, ev, out)
+	case core.EvResumed:
+		if n.sess != nil {
+			n.sess.Resumed()
+			n.session(ctx, out)
+		}
 	case core.EvTimer:
 		switch {
+		case ev.Timer == SessionTimer:
+			n.session(ctx, out)
 		case ev.Timer == HeartbeatTimer:
 			n.heartbeat(ctx, out)
 			if n.wanted {
@@ -316,6 +382,17 @@ func (n *Node) recv(ctx *core.Context, ev *core.Event, out *Output) {
 					out.Deletes = append(out.Deletes, d)
 				}
 			}
+		}
+		return
+	case meta.KindStarted:
+		if id, err := meta.DecodeStarted(ctx.Pool, &ev.Msg); err == nil && n.sess != nil && n.sess.Started(token, id) {
+			n.session(ctx, out)
+		}
+		return
+	case meta.KindRenewed:
+		if run, err := meta.DecodeRenewed(ctx.Pool, &ev.Msg, &n.ans); err == nil && n.sess != nil {
+			n.sess.Answer(ev.Peer, run, &n.ans, lease.Now(ctx))
+			n.session(ctx, out)
 		}
 		return
 	case meta.KindDisks:
@@ -397,7 +474,7 @@ func (n *Node) heartbeat(ctx *core.Context, out *Output) {
 	nr := &n.report
 	// With no replica running this reports the version only received, safe while a store's fence
 	// table starts empty in memory: a replica that starts later is handed n.table before any write.
-	*nr = meta.NodeReport{Node: n.cfg.Node, Release: n.cfg.Release, Meta: true, MetaOnly: n.cfg.MetaOnly, Epoch: n.epoch, Sessions: n.table.Version, Opened: n.opened, Failed: n.failed, Replicas: n.metas}
+	*nr = meta.NodeReport{Node: n.cfg.Node, Release: n.cfg.Release, Meta: !n.cfg.Client, MetaOnly: n.cfg.MetaOnly, Epoch: n.epoch, Sessions: n.table.Version, Opened: n.opened, Failed: n.failed, Replicas: n.metas}
 	for _, r := range n.reps {
 		if r.runs {
 			nr.Sessions, nr.Epoch = min(nr.Sessions, r.held), min(nr.Epoch, r.epoch)

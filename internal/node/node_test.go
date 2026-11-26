@@ -705,3 +705,107 @@ func TestADevicesOutputFeedsTheNode(t *testing.T) {
 		t.Fatalf("reported %+v", nr)
 	}
 }
+
+// A client-only node, with no device, starts its session, sending the same start again until it is
+// answered, renews it rate_gap after its first answer and every second after, holds its lease from
+// its second answer until it lapses, takes it back on the next answer, ends it on Resumed, and
+// starts a new session under a new request once an answer fences it.
+func TestAClientOnlyNodeHoldsASession(t *testing.T) {
+	r := &run{t: t, n: New(Config{Node: 4, Release: 1, Ctls: []core.NodeID{ctl}, Group: group, Seed: 3, Client: true}), ctx: core.Context{Now: 1, Raw: 1, Pool: sim.NewPool(1<<20, 0)}}
+	at := func(d core.Tick) { r.ctx.Now, r.ctx.Raw = r.ctx.Now+d, r.ctx.Raw+d }
+	start := func() uint64 {
+		t.Helper()
+		ms := r.sends(meta.KindSessionStart)
+		if len(ms) != 1 {
+			t.Fatalf("sent %d starts", len(ms))
+		}
+		_, _, req, _ := meta.Peek(&ms[0])
+		return req
+	}
+	beat := func() meta.SessionBeat {
+		t.Helper()
+		ms := r.sends(meta.KindSessionBeat)
+		if len(ms) != 1 {
+			t.Fatalf("sent %d heartbeats at %v", len(ms), r.ctx.Now)
+		}
+		var b meta.SessionBeat
+		if err := meta.DecodeSessionBeat(r.ctx.Pool, &ms[0], &b); err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	timer := func() { r.event(core.Event{Kind: core.EvTimer, Timer: SessionTimer}) }
+	answer := func(b meta.SessionBeat, st meta.SessionStatus) {
+		r.from(ctl, func(pool core.BufPool, m *core.Msg) error {
+			return meta.EncodeRenewed(pool, group, 7, &meta.SessionAnswer{Request: b.Request, Raw: r.ctx.Raw, Status: st}, m)
+		})
+	}
+	leased := func() bool { _, ok := r.n.Session(&r.ctx); return ok }
+
+	r.n.Start(&r.ctx, &r.out)
+	req := start()
+	at(Interval)
+	r.out.Reset()
+	timer()
+	if again := start(); again != req {
+		t.Fatalf("start sent again as %d, first %d", again, req)
+	}
+	r.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeStarted(pool, group, req, 5, m) })
+	b := beat()
+	if b.Session != 5 {
+		t.Fatalf("heartbeat %+v", b)
+	}
+	answer(b, meta.SessionRenewed)
+	if leased() {
+		t.Fatal("leased on the first answer")
+	}
+	at(100_000)
+	r.out.Reset()
+	timer()
+	b2 := beat()
+	if b2.Request <= b.Request || b2.Answered != b.Request {
+		t.Fatalf("second heartbeat %+v after %+v", b2, b)
+	}
+	answer(b2, meta.SessionRenewed)
+	if !leased() {
+		t.Fatal("no lease on the second answer")
+	}
+	for range 9 {
+		at(Interval)
+		r.out.Reset()
+		timer()
+		beat()
+	}
+	if leased() {
+		t.Fatal("leased 9 s after the last answered renewal")
+	}
+	at(Interval)
+	r.out.Reset()
+	timer()
+	answer(beat(), meta.SessionRenewed)
+	if !leased() {
+		t.Fatal("no lease on an answer after it lapsed")
+	}
+	r.event(core.Event{Kind: core.EvResumed})
+	if leased() {
+		t.Fatal("leased after Resumed")
+	}
+	answer(beat(), meta.SessionFenced)
+	req2 := start()
+	if id, _ := r.n.Session(&r.ctx); id != 0 || req2 == req {
+		t.Fatalf("after the fence: session %d", id)
+	}
+	r.from(ctl, func(pool core.BufPool, m *core.Msg) error { return meta.EncodeStarted(pool, group, req2, 6, m) })
+	r.n.Fenced(&r.ctx, 5, &r.out)
+	if id, _ := r.n.Session(&r.ctx); id != 6 {
+		t.Fatalf("a refusal of the old session's write moved the node to session %d", id)
+	}
+	r.out.Reset()
+	r.n.Fenced(&r.ctx, 6, &r.out)
+	if id, _ := r.n.Session(&r.ctx); id != 0 || start() == req2 {
+		t.Fatalf("a refused write of the session left session %d", id)
+	}
+	if r.report().Meta {
+		t.Fatal("a client-only node reports holding metadata")
+	}
+}
