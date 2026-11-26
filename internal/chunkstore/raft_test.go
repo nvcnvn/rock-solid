@@ -1133,7 +1133,7 @@ func TestARestartHandsReplicasTheReplicasItsManifestNames(t *testing.T) {
 		t.Fatalf("no segment header names manifest %+v: named LSN %d", r.s.Log().Manifest(), named)
 	}
 	var got []disklog.Replica
-	r.cfg.Replicas = func(owner uint32, rp disklog.Replica) error {
+	r.cfg.Replicas = func(owner uint32, rp disklog.Replica, _ uint64) error {
 		if owner == 9 {
 			got = append(got, rp)
 			r.s.AddRemote(owner, 2, 4, rp)

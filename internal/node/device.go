@@ -147,14 +147,15 @@ func NewDevice(ctx *core.Context, cfg DeviceConfig, out *DeviceOutput) *Device {
 // settings for, or two of one group.
 var ErrNoSettings = errors.New("node: the disk holds a MetaStore replica with no settings")
 
-// restore hosts the replica the manifest a restart loaded names, before the replay.
-func (d *Device) restore(owner uint32, rep disklog.Replica) error {
+// restore hosts the replica the manifest a restart loaded names, before the replay, under the
+// blob bound of the log the disk holds, which a volume grown since its format keeps.
+func (d *Device) restore(owner uint32, rep disklog.Replica, maxBlob uint64) error {
 	i := slices.IndexFunc(d.cfg.Metas, func(c meta.RoundConfig) bool { return c.Shard.Raft.Group == rep.Group })
 	if _, hosted := d.groups[rep.Group]; i < 0 || hosted {
 		return fmt.Errorf("%w: replica %d of group %d", ErrNoSettings, rep.ID, rep.Group)
 	}
 	cfg := d.cfg.Metas[i]
-	cfg.Owner, cfg.Shard.Raft.ID, cfg.Open = owner, rep.ID, true
+	cfg.Owner, cfg.Shard.Raft.ID, cfg.Open, cfg.MaxBlob = owner, rep.ID, true, maxBlob
 	d.host(cfg)
 	return nil
 }
@@ -163,10 +164,6 @@ func (d *Device) restore(owner uint32, rep disklog.Replica) error {
 // whose removal its store has yet to take, or whose owner key its store may not give a new shard
 // yet.
 var ErrHosted = errors.New("node: the device hosts the group, or its owner key is not reusable")
-
-// ErrBlobBound fails a device whose log's blob bound is not the one a log formatted at its size
-// has, which its replicas took: a log formatted at another size, as a grown volume's.
-var ErrBlobBound = errors.New("node: the log's blob bound is not a log of the device's size's")
 
 // ErrNotServing refuses a MetaStore replica on a device whose store does not serve.
 var ErrNotServing = errors.New("node: the device's store does not serve")
@@ -182,7 +179,7 @@ func (d *Device) AddMeta(cfg meta.RoundConfig) error {
 	if hosted || slices.ContainsFunc(d.removed, func(r removedMeta) bool { return r.group == group && !r.reported }) || !d.st.Reusable(cfg.Owner) {
 		return ErrHosted
 	}
-	cfg.Open = false
+	cfg.Open, cfg.MaxBlob = false, d.st.Log().MaxBlobBytes()
 	d.host(cfg)
 	return nil
 }
@@ -238,27 +235,16 @@ func (d *Device) leftOut(group, id uint64) bool {
 // host puts the replica cfg describes on the device's loop and makes it known to the store, in
 // one call.
 func (d *Device) host(cfg meta.RoundConfig) {
-	maxBlob, err := d.maxBlob()
-	if err != nil {
-		panic(err)
-	}
 	i := slices.Index(d.metas, nil)
 	if i < 0 {
 		i = len(d.metas)
 		d.metas = append(d.metas, nil)
 	}
-	cfg.Shard.Raft.Timer, cfg.MaxBlob, cfg.Answered = MetaTimer+core.TimerID(i), maxBlob, d.sv.Reply
+	cfg.Shard.Raft.Timer, cfg.Answered = MetaTimer+core.TimerID(i), d.sv.Reply
 	a := meta.NewRoundShard(d.cfg.Host, d.cfg.Rounds, cfg)
 	d.st.AddRemote(cfg.Owner, int(d.cfg.Loop), uint32(a.ID()), disklog.Replica{Group: cfg.Shard.Raft.Group, ID: cfg.Shard.Raft.ID})
 	d.metas[i] = a
 	d.groups[cfg.Shard.Raft.Group] = i
-}
-
-// maxBlob is MaxBlobBytes of a log formatted at the device's size, which its replicas take before
-// a log serves.
-func (d *Device) maxBlob() (uint64, error) {
-	g, err := disklog.GeometryFor(d.cfg.Blocks * core.BlockSize)
-	return disklog.MaxBlobFor(d.cfg.Store.Log, g), err
 }
 
 // dropMetas takes the replicas the device restored off the loop when its store does not serve:
@@ -406,11 +392,6 @@ func (d *Device) settle(ctx *core.Context, err error, out *DeviceOutput) {
 			return
 		}
 	}
-	if err == nil && d.st != nil && d.phase != opened {
-		if maxBlob, gerr := d.maxBlob(); gerr != nil || maxBlob != d.st.Log().MaxBlobBytes() {
-			err = ErrBlobBound
-		}
-	}
 	switch act, log := chunkstore.StartDevice(d.rng, err); {
 	case d.phase == recovering && act == chunkstore.StartFormat:
 		d.phase = formatting
@@ -426,7 +407,7 @@ func (d *Device) settle(ctx *core.Context, err error, out *DeviceOutput) {
 	case (d.phase == recovering || d.phase == formatting) && act == chunkstore.StartOpened:
 		sb := d.st.Log().Superblock()
 		d.log = sb.LogID
-		d.opened = meta.OpenedDisk{Device: d.cfg.Device, Log: d.log, Blocks: d.cfg.Blocks,
+		d.opened = meta.OpenedDisk{Device: d.cfg.Device, Log: d.log, Blocks: sb.DiskBlocks(),
 			Reserve: uint64(d.st.Log().Reserve()) * uint64(sb.SegmentBlocks), Class: d.cfg.Class, Loop: d.cfg.Loop}
 		out.Opened = &d.opened
 		d.restarted = d.phase == recovering

@@ -9,6 +9,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/loop"
+	"github.com/nvcnvn/rock-solid/internal/meta"
 	"github.com/nvcnvn/rock-solid/internal/node"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
@@ -191,6 +192,7 @@ type deviceOnLoop struct {
 	d              *node.Device
 	out            node.DeviceOutput
 	opened, failed int
+	report         meta.OpenedDisk
 }
 
 func (m *deviceOnLoop) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
@@ -218,7 +220,7 @@ func (m *deviceOnLoop) done(out []core.Action) []core.Action {
 		m.lg.Serve(log)
 	}
 	if m.out.Opened != nil {
-		m.opened++
+		m.opened, m.report = m.opened+1, *m.out.Opened
 	}
 	if m.out.Failed {
 		m.failed++

@@ -424,16 +424,31 @@ func TestADeviceThatFormatsHostsTheGroupsItRestoredAgain(t *testing.T) {
 	}
 }
 
-// A disk whose log was formatted at another size than the device has now, as a grown volume's,
-// fails at open: the replicas it restores took the blob bound of a log of the device's size.
-func TestADeviceFailsALogFormattedAtAnotherSize(t *testing.T) {
+// A device whose disk grew since its log was formatted, as a resized volume's, restores its replica
+// under the blob bound the log keeps from its format and reports the size its log was formatted
+// with: it holds every Txn it answered, leads and takes Txns gathered into a round past that bound.
+func TestADeviceRestoresItsReplicasOnAGrownVolume(t *testing.T) {
 	nm := newNodeMetas(t)
+	if err := nm.m.d.AddMeta(nm.replica()); err != nil {
+		t.Fatal(err)
+	}
+	nm.lead()
+	nm.send(20, 900)
+	formatted := nm.m.d.Store().Log().Superblock().DiskBlocks()
 	nm.sd.Restart()
 	nm.blocks = 2 * nm.sd.Blocks()
-	nm.start(nil)
-	if nm.m.failed != 1 || nm.m.opened != 0 {
-		t.Fatalf("the device opened %d times and failed %d", nm.m.opened, nm.m.failed)
+	nm.start([]meta.RoundConfig{nm.replica()})
+	if nm.m.failed != 0 || nm.m.opened != 1 || nm.m.report.Blocks != formatted {
+		t.Fatalf("the device opened %d times, reporting %d blocks of the %d formatted, and failed %d", nm.m.opened, nm.m.report.Blocks, formatted, nm.m.failed)
 	}
+	nm.lead()
+	nm.send(100, 900)
+	for tok := range nm.keys {
+		if err, ok := nm.answers[tok]; !ok || err != nil {
+			t.Fatalf("Txn %d answered %v, %v", tok, ok, err)
+		}
+	}
+	nm.check()
 }
 
 // A replica whose disk fails its round answers each Txn it holds dropped, as it applies nothing

@@ -62,9 +62,10 @@ type Config struct {
 	// Pages is where the index's tree takes its page slabs; nil takes them from the Go heap.
 	Pages lsm.Pages
 	// Replicas takes each Raft replica the manifest a restart loads names, with the owner its
-	// blobs carry, before the replay: it restores it as a shard on the round driver (AddRemote)
-	// before it returns, or returns why not, which stops the restart.
-	Replicas func(owner uint32, rep disklog.Replica) error
+	// blobs carry and the log's MaxBlobBytes from its superblock's geometry, before the replay: it
+	// restores it as a shard on the round driver (AddRemote) before it returns, or returns why
+	// not, which stops the restart.
+	Replicas func(owner uint32, rep disklog.Replica, maxBlob uint64) error
 }
 
 // DefaultMergeCache is the merged-block cache of a replica primary's store: 64 blocks, 256 KiB per disk.

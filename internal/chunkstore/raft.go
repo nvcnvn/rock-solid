@@ -92,7 +92,7 @@ func (s *Store) restoreReplicas(m *disklog.Manifest) error {
 		if s.cfg.Replicas == nil {
 			return fmt.Errorf("%w: replica %d of group %d", ErrReplicaNotRestored, mi.Replica.ID, mi.Replica.Group)
 		}
-		if err := s.cfg.Replicas(mi.Owner, mi.Replica); err != nil {
+		if err := s.cfg.Replicas(mi.Owner, mi.Replica, s.rec.MaxBlobBytes()); err != nil {
 			return err
 		}
 	}
