@@ -85,8 +85,10 @@ type replica struct {
 	// that is no stutter.
 	hist     []sent
 	lastLine key
-	// applyAt is the place in lines of the replica's last apply line, or -1.
+	// applyAt is the place in lines of the replica's last apply line, or -1, and haltAt the spec
+	// index of its halt line, or 0.
 	applyAt int
+	haltAt  int
 	// fresh is whether the next RaftState is a restart's, and props the configuration changes
 	// the replica's rounds logged since its last RaftState.
 	fresh bool
@@ -126,6 +128,11 @@ type sent struct {
 	members uint64
 }
 
+type win struct {
+	term int
+	at   key
+}
+
 type gen struct {
 	reps    []*replica
 	chosen  map[uint64]entry
@@ -134,6 +141,8 @@ type gen struct {
 	// leaders the replica that led each term of elected a replica led.
 	failed  map[uint64]bool
 	leaders map[uint64]uint64
+	// wins is the spec term and key of each elect or transfer line.
+	wins    []win
 	lines   []line
 	placed  int
 	boot    conf
@@ -302,6 +311,28 @@ func (g *gen) replicate(id int, lead, t uint64, lg []int, c int) {
 	g.line(id, "%s", s)
 }
 
+// elect writes replica id's line s for its win of spec term t. etcd-raft wins on the last vote's
+// answer, which can arrive after a voter that gave it won a later term: the win is placed before
+// the first win of a later term, unless a line of the replica's is later.
+func (g *gen) elect(id int, s string, t int) {
+	r := g.reps[id-1]
+	var first *win
+	for i := range g.wins {
+		if w := &g.wins[i]; w.term > t && (first == nil || w.at.less(first.at)) {
+			first = w
+		}
+	}
+	if first == nil || first.at.b != 0 || !r.lastLine.less(first.at) {
+		g.line(id, "%s", s)
+	} else {
+		g.placed++
+		k := key{first.at.a, g.placed - 1<<40}
+		g.lines = append(g.lines, line{k, s})
+		r.lastLine = k
+	}
+	g.wins = append(g.wins, win{t, r.lastLine})
+}
+
 // state writes the lines of replica id's RaftState record f: a restart, then a lead taken, its
 // log or commit index moved by a leader, its commit index moved as leader, the entries it
 // applied, or halted at, the configuration changes it proposed, as etcd-raft proposes the leave
@@ -336,7 +367,14 @@ func (g *gen) state(id int, pass uint64, f [trace.MaxFields]uint64) {
 	}
 	if r.fresh {
 		r.fresh = false
-		g.line(id, `[k |-> "restart", r |-> %d, c |-> %d, a |-> %d]`, id, g.index(r, commit), g.index(r, applied))
+		a := g.index(r, applied)
+		if r.haltAt == 0 || a < r.haltAt {
+			g.line(id, `[k |-> "restart", r |-> %d, c |-> %d, a |-> %d]`, id, g.index(r, commit), a)
+			return
+		}
+		// A halted replica restarts below the entry it cannot decode, and halts again applying it.
+		g.line(id, `[k |-> "restart", r |-> %d, c |-> %d, a |-> %d]`, id, g.index(r, commit), r.haltAt-1)
+		g.line(id, `[k |-> "apply", r |-> %d, a |-> %d]`, id, a)
 		return
 	}
 	if leads && (prev[4]&1 == 0 || prev[0] != term) {
@@ -347,7 +385,7 @@ func (g *gen) state(id int, pass uint64, f [trace.MaxFields]uint64) {
 		if term == r.nowTerm {
 			r.forced = false
 		}
-		g.line(id, `[k |-> "%s", i |-> %d, t |-> %d]`, kind, id, g.term(term))
+		g.elect(id, fmt.Sprintf(`[k |-> "%s", i |-> %d, t |-> %d]`, kind, id, g.term(term)), g.term(term))
 	}
 	switch {
 	case leads && commit > prev[2] && g.index(r, commit) <= g.index(r, prev[2]):
@@ -368,7 +406,8 @@ func (g *gen) state(id int, pass uint64, f [trace.MaxFields]uint64) {
 	moved := g.index(r, applied) > g.index(r, prev[3])
 	switch {
 	case moved && halts:
-		g.line(id, `[k |-> "halt", r |-> %d, a |-> %d]`, id, g.index(r, applied))
+		r.haltAt = g.index(r, applied)
+		g.line(id, `[k |-> "halt", r |-> %d, a |-> %d]`, id, r.haltAt)
 	case applied > prev[3] && !moved:
 		g.stutter(`[k |-> "apply", r |-> %d, a |-> %d]`, id, g.index(r, applied))
 	case applied > prev[3]:
@@ -402,7 +441,8 @@ func (g *gen) state(id int, pass uint64, f [trace.MaxFields]uint64) {
 		// A test halts a replica with no entry it failed to apply, which meta's halt needs, or
 		// past a command, which moves no spec index:
 		// the halt is the replica's last apply, unless a line of the replica's is later.
-		h := fmt.Sprintf(`[k |-> "halt", r |-> %d, a |-> %d]`, id, g.index(r, applied))
+		r.haltAt = g.index(r, applied)
+		h := fmt.Sprintf(`[k |-> "halt", r |-> %d, a |-> %d]`, id, r.haltAt)
 		if r.applyAt >= 0 && g.lines[r.applyAt].k == r.lastLine {
 			g.lines[r.applyAt].s = h
 		} else {
