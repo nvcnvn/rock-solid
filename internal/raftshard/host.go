@@ -36,6 +36,9 @@ type Host struct {
 	// retired is the owners of removed shards with the LSN of each one's newest blob, kept until
 	// the log's replay floor reaches it.
 	retired []retiredOwner
+	// unnamed is the owners of shards removed from the round driver that a manifest a restart may
+	// load can still name.
+	unnamed []unnamedOwner
 	// remote is the shards on the round driver, remoteAt each one's place by owner, and mail
 	// what a restart's replay sends them.
 	remote   []remoteShard
@@ -56,7 +59,10 @@ type Host struct {
 // bounds, pieces every live piece of its tree, and flush its part of the running due checkpoint,
 // if it has one.
 type remoteShard struct {
-	owner  uint32
+	owner uint32
+	rep   disklog.Replica
+	// named says a manifest naming the shard was durable when it was mailed or loaded.
+	named  bool
 	loop   int
 	id     uint32
 	from   uint64
@@ -138,6 +144,13 @@ type Mail struct {
 type retiredOwner struct {
 	owner uint32
 	lsn   uint64
+}
+
+// unnamedOwner is a removed shard's owner and the durable LSN of the first checkpoint begun
+// after the removal, 0 until one begins: a manifest past it leaves the owner out.
+type unnamedOwner struct {
+	owner uint32
+	after uint64
 }
 
 // hosted is one shard: its storage, the index of its last compaction, the round waiting for pool
@@ -274,14 +287,15 @@ func (h *Host) Add(owner uint32, st *Storage) {
 }
 
 // AddRemote knows the shard whose blobs carry owner as shard id on the round driver of loop, so a
-// restart's replay mails it its blobs, as Add does for a hosted shard, and checkpoints name it.
+// restart's replay mails it its blobs, as Add does for a hosted shard, and checkpoints name it,
+// with rep, the replica it holds the state of.
 // It is added before it writes a blob: until it reports a replay LSN, it is named with the log's
 // durable LSN when added, or with the one the loaded manifest names it with.
-func (h *Host) AddRemote(owner uint32, loop int, id uint32) {
+func (h *Host) AddRemote(owner uint32, loop int, id uint32, rep disklog.Replica) {
 	if !h.Reusable(owner) {
 		panic(fmt.Sprintf("raftshard: owner %d hosted, in flight or with blobs that can replay", owner))
 	}
-	rs := remoteShard{owner: owner, loop: loop, id: id}
+	rs := remoteShard{owner: owner, rep: rep, loop: loop, id: id}
 	if h.Log != nil {
 		rs.replay = h.Log.DurableLSN()
 	}
@@ -304,14 +318,15 @@ func (h *Host) RemoteReplay(owner uint32, lsn uint64) {
 }
 
 // RemoveRemote forgets owner's shard on the round driver, taken off its loop with every blob of it
-// reported dead, the newest at lsn: owner goes to no new shard while that blob can replay, and the
-// pieces of its tree are dead once a checkpoint begun after now ends (Gone), the running one's
-// manifest still naming them.
+// reported dead, the newest at lsn: owner goes to no new shard while that blob can replay or a
+// manifest a restart may load names it, and the pieces of its tree are dead once a checkpoint
+// begun after now ends (Gone), the running one's manifest still naming them.
 func (h *Host) RemoveRemote(owner uint32, lsn uint64) {
 	r := h.remoteShard(owner)
 	if lsn > 0 {
 		h.retire(owner, lsn)
 	}
+	h.unnamed = append(h.unnamed, unnamedOwner{owner: owner})
 	h.gone = append(h.gone, h.remote[r].pieces...)
 	if f := h.remote[r].flush; f != nil {
 		h.gone = append(h.gone, f.pieces...)
@@ -336,13 +351,20 @@ func (h *Host) Mail(dst []Mail) []Mail {
 // that its manifest is durable, naming the runs it wrote, base the base of the due manifest before
 // it: the shard compacts to what its mark recorded, and writes again what it keeps at or before
 // base, as Rewrite does for a hosted shard when the next checkpoint begins; its tree then
-// reports the pieces the manifest left out (RemoteDead).
+// reports the pieces the manifest left out (RemoteDead). The first manifest naming a replica asks
+// the log to name it in a segment header (disklog.Log.NameNewest), as only one a header names is
+// the one a restart loads, so a round the shard starts after the mail is durable only once a
+// restart restores the shard.
 func (h *Host) Checkpointed(base uint64) {
 	h.cp = 0
 	for i := range h.remote {
 		rs := &h.remote[i]
 		if rs.flush == nil {
 			continue
+		}
+		if !rs.named && rs.rep != (disklog.Replica{}) {
+			rs.named = true
+			h.Log.NameNewest()
 		}
 		rs.keep(rs.flush)
 		h.mail = append(h.mail, Mail{Kind: MailCheckpointed, Loop: rs.loop, Shard: rs.id, Base: base})
@@ -1007,7 +1029,7 @@ func (h *Host) Loaded(m *disklog.Manifest) {
 	for _, ix := range m.Indexes {
 		if r, ok := h.remoteAt[ix.Owner]; ok {
 			rs := &h.remote[r]
-			rs.from, rs.replay, rs.runs, rs.bounds = ix.ReplayLSN, ix.ReplayLSN, slices.Clone(ix.Runs), slices.Clone(ix.Bounds)
+			rs.from, rs.replay, rs.runs, rs.bounds, rs.named = ix.ReplayLSN, ix.ReplayLSN, slices.Clone(ix.Runs), slices.Clone(ix.Bounds), true
 		}
 		if k, ok := h.at[ix.Owner]; ok {
 			hd := &h.shards[k]
@@ -1042,12 +1064,19 @@ func (h *Host) Indexes(dst []disklog.CheckpointIndex, durable uint64) []disklog.
 }
 
 // RemoteIndexes appends each shard on the round driver's index for a checkpoint whose base is the
-// durable LSN durable: its owner, the replay LSN it reported, at most durable, and the runs the
+// durable LSN durable: its owner and replica, the replay LSN it reported, at most durable, and the runs the
 // newest manifest names; a due checkpoint's flush adds those it writes. The replay LSN reported
-// before the shard marks its tree is at or before every round its mark's base leaves live.
+// before the shard marks its tree is at or before every round its mark's base leaves live. The
+// checkpoint leaves out the shards removed before it, and checkpoints run one at a time, so every
+// manifest past durable leaves them out.
 func (h *Host) RemoteIndexes(dst []disklog.CheckpointIndex, durable uint64) []disklog.CheckpointIndex {
+	for i := range h.unnamed {
+		if h.unnamed[i].after == 0 {
+			h.unnamed[i].after = durable
+		}
+	}
 	for _, rs := range h.remote {
-		dst = append(dst, disklog.CheckpointIndex{Owner: rs.owner, ReplayLSN: min(rs.replay, durable), Runs: rs.runs, Bounds: rs.bounds})
+		dst = append(dst, disklog.CheckpointIndex{Owner: rs.owner, Replica: rs.rep, ReplayLSN: min(rs.replay, durable), Runs: rs.runs, Bounds: rs.bounds})
 	}
 	return dst
 }
@@ -1103,8 +1132,9 @@ func (hd *hosted) rewrite(lsn uint64) (Round, bool) {
 }
 
 // Reusable reports whether owner may be given to a new shard: no shard holds it, hosted or on the
-// round driver, no blob of it is in flight, and no blob of a removed shard of it lies past the
-// log's replay floor.
+// round driver, no blob of it is in flight, no blob of a removed shard of it lies past the log's
+// replay floor, and no manifest a restart may load names a removed shard of it on the round
+// driver, which a restart would restore under owner and mail the new shard's blobs.
 func (h *Host) Reusable(owner uint32) bool {
 	if _, ok := h.at[owner]; ok {
 		return false
@@ -1117,11 +1147,20 @@ func (h *Host) Reusable(owner uint32) bool {
 			return false
 		}
 	}
-	var floor uint64
+	var floor, named uint64
 	if h.Log != nil {
-		floor = h.Log.ReplayFloor()
+		floor, named = h.Log.ReplayFloor(), h.Log.NamedLSN()
 	}
 	keep, ok := 0, true
+	for _, u := range h.unnamed {
+		if u.after == 0 || named <= u.after {
+			ok = ok && u.owner != owner
+			h.unnamed[keep] = u
+			keep++
+		}
+	}
+	h.unnamed = h.unnamed[:keep]
+	keep = 0
 	for _, r := range h.retired {
 		if r.lsn > floor {
 			ok = ok && r.owner != owner

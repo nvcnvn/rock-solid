@@ -15,7 +15,7 @@ func sampleManifest() disklog.Manifest {
 		NextSeq: 9,
 		Indexes: []disklog.ManifestIndex{
 			{Owner: 1, ReplayLSN: 70, Runs: []disklog.BlobRef{{Segment: 4, Block: 2, LSN: 78, Entry: 3}}},
-			{Owner: 2, ReplayLSN: 77},
+			{Owner: 2, ReplayLSN: 77, Replica: disklog.Replica{Group: 10, ID: 3}},
 		},
 		Segments: []disklog.SegmentUsage{
 			{Segment: 1, State: disklog.SegmentUsed, Live: 40, Newest: 77},
@@ -31,7 +31,7 @@ func sampleEdit() disklog.ManifestEdit {
 		NextSeq: 11,
 		Indexes: []disklog.IndexEdit{
 			{
-				Owner: 2, ReplayLSN: 88,
+				Owner: 2, ReplayLSN: 88, Replica: disklog.Replica{Group: 11, ID: 4},
 				Added:  []disklog.BlobRef{{Segment: 6, Block: 1, LSN: 91}},
 				Bounds: []disklog.MergeBound{{Run: disklog.BlobRef{Segment: 6, Block: 1, LSN: 91}, Key: []byte("k"), Dead: 3}},
 			},
@@ -47,7 +47,7 @@ func sampleEdit() disklog.ManifestEdit {
 func editsEqual(a, b disklog.ManifestEdit) bool {
 	return a.BaseLSN == b.BaseLSN && a.NextSeq == b.NextSeq && slices.Equal(a.Segments, b.Segments) &&
 		slices.EqualFunc(a.Indexes, b.Indexes, func(x, y disklog.IndexEdit) bool {
-			return x.Owner == y.Owner && x.ReplayLSN == y.ReplayLSN && slices.Equal(x.Added, y.Added) && slices.Equal(x.Removed, y.Removed) &&
+			return x.Owner == y.Owner && x.ReplayLSN == y.ReplayLSN && x.Replica == y.Replica && slices.Equal(x.Added, y.Added) && slices.Equal(x.Removed, y.Removed) &&
 				boundsEqual(x.Bounds, y.Bounds)
 		})
 }
@@ -81,6 +81,11 @@ func TestManifestRoundTrip(t *testing.T) {
 	}
 	if _, err := disklog.DecodeManifestEdit(b); !errors.Is(err, disklog.ErrMalformed) {
 		t.Fatalf("a snapshot decoded as an edit: %v", err)
+	}
+	old := slices.Clone(b)
+	old[2] = 1
+	if _, err := disklog.DecodeManifest(old); !errors.Is(err, disklog.ErrMalformed) {
+		t.Fatalf("a snapshot of the kind whose indexes named no replica: %v", err)
 	}
 	b[0]++
 	if _, err := disklog.DecodeManifest(b); !errors.Is(err, disklog.ErrBadVersion) {
@@ -232,7 +237,7 @@ func TestManifestEditApplies(t *testing.T) {
 		BaseLSN: 90,
 		NextSeq: 11,
 		Indexes: []disklog.ManifestIndex{
-			{Owner: 2, ReplayLSN: 88, Runs: []disklog.BlobRef{{Segment: 6, Block: 1, LSN: 91}}, Bounds: e.Indexes[0].Bounds},
+			{Owner: 2, ReplayLSN: 88, Replica: disklog.Replica{Group: 11, ID: 4}, Runs: []disklog.BlobRef{{Segment: 6, Block: 1, LSN: 91}}, Bounds: e.Indexes[0].Bounds},
 			{Owner: 1, ReplayLSN: 90},
 		},
 		Segments: []disklog.SegmentUsage{

@@ -2,6 +2,7 @@ package looptest
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"slices"
@@ -39,11 +40,17 @@ type nodeMetas struct {
 	keys    map[uint64][]byte
 	groups  map[uint64]uint64
 	next    uint64
+	gone    int
+	// askFirst has start ask about replica 1 as the device starts, before its store serves.
+	askFirst bool
 }
 
 const nodeMetaGroup = 10
 
 var nodeMetaPeer = core.NodeID{Node: 77}
+
+// nodeMetaAsker is a node that asks the device about replicas; the driver counts its answers Gone.
+var nodeMetaAsker = core.NodeID{Node: 78}
 
 type metaDevice struct {
 	deviceOnLoop
@@ -74,6 +81,9 @@ func (d metaDeviceDriver) Execute(a *core.Action) {
 	var an meta.Answer
 	if a.Peer == nodeMetaPeer && meta.DecodeAnswer(pool, &a.Msg, &an) == nil {
 		d.nm.answers[an.Token] = an.Err
+	}
+	if in := a.Msg.Inline(); a.Peer == nodeMetaAsker && len(in) > 9 && in[9] == raftKindGone {
+		d.nm.gone++
 	}
 	if a.Msg.Buf != core.NoBuf {
 		pool.Free(a.Msg.Buf)
@@ -141,6 +151,9 @@ func (nm *nodeMetas) start(metas []meta.RoundConfig) {
 	}
 	AddWithDisk(n, k, nm.l, dr)
 	nm.l.Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: 1})
+	if nm.askFirst {
+		nm.postAsk(1)
+	}
 	nm.settle()
 }
 
@@ -467,4 +480,106 @@ func answersTo(ctx *core.Context, client core.NodeID, acts []core.Action) map[ui
 		}
 	}
 	return got
+}
+
+// raftKindGone is raftshard's message kind of an answer Gone, raftKindAsk of the ask it answers.
+const (
+	raftKindAsk  = 5
+	raftKindGone = 6
+)
+
+// ask sends the device an ask, from nodeMetaAsker, about replica id of the group, and settles.
+func (nm *nodeMetas) ask(id uint64) {
+	nm.postAsk(id)
+	nm.settle()
+}
+
+func (nm *nodeMetas) postAsk(id uint64) {
+	body := binary.LittleEndian.AppendUint64([]byte{core.ProtoGroup}, nodeMetaGroup)
+	body = append(body, raftKindAsk)
+	for _, v := range []uint64{2, id, 0, 0, 0} {
+		body = binary.LittleEndian.AppendUint64(body, v)
+	}
+	ev := core.Event{Kind: core.EvNetRecv, Peer: nodeMetaAsker}
+	if err := ev.Msg.SetInline(body); err != nil {
+		nm.t.Fatal(err)
+	}
+	nm.l.Inbox().Post(&ev)
+}
+
+// A restart restores the MetaStore replicas its disk's manifest names, not those the device has
+// settings for: a replica that answered Txns before a crash comes back holding every one, and
+// another group's settings host nothing. A disk holding a replica of a group the device has no
+// settings for leaves the device failed rather than forget it. An ask about the replica before the
+// store serves, so before it is restored, is not answered Gone.
+func TestARestartRestoresTheReplicasItsDiskHolds(t *testing.T) {
+	nm := newNodeMetas(t)
+	cfg := nm.replica()
+	if err := nm.m.d.AddMeta(cfg); err != nil {
+		t.Fatal(err)
+	}
+	nm.lead()
+	nm.send(20, 100)
+	other := nm.replica()
+	other.Shard.Raft.Group, other.Owner = nodeMetaGroup+1, 1002
+
+	nm.sd.Crash(core.NewRand(3))
+	nm.askFirst = true
+	nm.start([]meta.RoundConfig{other, cfg})
+	nm.askFirst = false
+	if nm.m.d.Meta(other.Shard.Raft.Group) != nil {
+		t.Fatal("the device hosted a replica its disk does not hold")
+	}
+	if nm.gone != 0 {
+		t.Fatal("the device answered an ask about a replica it holds Gone before its store served")
+	}
+	nm.lead()
+	nm.check()
+
+	nm.sd.Restart()
+	nm.start([]meta.RoundConfig{other})
+	if nm.m.d.Store() != nil {
+		t.Fatal("a disk holding a replica the device has no settings for served")
+	}
+}
+
+// A new replica starts, and so can acknowledge anything, only once a durable manifest names it,
+// which a restart then restores it from: crashed at every step from its add to its start, the
+// disk brings it back whenever it had started, and otherwise may not, its device then answering
+// an ask about it Gone.
+func TestANewReplicaStartsOnlyOnceARestartWouldRestoreIt(t *testing.T) {
+	lost, started := 0, 0
+	for k := 0; started < 3; k++ {
+		nm := newNodeMetas(t)
+		if err := nm.m.d.AddMeta(nm.replica()); err != nil {
+			t.Fatal(err)
+		}
+		nm.ticking = true
+		nm.l.Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: node.MetaTimer})
+		for range k {
+			if !nm.s.Step() {
+				break
+			}
+		}
+		up := nm.m.d.Meta(nodeMetaGroup).Shard() != nil
+		nm.ticking = false
+		nm.sd.Crash(core.NewRand(uint64(k)))
+		nm.start([]meta.RoundConfig{nm.replica()})
+		restored := nm.m.d.Meta(nodeMetaGroup) != nil
+		switch {
+		case up && !restored:
+			t.Fatalf("crashed after %d steps, a replica that had started was not restored", k)
+		case up:
+			started++
+		case !restored:
+			lost++
+			nm.ask(1)
+			if nm.gone != 1 {
+				t.Fatalf("crashed after %d steps, the device answered an ask about a replica it does not hold Gone %d times", k, nm.gone)
+			}
+		}
+	}
+	if lost == 0 {
+		t.Fatal("no crash came before a manifest named the replica")
+	}
 }

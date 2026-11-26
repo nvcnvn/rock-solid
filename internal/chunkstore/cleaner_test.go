@@ -43,11 +43,12 @@ func overwrite(h *harness, r *core.Rand, chunks []core.ChunkID, blocks uint16) {
 
 // Uniform overwrites of a quarter of a small disk write it over many times: the cleaner keeps
 // segments free, so no write fails, every block reads back, the usage table keeps the index's
-// counts, and a restart reads the same.
+// counts, and a restart reads the same. Seed 9 takes the free segments outside the reserve to 1,
+// past the second pass's threshold with a segment to spare; most seeds stop at 3 and run one.
 func TestCleanerKeepsAFullDiskWriting(t *testing.T) {
 	h := newHarnessOn(t, cleanConfig(), cleanGeo)
 	h.merging = true
-	r := core.NewRand(7)
+	r := core.NewRand(9)
 	chunks := []core.ChunkID{chunk(1), chunk(2)}
 	for range 4 * int(cleanGeo.DiskBlocks()) / 2 {
 		overwrite(h, r, chunks, 64)

@@ -11,8 +11,9 @@ const (
 	BlobRefSize = 18
 
 	manifestFixedSize  = 2 + 1 + 8 + 8 + 4 + 4
-	manifestIndexSize  = 4 + 8 + 4 + 4
-	editIndexSize      = 4 + 8 + 4 + 4 + 4
+	manifestIndexSize  = 4 + 8 + replicaSize + 4 + 4
+	editIndexSize      = 4 + 8 + replicaSize + 4 + 4 + 4
+	replicaSize        = 8 + 8
 	mergeBoundSize     = BlobRefSize + 4 + 2
 	pieceListSize      = 2 + 2
 	pieceListEntrySize = 2
@@ -21,9 +22,11 @@ const (
 	SegmentUsageSize = 4 + 1 + 4 + 8
 )
 
+// Kinds 1 and 2 were manifests whose indexes named no replica: a disk holding them fails its
+// open rather than misreading them.
 const (
-	kindSnapshot byte = 1
-	kindEdit     byte = 2
+	kindSnapshot byte = 3
+	kindEdit     byte = 4
 )
 
 // BlobRef names a blob entry of a durable record by the record's segment, block offset and LSN and the entry's index.
@@ -34,10 +37,18 @@ type BlobRef struct {
 	Entry   uint16
 }
 
-// ManifestIndex is an index's runs, each named by its last piece, the bounds its running merges set on some of them, and the LSN after which records replay into it.
+// Replica names the Raft replica whose state an index holds by its group and its ID in the group;
+// zero is no replica's, as the chunk index's.
+type Replica struct {
+	Group uint64
+	ID    uint64
+}
+
+// ManifestIndex is an index's runs, each named by its last piece, the bounds its running merges set on some of them, the LSN after which records replay into it, and the replica it holds the state of.
 type ManifestIndex struct {
 	Owner     uint32
 	ReplayLSN uint64
+	Replica   Replica
 	Runs      []BlobRef
 	Bounds    []MergeBound
 }
@@ -76,10 +87,11 @@ type MergeBound struct {
 	Dead uint32
 }
 
-// IndexEdit is an index's replay point, the runs an edit adds to and removes from it, and every bound its merges hold after it.
+// IndexEdit is an index's replay point and replica, the runs an edit adds to and removes from it, and every bound its merges hold after it.
 type IndexEdit struct {
 	Owner     uint32
 	ReplayLSN uint64
+	Replica   Replica
 	Added     []BlobRef
 	Removed   []BlobRef
 	Bounds    []MergeBound
@@ -100,6 +112,8 @@ func AppendManifest(dst []byte, m *Manifest) []byte {
 		ix := &m.Indexes[i]
 		dst = binary.LittleEndian.AppendUint32(dst, ix.Owner)
 		dst = binary.LittleEndian.AppendUint64(dst, ix.ReplayLSN)
+		dst = binary.LittleEndian.AppendUint64(dst, ix.Replica.Group)
+		dst = binary.LittleEndian.AppendUint64(dst, ix.Replica.ID)
 		dst = appendRefs(dst, ix.Runs)
 		dst = appendBounds(dst, ix.Bounds)
 	}
@@ -122,6 +136,8 @@ func AppendManifestEdit(dst []byte, e *ManifestEdit) []byte {
 		ix := &e.Indexes[i]
 		dst = binary.LittleEndian.AppendUint32(dst, ix.Owner)
 		dst = binary.LittleEndian.AppendUint64(dst, ix.ReplayLSN)
+		dst = binary.LittleEndian.AppendUint64(dst, ix.Replica.Group)
+		dst = binary.LittleEndian.AppendUint64(dst, ix.Replica.ID)
 		dst = appendRefs(dst, ix.Added)
 		dst = appendRefs(dst, ix.Removed)
 		dst = appendBounds(dst, ix.Bounds)
@@ -198,6 +214,7 @@ func DecodeManifest(b []byte) (Manifest, error) {
 		ix := &m.Indexes[i]
 		ix.Owner = r.u32()
 		ix.ReplayLSN = r.u64()
+		ix.Replica = Replica{Group: r.u64(), ID: r.u64()}
 		if owners[ix.Owner] || ix.ReplayLSN > base {
 			return Manifest{}, ErrMalformed
 		}
@@ -231,6 +248,7 @@ func DecodeManifestEdit(b []byte) (ManifestEdit, error) {
 		ix := &e.Indexes[i]
 		ix.Owner = r.u32()
 		ix.ReplayLSN = r.u64()
+		ix.Replica = Replica{Group: r.u64(), ID: r.u64()}
 		if owners[ix.Owner] || ix.ReplayLSN > base {
 			return ManifestEdit{}, ErrMalformed
 		}
@@ -384,7 +402,7 @@ func applyIndexes(base []ManifestIndex, edits []IndexEdit) ([]ManifestIndex, err
 		if !validBounds(runs, ed.Bounds) {
 			return nil, ErrMalformed
 		}
-		out[i] = ManifestIndex{Owner: ed.Owner, ReplayLSN: ed.ReplayLSN, Runs: runs, Bounds: ed.Bounds}
+		out[i] = ManifestIndex{Owner: ed.Owner, ReplayLSN: ed.ReplayLSN, Replica: ed.Replica, Runs: runs, Bounds: ed.Bounds}
 	}
 	return out, nil
 }
@@ -409,7 +427,7 @@ func diffIndexes(base, next []ManifestIndex) []IndexEdit {
 		if j, ok := at[ix.Owner]; ok {
 			old = base[j].Runs
 		}
-		ed := IndexEdit{Owner: ix.Owner, ReplayLSN: ix.ReplayLSN, Bounds: ix.Bounds}
+		ed := IndexEdit{Owner: ix.Owner, ReplayLSN: ix.ReplayLSN, Replica: ix.Replica, Bounds: ix.Bounds}
 		for _, r := range old {
 			if !slices.Contains(ix.Runs, r) {
 				ed.Removed = append(ed.Removed, r)

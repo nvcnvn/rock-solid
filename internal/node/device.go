@@ -3,6 +3,7 @@ package node
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
@@ -23,8 +24,10 @@ const MetaTimer core.TimerID = 0x6d657461 << 32
 // the operating system at each start, so a format a crash cut short is formatted again under
 // another log ID, the control-plane group's ID, the voter its replica reports to until
 // Authority names another, and the error opening the device, if any, which leaves it failed;
-// Host is the loop that owns the device, Rounds its log there, and Metas the MetaStore replicas
-// the disk holds, which a store opened, not formatted, restores.
+// Host is the loop that owns the device, Rounds its log there, and Metas the settings of the
+// MetaStore replicas the disk may hold, one per group: a store opened restores each replica its
+// manifest names, under the group, replica ID and owner the disk records, with the rest of the
+// settings of its group's entry here.
 type DeviceConfig struct {
 	Device uint64
 	Blocks uint64
@@ -118,18 +121,29 @@ type Device struct {
 func NewDevice(ctx *core.Context, cfg DeviceConfig, out *DeviceOutput) *Device {
 	d := &Device{cfg: cfg, rng: core.NewRand(cfg.Seed), start: lease.Now(ctx), auth: cfg.Ctl, hasAuth: cfg.Ctl != core.NodeID{},
 		groups: map[uint64]int{}, sv: meta.NewServer()}
+	d.cfg.Store.Replicas = d.restore
 	err := cfg.Err
 	if err == nil {
-		d.st, err = chunkstore.Open(ctx, cfg.Store, cfg.Blocks, &d.sout)
-	}
-	if err == nil {
-		for _, m := range cfg.Metas {
-			m.Open = true
-			d.host(m)
-		}
+		d.st, err = chunkstore.Open(ctx, d.cfg.Store, cfg.Blocks, &d.sout)
 	}
 	d.settle(ctx, err, out)
 	return d
+}
+
+// ErrNoSettings stops a restart whose disk holds a MetaStore replica of a group Metas has no
+// settings for, or two of one group.
+var ErrNoSettings = errors.New("node: the disk holds a MetaStore replica with no settings")
+
+// restore hosts the replica the manifest a restart loaded names, before the replay.
+func (d *Device) restore(owner uint32, rep disklog.Replica) error {
+	i := slices.IndexFunc(d.cfg.Metas, func(c meta.RoundConfig) bool { return c.Shard.Raft.Group == rep.Group })
+	if _, hosted := d.groups[rep.Group]; i < 0 || hosted {
+		return fmt.Errorf("%w: replica %d of group %d", ErrNoSettings, rep.ID, rep.Group)
+	}
+	cfg := d.cfg.Metas[i]
+	cfg.Owner, cfg.Shard.Raft.ID, cfg.Open = owner, rep.ID, true
+	d.host(cfg)
+	return nil
 }
 
 // ErrHosted refuses a MetaStore replica of a group the device hosts one of, or whose owner key
@@ -166,7 +180,7 @@ func (d *Device) Meta(group uint64) *meta.RoundShard {
 }
 
 // host puts the replica cfg describes on the device's loop and makes it known to the store, in
-// one call, so before any event of a store just opened.
+// one call.
 func (d *Device) host(cfg meta.RoundConfig) {
 	maxBlob, err := d.maxBlob()
 	if err != nil {
@@ -175,7 +189,7 @@ func (d *Device) host(cfg meta.RoundConfig) {
 	i := len(d.metas)
 	cfg.Shard.Raft.Timer, cfg.MaxBlob, cfg.Answered = MetaTimer+core.TimerID(i), maxBlob, d.sv.Reply
 	a := meta.NewRoundShard(d.cfg.Host, d.cfg.Rounds, cfg)
-	d.st.AddRemote(cfg.Owner, int(d.cfg.Loop), uint32(a.ID()))
+	d.st.AddRemote(cfg.Owner, int(d.cfg.Loop), uint32(a.ID()), disklog.Replica{Group: cfg.Shard.Raft.Group, ID: cfg.Shard.Raft.ID})
 	d.metas = append(d.metas, a)
 	d.groups[cfg.Shard.Raft.Group] = i
 }
@@ -228,17 +242,23 @@ func (d *Device) OnEvent(ctx *core.Context, ev *core.Event, out *DeviceOutput) {
 }
 
 // recvGroup hands a MetaStore group's message to the device's replica of the group: a Txn through
-// the server, which answers one for a group hosted nowhere here as NotLeader; another message for
-// no replica here is dropped.
+// the server, which answers one for a group hosted nowhere here as NotLeader; an ask about a
+// replica the device does not host, once its store serves and so has restored every replica the
+// disk holds, is answered Gone; another message for no replica here is dropped.
 func (d *Device) recvGroup(ctx *core.Context, ev *core.Event, acts []core.Action) []core.Action {
 	in := ev.Msg.Inline()
 	var a *meta.RoundShard
 	if len(in) > 9 {
 		a = d.Meta(binary.LittleEndian.Uint64(in[1:]))
 	}
-	switch {
+	var gone core.Action
+	switch _, id, asked := raftshard.Asked(&ev.Msg); {
 	case len(in) > 9 && in[9] == meta.KindTxn:
 		return d.sv.ServeRound(ctx, ev, a, acts)
+	case asked && d.phase == opened && (a == nil || a.ReplicaID() != id):
+		if raftshard.Gone(&ev.Msg, ev.Peer, &gone) {
+			acts = append(acts, gone)
+		}
 	case a != nil:
 		return a.OnEvent(ctx, ev, acts)
 	}

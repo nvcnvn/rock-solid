@@ -51,10 +51,10 @@ func goldenImages(t testing.TB) map[string][]byte {
 	images := map[string][]byte{"superblock": sb, "record_header": goldenRecord(t).image[:core.BlockSize], "record_header_slot": goldenSlotRecord(t).image[:2*core.BlockSize], "record_copy": goldenCopyRecord(t).image[:core.BlockSize], "record_peering": goldenPeeringRecord(t).image[:core.BlockSize]}
 	input, output := BlobRef{Segment: 4, Block: 2, LSN: 78, Entry: 3}, BlobRef{Segment: 6, Block: 1, LSN: 91}
 	images["manifest_snapshot"] = AppendManifest(nil, &Manifest{BaseLSN: 77, NextSeq: 9,
-		Indexes:  []ManifestIndex{{Owner: 1, ReplayLSN: 70, Runs: []BlobRef{input, output}, Bounds: []MergeBound{{Run: input, Key: []byte("bound"), Dead: 2}}}},
+		Indexes:  []ManifestIndex{{Owner: 1, ReplayLSN: 70, Replica: Replica{Group: 10, ID: 2}, Runs: []BlobRef{input, output}, Bounds: []MergeBound{{Run: input, Key: []byte("bound"), Dead: 2}}}},
 		Segments: []SegmentUsage{{Segment: 1, State: SegmentUsed, Live: 40, Newest: 77}}})
 	images["manifest_edit"] = AppendManifestEdit(nil, &ManifestEdit{BaseLSN: 90, NextSeq: 11,
-		Indexes:  []IndexEdit{{Owner: 1, ReplayLSN: 88, Added: []BlobRef{output}, Removed: []BlobRef{input}, Bounds: []MergeBound{{Run: output, Key: []byte("k"), Dead: 3}}}},
+		Indexes:  []IndexEdit{{Owner: 1, ReplayLSN: 88, Replica: Replica{Group: 10, ID: 2}, Added: []BlobRef{output}, Removed: []BlobRef{input}, Bounds: []MergeBound{{Run: output, Key: []byte("k"), Dead: 3}}}},
 		Segments: []SegmentUsage{{Segment: 1, State: SegmentFree}, {Segment: 5, State: SegmentUsed, Live: 3, Newest: 90}}})
 	for name, h := range map[string]SegmentHeader{"segment_header": testSegmentHeader(), "segment_header_clean": testCleanHeader(), "segment_header_slot": testSlotLaneHeader(), "segment_header_meta": testMetaHeader(), "segment_header_merge": testMergeHeader()} {
 		if images[name], err = AppendSegmentHeader(nil, h); err != nil {

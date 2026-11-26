@@ -904,7 +904,7 @@ func TestARemovedShardsPiecesStayLiveUntilAManifestLeavesItOut(t *testing.T) {
 // them no more. The first due checkpoint that wrote its runs begins with nothing durable.
 func TestARemovedRemoteShardsPiecesDieOnceAManifestLeavesItOut(t *testing.T) {
 	r := newRaftRig(t, raftConfig(), raftGeometry, 7)
-	r.s.AddRemote(9, 2, 4)
+	r.s.AddRemote(9, 2, 4, disklog.Replica{})
 	r.remotePiece = fill(core.BlockSize, 9)
 	for i := range 2 {
 		r.s.RemoteFull()
@@ -957,7 +957,7 @@ func TestARemovedRemoteShardsPiecesDieOnceAManifestLeavesItOut(t *testing.T) {
 // does a checkpoint begun before its next flush, merge bound included.
 func TestAShardOnTheRoundDriverNamesTheRunsItsFlushCarries(t *testing.T) {
 	r := newRaftRig(t, raftConfig(), raftGeometry, 7)
-	r.s.AddRemote(9, 2, 4)
+	r.s.AddRemote(9, 2, 4, disklog.Replica{})
 	r.remotePiece = fill(core.BlockSize, 9)
 	for i := range 2 {
 		r.s.RemoteFull()
@@ -1002,7 +1002,7 @@ func TestRemoveRaftRefusesAnOwnerNotHosted(t *testing.T) {
 func TestAStoreMailsAShardOnTheRoundDriverItsShareAndCheckpoints(t *testing.T) {
 	cfg := raftConfig()
 	r := newRaftRig(t, cfg, raftGeometry, 5)
-	r.s.AddRemote(9, 2, 4)
+	r.s.AddRemote(9, 2, 4, disklog.Replica{})
 	r.chunkWrite(chunk(1), fill(core.BlockSize, 1))
 	r.settle()
 	share := cfg.Log.MaxReplayBytes
@@ -1028,7 +1028,7 @@ func TestAStoreMailsAShardOnTheRoundDriverItsShareAndCheckpoints(t *testing.T) {
 	if r.s.Log().Manifest() == manifest || len(r.mail) != 0 {
 		t.Fatalf("a step checkpoint wrote manifest %+v after %+v and mailed %+v", r.s.Log().Manifest(), manifest, r.mail)
 	}
-	r.s.AddRemote(10, 2, 5)
+	r.s.AddRemote(10, 2, 5, disklog.Replica{})
 	r.chunkWrite(chunk(3), fill(core.BlockSize, 3))
 	r.settle()
 	third := 2 * share / 3
@@ -1045,7 +1045,7 @@ func TestAStoreMailsAShardOnTheRoundDriverItsShareAndCheckpoints(t *testing.T) {
 // segment where a merge of the shard holds a run is a victim.
 func TestAShardOnTheRoundDriversDeadPiecesAndRunsReachAnIdleStore(t *testing.T) {
 	r := newRaftRig(t, raftConfig(), raftGeometry, 7)
-	r.s.AddRemote(9, 2, 4)
+	r.s.AddRemote(9, 2, 4, disklog.Replica{})
 	r.remotePiece = fill(core.BlockSize, 9)
 	for i := range 2 {
 		r.s.RemoteFull()
@@ -1113,5 +1113,51 @@ func TestAShardOnTheRoundDriversDeadPiecesAndRunsReachAnIdleStore(t *testing.T) 
 	r.s.RemoteCosts(9, []disklog.RunCost{{Pieces: kept[:1], Held: true}, {Pieces: kept[1:], Steps: 1, Extra: 100}})
 	if v, _ := r.s.pickVictims(); slices.Contains(v, seg) {
 		t.Fatalf("victims %v hold segment %d, where a merge of the shard holds a run", v, seg)
+	}
+}
+
+// A restart hands Config.Replicas each replica the manifest it loads names, with its owner, and
+// the replica added there is known again; with no Replicas to take it, the restart stops rather
+// than take the replica's blobs for dead. The first manifest naming the replica has the next round
+// open a segment, so a segment header names it.
+func TestARestartHandsReplicasTheReplicasItsManifestNames(t *testing.T) {
+	r := newRaftRig(t, raftConfig(), raftGeometry, 7)
+	rep := disklog.Replica{Group: 10, ID: 2}
+	r.s.AddRemote(9, 2, 4, rep)
+	r.s.RemoteFull()
+	r.chunkWrite(chunk(1), fill(core.BlockSize, 1))
+	r.settle()
+	r.chunkWrite(chunk(1), fill(core.BlockSize, 2))
+	r.settle()
+	if named := r.s.Log().NamedLSN(); named == 0 || named < r.s.Log().Manifest().LSN {
+		t.Fatalf("no segment header names manifest %+v: named LSN %d", r.s.Log().Manifest(), named)
+	}
+	var got []disklog.Replica
+	r.cfg.Replicas = func(owner uint32, rp disklog.Replica) error {
+		if owner == 9 {
+			got = append(got, rp)
+			r.s.AddRemote(owner, 2, 4, rp)
+		}
+		return nil
+	}
+	r.crash(core.NewRand(1))
+	if len(got) != 1 || got[0] != rep || !r.s.raft.Remote(9) {
+		t.Fatalf("the restart restored replicas %v, want %v", got, rep)
+	}
+
+	r.cfg.Replicas = nil
+	r.s.Close()
+	r.queue, r.timerAt, r.out, r.held = nil, 0, Output{}, nil
+	r.pool = sim.NewPool(32<<20, 0)
+	r.ctx.Pool = r.pool
+	var err error
+	if r.s, err = Open(&r.ctx, r.cfg, r.disk.Blocks(), &r.out); err == nil {
+		r.take()
+		for n := 0; n < settleSteps && r.step(); n++ {
+		}
+		err = r.s.Err()
+	}
+	if !errors.Is(err, ErrReplicaNotRestored) {
+		t.Fatalf("a restart with nothing to take the replica: %v", err)
 	}
 }

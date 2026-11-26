@@ -33,13 +33,17 @@ func (r *rig) commit(st *Storage, owner uint32, flush uint64, rd Round) uint64 {
 // the newest manifest, so that a restart loads it.
 func (r *rig) roll() {
 	r.t.Helper()
-	r.host.Add(99, NewStorage())
+	owner := uint32(99)
+	for !r.host.Reusable(owner) {
+		owner--
+	}
+	r.host.Add(owner, NewStorage())
 	for i := uint64(1); i <= 40; i++ {
-		r.write(99, i, &Round{Entries: entries(i, 1, 1, 8<<10)})
+		r.write(owner, i, &Round{Entries: entries(i, 1, 1, 8<<10)})
 		r.run()
 	}
 	r.takeDone()
-	r.host.Remove(99)
+	r.host.Remove(owner)
 }
 
 func (r *rig) replayLSN(owner uint32) uint64 {
@@ -262,6 +266,36 @@ func TestARemovedOwnerIsNotReusableBeforeASegmentHeaderNamesTheManifest(t *testi
 	sts := r.crash(5)
 	if l, _ := sts[5].LastIndex(); l != 0 || sts[5].HardState() != hs {
 		t.Fatalf("the new shard of owner 5 recovered last index %d and hard state %+v, want 0 and %+v", l, sts[5].HardState(), hs)
+	}
+}
+
+// A shard removed from the round driver leaves its owner to no new shard while a manifest a
+// restart may load names it: neither the checkpoint running at the removal nor a later manifest
+// no segment header names yet frees it, only a header naming a manifest begun after the removal.
+func TestARemovedRemoteOwnerIsReusableOnceAManifestLeavingItOutIsNamed(t *testing.T) {
+	r := newRig(t)
+	r.host.AddRemote(6, 1, 0, disklog.Replica{Group: 3, ID: 4})
+	durable := r.host.Log.DurableLSN()
+	if err := r.host.Log.BeginCheckpoint(r.host.RemoteIndexes(nil, durable)); err != nil {
+		t.Fatal(err)
+	}
+	r.host.RemoveRemote(6, 0)
+	if err := r.host.Log.EndCheckpoint(&r.ctx, &r.out); err != nil {
+		t.Fatal(err)
+	}
+	r.absorb()
+	r.run()
+	r.roll()
+	if r.host.Reusable(6) {
+		t.Fatal("owner 6 is reusable while the manifest a restart loads names its removed shard")
+	}
+	r.checkpoint()
+	if r.host.Reusable(6) {
+		t.Fatal("owner 6 is reusable before a segment header names the manifest leaving it out")
+	}
+	r.roll()
+	if !r.host.Reusable(6) {
+		t.Fatal("owner 6 is not reusable once a segment header names a manifest leaving it out")
 	}
 }
 
@@ -607,7 +641,7 @@ func TestAShardOnTheRoundDriverIsNamedBeforeItsFirstReport(t *testing.T) {
 	r.host.Add(5, st5)
 	r.commit(st5, 5, 1, Round{Entries: entries(1, 1, 1, 100)})
 	added := r.host.Log.DurableLSN()
-	r.host.AddRemote(6, 1, 0)
+	r.host.AddRemote(6, 1, 0, disklog.Replica{})
 	r.commit(st5, 5, 2, Round{Entries: entries(2, 1, 1, 100)})
 	if got := r.remoteReplayLSN(6); got != added {
 		t.Fatalf("shard 6, added at durable LSN %d, is named with %d before it reports", added, got)
@@ -630,7 +664,7 @@ func TestAShardOnTheRoundDriverIsNamedBeforeItsFirstReport(t *testing.T) {
 // bound, or a crash after it would load the run whole, dead pieces included.
 func TestALoadedManifestNamesAShardsRunsWithTheirBounds(t *testing.T) {
 	h := NewHost(nil)
-	h.AddRemote(6, 1, 0)
+	h.AddRemote(6, 1, 0, disklog.Replica{})
 	run := disklog.BlobRef{Segment: 2, Block: 3, LSN: 4}
 	bounds := []disklog.MergeBound{{Run: run, Key: []byte("k"), Dead: 1}}
 	h.Loaded(&disklog.Manifest{Indexes: []disklog.ManifestIndex{{Owner: 6, ReplayLSN: 5, Runs: []disklog.BlobRef{run}, Bounds: bounds}}})

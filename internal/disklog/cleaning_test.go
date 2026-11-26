@@ -143,6 +143,29 @@ func TestNoSegmentIsCleanableBeforeAHeaderNamesTheFirstManifest(t *testing.T) {
 	}
 }
 
+// A round appends to its lane's open segment, whose header names no manifest written since; once
+// NameNewest asks for it, the next ordinary round opens a segment instead, so once that round is
+// durable a segment header names the newest manifest, the one a restart loads. The checkpoint's
+// lane still appends: the reserve counts on it.
+func TestARoundAfterNameNewestNamesTheNewestManifest(t *testing.T) {
+	h := formatted(t, 1<<16*core.BlockSize, testConfig(0))
+	h.put(disklog.Hot, h.write(0, 1, 1))
+	h.checkpointPieces(nil, 1, 100)
+	m := h.log.Manifest()
+	h.put(disklog.Hot, h.write(1, 1, 2))
+	if m.LSN == 0 || h.log.NamedLSN() >= m.LSN {
+		t.Fatalf("a round that appended names manifest %+v: named LSN %d", m, h.log.NamedLSN())
+	}
+	h.log.NameNewest()
+	if next := h.checkpointPieces(nil, 1, 100).runs[0]; next.Segment != m.Segment {
+		t.Fatalf("a checkpoint piece after NameNewest opened segment %d instead of appending to %d", next.Segment, m.Segment)
+	}
+	h.put(disklog.Hot, h.write(2, 1, 3))
+	if h.log.NamedLSN() < m.LSN {
+		t.Fatalf("a round after NameNewest left manifest %+v unnamed: named LSN %d", m, h.log.NamedLSN())
+	}
+}
+
 // copyTrial hands the log one victim's copies of counts blocks each and returns the blocks they
 // took from the cleaner's open segment at (segment, block) on: the tail they left behind there when
 // they rolled, the header of the segment they opened and their records, and where the lane's open

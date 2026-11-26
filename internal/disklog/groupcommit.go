@@ -323,10 +323,11 @@ func isCheckpointKind(e *Entry) bool {
 	return isManifestKind(e) || e.Kind == EntryBlob && e.BlobKind == BlobRun
 }
 
-// CheckpointIndex names an index a checkpoint covers, its replay LSN, the durable runs the manifest names again and the bounds its running merges set on them.
+// CheckpointIndex names an index a checkpoint covers, its replay LSN, the replica it holds the state of, the durable runs the manifest names again and the bounds its running merges set on them.
 type CheckpointIndex struct {
 	Owner     uint32
 	ReplayLSN uint64
+	Replica   Replica
 	Runs      []BlobRef
 	Bounds    []MergeBound
 }
@@ -443,6 +444,8 @@ type lane struct {
 	q      queue
 	asm    cursor
 	opened uint64
+	// names is the LSN of the manifest the header of the open segment names.
+	names uint64
 }
 
 // staleFlush is the flush of a round that a later flush retired, still in flight since at.
@@ -575,8 +578,10 @@ type Log struct {
 	held       bool
 	dying      []dyingPiece
 	namedLSN   uint64
-	pinnedLSN  uint64
-	slots      slotTable
+	// naming is the manifest NameNewest wants a segment header to name.
+	naming    uint64
+	pinnedLSN uint64
+	slots     slotTable
 
 	lanes     []lane
 	cpNoSpace bool
@@ -1110,7 +1115,7 @@ func (l *Log) beginCheckpoint(indexes []CheckpointIndex, steps bool) error {
 		if ix.ReplayLSN > l.durableLSN || slices.ContainsFunc(indexes[:i], func(o CheckpointIndex) bool { return o.Owner == ix.Owner }) {
 			return ErrMalformed
 		}
-		m.Indexes[i] = ManifestIndex{Owner: ix.Owner, ReplayLSN: ix.ReplayLSN}
+		m.Indexes[i] = ManifestIndex{Owner: ix.Owner, ReplayLSN: ix.ReplayLSN, Replica: ix.Replica}
 		if !m.Indexes[i].carry(ix.Runs, ix.Bounds, l.durableLSN) {
 			return ErrMalformed
 		}
@@ -1697,7 +1702,7 @@ func (l *Log) place(i int) (target, placement) {
 	}
 	lay, _ := acc.layout()
 	c := ln.asm
-	if c.segment != 0 && uint64(l.sb.SegmentBlocks-c.next) >= lay.Blocks() {
+	if c.segment != 0 && uint64(l.sb.SegmentBlocks-c.next) >= lay.Blocks() && !(ordinary && ln.names < l.naming && l.namedLSN < l.naming) {
 		if ln.opened > l.durableLSN && !l.appendAnywhere {
 			return target{}, placeWait
 		}
@@ -1733,6 +1738,13 @@ func (l *Log) firstFree() (uint32, bool) {
 	}
 	return 0, false
 }
+
+// NameNewest has an ordinary round open a segment of its lane, rather than append, while its
+// open segment's header and every durable one name a manifest older than the newest now, so an
+// ordinary round started after the call is durable only once a durable segment header names that
+// manifest, the one a restart then loads; a waiting idle log stays idle. The cleaner's, the
+// checkpoint's and the merges' lanes still append, which the reserve counts on.
+func (l *Log) NameNewest() { l.naming = l.manifest.LSN }
 
 // Hold keeps the log from starting rounds until Release, so that the items an owner submits
 // within a pass share one round.
@@ -1932,7 +1944,7 @@ func (l *Log) startRound(ctx *core.Context, t target, out *Output) {
 	}
 	ln.asm = cursor{segment: t.segment, seq: t.seq, next: t.offset + uint32(lay.Blocks())}
 	if t.roll {
-		ln.opened = l.nextLSN
+		ln.opened, ln.names = l.nextLSN, l.manifest.LSN
 	}
 	l.nextLSN++
 	l.last = t.lane

@@ -23,6 +23,11 @@ var ErrOverloaded = errors.New("meta: the replica retains its share of entries o
 // round of the replica's own takes.
 const bootRound = math.MaxUint64
 
+// nameRound is the number a new replica writes its boot state again under once a due checkpoint's
+// manifest naming it is durable: the store has asked the log to name that manifest in a segment
+// header (disklog.Log.NameNewest), so once the round is durable a restart restores the replica.
+const nameRound = math.MaxUint64 - 1
+
 // RoundConfig is a replica on the round driver's settings.
 type RoundConfig struct {
 	// Shard is the replica's, its storage's base the group's boot state: the voters' configuration.
@@ -40,7 +45,10 @@ type RoundConfig struct {
 // RoundShard is a MetaStore replica on a storage node's loop, whose rounds go to its disk's log
 // through the round driver: the loop.Shard that composes the replica, its state machine and its
 // raftshard.Rounds, and answers its disk's owner's mail. A new replica writes the group's boot
-// state as its first round and starts once that is durable; one its disk restores starts once
+// state as its first round, asks for a due checkpoint, and starts once that round is durable and
+// so is a due checkpoint's manifest naming it (MailCheckpointed), as a restart restores only the
+// replicas its manifest names, so it acknowledges nothing a crash would make it forget; one its
+// disk restores starts once
 // the replay ends, from the runs and blobs mailed to it, or with none mailed writes its boot
 // state as a new one does. While Rounds reports it full it drops the appends sent to it and
 // refuses Txns with ErrOverloaded.
@@ -59,7 +67,10 @@ type RoundShard struct {
 	// storage's; share is the share last mailed, and dead the blobs being reported dead.
 	replayed, restored bool
 	share              uint64
-	dead               []disklog.BlobRef
+	// booted says the boot round of a new replica is durable, manifested that a due checkpoint's
+	// manifest naming it is, and named that its name round is, so a restart restores it.
+	booted, manifested, named bool
+	dead                      []disklog.BlobRef
 	// flushing says the running checkpoint began the tree's flush, cp is its number, and mark and
 	// conf the index applied at its mark, which the log compacts to once its manifest is durable.
 	flushing bool
@@ -72,7 +83,7 @@ type RoundShard struct {
 // knows it by its owner and the ShardID it returns (chunkstore.Store.AddRemote) within the same
 // pass, before its first round can be durable.
 func NewRoundShard(l *loop.Loop, lg *loop.Log, cfg RoundConfig) *RoundShard {
-	a := &RoundShard{l: l, cfg: cfg, boot: cfg.Shard.Raft.Storage.Base()}
+	a := &RoundShard{l: l, cfg: cfg, boot: cfg.Shard.Raft.Storage.Base(), named: cfg.Open}
 	a.st = cfg.Shard.Raft.Storage
 	if cfg.Open {
 		a.st = raftshard.NewStorage()
@@ -81,9 +92,13 @@ func NewRoundShard(l *loop.Loop, lg *loop.Log, cfg RoundConfig) *RoundShard {
 	a.id = l.AddShard(a, lg)
 	if !cfg.Open {
 		a.writeBoot()
+		a.l.Reply(a.id, loop.Reply{Kind: loop.ReplyFull, Owner: cfg.Owner})
 	}
 	return a
 }
+
+// ReplicaID is the replica's ID in its group.
+func (a *RoundShard) ReplicaID() uint64 { return a.cfg.Shard.Raft.ID }
 
 // ID is the replica's ShardID on its loop.
 func (a *RoundShard) ID() loop.ShardID { return a.id }
@@ -100,6 +115,11 @@ func (a *RoundShard) Err() error { return a.err }
 
 func (a *RoundShard) writeBoot() {
 	a.rs.Write(bootRound, &raftshard.Round{Snapshot: raftpb.Snapshot{Metadata: a.boot}})
+	a.l.Mark(a.id)
+}
+
+func (a *RoundShard) writeName() {
+	a.rs.Write(nameRound, &raftshard.Round{Snapshot: raftpb.Snapshot{Metadata: a.boot}})
 	a.l.Mark(a.id)
 }
 
@@ -204,7 +224,7 @@ func (a *RoundShard) Ready(items []disklog.Item) []disklog.Item {
 }
 
 // Durable implements loop.Shard: the replica takes its round, or starts once its boot round is
-// durable; a round of its the log failed stops it, and one of Rounds' own a later Rewrite writes
+// durable if a durable manifest names it; a round of its the log failed stops it, and one of Rounds' own a later Rewrite writes
 // again.
 func (a *RoundShard) Durable(ctx *core.Context, err error, refs []disklog.BlobRef, out []core.Action) []core.Action {
 	round, err := a.rs.Durable(err, refs)
@@ -213,7 +233,14 @@ func (a *RoundShard) Durable(ctx *core.Context, err error, refs []disklog.BlobRe
 	case err != nil:
 		a.fail(fmt.Errorf("meta: round %d of shard %d: %w", round, a.cfg.Owner, err))
 	case a.err != nil:
+	case round == bootRound && a.named:
+		a.start(ctx)
 	case round == bootRound:
+		if a.booted = true; a.manifested {
+			a.writeName()
+		}
+	case round == nameRound:
+		a.named = true
 		a.start(ctx)
 	default:
 		a.shard.Durable(ctx, round, &a.out)
@@ -262,11 +289,19 @@ func (a *RoundShard) Mail(ctx *core.Context, m *loop.Mail, out []core.Action) []
 		}
 		a.piece()
 	case loop.MailFlushFailed:
+		if !a.manifested && !a.named {
+			a.l.Reply(a.id, loop.Reply{Kind: loop.ReplyFull, Owner: a.cfg.Owner})
+		}
 		if a.flushing {
 			a.flushing = false
 			a.state.Tree().FlushFailed()
 		}
 	case loop.MailCheckpointed:
+		if !a.named && !a.manifested {
+			if a.manifested = true; a.booted {
+				a.writeName()
+			}
+		}
 		a.checkpointed(m.Base)
 	case loop.MailRewrite:
 		if a.shard != nil {

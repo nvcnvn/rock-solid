@@ -210,9 +210,9 @@ func TestPlantedLogBugsBreakNamed(t *testing.T) {
 // Planted violation: the net-gain guard charging a metadata victim's rewrite as if it took no
 // steps, leaving out each step's record header, extra blobs and manifest, takes victims whose
 // rewrites write a segment or more, and invRewrite, counting the blocks they wrote, names it at
-// seed 29 (also 47 of the first 80).
+// seed 47, the only one of the first 120 it names.
 func TestARewriteChargedBelowWhatItWritesBreaksRewrite(t *testing.T) {
-	_, err := cleanerCrash(t, 29, plants{rewriteNoSteps: true})
+	_, err := cleanerCrash(t, 47, plants{rewriteNoSteps: true})
 	if violationOf(err) != invRewrite {
 		t.Fatalf("broke %v", err)
 	}

@@ -653,6 +653,52 @@ func TestCheckpointCarriesDurableRuns(t *testing.T) {
 	}
 }
 
+// An edit names the replica of an index its base already holds, as a restart loading the edit
+// must hand that replica its state.
+func TestAManifestEditKeepsAnIndexsReplica(t *testing.T) {
+	h := formatted(t, gib, testConfig(0))
+	h.put(disklog.Hot, h.write(0, 1, 1))
+	rep := disklog.Replica{Group: 10, ID: 3}
+	var runs []disklog.BlobRef
+	checkpoint := func(pieces int) disklog.Event {
+		if err := h.log.BeginCheckpoint([]disklog.CheckpointIndex{{Owner: 5, ReplayLSN: 1, Replica: rep, Runs: runs}}); err != nil {
+			t.Fatal(err)
+		}
+		var tks []disklog.Ticket
+		for i := range pieces {
+			it := h.blob(disklog.BlobRun, 5, 10, uint64(i))
+			tk, err := h.log.CheckpointPiece(&h.ctx, 5, it.Buf, 10, true, &h.out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.absorb()
+			tks = append(tks, tk)
+		}
+		if err := h.log.EndCheckpoint(&h.ctx, &h.out); err != nil {
+			t.Fatal(err)
+		}
+		h.absorb()
+		h.run()
+		durable := h.eventsOf(disklog.Durable)
+		for _, ev := range durable {
+			for i, tk := range ev.Tickets {
+				if slices.Contains(tks, tk) {
+					runs = append(runs, disklog.BlobRef{Segment: ev.Segment, Block: ev.Block, LSN: ev.LSN, Entry: uint16(i)})
+				}
+			}
+		}
+		return durable[len(durable)-1]
+	}
+	checkpoint(20)
+	last := checkpoint(0)
+	if n := len(h.readChain(last).bodies); n != 2 {
+		t.Fatalf("the second manifest is a chain of %d bodies, want a snapshot and an edit", n)
+	}
+	if m := h.readManifest(last); len(m.Indexes) != 1 || m.Indexes[0].Replica != rep {
+		t.Fatalf("the edited manifest's indexes %+v, want owner 5 holding replica %+v", m.Indexes, rep)
+	}
+}
+
 func TestManifestLargerThanARecordGoesInPieces(t *testing.T) {
 	h := formatted(t, gib, testConfig(3))
 	const runs = 500
@@ -875,7 +921,7 @@ func boundsEqual(a, b []disklog.MergeBound) bool {
 func manifestsEqual(a, b disklog.Manifest) bool {
 	return a.BaseLSN == b.BaseLSN && a.NextSeq == b.NextSeq &&
 		slices.EqualFunc(a.Indexes, b.Indexes, func(x, y disklog.ManifestIndex) bool {
-			return x.Owner == y.Owner && x.ReplayLSN == y.ReplayLSN && slices.Equal(x.Runs, y.Runs) && boundsEqual(x.Bounds, y.Bounds)
+			return x.Owner == y.Owner && x.ReplayLSN == y.ReplayLSN && x.Replica == y.Replica && slices.Equal(x.Runs, y.Runs) && boundsEqual(x.Bounds, y.Bounds)
 		}) &&
 		slices.Equal(a.Segments, b.Segments)
 }

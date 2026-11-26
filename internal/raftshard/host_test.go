@@ -193,7 +193,7 @@ func (r *rig) crash(owners ...uint32) map[uint32]*Storage {
 		r.host.Add(o, sts[o])
 	}
 	for i, o := range r.remote {
-		r.host.AddRemote(o, 1, uint32(i))
+		r.host.AddRemote(o, 1, uint32(i), disklog.Replica{})
 	}
 	var err error
 	if r.rec, err = disklog.Recover(&r.ctx, rigConfig(), rigGeometry.DiskBlocks(), disklog.ModeOpen, 1<<20, &r.out); err != nil {

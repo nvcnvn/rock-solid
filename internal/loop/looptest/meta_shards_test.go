@@ -125,7 +125,7 @@ func (sh *metaShards) opened(st *chunkstore.Store, open bool) {
 			},
 		}
 		rep.a = meta.NewRoundShard(sh.loops[i], sh.lg, cfg)
-		st.AddRemote(metaOwner(i), i, uint32(rep.a.ID()))
+		st.AddRemote(metaOwner(i), i, uint32(rep.a.ID()), disklog.Replica{})
 		sh.loops[i].Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: metaRaftTimer})
 	}
 }
@@ -499,7 +499,7 @@ func fillBehindAStuckCheckpoint(t *testing.T) (*metaShards, uint32, uint64) {
 	sh.tick()
 	rep := sh.reps[0]
 	held := uint32(rep.a.ID()) + 1
-	sh.r.S.AddRemote(2001, 0, held)
+	sh.r.S.AddRemote(2001, 0, held, disklog.Replica{})
 	sh.r.Settle()
 	base := rep.a.Storage().Base().Index
 	for n := 0; len(rep.refused) < 4; n++ {
@@ -674,7 +674,7 @@ func TestAFullMetaFollowerNamesItsLeader(t *testing.T) {
 	sh.tick()
 	sh.propose(0, 8, 600)
 	learner := sh.reps[1]
-	sh.r.S.AddRemote(2001, 0, uint32(sh.reps[0].a.ID())+1)
+	sh.r.S.AddRemote(2001, 0, uint32(sh.reps[0].a.ID())+1, disklog.Replica{})
 	sh.r.Settle()
 	sh.propose(0, 8, 600)
 	sh.lg.Send(1, loop.Mail{Shard: learner.a.ID(), Kind: loop.MailShare, Share: 1})

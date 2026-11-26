@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 
 	"go.etcd.io/raft/v3/raftpb"
@@ -57,7 +58,8 @@ func (s *Store) AddRaft(owner uint32, st *raftshard.Storage, sh RaftShard) {
 
 // AddRemote knows the shard whose blobs carry owner as shard id on the round driver of loop,
 // which writes its rounds to this store's log: a restart's replay hands its blobs to Output's
-// Mail, every checkpoint names it with the replay LSN it reports (RemoteReplay), and a broken
+// Mail, every checkpoint names it with rep, the replica it holds the state of, which a restart
+// hands Config.Replicas, and with the replay LSN it reports (RemoteReplay), and a broken
 // index stops the store rather than rebuilding it under the driver. Output's Mail also tells it
 // its share of twice max_replay_bytes as the shards on the disk come and go, and each due
 // checkpoint whose manifest is durable, after which it compacts and writes again what holds the
@@ -68,12 +70,33 @@ func (s *Store) AddRaft(owner uint32, st *raftshard.Storage, sh RaftShard) {
 // leave out die once a checkpoint begun after it reports them ends (RemoteDead), and the store
 // begins one while such pieces wait. The cleaner weighs its runs as it replies them (RemoteCosts)
 // and mails it to rewrite those in a victim. It is called as AddRaft is, before the shard writes
-// a blob, and after Open, before any event, to restore it from the manifest's runs.
-func (s *Store) AddRemote(owner uint32, loop int, id uint32) {
+// a blob, and to restore it from the manifest's runs, from Config.Replicas or, for a shard of
+// no replica, after Open and before any event.
+func (s *Store) AddRemote(owner uint32, loop int, id uint32, rep disklog.Replica) {
 	if s.raft == nil {
 		s.raft = raftshard.NewHost(s.log)
 	}
-	s.raft.AddRemote(owner, loop, id)
+	s.raft.AddRemote(owner, loop, id, rep)
+}
+
+// ErrReplicaNotRestored stops a restart whose manifest names a replica no Config.Replicas takes.
+var ErrReplicaNotRestored = errors.New("chunkstore: the disk holds a replica nothing restores")
+
+// restoreReplicas hands Config.Replicas each replica the loaded manifest names, before its runs
+// are read: a replica left out would be taken for dead, so with no Replicas it stops the restart.
+func (s *Store) restoreReplicas(m *disklog.Manifest) error {
+	for _, mi := range m.Indexes {
+		if mi.Replica == (disklog.Replica{}) {
+			continue
+		}
+		if s.cfg.Replicas == nil {
+			return fmt.Errorf("%w: replica %d of group %d", ErrReplicaNotRestored, mi.Replica.ID, mi.Replica.Group)
+		}
+		if err := s.cfg.Replicas(mi.Owner, mi.Replica); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // RemoteReplay takes the replay LSN owner's shard on the round driver reported: a restart needs

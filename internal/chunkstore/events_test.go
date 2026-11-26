@@ -518,7 +518,7 @@ func TestOnePieceAtATime(t *testing.T) {
 // closing its log for a rebuild under the driver's batches.
 func TestABrokenIndexStopsAStoreWithAShardOnTheRoundDriver(t *testing.T) {
 	h := newHarness(t, testConfig())
-	h.s.AddRemote(9, 1, 0)
+	h.s.AddRemote(9, 1, 0, disklog.Replica{})
 	gen := h.s.logGen
 	h.s.indexBroken(&h.ctx, lsm.ErrCheck, &h.out)
 	if !errors.Is(h.s.Err(), lsm.ErrCheck) || h.s.phase == draining || h.s.logGen != gen {
@@ -532,7 +532,7 @@ func TestAStoreWithAShardOnTheRoundDriverStopsOutOfRoom(t *testing.T) {
 	cfg := cleanConfig()
 	cfg.Log.Reserve, cfg.CleanFree = 4, -1
 	h := newHarnessOn(t, cfg, cleanGeo)
-	h.s.AddRemote(9, 1, 0)
+	h.s.AddRemote(9, 1, 0, disklog.Replica{})
 	for i := 0; h.s.Err() == nil; i++ {
 		if i == 5000 {
 			t.Fatal("the store kept serving a full log")

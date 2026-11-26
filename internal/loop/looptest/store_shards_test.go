@@ -80,7 +80,7 @@ func (sh *storeShards) opened(st *chunkstore.Store) {
 		sh.shards[i] = addRaftRounds(l, l.Context().Pool, sh.lg, 1001+uint32(i), sh.maxBlob, sh.rounds)
 		rr := sh.shards[i]
 		rr.reply, rr.pause, rr.sizes, rr.bounded, rr.late = true, sh.pause, sh.sizes, sh.bounded, sh.late
-		st.AddRemote(1001+uint32(i), i, uint32(sh.shards[i].id))
+		st.AddRemote(1001+uint32(i), i, uint32(sh.shards[i].id), disklog.Replica{})
 		l.Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: 1})
 	}
 }
@@ -417,7 +417,7 @@ func TestMailForAShardNotYetOnItsLoopWaitsForIt(t *testing.T) {
 	sh := newStoreShards(t, storetest.Config(), 3)
 	sh.r.Settle()
 	for i, owner := range []uint32{2001, 2002} {
-		sh.r.S.AddRemote(owner, 0, uint32(1+i))
+		sh.r.S.AddRemote(owner, 0, uint32(1+i), disklog.Replica{})
 		sh.r.Write(storetest.Chunk(uint32(i)), 0, storetest.Fill(core.BlockSize, byte(i)), 0)
 		sh.r.Settle()
 	}
@@ -468,7 +468,7 @@ func TestARemovedShardsOwnerOnTheRoundDriverWaitsForTheFloor(t *testing.T) {
 	}
 	fresh := addRaftRounds(sh.loops[0], sh.loops[0].Context().Pool, sh.lg, 1001, sh.maxBlob, 3)
 	fresh.reply = true
-	sh.r.S.AddRemote(1001, 0, uint32(fresh.id))
+	sh.r.S.AddRemote(1001, 0, uint32(fresh.id), disklog.Replica{})
 	sh.shards[0] = fresh
 	sh.r.Settle()
 	if fresh.done != 3 {
