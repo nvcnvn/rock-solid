@@ -28,6 +28,11 @@ const bootRound = math.MaxUint64
 // header (disklog.Log.NameNewest), so once the round is durable a restart restores the replica.
 const nameRound = math.MaxUint64 - 1
 
+// snapNameRound is the number a replica restoring a snapshot writes an empty round under once the
+// manifest naming the runs that hold the snapshot is durable, as nameRound is for a new replica:
+// once it is durable a restart loads those runs, and the replica is told its snapshot's round durable.
+const snapNameRound = math.MaxUint64 - 2
+
 // RoundConfig is a replica on the round driver's settings.
 type RoundConfig struct {
 	// Shard is the replica's, its storage's base the group's boot state: the voters' configuration.
@@ -50,8 +55,9 @@ type RoundConfig struct {
 // replicas its manifest names, so it acknowledges nothing a crash would make it forget; one its
 // disk restores starts once
 // the replay ends, from the runs and blobs mailed to it, or with none mailed writes its boot
-// state as a new one does. While Rounds reports it full it drops the appends sent to it and
-// refuses Txns with ErrOverloaded.
+// state as a new one does. A snapshot it restores goes to its runs, not its round, and it is told
+// the round durable only once a restart would load them. While Rounds reports it full it drops the
+// appends sent to it and refuses Txns with ErrOverloaded.
 type RoundShard struct {
 	l     *loop.Loop
 	id    loop.ShardID
@@ -77,6 +83,15 @@ type RoundShard struct {
 	cp, mark uint64
 	conf     raftpb.ConfState
 	costs    []disklog.RunCost
+	// snapRound is the replica's round restoring snap, 0 for none, which the replica is told durable
+	// only once a restart would load runs holding the snapshot: its record carries the snapshot's
+	// index, term and configuration alone, and a restart on older runs drops it. Once it is durable
+	// the state restores the snapshot (snapTaken), a due checkpoint flushes the tree marked with the
+	// snapshot's base (snapFlush), and once that manifest is durable snapNameRound goes out
+	// (snapNaming).
+	snap                             raftpb.Snapshot
+	snapRound                        uint64
+	snapTaken, snapFlush, snapNaming bool
 }
 
 // NewRoundShard puts the replica cfg describes on l, its rounds going to lg; the disk's store
@@ -173,8 +188,13 @@ func (a *RoundShard) submit(ctx *core.Context, t *Txn, token uint64, out []core.
 // and the disk's owner what its rounds changed.
 func (a *RoundShard) after(ctx *core.Context, out []core.Action) []core.Action {
 	o := &a.out
-	if o.Raft.Flush != 0 {
-		a.rs.Write(o.Raft.Flush, &o.Raft.Round)
+	if rd := &o.Raft.Round; o.Raft.Flush != 0 && rd.Snapshot.Metadata.Index != 0 {
+		a.snap, a.snapRound = rd.Snapshot, o.Raft.Flush
+		r := *rd
+		r.Snapshot.Data, r.Runs = nil, true
+		a.rs.Write(o.Raft.Flush, &r)
+	} else if o.Raft.Flush != 0 {
+		a.rs.Write(o.Raft.Flush, rd)
 	}
 	out = a.answer(ctx, out)
 	out = append(out, o.Raft.Actions...)
@@ -245,6 +265,13 @@ func (a *RoundShard) Durable(ctx *core.Context, err error, refs []disklog.BlobRe
 	case round == nameRound:
 		a.named = true
 		a.start(ctx)
+	case round == a.snapRound && !a.snapTaken:
+		a.snapTaken = true
+		a.fail(a.state.Restore(a.snap.Metadata.Index, a.snap.Data))
+		a.l.Reply(a.id, loop.Reply{Kind: loop.ReplyFull, Owner: a.cfg.Owner})
+	case round == snapNameRound:
+		round, a.snap, a.snapRound, a.snapTaken, a.snapNaming = a.snapRound, raftpb.Snapshot{}, 0, false, false
+		a.shard.Durable(ctx, round, &a.out)
 	default:
 		a.shard.Durable(ctx, round, &a.out)
 	}
@@ -312,9 +339,10 @@ func (a *RoundShard) Mail(ctx *core.Context, m *loop.Mail, out []core.Action) []
 		}
 		a.piece()
 	case loop.MailFlushFailed:
-		if !a.manifested && !a.named {
+		if !a.manifested && !a.named || a.snapFlush {
 			a.l.Reply(a.id, loop.Reply{Kind: loop.ReplyFull, Owner: a.cfg.Owner})
 		}
+		a.snapFlush = false
 		if a.flushing {
 			a.flushing = false
 			a.state.Tree().FlushFailed()
@@ -396,8 +424,10 @@ func (a *RoundShard) recovered(ctx *core.Context) {
 	a.merge()
 }
 
-// beginFlush marks the tree with the storage's base and the index applied, begins its flush for
-// checkpoint cp, names the runs it carries and replies its first piece. A replica not yet started
+// beginFlush marks the tree with the storage's base and the index applied, or the snapshot's base
+// once the state restored one the replica has yet to be told durable, begins its flush for
+// checkpoint cp, names the runs it carries, asks for the manifest to be named in a segment header
+// if it holds the snapshot, and replies its first piece. A replica not yet started
 // writes nothing: its manifest names it with the runs the one before named, and the replay LSN
 // it last reported, or the durable LSN when its disk learned of it, at or before its boot round.
 func (a *RoundShard) beginFlush(cp uint64) {
@@ -407,7 +437,12 @@ func (a *RoundShard) beginFlush(cp uint64) {
 		return
 	}
 	a.mark, a.conf = a.shard.Applied()
-	a.state.Mark(a.st.Base())
+	base := a.st.Base()
+	if a.snapTaken {
+		base, a.mark = a.snap.Metadata, 0
+	}
+	a.snapFlush = a.snapTaken && !a.snapNaming
+	a.state.Mark(base)
 	tree := a.state.Tree()
 	if _, err := tree.BeginFlush(); err != nil {
 		a.fail(err)
@@ -416,6 +451,9 @@ func (a *RoundShard) beginFlush(cp uint64) {
 	}
 	a.flushing = true
 	a.l.Reply(a.id, loop.Reply{Kind: loop.ReplyRuns, Owner: a.cfg.Owner, LSN: cp, Refs: slices.Clone(tree.CarriedRuns()), Bounds: slices.Clone(tree.Bounds())})
+	if a.snapFlush {
+		a.l.Reply(a.id, loop.Reply{Kind: loop.ReplyName, Owner: a.cfg.Owner, LSN: cp})
+	}
 	a.piece()
 }
 
@@ -436,7 +474,8 @@ func (a *RoundShard) piece() {
 
 // checkpointed takes the manifest of the checkpoint it flushed under as durable: it reports the
 // pieces its tree no longer names, compacts its log to the mark, writes again what holds the
-// replay floor at base back, and goes on merging.
+// replay floor at base back, and goes on merging; a manifest holding a restored snapshot instead
+// has the replica write snapNameRound.
 func (a *RoundShard) checkpointed(base uint64) {
 	if !a.flushing || a.err != nil {
 		return
@@ -448,6 +487,11 @@ func (a *RoundShard) checkpointed(base uint64) {
 	}
 	if len(dead) > 0 {
 		a.l.Reply(a.id, loop.Reply{Kind: loop.ReplyDead, Owner: a.cfg.Owner, Refs: dead})
+	}
+	if a.snapFlush {
+		a.snapFlush, a.snapNaming = false, true
+		a.rs.Write(snapNameRound, &raftshard.Round{})
+		a.l.Mark(a.id)
 	}
 	if a.mark > a.st.Base().Index {
 		a.fail(a.rs.Compact(a.mark, a.conf))

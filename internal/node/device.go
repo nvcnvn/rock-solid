@@ -344,6 +344,8 @@ func (d *Device) OnReply(r loop.Reply) {
 		d.st.RemotePiece(r.Owner, r.LSN, r.Data, r.Root)
 	case loop.ReplyRuns:
 		d.st.RemoteRuns(r.Owner, r.LSN, r.Refs, r.Bounds)
+	case loop.ReplyName:
+		d.st.RemoteName(r.Owner, r.LSN)
 	case loop.ReplyDead:
 		d.st.RemoteDead(r.Owner, r.Refs)
 	case loop.ReplyCosts:

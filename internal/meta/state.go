@@ -297,8 +297,7 @@ func (s *State) Restore(index uint64, data []byte) error {
 	return nil
 }
 
-// walkSnapshot checks snapshot data and puts each of its keys into tree, if not nil. A restored
-// snapshot enters the memtable until the shard's checkpoint names runs (docs/tech-debts.md).
+// walkSnapshot checks snapshot data and puts each of its keys into tree, if not nil.
 func walkSnapshot(data []byte, tree *lsm.Tree) error {
 	if len(data) == 0 || data[0] != snapshotFormat {
 		return ErrMalformed

@@ -105,6 +105,10 @@ const (
 	// change: the owner's cleaner reads a victim's cost from the last it heard, and mails the
 	// shard a MailRewrite for a victim holding a piece of one.
 	ReplyCosts
+	// ReplyName asks that the manifest of checkpoint LSN, whose runs the shard's flush carries, be
+	// the one a restart loads before any later round of the shard is durable: the owner has the log
+	// name it in a segment header.
+	ReplyName
 )
 
 // Reply is what a shard tells its disk's owner of its blobs, which carry Owner, off the data path;

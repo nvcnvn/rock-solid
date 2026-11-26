@@ -281,8 +281,11 @@ func (s *Shard) apply(snap raftpb.Snapshot, ents []raftpb.Entry) {
 		return
 	}
 	if !raft.IsEmptySnap(snap) {
-		if err := s.state.Restore(snap.Metadata.Index, snap.Data); err != nil {
-			panic(fmt.Sprintf("meta: a snapshot that passed CheckSnapshot does not restore: %v", err))
+		// A replica on the round driver restored the snapshot before telling Raft its round durable.
+		if snap.Metadata.Index != s.state.applied {
+			if err := s.state.Restore(snap.Metadata.Index, snap.Data); err != nil {
+				panic(fmt.Sprintf("meta: a snapshot that passed CheckSnapshot does not restore: %v", err))
+			}
 		}
 		for len(s.waits) > 0 {
 			s.settle(0, raft.ErrProposalDropped)

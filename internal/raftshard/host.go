@@ -92,6 +92,8 @@ type remoteFlush struct {
 	named   bool
 	carried []disklog.BlobRef
 	bounds  []disklog.MergeBound
+	// name says the shard asked that this manifest be named in a segment header (RemoteName).
+	name bool
 }
 
 type remotePiece struct {
@@ -355,10 +357,11 @@ func (h *Host) Mail(dst []Mail) []Mail {
 // that its manifest is durable, naming the runs it wrote, base the base of the due manifest before
 // it: the shard compacts to what its mark recorded, and writes again what it keeps at or before
 // base, as Rewrite does for a hosted shard when the next checkpoint begins; its tree then
-// reports the pieces the manifest left out (RemoteDead). The first manifest naming a replica asks
-// the log to name it in a segment header (disklog.Log.NameNewest), as only one a header names is
-// the one a restart loads, so a round the shard starts after the mail is durable only once a
-// restart restores the shard; so does the first manifest leaving out a removed one, so a restart
+// reports the pieces the manifest left out (RemoteDead). The first manifest naming a replica, or
+// one a shard asked for (RemoteName), asks the log to name it in a segment header
+// (disklog.Log.NameNewest), as only one a header names is the one a restart loads, so a round the
+// shard starts after the mail is durable only once a restart loads that manifest or a later one;
+// so does the first manifest leaving out a removed one, so a restart
 // soon restores it no more, and Retry writes a round to open that segment (name).
 func (h *Host) Checkpointed(base uint64) {
 	h.cp = 0
@@ -371,7 +374,7 @@ func (h *Host) Checkpointed(base uint64) {
 		if rs.flush == nil {
 			continue
 		}
-		if !rs.named && rs.rep != (disklog.Replica{}) {
+		if !rs.named && rs.rep != (disklog.Replica{}) || rs.flush.name {
 			rs.named = true
 			h.Log.NameNewest()
 		}
@@ -404,6 +407,16 @@ func (h *Host) RemoteRuns(owner uint32, cp uint64, runs []disklog.BlobRef, bound
 	}
 	f := h.remote[r].flush
 	f.named, f.carried, f.bounds = true, runs, bounds
+}
+
+// RemoteName takes the ask of owner's shard on the round driver that the manifest of checkpoint
+// cp, whose runs its flush carries, be the one a restart loads before any later round of the shard
+// is durable (loop.ReplyName): once the manifest is durable, the log names it in a segment header
+// (disklog.Log.NameNewest), as for a new replica's first. A stale ask is dropped, as RemoteRuns'.
+func (h *Host) RemoteName(owner uint32, cp uint64) {
+	if r, ok := h.remoteAt[owner]; ok && cp == h.cp && h.remote[r].flush != nil {
+		h.remote[r].flush.name = true
+	}
 }
 
 // RemoteDead takes the pieces owner's shard on the round driver replied its tree no longer names

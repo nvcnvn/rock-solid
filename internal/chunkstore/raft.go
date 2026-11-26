@@ -117,6 +117,10 @@ func (s *Store) RemoteRuns(owner uint32, cp uint64, runs []disklog.BlobRef, boun
 	s.raft.RemoteRuns(owner, cp, runs, bounds)
 }
 
+// RemoteName takes the ask of owner's shard on the round driver that the manifest of checkpoint cp
+// be the one a restart loads before any later round of the shard is durable (loop.ReplyName).
+func (s *Store) RemoteName(owner uint32, cp uint64) { s.raft.RemoteName(owner, cp) }
+
 // RemoteDead takes the pieces owner's shard on the round driver replied its tree no longer names
 // (loop.ReplyDead), its merges' inputs once a durable manifest names their output: they are
 // reported dead once a checkpoint begun after now ends.

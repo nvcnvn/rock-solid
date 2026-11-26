@@ -49,6 +49,10 @@ type metaShards struct {
 	replies []loop.Reply
 	// answered, if set, takes each replica's answers too.
 	answered func(*core.Context, []meta.Answer, []core.Action) []core.Action
+	// cut drops every message to loop 1 while set; acked is the highest index the replica on loop
+	// 1 acknowledged to its leader.
+	cut   bool
+	acked uint64
 }
 
 // metaRep is the replica on a loop: Txns waiting for its loop, the answer to each Txn by token,
@@ -170,6 +174,16 @@ func (d metaDriver) Execute(a *core.Action) {
 	if a.Kind != core.ActNetSend {
 		d.diskDriver.Execute(a)
 		return
+	}
+	if d.sh.cut && a.Peer.Loop == 1 {
+		if a.Msg.Buf != core.NoBuf {
+			d.sh.loops[d.i].Context().Pool.Free(a.Msg.Buf)
+		}
+		return
+	}
+	var m raftpb.Message
+	if in := a.Msg.Inline(); d.i == 1 && len(in) > 10 && in[9] == 0 && m.Unmarshal(in[10:]) == nil && m.Type == raftpb.MsgAppResp && !m.Reject {
+		d.sh.acked = max(d.sh.acked, m.Index)
 	}
 	ev := core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: d.sh.node, Loop: uint32(d.i)}, Msg: a.Msg}
 	if b := a.Msg.Buf; b != core.NoBuf {
@@ -332,6 +346,8 @@ func (m metaStoreMachine) OnReply(_ *loop.Log, r loop.Reply) {
 		s.RemotePiece(r.Owner, r.LSN, r.Data, r.Root)
 	case loop.ReplyRuns:
 		s.RemoteRuns(r.Owner, r.LSN, r.Refs, r.Bounds)
+	case loop.ReplyName:
+		s.RemoteName(r.Owner, r.LSN)
 	case loop.ReplyDead:
 		s.RemoteDead(r.Owner, r.Refs)
 	case loop.ReplyCosts:
@@ -718,4 +734,72 @@ func TestANewMetaShardShortOfBuffersWritesItsBootRoundOnItsNextEvent(t *testing.
 		t.Fatalf("the replica never started once buffers returned: %v", rep.a.Err())
 	}
 	sh.tick()
+}
+
+// TestALearnerCrashedAtEveryStepOfASnapshotRestoreKeepsWhatItAcknowledged has a learner that joins
+// with empty storage cut off from its leader while the leader applies Txns, so the leader then
+// sends it a snapshot holding them, and crashes the process at every step from the reconnection
+// until 20 steps after the learner took the snapshot's round durable. Each restart restores the
+// learner holding every index it acknowledged, and holding the leader's keys whenever its storage
+// is at or past the snapshot: a crash before a segment header named the manifest of its runs drops
+// the snapshot's round, which the learner had not acknowledged.
+func TestALearnerCrashedAtEveryStepOfASnapshotRestoreKeepsWhatItAcknowledged(t *testing.T) {
+	var before, after, acks int
+	for k, took := 0, -1; took < 0 || k <= took+20; k++ {
+		sh := (&metaShards{t: t, cfg: shardReplay(), on: []int{0, 1}, joined: true, cut: true}).format()
+		sh.ticking = true
+		for _, i := range sh.on {
+			sh.loops[i].Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: metaRaftTimer})
+		}
+		for s := sh.reps[0].a.Shard(); s == nil || s.Raft().Leader() != 1; s = sh.reps[0].a.Shard() {
+			if !sh.s.Step() {
+				t.Fatal("the voter never led")
+			}
+		}
+		sh.ticking = false
+		sh.r.Settle()
+		sh.propose(0, 8, 600)
+		snap, _ := sh.reps[0].a.Shard().Applied()
+		sh.cut, sh.ticking = false, true
+		for _, i := range sh.on {
+			sh.loops[i].Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: metaRaftTimer})
+		}
+		for i := range k {
+			if took < 0 && sh.reps[1].a.Storage().Base().Index >= snap {
+				took = i
+			}
+			if !sh.s.Step() {
+				t.Fatal("the process went idle while ticking")
+			}
+		}
+		acked := sh.acked
+		if acked >= snap {
+			acks++
+		}
+		sh.ticking = false
+		sh.sd.Crash(core.NewRand(uint64(k)))
+		sh.r.Reopen()
+		learner := sh.reps[1].a
+		if learner.Shard() == nil {
+			t.Fatalf("crashed %d steps after the reconnection, the learner did not start: %v", k, learner.Err())
+		}
+		if last, _ := learner.Storage().LastIndex(); last < acked {
+			t.Fatalf("crashed %d steps after the reconnection, the learner acknowledged %d and restarted holding to %d", k, acked, last)
+		}
+		if learner.Storage().Base().Index < snap {
+			before++
+			continue
+		}
+		after++
+		tree := learner.Shard().State().Tree()
+		for tok, key := range sh.reps[0].keys {
+			if v, ok := tree.Get(key); !ok || !bytes.HasPrefix(v, key) {
+				t.Fatalf("crashed %d steps after the reconnection, the learner restarted on the snapshot at %d holding %q under Txn %d's key", k, snap, v, tok)
+			}
+		}
+	}
+	if before == 0 || after == 0 || acks == 0 {
+		t.Fatalf("%d restarts before the snapshot, %d on it, %d after the learner acknowledged it", before, after, acks)
+	}
+	t.Logf("%d restarts before the snapshot, %d on it, %d after the learner acknowledged it", before, after, acks)
 }

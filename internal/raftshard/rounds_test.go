@@ -162,6 +162,56 @@ func TestRoundsReplayDropsATornRoundAtTheNextFirstBlob(t *testing.T) {
 	}
 }
 
+// TestRoundsReplayDropsASnapshotRoundTheRunsDoNotHold replays, on a base of 0, an entries round
+// and then a round restoring a snapshot at 8 whose data is in the replica's runs: the runs the
+// restart loaded are older than the snapshot, so the round is dropped whole, its hard state too,
+// and its blobs are dead once the replay ends. On runs at the snapshot, the round drops every
+// entry replayed before it, though they lie past the snapshot.
+func TestRoundsReplayDropsASnapshotRoundTheRunsDoNotHold(t *testing.T) {
+	snap := &Round{
+		Snapshot:  raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: 8, Term: 2, ConfState: raftpb.ConfState{Voters: []uint64{1}}}},
+		HardState: raftpb.HardState{Term: 2, Commit: 8},
+		Runs:      true,
+	}
+	var lsn uint64
+	blobs := func(r *Round) []landedBlob {
+		var out []landedBlob
+		for _, b := range roundBlobs(t, r, 1<<20) {
+			lsn++
+			out = append(out, landedBlob{disklog.BlobRef{Segment: 1, Block: uint32(lsn), LSN: lsn}, b.kind, b.payload})
+		}
+		return out
+	}
+	old, restore := blobs(&Round{Entries: ents(1, 1, 10, 10), HardState: raftpb.HardState{Term: 1, Commit: 5}}), blobs(snap)
+	replayAll := func(base uint64) (*Storage, []disklog.BlobRef) {
+		st := NewStorage()
+		if base > 0 {
+			if err := st.ApplySnapshot(raftpb.Snapshot{Metadata: snap.Snapshot.Metadata}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		r := NewRounds(3, st, 1<<20)
+		for _, b := range slices.Concat(old, restore) {
+			if err := r.Replay(b.ref, b.kind, b.data); err != nil {
+				t.Fatal(err)
+			}
+		}
+		r.Replayed()
+		return st, r.Dead(nil)
+	}
+	st, dead := replayAll(0)
+	if last, _ := st.LastIndex(); st.Base().Index != 0 || last != 10 || st.HardState().Term != 1 {
+		t.Fatalf("on older runs: base %d, last %d, hard state %+v", st.Base().Index, last, st.HardState())
+	}
+	if !reflect.DeepEqual(dead, refsOf(restore)) {
+		t.Fatalf("dead %v on older runs, want the dropped round's %v", dead, refsOf(restore))
+	}
+	st, _ = replayAll(8)
+	if last, _ := st.LastIndex(); last != 8 || st.HardState().Term != 2 {
+		t.Fatalf("on runs at the snapshot: last %d, hard state %+v", last, st.HardState())
+	}
+}
+
 // TestRoundsPanicOnABrokenCallOrder checks that each call out of order panics rather than lose or
 // double count a round.
 func TestRoundsPanicOnABrokenCallOrder(t *testing.T) {

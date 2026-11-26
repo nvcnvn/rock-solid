@@ -17,13 +17,17 @@ type Round struct {
 	Snapshot  raftpb.Snapshot
 	Removed   bool
 	Deleted   bool
+	// Runs says the snapshot's data is in the replica's runs, not the record, which holds its
+	// index, term and configuration alone.
+	Runs bool
 }
 
 // A round's record is a flags byte, then, if flagged, the snapshot (its index, term, configuration
-// and data), the entries (the first index, the count, and each entry's term, type, length and
-// payload) and the hard state (term, vote, commit), little-endian, in that order; flagRemoved
-// marks a replica that learned its removal and flagDeleted one deleted, which a replay keeps. Replaying a
-// snapshot drops the entries before it, and a hard state's commit index needs its entries. It goes
+// and, unless flagRuns says the replica's runs hold it, data), the entries (the first index, the
+// count, and each entry's term, type, length and payload) and the hard state (term, vote, commit),
+// little-endian, in that order; flagRemoved marks a replica that learned its removal and
+// flagDeleted one deleted, which a replay keeps. Replaying a snapshot drops every entry before it,
+// and a hard state's commit index needs its entries. It goes
 // to the log as blobs of at most a record each, every one but the last of kind BlobRaftEntries
 // and the last of kind BlobRaftState, so a round torn at the log's tail is dropped whole. Each
 // blob starts with a byte that is 1 for a round's first blob and 0 for the others: a torn round
@@ -34,6 +38,7 @@ const (
 	flagHardState
 	flagRemoved
 	flagDeleted
+	flagRuns
 )
 
 // ErrBadRound reports a round record that does not decode.
@@ -57,6 +62,9 @@ func AppendRound(dst []byte, r *Round) []byte {
 	if r.Deleted {
 		flags |= flagDeleted
 	}
+	if r.Runs && flags&flagSnapshot != 0 {
+		flags |= flagRuns
+	}
 	dst = append(dst, flags)
 	if flags&flagSnapshot != 0 {
 		m := &r.Snapshot.Metadata
@@ -72,7 +80,9 @@ func AppendRound(dst []byte, r *Round) []byte {
 			auto = 1
 		}
 		dst = append(dst, auto)
-		dst = append(le.AppendUint32(dst, uint32(len(r.Snapshot.Data))), r.Snapshot.Data...)
+		if flags&flagRuns == 0 {
+			dst = append(le.AppendUint32(dst, uint32(len(r.Snapshot.Data))), r.Snapshot.Data...)
+		}
 	}
 	if flags&flagEntries != 0 {
 		dst = le.AppendUint32(le.AppendUint64(dst, r.Entries[0].Index), uint32(len(r.Entries)))
@@ -154,9 +164,18 @@ func (s *Storage) replay(kind disklog.BlobKind, payload []byte) (summary, error)
 	if err != nil {
 		return summary{}, err
 	}
-	if r.Snapshot.Metadata.Index != 0 && r.Snapshot.Metadata.Index > s.base.Index {
-		s.base, s.ents, s.chunks, s.first, s.bytes = r.Snapshot.Metadata, s.ents[:0], nil, 0, 0
-		s.data = append([]byte(nil), r.Snapshot.Data...)
+	if m := r.Snapshot.Metadata; m.Index != 0 {
+		// The replica takes a round whose snapshot's data is in its runs as durable only once a
+		// restart loads runs at or past the snapshot, so a restart on older runs drops the round
+		// whole, as if it had never been written.
+		if r.Runs && m.Index > s.base.Index {
+			return summary{}, nil
+		}
+		// Every entry replayed so far was written before the snapshot, which replaced the whole log.
+		s.ents, s.chunks, s.first, s.bytes = s.ents[:0], nil, 0, 0
+		if m.Index > s.base.Index {
+			s.base, s.data = m, append([]byte(nil), r.Snapshot.Data...)
+		}
 	}
 	if len(r.Entries) > 0 {
 		if r.Entries[0].Index > s.last()+1 {
@@ -197,8 +216,8 @@ func DecodeRound(rec []byte, r *Round) error {
 	*r = Round{}
 	d := decoder{b: rec}
 	flags := d.byte()
-	r.Removed, r.Deleted = flags&flagRemoved != 0, flags&flagDeleted != 0
-	if flags&^(flagSnapshot|flagEntries|flagHardState|flagRemoved|flagDeleted) != 0 {
+	r.Removed, r.Deleted, r.Runs = flags&flagRemoved != 0, flags&flagDeleted != 0, flags&flagRuns != 0
+	if flags&^(flagSnapshot|flagEntries|flagHardState|flagRemoved|flagDeleted|flagRuns) != 0 || r.Runs && flags&flagSnapshot == 0 {
 		return ErrBadRound
 	}
 	if flags&flagSnapshot != 0 {
@@ -215,7 +234,9 @@ func DecodeRound(rec []byte, r *Round) error {
 		}
 		auto := d.byte()
 		m.ConfState.AutoLeave = auto == 1
-		r.Snapshot.Data = d.bytes(d.u32())
+		if !r.Runs {
+			r.Snapshot.Data = d.bytes(d.u32())
+		}
 		if m.Index == 0 || auto > 1 {
 			return ErrBadRound
 		}

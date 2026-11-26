@@ -272,6 +272,20 @@ func TestARoundSpansBlobsAndATornOneChangesNothing(t *testing.T) {
 	}
 }
 
+// A round restoring a snapshot whose data is in the replica's runs carries the snapshot's index,
+// term and configuration alone.
+func TestARoundWhoseSnapshotIsInTheRunsCarriesNoData(t *testing.T) {
+	r := Round{Snapshot: raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: 4, Term: 1, ConfState: raftpb.ConfState{Voters: []uint64{1}}}, Data: []byte("state")}, Runs: true}
+	rec := AppendRound(nil, &r)
+	var got Round
+	if err := DecodeRound(rec, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Runs || got.Snapshot.Data != nil || got.Snapshot.Metadata.String() != r.Snapshot.Metadata.String() || bytes.Contains(rec, r.Snapshot.Data) {
+		t.Fatalf("decoded %+v from %x", got, rec)
+	}
+}
+
 func TestRoundRecordsRoundTrip(t *testing.T) {
 	r := Round{
 		Snapshot:  raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: 4, Term: 1, ConfState: raftpb.ConfState{Voters: []uint64{1, 4}, VotersOutgoing: []uint64{1, 2}, LearnersNext: []uint64{2}, AutoLeave: true}}, Data: []byte("x")},
@@ -296,6 +310,7 @@ func FuzzDecodeRound(f *testing.F) {
 	f.Add(AppendRound(nil, &Round{HardState: raftpb.HardState{Term: 1, Commit: 2}, Entries: ents(1, 1, 2, 3)}))
 	f.Add(AppendRound(nil, &Round{Snapshot: raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: 3, Term: 1, ConfState: raftpb.ConfState{Voters: []uint64{1}}}}}))
 	f.Add(AppendRound(nil, &Round{HardState: raftpb.HardState{Term: 2, Vote: 1, Commit: 2}, Removed: true, Deleted: true}))
+	f.Add(AppendRound(nil, &Round{Snapshot: raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: 3, Term: 1}}, Entries: ents(1, 4, 1, 2), Runs: true}))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		k := len(b) / 2
 		split := NewStorage()
