@@ -130,8 +130,10 @@ type gen struct {
 	reps    []*replica
 	chosen  map[uint64]entry
 	elected []uint64
-	// failed is each term of elected no replica led, a halted leader's failed hand-off.
+	// failed is each term of elected no replica led, a halted leader's failed hand-off, and
+	// leaders the replica that led each term of elected a replica led.
 	failed  map[uint64]bool
+	leaders map[uint64]uint64
 	lines   []line
 	placed  int
 	boot    conf
@@ -317,6 +319,11 @@ func (g *gen) state(id int, pass uint64, f [trace.MaxFields]uint64) {
 		fatal("replica %d's commit and applied indexes dropped outside a restart, from %d and %d to %d and %d", id, prev[2], prev[3], commit, applied)
 	}
 	leads := flags&1 != 0
+	if !leads && lead == 0 && !slices.Equal(lg, r.noted) {
+		// A follower that took an append and then started a pre-vote in the same pass knows no
+		// leader, yet holds the entries the term's leader sent.
+		lead = g.leaders[term]
+	}
 	if pass == r.nowPass && term > prev[0] {
 		r.nowTerm = term
 	}
@@ -358,10 +365,11 @@ func (g *gen) state(id int, pass uint64, f [trace.MaxFields]uint64) {
 	if halts {
 		g.halts++
 	}
+	moved := g.index(r, applied) > g.index(r, prev[3])
 	switch {
-	case applied > prev[3] && halts:
+	case moved && halts:
 		g.line(id, `[k |-> "halt", r |-> %d, a |-> %d]`, id, g.index(r, applied))
-	case applied > prev[3] && g.index(r, applied) == g.index(r, prev[3]):
+	case applied > prev[3] && !moved:
 		g.stutter(`[k |-> "apply", r |-> %d, a |-> %d]`, id, g.index(r, applied))
 	case applied > prev[3]:
 		g.line(id, `[k |-> "apply", r |-> %d, a |-> %d]`, id, g.index(r, applied))
@@ -390,8 +398,9 @@ func (g *gen) state(id int, pass uint64, f [trace.MaxFields]uint64) {
 			g.line(id, `[k |-> "notice", r |-> %d, p |-> %d]`, id, r.peer)
 		}
 	}
-	if halts && applied == prev[3] {
-		// A test halts a replica with no entry it failed to apply, which meta's halt needs:
+	if halts && !moved {
+		// A test halts a replica with no entry it failed to apply, which meta's halt needs, or
+		// past a command, which moves no spec index:
 		// the halt is the replica's last apply, unless a line of the replica's is later.
 		h := fmt.Sprintf(`[k |-> "halt", r |-> %d, a |-> %d]`, id, g.index(r, applied))
 		if r.applyAt >= 0 && g.lines[r.applyAt].k == r.lastLine {
@@ -534,7 +543,7 @@ func main() {
 	if err := sc.Err(); err != nil {
 		fatal("%v", err)
 	}
-	g := &gen{chosen: map[uint64]entry{}, failed: map[uint64]bool{}, boot: conf{in: 0b1110}, plan: 0b1110}
+	g := &gen{chosen: map[uint64]entry{}, failed: map[uint64]bool{}, leaders: map[uint64]uint64{}, boot: conf{in: 0b1110}, plan: 0b1110}
 	var failed []uint64
 	prev := make([]uint64, nodes)
 	for _, rec := range recs {
@@ -543,6 +552,7 @@ func main() {
 		}
 		f := rec.Fields
 		if f[4]&1 != 0 {
+			g.leaders[f[0]] = uint64(rec.Node) + 1
 			if i, ok := slices.BinarySearch(g.elected, f[0]); !ok {
 				g.elected = slices.Insert(g.elected, i, f[0])
 			}

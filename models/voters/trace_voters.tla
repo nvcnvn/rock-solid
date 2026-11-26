@@ -63,7 +63,7 @@ Line(l) ==
        /\ \/ AskLeader(l.r, l.l)
           \/ support[l.r] # {l.l} /\ UNCHANGED vars
     \/ /\ l.k = "notice"
-       /\ Notice(l.r, l.p)
+       /\ IF out[l.r] THEN UNCHANGED vars ELSE Notice(l.r, l.p)
     \/ /\ l.k = "delete"
        /\ Delete(l.r)
     \/ /\ l.k = "crash"
