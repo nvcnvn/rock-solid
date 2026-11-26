@@ -151,6 +151,8 @@ type epochChecks struct {
 	// acked is the newest version of each chunk acknowledged to a client; clean the newest each disk held listing nothing of the chunk as it was acknowledged or as a recovery brought it.
 	acked map[core.ChunkID]uint64
 	clean map[diskChunk]uint64
+	// rcvs is the version and interval of each disk's last recovery of an acknowledged chunk, the epoch model's rcv.
+	rcvs map[diskChunk]rcvAt
 	// prims is the primary disk of each PG interval the cluster's table recorded.
 	prims map[pgInterval]uint32
 	// tears is set for a run whose crashes leave versions in part, where every copy can be torn and property 19 is not claimed.
@@ -159,6 +161,11 @@ type epochChecks struct {
 
 type pgInterval struct {
 	pg       core.PGID
+	interval uint32
+}
+
+type rcvAt struct {
+	version  uint64
 	interval uint32
 }
 
@@ -199,7 +206,7 @@ func watchEpochs(c *rcluster, rec *DiskRecord) *epochChecks {
 	x := &epochChecks{c: c, rec: rec, seen: make([]memberSeen, len(c.reps)), epochs: make([]uint64, len(c.reps)),
 		intervals: map[nodePG]uint32{}, activated: map[core.PGID]uint32{}, logs: map[uint32]uint64{},
 		decisions: map[core.PGID]map[uint32][]keptChunk{}, errs: map[string]error{},
-		writes: map[core.RequestID]core.ChunkID{}, updates: map[updateAt]core.ChunkID{}, held: map[heldAt]bool{}, acked: map[core.ChunkID]uint64{}, clean: map[diskChunk]uint64{}, prims: map[pgInterval]uint32{}}
+		writes: map[core.RequestID]core.ChunkID{}, updates: map[updateAt]core.ChunkID{}, held: map[heldAt]bool{}, acked: map[core.ChunkID]uint64{}, clean: map[diskChunk]uint64{}, rcvs: map[diskChunk]rcvAt{}, prims: map[pgInterval]uint32{}}
 	for _, inv := range epochInvariants {
 		c.inv.Register(inv, func() error { return x.errs[inv] })
 	}
@@ -271,7 +278,7 @@ func (x *epochChecks) event(d int, ev *core.Event, done bool) {
 	x.recovered(d)
 }
 
-// recovered notes each acknowledged chunk node d's last pass recovered as clean on d's disk at the version the recovery brought, while its index lists nothing of it.
+// recovered notes each acknowledged chunk node d's last pass recovered, and as clean on d's disk at the version the recovery brought while its index lists nothing of it.
 func (x *epochChecks) recovered(d int) {
 	o := x.c.reps[d]
 	for _, n := range x.c.notes[d] {
@@ -282,8 +289,9 @@ func (x *epochChecks) recovered(d int) {
 			if ch.Hash() != n.Fields[0] {
 				continue
 			}
+			k := diskChunk{o.cfg.Disk, ch}
+			x.rcvs[k] = rcvAt{n.Fields[1], uint32(n.Fields[3])}
 			if c, _ := o.Store().Index().Chunk(o.st.cfg.Pool, ch); c.ListedIn == 0 && c.Whole >= n.Fields[1] {
-				k := diskChunk{o.cfg.Disk, ch}
 				x.clean[k] = max(x.clean[k], n.Fields[1])
 			}
 		}
@@ -434,6 +442,7 @@ func (x *epochChecks) decided(r *Replica) {
 			continue
 		}
 		byPG[l.interval] = slices.Clone(l.kept)
+		x.uncopied(l)
 		for _, k := range slices.Sorted(maps.Keys(byPG)) {
 			earlier := byPG[k]
 			if k >= l.interval {
@@ -444,6 +453,19 @@ func (x *epochChecks) decided(r *Replica) {
 				if intervalOf(kc.kept) < k && (j < 0 && kc.kept != 0 || j >= 0 && kc.kept > earlier[j].kept) {
 					x.fail(invKeptAfterDrop, fmt.Errorf("interval %d of %v keeps %#x of %v, which interval %d dropped", l.interval, l.pg, kc.kept, kc.chunk, k))
 				}
+			}
+		}
+	}
+}
+
+// uncopied takes back the clean credit of each disk whose recovery of a chunk activated lead l's
+// decision drops, keeping a version below the recovery's in a later interval: the versions of
+// intervals before the recovery's go with it, as the epoch model's Uncopied has them.
+func (x *epochChecks) uncopied(l *lead) {
+	for _, kc := range l.kept {
+		for k, rc := range x.rcvs {
+			if k.chunk == kc.chunk && l.interval > rc.interval && kc.kept < rc.version && intervalOf(x.clean[k]) < rc.interval {
+				x.clean[k] = 0
 			}
 		}
 	}
@@ -498,7 +520,7 @@ func (x *epochChecks) sources() error {
 	return nil
 }
 
-// canSource reports whether member m can serve chunk ch of PG pg: if acked is 0, an up member that lists nothing of it or runs no store to say; otherwise one of any mark that held version acked clean when it was acknowledged or since a recovery and lists nothing, lists only a version above it that it lacks though it was that version's primary, or runs no store to say.
+// canSource reports whether member m can serve chunk ch of PG pg: if acked is 0, an up member that lists nothing of it or runs no store to say; otherwise one of any mark that held version acked clean when it was acknowledged or since a recovery a later decision kept, holds it whole if running, and lists nothing, lists only a version above it that it lacks though it was that version's primary, or runs no store to say.
 func (x *epochChecks) canSource(m Member, pg core.PGID, ch core.ChunkID, acked uint64) bool {
 	if m.Mark != MarkUp && acked == 0 {
 		return false
@@ -513,7 +535,7 @@ func (x *epochChecks) canSource(m Member, pg core.PGID, ch core.ChunkID, acked u
 	if acked == 0 {
 		return c.ListedIn == 0
 	}
-	return held && (c.ListedIn == 0 || c.Listed > acked && c.Version < c.Listed && x.prims[pgInterval{pg, intervalOf(c.Listed)}] == m.Disk)
+	return held && c.Whole >= acked && (c.ListedIn == 0 || c.Listed > acked && c.Version < c.Listed && x.prims[pgInterval{pg, intervalOf(c.Listed)}] == m.Disk)
 }
 
 // identities checks the disk record and the disks the nodes run: each disk ID keeps the log ID it was first given, and no log ID is up under two disk IDs.
