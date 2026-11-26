@@ -45,8 +45,8 @@ func members(c *meta.Control) []chunkstore.Member {
 }
 
 // The operator's command line over TCP against a single-voter control plane with two storage
-// node processes: each shard-map group gets a voter on each node, both reporting they hold
-// metadata; a pool created from it places its PGs on the disks the nodes reported; a PG pinned from it is pinned in the table and unpinned again; a disk holding
+// node processes: the first data group gets a voter on each node, both reporting they hold
+// metadata, and the control-plane group's entry keeps its own voter; a pool created from it places its PGs on the disks the nodes reported; a PG pinned from it is pinned in the table and unpinned again; a disk holding
 // members, drained, is refused removal until balance has moved them off, then removed; a
 // declaration for an up disk prints the leader's refusal; the device with no valid superblock is
 // printed failed; and once node 3 is killed and its disks' PGs refill, keeping them as leaving
@@ -73,11 +73,6 @@ func TestTheOperatorsCommandLineOverTCP(t *testing.T) {
 		t.Fatalf("the nodes' disks never came up; node 2 said:\n%s\nnode 3 said:\n%s", out2.String(), out3.String())
 	}
 
-	if err := onCtl(t, p, func(_ *core.Context, c *meta.Control) error {
-		return c.SetShardMap(&meta.ShardMap{Groups: []meta.Group{{ID: 1}, {ID: 2, Start: meta.PrefixEnd([]byte{meta.SpaceCtl})}}})
-	}); err != nil {
-		t.Fatal(err)
-	}
 	voters := func() [][]uint32 {
 		return onCtl(t, p, func(_ *core.Context, c *meta.Control) [][]uint32 {
 			var ns [][]uint32
@@ -93,9 +88,9 @@ func TestTheOperatorsCommandLineOverTCP(t *testing.T) {
 	}
 	if !within(10*time.Second, func() bool {
 		vs := voters()
-		return len(vs) == 2 && slices.Equal(vs[0], []uint32{2, 3}) && slices.Equal(vs[1], []uint32{2, 3})
+		return len(vs) == 2 && slices.Equal(vs[0], []uint32{1}) && slices.Equal(vs[1], []uint32{2, 3})
 	}) {
-		t.Fatalf("the groups' voters are on nodes %v, not on 2 and 3", voters())
+		t.Fatalf("the groups' voters are on nodes %v, not the control plane's on its voter and the data group's on 2 and 3", voters())
 	}
 
 	if code, said := admin(p, "pool", "1", "-replicas", "2", "-min-live", "2", "-failure-domain", "disk", "-pg-count", "16"); code != 0 || !strings.Contains(said, "pool 1 set") {

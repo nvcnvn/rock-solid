@@ -19,3 +19,4 @@ docs/refs/
 # Agent worktrees
 .claude/worktrees/
 /rock-solid
+/cmd/rock-solid/rock-solid

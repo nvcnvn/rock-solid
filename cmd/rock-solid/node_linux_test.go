@@ -306,9 +306,24 @@ func TestANodeStartsItsDevicesAndTakesItsDisksAndTablesOverTCP(t *testing.T) {
 	}
 }
 
+// dataGroup is the first data group, which the control-plane leader adds once a metadata node reports.
+const dataGroup = ctlGroup + 1
+
+// hosts reports whether node last reported running the first data group's replica id in a
+// configuration of voters alone.
+func hosts(c *meta.Control, node uint32, id uint64, voters ...uint64) bool {
+	if c == nil {
+		return false
+	}
+	return slices.ContainsFunc(c.Reported(node), func(r meta.ReplicaReport) bool {
+		return r.Group == dataGroup && r.ID == id && !r.Joint && slices.Equal(slices.Sorted(slices.Values(r.Voters)), voters)
+	})
+}
+
 // A storage node hosts the MetaStore replica the control plane's shard map places on its disk, the
-// one voter of a data group on one metadata node, which reports it running; killed and started
-// again, the node restores it from its disk with the settings the map gives, and it runs again.
+// one voter of the first data group, which the leader adds once the node reports, and reports it
+// running; killed and started again, the node restores it from its disk with the settings the map
+// gives, and it runs again.
 func TestANodeHostsTheMetaStoreReplicaItsShardMapPlacesAcrossAKill(t *testing.T) {
 	dir := testDir(t)
 	p := runCtl(t, dir)
@@ -324,21 +339,9 @@ func TestANodeHostsTheMetaStoreReplicaItsShardMapPlacesAcrossAKill(t *testing.T)
 	}) {
 		t.Fatalf("the node's disk never came up; the node said:\n%s", out.String())
 	}
-	ctlEntry := meta.Group{ID: ctlGroup, LastID: 102, Voters: []meta.Replica{{ID: 1, Node: 1}, {ID: 101, Node: 101}, {ID: 102, Node: 102}}}
-	if err := onCtl(t, p, func(_ *core.Context, c *meta.Control) error {
-		return c.SetShardMap(&meta.ShardMap{Groups: []meta.Group{ctlEntry, {ID: 2, Start: meta.PrefixEnd([]byte{meta.SpaceCtl})}}})
-	}); err != nil {
-		t.Fatal(err)
-	}
 	runs := func() bool {
 		return within(60*time.Second, func() bool {
-			return onCtl(t, p, func(_ *core.Context, c *meta.Control) bool {
-				if c == nil {
-					return false
-				}
-				rs := c.Reported(2)
-				return len(rs) == 1 && rs[0].Group == 2 && rs[0].ID == 1 && slices.Equal(rs[0].Voters, []uint64{1})
-			})
+			return onCtl(t, p, func(_ *core.Context, c *meta.Control) bool { return hosts(c, 2, 1, 1) && len(c.Reported(2)) == 1 })
 		})
 	}
 	if !runs() {
@@ -360,10 +363,10 @@ func TestANodeHostsTheMetaStoreReplicaItsShardMapPlacesAcrossAKill(t *testing.T)
 	}
 }
 
-// A data group's two voters, on two storage nodes, elect and take a Txn after a cold start of the
-// whole cluster: both nodes start again before the control plane, so the first membership each
-// gets, with which its device restores its replica, names no disk of the other, and the replicas
-// learn each other's loop from the memberships that follow.
+// The first data group's two voters, on two storage nodes, elect and take a Txn after a cold start
+// of the whole cluster: both nodes start again before the control plane, so the first membership
+// each gets, with which its device restores its replica, names no disk of the other, and the
+// replicas learn each other's loop from the memberships that follow.
 func TestAGroupOnTwoNodesTakesATxnAfterAColdStart(t *testing.T) {
 	dir := testDir(t)
 	base := freeBase(t, 5)
@@ -392,13 +395,22 @@ func TestAGroupOnTwoNodesTakesATxnAfterAColdStart(t *testing.T) {
 	}) {
 		t.Fatalf("the nodes' disks never came up; node 2 said:\n%s", said(outs))
 	}
-	ctlEntry := meta.Group{ID: ctlGroup, LastID: 102, Voters: []meta.Replica{{ID: 1, Node: 1}, {ID: 101, Node: 101}, {ID: 102, Node: 102}}}
-	if err := onCtl(t, p, func(_ *core.Context, c *meta.Control) error {
-		return c.SetShardMap(&meta.ShardMap{Groups: []meta.Group{ctlEntry, {ID: 2, Start: meta.PrefixEnd([]byte{meta.SpaceCtl})}}})
-	}); err != nil {
-		t.Fatal(err)
+	if !within(90*time.Second, func() bool {
+		return onCtl(t, p, func(_ *core.Context, c *meta.Control) bool {
+			if c == nil || len(c.ShardMap().Groups) != 2 {
+				return false
+			}
+			g := c.ShardMap().Groups[1]
+			if len(g.Voters) != 2 {
+				return false
+			}
+			ids := slices.Sorted(slices.Values([]uint64{g.Voters[0].ID, g.Voters[1].ID}))
+			return hosts(c, g.Voters[0].Node, g.Voters[0].ID, ids...) && hosts(c, g.Voters[1].Node, g.Voters[1].ID, ids...)
+		})
+	}) {
+		t.Fatalf("the first data group never ran with a voter on each node; node 2 said:\n%s", said(outs))
 	}
-	x := newTxner(t, 2, base, core.NodeID{Node: 2, Loop: 1}, core.NodeID{Node: 3, Loop: 1})
+	x := newTxner(t, dataGroup, base, core.NodeID{Node: 2, Loop: 1}, core.NodeID{Node: 3, Loop: 1})
 	if !x.applies(60 * time.Second) {
 		t.Fatalf("the group never took a Txn; node 2 said:\n%s", said(outs))
 	}

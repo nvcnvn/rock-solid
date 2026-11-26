@@ -53,7 +53,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) int {
 	}
 	var unfound uint32
 	if a.Op == meta.AdminGiveUp {
-		an, err := sendAdmin(cfg, &meta.Admin{Op: meta.AdminPG, Pool: a.Pool, PG: a.PG})
+		an, err := sendAdmin(cfg, &meta.Admin{Op: meta.AdminPG, Pool: a.Pool, PG: a.PG}, nil)
 		if err == nil && an.Refused != "" {
 			err = errors.New("refused: " + an.Refused)
 		}
@@ -63,7 +63,7 @@ func runAdmin(args []string, stdout, stderr io.Writer) int {
 		}
 		a.Interval, unfound = an.GiveUp.Interval, an.Unfound
 	}
-	an, err := sendAdmin(cfg, &a)
+	an, err := sendAdmin(cfg, &a, nil)
 	an.Unfound = unfound
 	switch {
 	case err != nil:
@@ -304,10 +304,11 @@ func (p *poolSettings) spec(fs *flag.FlagSet) (chunkstore.PoolSpec, error) {
 	return s, err
 }
 
-// sendAdmin sends command a to the control-plane leader and returns its answer. It tries the
-// voters in turn, going to the leader a voter names, and sends the command again under the same
-// request, which the leader answers once, until cfg.Timeout runs out.
-func sendAdmin(cfg adminConfig, a *meta.Admin) (meta.AdminAnswer, error) {
+// sendAdmin sends command a to the control-plane leader and returns its answer, or for
+// AdminMembership decodes the membership answering it into m. It tries the voters in turn, going
+// to the leader a voter names, and sends the command again under the same request, which the
+// leader answers once, until cfg.Timeout runs out.
+func sendAdmin(cfg adminConfig, a *meta.Admin, m *meta.Membership) (meta.AdminAnswer, error) {
 	pool := core.NewPool([][]byte{make([]byte, tcp.MaxData+core.BlockSize)}, 0)
 	self := core.NodeID{Node: 1<<31 | rand.Uint32()>>1}
 	request := rand.Uint64() | 1
@@ -318,7 +319,7 @@ func sendAdmin(cfg adminConfig, a *meta.Admin) (meta.AdminAnswer, error) {
 		if deadline.After(end) {
 			deadline = end
 		}
-		an, leader, known, err := tryAdmin(pool, cfg, v, self, request, a, deadline)
+		an, leader, known, err := tryAdmin(pool, cfg, v, self, request, a, m, deadline)
 		switch {
 		case err != nil:
 			last = fmt.Errorf("voter %d at %v: %w", v.Node, v.Addr, err)
@@ -338,38 +339,42 @@ func sendAdmin(cfg adminConfig, a *meta.Admin) (meta.AdminAnswer, error) {
 	return meta.AdminAnswer{}, fmt.Errorf("no answer from the control-plane leader within %v: %w", cfg.Timeout, last)
 }
 
-// tryAdmin sends command a to voter v and waits until deadline for its answer, or for the leader
-// the voter names instead, nil when it answered.
-func tryAdmin(pool core.BufPool, cfg adminConfig, v voter, self core.NodeID, request uint64, a *meta.Admin, deadline time.Time) (meta.AdminAnswer, *core.NodeID, bool, error) {
+// tryAdmin sends command a to voter v and waits until deadline for its answer, the membership into
+// m for AdminMembership, or for the leader the voter names instead, nil when it answered.
+func tryAdmin(pool core.BufPool, cfg adminConfig, v voter, self core.NodeID, request uint64, a *meta.Admin, m *meta.Membership, deadline time.Time) (meta.AdminAnswer, *core.NodeID, bool, error) {
 	c, err := tcp.Dial(v.Addr, self, pool, time.Until(deadline))
 	if err != nil {
 		return meta.AdminAnswer{}, nil, false, err
 	}
 	defer func() { _ = c.Close() }()
-	var m core.Msg
-	if err := meta.EncodeAdmin(pool, cfg.Group, request, a, &m); err != nil {
+	var msg core.Msg
+	if err := meta.EncodeAdmin(pool, cfg.Group, request, a, &msg); err != nil {
 		return meta.AdminAnswer{}, nil, false, err
 	}
-	if err := c.Send(&m); err != nil {
+	if err := c.Send(&msg); err != nil {
 		return meta.AdminAnswer{}, nil, false, err
 	}
 	for {
-		if err := c.Recv(deadline, &m); err != nil {
+		if err := c.Recv(deadline, &msg); err != nil {
 			return meta.AdminAnswer{}, nil, false, err
 		}
-		group, kind, token, ok := meta.Peek(&m)
+		group, kind, token, ok := meta.Peek(&msg)
 		switch {
 		case !ok || group != cfg.Group:
 		case kind == meta.KindAdminAnswer && token == request:
-			an, err := meta.DecodeAdminAnswer(pool, &m)
-			freeMsg(pool, &m)
+			an, err := meta.DecodeAdminAnswer(pool, &msg)
+			freeMsg(pool, &msg)
 			return an, nil, false, err
+		case kind == meta.KindDisks && m != nil:
+			err := meta.DecodeDisks(pool, &msg, m)
+			freeMsg(pool, &msg)
+			return meta.AdminAnswer{}, nil, false, err
 		case kind == meta.KindLeader:
-			at, known, err := meta.DecodeLeader(pool, &m)
-			freeMsg(pool, &m)
+			at, known, err := meta.DecodeLeader(pool, &msg)
+			freeMsg(pool, &msg)
 			return meta.AdminAnswer{}, &at, known, err
 		}
-		freeMsg(pool, &m)
+		freeMsg(pool, &msg)
 	}
 }
 

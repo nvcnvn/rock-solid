@@ -150,10 +150,12 @@ func main() {
 		if cfg, err = parseNode(os.Args[2:]); err == nil {
 			p, err = newNode(cfg)
 		}
-	case len(os.Args) >= 2 && (os.Args[1] == "disk" || os.Args[1] == "pool"):
+	case len(os.Args) >= 2 && (os.Args[1] == "disk" || os.Args[1] == "pool" || os.Args[1] == "pg"):
 		os.Exit(runAdmin(os.Args[1:], os.Stdout, os.Stderr))
+	case len(os.Args) >= 2 && os.Args[1] == "volume":
+		os.Exit(runVolume(os.Args[1:], os.Stdout, os.Stderr))
 	default:
-		fmt.Fprintln(os.Stderr, "usage: rock-solid ctl|node|disk|pool [flags]")
+		fmt.Fprintln(os.Stderr, "usage: rock-solid ctl|node|disk|pool|pg|volume [flags]")
 		os.Exit(2)
 	}
 	if err != nil {
