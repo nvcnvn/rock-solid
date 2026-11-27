@@ -341,6 +341,17 @@ func (g *gen) passes(id int, end key, lead uint64, lg []int, c int) bool {
 	return true
 }
 
+// sender is the leader and code term of an append a follower took as its term went from from
+// to to: the latest of those terms whose leader led it by now.
+func (g *gen) sender(from, to uint64) (uint64, uint64) {
+	for t := to; t >= max(from, 1); t-- {
+		if l := g.leaders[t]; l != 0 && slices.ContainsFunc(g.reps[l-1].hist, func(h sent) bool { return h.leads && h.term == g.term(t) }) {
+			return l, t
+		}
+	}
+	return 0, to
+}
+
 // elect writes replica id's line s for its win of spec term t. etcd-raft wins on the last vote's
 // answer, which can arrive after a voter that gave it won a later term: the win is placed before
 // the first win of a later term, unless a line of the replica's is later.
@@ -380,10 +391,13 @@ func (g *gen) state(id int, pass uint64, f [trace.MaxFields]uint64) {
 		fatal("replica %d's commit and applied indexes dropped outside a restart, from %d and %d to %d and %d", id, prev[2], prev[3], commit, applied)
 	}
 	leads := flags&1 != 0
+	appTerm := term
 	if !leads && lead == 0 && !slices.Equal(lg, r.noted) {
-		// A follower that took an append and then started a pre-vote in the same pass knows no
-		// leader, yet holds the entries the term's leader sent.
-		lead = g.leaders[term]
+		// A follower that took an append and then started a pre-vote, or took a later term's
+		// vote, in the same pass knows no leader, yet holds the entries a leader sent.
+		if lead, appTerm = g.sender(prev[0], term); lead == 0 {
+			fatal("replica %d's log moved with no leader of terms %d to %d", id, prev[0], term)
+		}
 	}
 	if pass == r.nowPass && term > prev[0] {
 		r.nowTerm = term
@@ -423,7 +437,7 @@ func (g *gen) state(id int, pass uint64, f [trace.MaxFields]uint64) {
 	case leads && commit > prev[2]:
 		g.line(id, `[k |-> "commit", i |-> %d, c |-> %d]`, id, g.index(r, commit))
 	case !leads && lead != 0 && (commit != prev[2] || !slices.Equal(lg, r.noted)):
-		g.replicate(id, lead, term, lg, g.index(r, commit))
+		g.replicate(id, lead, appTerm, lg, g.index(r, commit))
 	case term != prev[0] && handOffFails(prev[4], f) && g.failed[term]:
 		g.line(id, `[k |-> "handofffails", l |-> %d, t |-> %d]`, id, g.term(term))
 	case term != prev[0]:

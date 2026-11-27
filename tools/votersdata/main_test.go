@@ -87,3 +87,32 @@ func TestAnAppendSentBeforeItsLeaderStoppedPassesTheFollowersApply(t *testing.T)
 		t.Fatalf("the append is not placed between the leader's commit and its crash:\n%s", strings.Join(ls, "\n"))
 	}
 }
+
+// Of two terms a leaderless follower's log moved across whose leaders both led by now, the
+// append is the later term's leader's.
+func TestAnAppendIsTheLatestLedTermsLeaders(t *testing.T) {
+	g := &gen{
+		elected: []uint64{1, 2},
+		leaders: map[uint64]uint64{1: 1, 2: 2},
+		reps:    []*replica{{hist: []sent{{leads: true, term: 1}}}, {hist: []sent{{leads: true, term: 2}}}},
+	}
+	if l, term := g.sender(1, 2); l != 2 || term != 2 {
+		t.Fatalf("sender is replica %d of term %d, want replica 2 of term 2", l, term)
+	}
+}
+
+// A follower that took an append and then a vote of a later term in one pass names no leader:
+// the append is the leader's of the term it left, as the later term's candidate has not won yet.
+func TestAnAppendTakenWithALaterTermsVoteIsTheEarlierLeaders(t *testing.T) {
+	ls := steps(t, append(slices.Clone(boot),
+		"0 0.0 output RaftEntry index=4 term=1 kind=2 change=50177",
+		"0 0.0 output RaftState term=1 lead=1 commit=2 applied=2 flags=1",
+		"0 2.0 output RaftEntry index=4 term=1 kind=2 change=50177",
+		"0 2.0 output RaftState term=2 lead=0 commit=2 applied=1 flags=0",
+		"0 1.0 output RaftEntry index=4 term=2 kind=1 change=0",
+		"0 1.0 output RaftState term=2 lead=2 commit=1 applied=1 flags=1",
+	)...)
+	if !slices.Contains(ls, `[k |-> "replicate", i |-> 1, j |-> 3, lg |-> <<1, 1, 1>>, c |-> 1]`) {
+		t.Fatalf("the append is not leader 1's:\n%s", strings.Join(ls, "\n"))
+	}
+}
