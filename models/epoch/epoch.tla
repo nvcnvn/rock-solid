@@ -1676,9 +1676,11 @@ GoneRefusesRecovery(n, c, d) ==
 \* disk error or a crash, after it went out to members, while the primary is
 \* still in its interval or has not decided its next one: peering answers only
 \* once a disk's records are durable or failed. The primary refuses
-\* its client and ends the interval. A node that adopted a table where it no
-\* longer leads the PG refused the client and gated the version (Adopt); its
-\* record fails until a later interval of the PG is decided. Only the newest
+\* its client and ends the interval. A version already refused to its client,
+\* as a member refused an earlier one (Refused), fails as a pending one does.
+\* A node that adopted a table where it no longer leads the PG refused the
+\* client and gated the version (Adopt); its record fails until a later
+\* interval of the PG is decided. Only the newest
 \* version on its log fails: a record that fails below a later logged one,
 \* reported as held whole up to the failure, is not modelled.
 OwnFail(n, r) ==
@@ -1688,7 +1690,7 @@ OwnFail(n, r) ==
     IN /\ r.n = n
        /\ r \in ownw
        /\ Running(n)
-       /\ \/ /\ r \in pend
+       /\ \/ /\ r \in pend \cup refd
              /\ \/ pr[n][p].iv = IvOfV(r.v)
                 \/ ~Decided(n, p, pr[n][p].iv)
              /\ Leads(n, p)
@@ -1700,10 +1702,11 @@ OwnFail(n, r) ==
        /\ ids' = [ids EXCEPT ![own] = {x \in @ : x.c # r.c \/ x.v # r.v}]
        /\ gat' = [gat EXCEPT ![own] = @ \ {g}]
        /\ pend' = pend \ {r}
+       /\ refd' = refd \ {r}
        /\ ownw' = ownw \ {r}
        /\ pr' = IF Leads(n, p) THEN [pr EXCEPT ![n][p].ask = TRUE] ELSE pr
        /\ UNCHANGED <<wm, ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, rcv, miss, persIv, drp, rdrp, ldrp, imf, mrecv, failed,
-                      pv, pin, known, dec, act, rm, vers, ackd, wst, sends, dmn, bad, refd,
+                      pv, pin, known, dec, act, rm, vers, ackd, wst, sends, dmn, bad,
                       leaseVars, now, raw, boot, rawR, bootR, slew, runId, frz, suspAt, rstAt,
                       rq, gm, hbm, lastAsk, lastHb, net, arrived, dirty, hs, raftVars>>
 
@@ -3127,6 +3130,9 @@ MemberFails3 == Plan(<<>>, Partial, {"mfail"})
 FailRestart == [Plan(<<>>, Partial2, {"mfail", "restart"}) EXCEPT !.k = 2]
 \* One of two versions fails on the primary's own log.
 OwnFails == Plan(<<>>, Partial2, {"ownfail"})
+\* A member refuses the first, refusing both to their clients, and the second
+\* fails on the primary's own log.
+RefusedOwnFails == [Plan(<<>>, Partial2, {"mfail", "ownfail"}) EXCEPT !.k = 2]
 \* A member fails a version while the primary moves to another member.
 FailMoved == Plan(<<Rot(2)>>, Partial2, {"mfail"})
 \* A version fails on the primary's own log while the primary moves.
@@ -3165,8 +3171,8 @@ EditPlans == {EditAway, EditReorder}
 AskPlans == {MemberFails, OwnFails, FailMoved, OwnFailMoved}
 \* ci-faults and ci-faults-more split FaultPlans, each under the 300 s budget:
 \* MinLiveRaised fits only with PG 2 alone, and deep-faults-more checks it with both.
-FaultPlansFail == {MemberFails, MemberFails3, FailRestart, OwnFails, FailMoved, OwnFailMoved, FailDown,
-                   OwnFailDown, FailMaint, OwnFailMaint, RotBack, FormatAtPeering, FormatAtRecovery}
+FaultPlansFail == {MemberFails, MemberFails3, FailRestart, OwnFails, RefusedOwnFails, FailMoved, OwnFailMoved,
+                   FailDown, OwnFailDown, FailMaint, OwnFailMaint, RotBack, FormatAtPeering, FormatAtRecovery}
 FaultPlansMore == {MinLiveRaised}
 FaultPlans == FaultPlansFail \cup FaultPlansMore
 
