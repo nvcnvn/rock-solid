@@ -73,6 +73,7 @@ internal/meta TestNoSessionIsFencedWhileItsClientsLeaseRuns 2000
 internal/meta TestNoGrantedFlushIsRefusedForSpace 1000
 internal/meta TestTheFilesystemWorkloadKeepsItsInvariantsAcrossElections 100
 internal/meta TestReadsSeeEveryTxnAcknowledgedBeforeThem 2000
+internal/meta TestAnOrphanIsNeverFreedWhileALiveSessionHasItOpen 2000
 internal/loop/nettest TestSuiteOnTheSimulatedNetwork 100
 internal/fsclient TestAMountsHistoriesKeepTheirInvariantsAcrossCrashes 150
 "
