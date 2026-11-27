@@ -62,7 +62,7 @@ func (m *Machine) create(o *op, out *Output) {
 		m.fetch(o, o.child, false, out)
 		o.step = createOpened
 	case createOpened:
-		if m.stale(o, o.child) {
+		if m.refetch(o, o.child) {
 			m.fetch(o, o.child, false, out)
 			return
 		}

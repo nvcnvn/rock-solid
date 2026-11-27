@@ -30,6 +30,20 @@ func (m *Machine) stale(o *op, ino uint64) bool {
 	return false
 }
 
+// refetch reports whether o fetches ino's attributes again: once when they went stale, and after
+// that never, answering with an attribute timeout of 0, so a stream of requests cannot starve o.
+func (m *Machine) refetch(o *op, ino uint64) bool {
+	if !m.stale(o, ino) {
+		return false
+	}
+	if o.refetched {
+		o.expire = true
+		return false
+	}
+	o.refetched = true
+	return true
+}
+
 // took decodes the attributes fetch read for ino into its node; false when the inode is gone.
 func (m *Machine) took(o *op, ino uint64) (*node, bool) {
 	if !o.got[0].ok || meta.DecodeAttr(o.got[0].v, &o.attr) != nil {
@@ -77,7 +91,7 @@ func (m *Machine) lookup(o *op, out *Output) {
 		m.fetch(o, child, mode == meta.ModeDir, out)
 		o.step = 2
 	case 2:
-		if m.stale(o, o.child) {
+		if m.refetch(o, o.child) {
 			m.fetch(o, o.child, o.mode == meta.ModeDir, out)
 			return
 		}
@@ -90,6 +104,9 @@ func (m *Machine) lookup(o *op, out *Output) {
 		n.lookups++
 		a := shown(n)
 		e := m.entry(o.child, &a)
+		if o.expire {
+			e.AttrValid = 0
+		}
 		out.Replies = fuseproto.AppendEntry(out.Replies, o.req.Unique, &e)
 		m.end(o, out)
 	}
@@ -102,7 +119,7 @@ func (m *Machine) getattr(o *op, out *Output) {
 		o.step = 1
 		return
 	}
-	if m.stale(o, ino) {
+	if m.refetch(o, ino) {
 		m.fetch(o, ino, false, out)
 		return
 	}
@@ -114,6 +131,9 @@ func (m *Machine) getattr(o *op, out *Output) {
 	a := shown(n)
 	fa := fuseAttr(ino, &a)
 	_, valid := m.timeouts(a.Mode)
+	if o.expire {
+		valid = 0
+	}
 	if o.req.Opcode == fuseproto.OpStatx {
 		out.Replies = fuseproto.AppendStatx(out.Replies, o.req.Unique, valid, 0, &fa)
 	} else {
@@ -153,6 +173,9 @@ func (m *Machine) handOut(o *op, n *node, ino uint64, create bool, out *Output) 
 		n.lookups++
 		a := shown(n)
 		e := m.entry(ino, &a)
+		if o.expire {
+			e.AttrValid = 0
+		}
 		out.Replies = fuseproto.AppendCreate(out.Replies, o.req.Unique, &e, fuseproto.Open{Fh: fh})
 	} else {
 		out.Replies = fuseproto.AppendOpen(out.Replies, o.req.Unique, fuseproto.Open{Fh: fh, Flags: flags})
