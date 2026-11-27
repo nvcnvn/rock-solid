@@ -84,8 +84,11 @@ type ChunkCall struct {
 
 // Output is what one call into the machine emits; the driver makes its calls in order.
 type Output struct {
-	// Replies holds FUSE reply frames back to back, each starting with its length.
+	// Replies holds FUSE reply frames back to back, each starting with its length, and Data the
+	// replies carrying a READ's data, each a frame at the start of a pool buffer the driver writes
+	// and frees.
 	Replies []byte
+	Data    []core.IOBuf
 	Reads   []Read
 	Txns    []TxnSend
 	Chunks  []ChunkCall
@@ -93,7 +96,7 @@ type Output struct {
 
 // Reset empties the output for reuse.
 func (o *Output) Reset() {
-	o.Replies, o.Reads, o.Txns, o.Chunks = o.Replies[:0], o.Reads[:0], o.Txns[:0], o.Chunks[:0]
+	o.Replies, o.Data, o.Reads, o.Txns, o.Chunks = o.Replies[:0], o.Data[:0], o.Reads[:0], o.Txns[:0], o.Chunks[:0]
 }
 
 // plants are bugs a test plants.
@@ -118,6 +121,8 @@ type Machine struct {
 	seq     uint64
 	blocked []*op
 	plant   plants
+	// pool is the loop's, which READ replies and WRITEs waiting for a raise take their data from.
+	pool core.BufPool
 }
 
 // node is what the machine knows of an inode.
@@ -182,7 +187,9 @@ type op struct {
 	names   []byte
 	data    []byte
 	reply   []byte
-	fetch   uint64
+	// buf holds a READ's reply or a WRITE's data, off the Go heap; data aliases a WRITE's.
+	buf   core.IOBuf
+	fetch uint64
 	// resolved is a LOOKUP that has read its entry; again a request retried after a check failed.
 	resolved bool
 	again    bool
@@ -247,7 +254,7 @@ func (m *Machine) newOp() *op {
 	if k := len(m.free); k > 0 {
 		o, m.free = m.free[k-1], m.free[:k-1]
 	} else {
-		o = &op{}
+		o = &op{buf: core.NoBuf}
 	}
 	m.ops = append(m.ops, o)
 	return o
@@ -261,7 +268,10 @@ func (m *Machine) done(o *op) {
 			break
 		}
 	}
-	*o = op{scan: o.scan[:0], vbuf: o.vbuf[:0], names: o.names[:0], data: o.data[:0], reply: o.reply[:0], fs: o.fs}
+	if o.buf != core.NoBuf {
+		m.pool.Free(o.buf)
+	}
+	*o = op{scan: o.scan[:0], vbuf: o.vbuf[:0], names: o.names[:0], reply: o.reply[:0], fs: o.fs, buf: core.NoBuf}
 	m.free = append(m.free, o)
 }
 
@@ -309,6 +319,7 @@ func (m *Machine) unlock(o *op, out *Output) {
 // Request takes a decoded request read at wall-clock time now, in nanoseconds since the epoch;
 // its frame need live only through the call.
 func (m *Machine) Request(ctx *core.Context, now int64, r *fuseproto.Request, out *Output) {
+	m.pool = ctx.Pool
 	switch r.Opcode {
 	case fuseproto.OpForget:
 		m.forget(r.NodeID, r.NLookup)
@@ -407,6 +418,7 @@ func (m *Machine) get(o *op, slot int, inode uint64, tag byte, name []byte, out 
 
 // ReadDone answers Read token with the keys found and their values, which need live only through the call.
 func (m *Machine) ReadDone(ctx *core.Context, token uint64, kvs []meta.KV, out *Output) {
+	m.pool = ctx.Pool
 	w, ok := m.waits[token]
 	if !ok {
 		return
@@ -437,6 +449,7 @@ func errResend(err error) bool {
 
 // TxnDone settles TxnSend token with its Result or error.
 func (m *Machine) TxnDone(ctx *core.Context, token uint64, r *meta.Result, err error, out *Output) {
+	m.pool = ctx.Pool
 	w, ok := m.waits[token]
 	if !ok {
 		return

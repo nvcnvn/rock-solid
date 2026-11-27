@@ -137,6 +137,11 @@ func (h *mount) serve() {
 		for b := o.Replies; len(b) > 0; b = b[binary.LittleEndian.Uint32(b):] {
 			h.replies = append(h.replies, bytes.Clone(b[:binary.LittleEndian.Uint32(b)]))
 		}
+		for _, buf := range o.Data {
+			b := h.ctx.Pool.Bytes(buf)
+			h.replies = append(h.replies, bytes.Clone(b[:binary.LittleEndian.Uint32(b)]))
+			h.ctx.Pool.Free(buf)
+		}
 		for _, s := range o.Txns {
 			h.txns = append(h.txns, *s.Txn)
 		}

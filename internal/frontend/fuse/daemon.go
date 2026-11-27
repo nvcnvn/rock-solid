@@ -314,13 +314,22 @@ func (d *Daemon) feed(ctx *core.Context, f func(o *fsclient.Output)) {
 	}
 	for b := o.Replies; len(b) > 0; {
 		n := binary.LittleEndian.Uint32(b)
-		if err := d.dev.Write(b[:n]); err != nil && !errors.Is(err, ErrGone) {
-			log.Printf("fuse: a reply the kernel refused: %v", err)
-		}
+		d.write(b[:n])
 		b = b[n:]
+	}
+	for _, buf := range o.Data {
+		b := ctx.Pool.Bytes(buf)
+		d.write(b[:binary.LittleEndian.Uint32(b)])
+		ctx.Pool.Free(buf)
 	}
 	for _, rd := range o.Reads {
 		d.read(ctx, rd)
+	}
+}
+
+func (d *Daemon) write(frame []byte) {
+	if err := d.dev.Write(frame); err != nil && !errors.Is(err, ErrGone) {
+		log.Printf("fuse: a reply the kernel refused: %v", err)
 	}
 }
 

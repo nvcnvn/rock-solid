@@ -716,6 +716,11 @@ func (d *daemon) feed(m *Machine, f func(o *Output)) {
 	for b := o.Replies; len(b) > 0; b = b[binary.LittleEndian.Uint32(b):] {
 		d.reply(m, b[:binary.LittleEndian.Uint32(b)])
 	}
+	for _, buf := range o.Data {
+		b := d.ctx.Pool.Bytes(buf)
+		d.reply(m, b[:binary.LittleEndian.Uint32(b)])
+		d.ctx.Pool.Free(buf)
+	}
 	for _, rd := range o.Reads {
 		d.read(m, rd)
 	}

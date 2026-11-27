@@ -56,7 +56,11 @@ func (m *Machine) write(o *op, data []byte, out *Output) {
 		m.chunks(o, ChunkCall{Off: o.req.Offset, Data: data}, out)
 		return
 	}
-	o.data = append(o.data[:0], data...)
+	if !m.hold(o, len(data), out) {
+		return
+	}
+	o.data = m.pool.Bytes(o.buf)[:len(data)]
+	copy(o.data, data)
 	o.step = writeRaise
 	m.run(o, out)
 }
@@ -142,8 +146,9 @@ func (m *Machine) read(o *op, out *Output) {
 			m.fail(o, o.errno, out)
 			return
 		}
-		fuseproto.PutDataReply(o.reply, o.req.Unique)
-		out.Replies = append(out.Replies, o.reply...)
+		fuseproto.PutDataReply(m.pool.Bytes(o.buf)[:fuseproto.OutHeaderSize+int(o.req.Size)], o.req.Unique)
+		out.Data = append(out.Data, o.buf)
+		o.buf = core.NoBuf
 		m.done(o)
 		return
 	}
@@ -153,13 +158,31 @@ func (m *Machine) read(o *op, out *Output) {
 		return
 	}
 	n := uint32(min(uint64(o.req.Size), size-o.req.Offset))
-	o.reply = append(o.reply[:0], make([]byte, fuseproto.OutHeaderSize+int(n))...)
+	if !m.hold(o, fuseproto.OutHeaderSize+int(n), out) {
+		return
+	}
+	clear(m.pool.Bytes(o.buf)[:fuseproto.OutHeaderSize+int(n)])
+	o.req.Size = n
 	o.step = writeChunk
 	m.chunks(o, ChunkCall{Read: true, Off: o.req.Offset, N: n}, out)
 }
 
+// hold gives o a pool buffer of n bytes, answering EIO when the pool has none: in place, a READ's
+// reply behind the header's headroom, which the chunk data is copied into once, and a WRITE's
+// data while it waits for its raise of alloc_end.
+func (m *Machine) hold(o *op, n int, out *Output) bool {
+	b, err := m.pool.Alloc(n)
+	if err != nil {
+		m.fail(o, EIO, out)
+		return false
+	}
+	o.buf = b
+	return true
+}
+
 // ChunkDone takes a chunk-client completion, freeing its buffer.
 func (m *Machine) ChunkDone(ctx *core.Context, c *chunkstore.Completion, out *Output) {
+	m.pool = ctx.Pool
 	w, ok := m.waits[c.Token]
 	if c.Buf != core.NoBuf {
 		defer ctx.Pool.Free(c.Buf)
@@ -174,7 +197,8 @@ func (m *Machine) ChunkDone(ctx *core.Context, c *chunkstore.Completion, out *Ou
 	switch {
 	case c.Status == chunkstore.StatusOK && o.req.Opcode == fuseproto.OpRead && c.Buf != core.NoBuf:
 		b := ctx.Pool.Bytes(c.Buf)[c.Off%core.BlockSize:]
-		copy(o.reply[fuseproto.OutHeaderSize+int(c.Off-o.req.Offset):], b[:min(len(b), int(c.Len))])
+		reply := m.pool.Bytes(o.buf)[:fuseproto.OutHeaderSize+int(o.req.Size)]
+		copy(reply[fuseproto.OutHeaderSize+int(c.Off-o.req.Offset):], b[:min(len(b), int(c.Len))])
 	case c.Status == chunkstore.StatusOK, c.Status == chunkstore.StatusUnfound && o.req.Opcode == fuseproto.OpRead:
 	case c.Status == chunkstore.StatusNoSpace:
 		o.errno = ENOSPC
