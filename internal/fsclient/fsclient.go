@@ -32,8 +32,11 @@ const (
 	EOPNOTSUPP   fuseproto.Errno = 95
 )
 
-// oExcl is open(2)'s O_EXCL.
-const oExcl = 0o200
+// oExcl and oTrunc are open(2)'s O_EXCL and O_TRUNC.
+const (
+	oExcl  = 0o200
+	oTrunc = 0o1000
+)
 
 // NameMax is the longest name a directory entry takes.
 const NameMax = 255
@@ -477,7 +480,7 @@ func (m *Machine) TxnDone(ctx *core.Context, token uint64, r *meta.Result, err e
 			m.run(o, out)
 		case c.Kind == meta.OpCheckEmpty:
 			m.fail(o, ENOTEMPTY, out)
-		case c.Absent && o.req.Opcode == fuseproto.OpCreate && o.req.Flags&oExcl == 0:
+		case c.Absent && o.req.Opcode == fuseproto.OpCreate && o.req.Flags&oExcl == 0 && entryKey(c.Key):
 			o.step = createOpen
 			m.run(o, out)
 		case c.Absent:
@@ -489,6 +492,12 @@ func (m *Machine) TxnDone(ctx *core.Context, token uint64, r *meta.Result, err e
 	}
 	o.step = -1
 	m.run(o, out)
+}
+
+// entryKey reports a directory entry's key, which a case index's folded key is not.
+func entryKey(key []byte) bool {
+	var k meta.Key
+	return meta.DecodeKey(key, &k) == nil && k.Tag == meta.InodeEntry
 }
 
 func (m *Machine) internalDone(o *op, out *Output) {

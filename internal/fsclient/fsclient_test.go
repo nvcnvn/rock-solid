@@ -604,7 +604,8 @@ func TestAWriteBeforeItsRaiseLeavesAChunkThePurgeMisses(t *testing.T) {
 }
 
 // A CREATE without O_EXCL whose name another node created first opens that file, as open(2)
-// would; with O_EXCL it fails EEXIST.
+// would, and with O_TRUNC truncates it only when empty, as a size setattr does until Truncate;
+// with O_EXCL it fails EEXIST.
 func TestACreateWithoutExclOpensTheFileAnotherNodeCreatedFirst(t *testing.T) {
 	h := newMount(t, Config{})
 	other := *h
@@ -614,6 +615,11 @@ func TestACreateWithoutExclOpensTheFileAnotherNodeCreatedFirst(t *testing.T) {
 		t.Fatalf("create opened inode %x handle %d, want inode %x", got, fh, ino)
 	}
 	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpCreate, NodeID: meta.RootInode, Name: []byte("f"), Mode: uint32(meta.ModeFile | 0o644), Flags: oExcl}), EEXIST)
+	h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpCreate, NodeID: meta.RootInode, Name: []byte("f"), Mode: uint32(meta.ModeFile | 0o644), Flags: oTrunc}))
+	b := h.attr(ino)
+	b.Size = 5
+	h.setAttr(ino, b)
+	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpCreate, NodeID: meta.RootInode, Name: []byte("f"), Mode: uint32(meta.ModeFile | 0o644), Flags: oTrunc}), EOPNOTSUPP)
 	other.mkdir(meta.RootInode, "d")
 	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpCreate, NodeID: meta.RootInode, Name: []byte("d"), Mode: uint32(meta.ModeFile | 0o644)}), EISDIR)
 }
@@ -758,5 +764,30 @@ func TestAFetchFromBeforeTheMachinesOwnCommitIsNotTaken(t *testing.T) {
 	h.ok(flush)
 	if got := h.read(ino, fh, 0, 100); string(got) != "hello" {
 		t.Fatalf("read after the open gave %q", got)
+	}
+}
+
+// With a case index, a CREATE whose name folds to another node's file answers EEXIST; one whose
+// name another node made and unlinked before the create read it is made again.
+func TestACreateThatLosesItsNameAnswersByWhatHoldsIt(t *testing.T) {
+	h := newMount(t, Config{CaseIndex: true})
+	other := *h
+	other.m, other.out, other.replies = New(Config{Volume: vol, CaseIndex: true, Session: 8, Mount: 1, SlotLimit: 1 << 20}), Output{}, nil
+	theirs, _ := other.create(meta.RootInode, "f")
+	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpCreate, NodeID: meta.RootInode, Name: []byte("F"), Mode: uint32(meta.ModeFile | 0o644)}), EEXIST)
+	h.held = true
+	u := h.send(fuseproto.Request{Opcode: fuseproto.OpCreate, NodeID: meta.RootInode, Name: []byte("f"), Mode: uint32(meta.ModeFile | 0o644)})
+	h.answerTxn(h.sent[0])
+	h.serve()
+	if len(h.reads) != 1 {
+		t.Fatalf("a create that lost its name sent %d reads", len(h.reads))
+	}
+	other.ok(other.send(fuseproto.Request{Opcode: fuseproto.OpUnlink, NodeID: meta.RootInode, Name: []byte("f")}))
+	h.held = false
+	h.answerRead(h.reads[0])
+	h.serve()
+	e := h.entry(u)
+	if e.NodeID == theirs || h.entry(h.lookup(meta.RootInode, "f")).NodeID != e.NodeID {
+		t.Fatalf("the create answered inode %x, the unlinked file's %x", e.NodeID, theirs)
 	}
 }

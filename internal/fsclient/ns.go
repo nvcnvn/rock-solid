@@ -37,7 +37,8 @@ func (m *Machine) build(o *op, err error, out *Output) {
 }
 
 // create serves CREATE and MKDIR.
-// The steps of a CREATE without O_EXCL whose name another node created first, which opens that file.
+// The steps of a CREATE without O_EXCL whose name another node created first, which opens that
+// file, or, once the file is gone, creates the name again, under a new inode once it read that file's.
 const (
 	createOpen = iota + 20
 	createFetch
@@ -51,6 +52,10 @@ func (m *Machine) create(o *op, out *Output) {
 		m.get(o, 0, dir, meta.InodeEntry, o.req.Name, out)
 		o.step = createFetch
 	case createFetch:
+		if !o.got[0].ok {
+			m.recreate(o, out)
+			return
+		}
 		if !m.child(o, out) {
 			return
 		}
@@ -68,8 +73,12 @@ func (m *Machine) create(o *op, out *Output) {
 		}
 		n, ok := m.took(o, o.child)
 		if !ok {
-			o.step = 0
-			m.run(o, out)
+			o.child = 0
+			m.recreate(o, out)
+			return
+		}
+		if o.req.Flags&oTrunc != 0 && shown(n).Size > 0 {
+			m.fail(o, EOPNOTSUPP, out)
 			return
 		}
 		m.handOut(o, n, o.child, true, out)
@@ -121,6 +130,19 @@ func (m *Machine) create(o *op, out *Output) {
 			m.handOut(o, n, o.child, true, out)
 		}
 	}
+}
+
+// recreate sends a CREATE whose name was taken, and freed before it read the file, from step 0
+// again under a replay ID of its own, its unique with bit 0 set, which the kernel never sets in a
+// request's: the first ID's record replays the failed check. A second loss answers EEXIST.
+func (m *Machine) recreate(o *op, out *Output) {
+	if o.mreq.ID&1 != 0 {
+		m.fail(o, EEXIST, out)
+		return
+	}
+	o.mreq.ID |= 1
+	o.step = 0
+	m.run(o, out)
 }
 
 // child decodes the entry read into slot 0; false when absent, with ENOENT answered.
