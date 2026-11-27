@@ -484,17 +484,71 @@ func (g *gen) state(id int, pass uint64, f [trace.MaxFields]uint64) {
 	if halts && !moved {
 		// A test halts a replica with no entry it failed to apply, which meta's halt needs, or
 		// past a command, which moves no spec index:
-		// the halt is the replica's last apply, unless a line of the replica's is later.
+		// the halt is the replica's last apply when haltTakesApply holds, and after a crash and
+		// restart the replica halts again, as when the harness halts it again as it restarts.
 		r.haltAt = g.index(r, applied)
 		h := fmt.Sprintf(`[k |-> "halt", r |-> %d, a |-> %d]`, id, r.haltAt)
-		if r.applyAt >= 0 && g.lines[r.applyAt].k == r.lastLine {
+		if g.haltTakesApply(id, r.haltAt) {
 			g.lines[r.applyAt].s = h
+			g.haltAgain(id)
 		} else {
 			g.line(id, "%s", h)
 		}
 	}
 	if flags&8 != 0 && prev[4]&8 == 0 {
 		g.line(id, `[k |-> "delete", r |-> %d]`, id)
+	}
+}
+
+// haltTakesApply reports whether replica id's halt at spec index a can take the place of its last
+// apply line: that apply is at a, the replica's only lines since are none or a crash and the
+// restart after it, and no line since is a hand-off, which the spec's Halted leader enables.
+func (g *gen) haltTakesApply(id, a int) bool {
+	r := g.reps[id-1]
+	if r.applyAt < 0 {
+		return false
+	}
+	var at int
+	if _, err := fmt.Sscanf(g.lines[r.applyAt].s, `[k |-> "apply", r |-> %d, a |-> %d]`, new(int), &at); err != nil || at != a {
+		return false
+	}
+	k := g.lines[r.applyAt].k
+	var own []string
+	for _, l := range g.lines {
+		if !k.less(l.k) {
+			continue
+		}
+		kind, _, _ := strings.Cut(l.s, ",")
+		if kind == `[k |-> "transfer"` || kind == `[k |-> "handofffails"` {
+			return false
+		}
+		if l.id == id {
+			own = append(own, kind)
+		}
+	}
+	return len(own) == 0 || slices.Equal(own, []string{`[k |-> "crash"`, `[k |-> "restart"`})
+}
+
+// haltAgain rewrites each restart of replica id after its halt's line at the index before the
+// halt, an apply following it.
+func (g *gen) haltAgain(id int) {
+	r := g.reps[id-1]
+	at := g.lines[r.applyAt].k
+	for i := range g.lines {
+		l := &g.lines[i]
+		var c, a int
+		if l.id != id || !at.less(l.k) || !strings.HasPrefix(l.s, `[k |-> "restart"`) {
+			continue
+		}
+		if _, err := fmt.Sscanf(l.s, `[k |-> "restart", r |-> %d, c |-> %d, a |-> %d]`, new(int), &c, &a); err != nil {
+			fatal("restart line %s: %v", l.s, err)
+		}
+		l.s = fmt.Sprintf(`[k |-> "restart", r |-> %d, c |-> %d, a |-> %d]`, id, c, r.haltAt-1)
+		k := key{l.k.a, 1}
+		g.lines = append(g.lines, line{k: k, s: fmt.Sprintf(`[k |-> "apply", r |-> %d, a |-> %d]`, id, a), id: id})
+		if r.lastLine.less(k) {
+			r.lastLine = k
+		}
 	}
 }
 
