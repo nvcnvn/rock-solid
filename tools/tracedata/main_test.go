@@ -51,3 +51,13 @@ func TestRecoveryLateOnlyForAReplyItsDecisionReads(t *testing.T) {
 		}
 	}
 }
+
+func TestPastRefusalOnlyAtTheFailOfItsVersion(t *testing.T) {
+	const chunk, v = 9, 5
+	g := &gen{past: map[[2]uint64][]string{{chunk, v}: {"a"}, {chunk, v + 1}: {"b"}}}
+	g.heardPast(chunk, v)
+	g.heardPast(chunk, v+2)
+	if len(g.lines) != 1 || g.lines[0] != "[a]" {
+		t.Errorf("lines %q, want [a] alone", g.lines)
+	}
+}

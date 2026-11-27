@@ -188,6 +188,8 @@ const (
 	OutResends
 	// OutResendEntry is one entry of the OutResends before it: disk chunk version identity request.
 	OutResendEntry
+	// OutPastRefused, a member refusing a client version of an interval of its PG it has left: chunk version.
+	OutPastRefused
 	numNames
 )
 
@@ -325,6 +327,7 @@ var schemas = [numNames]schema{
 	OutHeard:          {"Heard", KindOutput, []field{{"id", typeNum}, fVer}},
 	OutResends:        {"Resends", KindOutput, []field{fDisk}},
 	OutResendEntry:    {"ResendEntry", KindOutput, []field{fDisk, fChunk, fVer, {"identity", typeNum}, {"request", typeNum}}},
+	OutPastRefused:    {"PastRefused", KindOutput, []field{fChunk, fVer}},
 }
 
 // Kind is the kind of record the name belongs to, or 0 for an unknown name.

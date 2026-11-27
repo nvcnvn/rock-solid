@@ -1611,17 +1611,13 @@ OwnLogged(r) ==
     /\ UNCHANGED <<ctlVars, nodeVars, priVars, rm, vers, ackd, wst, sends, dmn, bad, pend, refd,
                    leaseVars, clockVars, raftVars>>
 
-\* A member refuses a version m carries, of its current interval. A primary that
-\* has yet to answer the version, once it hears, refuses its client and those of
-\* the chunk's later versions, whose bytes may rest on it, and the interval it
-\* was ordered in ends; peering decides whether they stay. A version already
-\* answered changes nothing at the primary.
-Refused(m) ==
-    LET d == m.to
-        r == CHOOSE x \in vers : x.c = m.c /\ x.v = m.v /\ x.n = m.from /\ x.r = m.r
-    IN /\ [c |-> m.c, v |-> m.v] \notin failed[d]
-       /\ failed' = [failed EXCEPT ![d] = @ \cup {[c |-> m.c, v |-> m.v]}]
-       /\ LET out == IF r \notin pend THEN {}
+\* The primary hears a member refuse the version m carries. If it has yet to
+\* answer the version, it refuses its client and those of the chunk's later
+\* versions, whose bytes may rest on it, and the interval it was ordered in ends;
+\* peering decides whether they stay. A version already answered changes nothing.
+RefusalHeard(m) ==
+    LET r == CHOOSE x \in vers : x.c = m.c /\ x.v = m.v /\ x.n = m.from /\ x.r = m.r
+    IN /\ LET out == IF r \notin pend THEN {}
                       ELSE IF Bug("FailOnlyOne") THEN {r}
                       ELSE {x \in pend : x.n = m.from /\ x.r = m.r /\ x.c = m.c /\ x.v >= m.v}
           IN /\ pend' = pend \ out
@@ -1633,6 +1629,13 @@ Refused(m) ==
                       leaseVars, now, raw, boot, rawR, bootR, slew, runId, frz, suspAt, rstAt,
                       rq, gm, hbm, lastAsk, lastHb, net, arrived, dirty, hs, raftVars>>
 
+\* A member refuses a version m carries, of its current interval, and records it
+\* failed.
+Refused(m) ==
+    /\ [c |-> m.c, v |-> m.v] \notin failed[m.to]
+    /\ failed' = [failed EXCEPT ![m.to] = @ \cup {[c |-> m.c, v |-> m.v]}]
+    /\ RefusalHeard(m)
+
 \* A member refuses a version of its current interval it has not logged, or
 \* fails to log it.
 MemberFail(m) ==
@@ -1642,6 +1645,19 @@ MemberFail(m) ==
     /\ IvAt(dnode[m.to], m.p) = m.iv
     /\ Fault("mfail")
     /\ Refused(m)
+
+\* A member that moved on to a later interval of the PG refuses a version of an
+\* earlier one, logged or not, as it accepts only its current interval's, and
+\* the primary hears the refusal as any other, maybe after the member went down.
+\* The member records no failure: that interval is over for it. The primary
+\* takes it as a member's refusal, which "mfail" plans explore, so only traces
+\* and plans that set "past" take it.
+PastRefuses(m) ==
+    /\ "past" \in plan.f
+    /\ dnode[m.to] # 0
+    /\ IvAt(dnode[m.to], m.p) > m.iv
+    /\ RefusalHeard(m)
+    /\ UNCHANGED <<failed, faults>>
 
 \* The node of a disk formatted again still holds a table with the old disk in
 \* the interval. It is no member of that interval, so it refuses what the
@@ -2341,7 +2357,7 @@ Protocol ==
     \/ \E n \in Node, p \in PG, c \in Chunk, d \in Disk : Recover(n, p, c, d)
     \/ \E i \in 1..Len(Writes) : Send(i)
     \/ \E n \in Node : \E x \in pin[n] : Order(n, x) \/ Reanswer(n, x) \/ Stale(n, x) \/ Refuse(n, x)
-    \/ \E m \in rm : Deliver(m)
+    \/ \E m \in rm : Deliver(m) \/ PastRefuses(m)
     \/ \E r \in ownw : OwnLogged(r)
     \/ \E r \in pend : Answer(r)
     \/ \E n, v \in Node : ~rlead[v] /\ Fortify(n, v)
@@ -3015,16 +3031,17 @@ ListerPrimaryPlans == {Plan(<<Mark(3, "down"), Mark(3, "up"), Rot(1)>>, Partial,
 \* under a primary that stays, with a third send, so a lost reanswer is sent
 \* again. ci-resend-held: the chunk left one clean copy, as in HeldPlans.
 \* ci-resend-recovered: a member down for the writes, back, recovered and made
-\* primary. The last two send X alone: with Y as well, neg-resend-recovery-ids
-\* passed 4 million states in 10 minutes unbroken. ci-resend-trim: the refusal
-\* and the recovered plans with trimming. neg-resend-recovery-live-only needs Y
+\* primary; marked down, it may refuse a write sent before ("past"). The last
+\* two send X alone: with Y as well, neg-resend-recovery-ids passed 4 million
+\* states in 10 minutes unbroken. ci-resend-trim: the refusal and the recovered
+\* plans with trimming. neg-resend-recovery-live-only needs Y
 \* to overwrite X, so its member comes back as primary in one table.
 Resend == <<[c |-> 1, blk |-> 1, whole |-> TRUE, inc |-> 0, re |-> 0, after |-> 0],
             [c |-> 1, blk |-> 1, whole |-> TRUE, inc |-> 0, re |-> 0, after |-> 0]>>
 ResendPlans == {Plan(<<Rot(1)>>, Resend, {"lose"}), Plan(<<>>, Resend, {"lose", "restart"})}
 ResendFailPlans == {Plan(<<>>, Resend, {"lose", "mfail"})}
 ResendHeldPlans == {Plan(<<Mark(3, "down"), Mark(3, "up"), Mark(2, "down")>>, <<Resend[1]>>, {"lose"})}
-ResendRecoveredPlans == {Plan(<<Mark(2, "down"), Mark(2, "up"), Rot(1)>>, <<Resend[1]>>, {"lose"})}
+ResendRecoveredPlans == {Plan(<<Mark(2, "down"), Mark(2, "up"), Rot(1)>>, <<Resend[1]>>, {"lose", "past"})}
 ResendOverwrittenPlans == {Plan(<<Mark(2, "down"), Tab(1, <<2, 1, 3>>, <<"up", "up", "up">>, {})>>, Resend, {})}
 TrimPlans == {Plan(<<>>, Resend, {"lose", "mfail", "trim"}),
               Plan(<<Mark(2, "down"), Mark(2, "up"), Rot(1)>>, <<Resend[1]>>, {"lose", "trim"})}

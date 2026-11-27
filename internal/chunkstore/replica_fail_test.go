@@ -407,6 +407,36 @@ func TestARecoveringMemberRefusesWrites(t *testing.T) {
 	}
 }
 
+// Disk 3, on a table where pg0 has moved on to interval 2, refuses a version of interval 1 its primary sends, and its
+// trace says so: the primary's Fail of that version refuses the clients, which the spec's PastRefuses takes.
+func TestAMemberPastTheIntervalRecordsItsRefusal(t *testing.T) {
+	c := newRCluster(t, rtable(4, 2))
+	ch := chunkIn(pg0, 4, 0)
+	c.conformBegin()
+	later := cloneTable(c.table)
+	_, e := later.entry(pg0)
+	e.Interval++
+	c.call(2, func(ctx *core.Context, r *Replica, out *ReplicaOutput) { r.table = later })
+	w := c.replicaWrite(2, ch, MakeVersion(1, 1))
+	c.until(w)
+	if rp := c.reply(w); rp.Status != StatusRefused {
+		t.Fatalf("answered %+v", rp)
+	}
+	var past []uint64
+	for line := range bytes.Lines(c.s.Trace()) {
+		r, err := trace.Parse(bytes.TrimSuffix(line, []byte("\n")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Name == trace.OutPastRefused {
+			past = append(past, r.Fields[1])
+		}
+	}
+	if !slices.Equal(past, []uint64{MakeVersion(1, 1)}) {
+		t.Fatalf("past refusals %#x, want 1.1", past)
+	}
+}
+
 // Disk 3, cut off, acknowledges 1.2 and then refuses 1.1, as a member does that logged both and refuses 1.1 sent again after the acknowledgment was lost: 1.2 has committed and waits behind 1.1, and the primary still asks for the next interval, whose peering settles both.
 func TestAFailureBelowACommittedVersionStillAsks(t *testing.T) {
 	c := newRCluster(t, rtable(4, 2))

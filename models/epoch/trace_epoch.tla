@@ -31,7 +31,7 @@ TCnt(v) == v % TBase
 \* restart: a refusal of a version of its interval by a store that serves, an
 \* mfail line, has no step. That no step, not UnchangedIntervalAccepts, which
 \* a budget for "mfail" leaves silent on refusals, is what rejects one.
-TPlanSet == {[free |-> FALSE, m |-> TPlan, w |-> TWrites, f |-> {"restart", "format", "ownfail", "lateask", "mfail", "lose", "trim"},
+TPlanSet == {[free |-> FALSE, m |-> TPlan, w |-> TWrites, f |-> {"restart", "format", "ownfail", "lateask", "mfail", "lose", "trim", "past"},
               t |-> 0, k |-> 100000, s |-> 100000]}
 TMaint == [p \in TPG |-> FALSE]
 TRates == [n \in TNode |-> {1000}]
@@ -199,6 +199,8 @@ Line(l) ==
           \/ \E m \in {x \in rm : x.to = ddisk[l.n] /\ x.c = l.c /\ x.v = l.v} : Deliver(m)
     \/ /\ l.k = "unready"
        /\ \E m \in {x \in rm : x.to = ddisk[l.n] /\ x.c = l.c /\ x.v = l.v} : MemberFail(m)
+    \/ /\ l.k = "pastrefused"
+       /\ \E m \in {x \in rm : dnode[x.to] = l.n /\ x.c = l.c /\ x.v = l.v} : PastRefuses(m)
     \/ /\ l.k = "gone"
        /\ \E m \in {x \in rm : dhost[x.to] = l.n /\ x.c = l.c /\ x.v = l.v} :
             IF [c |-> l.c, v |-> l.v] \in failed[m.to] THEN UNCHANGED vars ELSE GoneRefuses(m)

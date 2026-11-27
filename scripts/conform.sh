@@ -144,7 +144,7 @@ cover() {
 		}
 		BEGIN {
 			split("fold Fold renew Renew adopt Adopt send Send order Order logged Deliver ownlogged OwnLogged committed Answer maydeliver Deliver unready MemberFail " \
-				"gone GoneRefuses gonerecover GoneRefusesRecovery mayfail OwnFail restart Restart format Format recovered Recover recoveredlate Recover mayrecover Recover " \
+				"gone GoneRefuses pastrefused PastRefuses gonerecover GoneRefusesRecovery mayfail OwnFail restart Restart format Format recovered Recover recoveredlate Recover mayrecover Recover " \
 				"reported ReportRecovered ask AskNext restartask RestartAsk peer Peer activate Activate plan.mark MarkDisk " \
 				"plan.replace Replace plan.rotate Rotate plan.add Add plan.remove Remove plan.stay Stay plan.drop Drop plan.refill Refill " \
 				"plan.minlive SetMinLive plan.edit Edit lost Lost committed.lost LoseAnswer reanswer Reanswer reanswer.lost LoseReanswer " \
@@ -187,7 +187,7 @@ coverage() {
 			}
 			if (!("epoch" in m)) exit
 			never = ""
-			n = split("Fold Renew Adopt Peer Activate CounterOut AskNext RestartAsk ReportRecovered Persist Recover Send Order Refuse Deliver OwnLogged Answer " \
+			n = split("Fold Renew Adopt Peer Activate CounterOut AskNext RestartAsk ReportRecovered Persist Recover Send Order Refuse Deliver PastRefuses OwnLogged Answer " \
 				"Fortify BootUp MarkDisk Replace Rotate Add Remove Drop Stay Refill Lost GiveUp SetMinLive Split Edit Die Isolate MemberFail GoneRefuses GoneRefusesRecovery OwnFail " \
 				"LoseAnswer Reanswer LoseReanswer Stale Trim OpenGrant OpenLapse Suspend Wake Freeze Thaw RateStep Restart Reboot Format NetFault Elect Transfer StepDown " \
 				"Ask Grant GrantRefused SendHb RecvGrant RecvHb RoundTrip Beat EndWait Tick", a)

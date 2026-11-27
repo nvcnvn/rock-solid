@@ -111,6 +111,8 @@ type gen struct {
 	outOfPool map[uint64]bool
 	// refused holds each member's refusal the primary has not heard, by chunk: its line, and the node that refused.
 	refused map[uint64][]refusal
+	// past holds the lines of members' refusals of a version of an interval they left, by chunk and version, until the primary fails that version; one it never fails changed nothing there.
+	past map[[2]uint64][]string
 	// orderAt is the line of each recovery a primary ordered, by chunk and interval, and served each [spec disk, chunk, interval] a member read for a recovery.
 	orderAt  map[[2]uint64]int
 	served   map[[3]uint64]bool
@@ -698,6 +700,14 @@ func (g *gen) heard(match func(chunk uint64, x refusal) bool) {
 	}
 }
 
+// heardPast writes the refusals of version v of chunk c by members that left its interval, as the primary fails v.
+func (g *gen) heardPast(c, v uint64) {
+	for _, l := range g.past[[2]uint64{c, v}] {
+		g.line("%s", l)
+	}
+	delete(g.past, [2]uint64{c, v})
+}
+
 func (g *gen) run(recs []trace.Record) {
 	epoch, changed, first, i := g.tableAt(recs, 0)
 	g.pgs = slices.Clone(changed)
@@ -758,8 +768,12 @@ func (g *gen) run(recs []trace.Record) {
 				kind += "recover"
 			}
 			g.refused[r.Fields[0]] = append(g.refused[r.Fields[0]], refusal{fmt.Sprintf(`k |-> "%s", n |-> %d, c |-> %d, v |-> %s`, kind, n, g.chunk(r.Fields[0]), ver(r.Fields[1])), n})
+		case trace.OutPastRefused:
+			k := [2]uint64{r.Fields[0], r.Fields[1]}
+			g.past[k] = append(g.past[k], fmt.Sprintf(`k |-> "pastrefused", n |-> %d, c |-> %d, v |-> %s`, n, g.chunk(r.Fields[0]), ver(r.Fields[1])))
 		case trace.OutFail:
 			g.heard(func(c uint64, _ refusal) bool { return c == r.Fields[0] })
+			g.heardPast(r.Fields[0], r.Fields[1])
 		case trace.OutLogged:
 			kind := "logged"
 			if slices.Contains(g.ownOpen[n], [2]uint64{r.Fields[0], r.Fields[1]}) {
@@ -1084,7 +1098,7 @@ func main() {
 	}
 	g := &gen{entries: map[uint64]*entry{}, initial: map[uint64]entry{}, wid: map[[2]uint64]int{}, byID: map[uint64]int{}, verWrite: map[[2]uint64]int{}, answer: map[int]string{}, unanswered: map[int]int{}, mergedAt: map[int]int{}, takenAt: map[int]int{}, heardOK: map[string]bool{}, watermark: map[[3]uint64]uint64{}, epochs: map[uint64]int{}, replies: map[[3]uint64]map[uint64]*reply{}, decisions: map[[3]uint64]bool{},
 		lists: map[[3]uint64]bool{}, operatorAsk: map[uint64]bool{}, restarted: map[[2]uint64]bool{}, diskIDs: map[uint64]uint64{}, primary: map[uint64]int{}, ownOpen: map[int][][2]uint64{}, memberOpen: map[int][][2]uint64{},
-		activated: map[uint64]uint64{}, tableIv: map[uint64]map[uint64]uint64{}, left: map[[2]uint64]int{}, formatAt: map[uint64]int{}, outOfPool: map[uint64]bool{}, nodeDisk: map[int]uint64{}, recovering: map[int][][4]uint64{}, orderAt: map[[2]uint64]int{}, served: map[[3]uint64]bool{}, landAt: map[[3]uint64]int{}, refused: map[uint64][]refusal{}}
+		activated: map[uint64]uint64{}, tableIv: map[uint64]map[uint64]uint64{}, left: map[[2]uint64]int{}, formatAt: map[uint64]int{}, outOfPool: map[uint64]bool{}, nodeDisk: map[int]uint64{}, recovering: map[int][][4]uint64{}, orderAt: map[[2]uint64]int{}, served: map[[3]uint64]bool{}, landAt: map[[3]uint64]int{}, refused: map[uint64][]refusal{}, past: map[[2]uint64][]string{}}
 	recs := g.load(flag.Arg(0))
 	if len(recs) == 0 {
 		fatal("no table in the trace")

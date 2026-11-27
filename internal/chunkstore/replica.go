@@ -1468,6 +1468,8 @@ func (r *Replica) memberUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 			}
 			out.note(trace.OutMemberFail, u.Chunk.Hash(), u.Version, reason, rec, unready)
 			r.noteFailed(failedVer{pg: u.PG.PG, chunk: u.Chunk, version: u.Version, unready: unready})
+		} else if e != nil && u.PG.Interval < e.Interval && !recover {
+			out.note(trace.OutPastRefused, u.Chunk.Hash(), u.Version, 0, 0, 0)
 		}
 		freeBuf(ctx, ev.Msg.Buf)
 		rp := r.refusal(u.PG.PG)
