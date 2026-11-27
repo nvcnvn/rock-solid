@@ -3016,7 +3016,7 @@ traces, that both outcomes of a seeded choice occur, or that a planted bug trips
   | `internal/meta` `TestNoGrantedFlushIsRefusedForSpace` | 1,000 | 4 s |
   | `internal/meta` `TestTheFilesystemWorkloadKeepsItsInvariantsAcrossElections` | 100 | 2 s |
   | `internal/loop/nettest` `TestSuiteOnTheSimulatedNetwork` | 100 | 5 s |
-  | `internal/fsclient` `TestAMountsHistoriesKeepTheirInvariantsAcrossCrashes` | 150 | 73 s on the SYS-2 box (4 processes) |
+  | `internal/fsclient` `TestAMountsHistoriesKeepTheirInvariantsAcrossCrashes` | 150 | 87 s on the SYS-2 box (4 processes) |
 
 - A process's memory does not grow with the seeds it runs; the disk log tests' processes stay
   under 400 MiB, the random-crash harness's pool being 16 MiB. The group commit property's seed
