@@ -690,3 +690,27 @@ func TestTheRequestPathAllocatesNothing(t *testing.T) {
 		t.Fatalf("%v allocations a cycle of %d requests", n, len(reqs))
 	}
 }
+
+// A FLUSH that finds its writes committed by the FLUSH ahead of it ends without taking the inode,
+// and still hands it on: a WRITE queued behind both raises alloc_end and is answered.
+func TestARequestQueuedBehindTwoCommitsRuns(t *testing.T) {
+	h := newMount(t, Config{})
+	ino, fh := h.create(meta.RootInode, "f")
+	h.ok(h.write(ino, fh, 0, make([]byte, 4096)))
+	h.held = true
+	f1 := h.send(fuseproto.Request{Opcode: fuseproto.OpFlush, NodeID: ino, Fh: fh})
+	f2 := h.send(fuseproto.Request{Opcode: fuseproto.OpFlush, NodeID: ino, Fh: fh})
+	w := h.write(ino, fh, 40*core.ChunkSize, make([]byte, 4096))
+	if len(h.sent) != 1 {
+		t.Fatalf("%d Txns sent while the first flush held the inode", len(h.sent))
+	}
+	h.held = false
+	h.answerTxn(h.sent[0])
+	h.serve()
+	h.ok(f1)
+	h.ok(f2)
+	h.ok(w)
+	if n := h.m.Pending(); n != 0 {
+		t.Fatalf("%d requests still in hand", n)
+	}
+}

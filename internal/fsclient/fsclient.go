@@ -285,13 +285,15 @@ func (m *Machine) lock(o *op, n *node) bool {
 	return false
 }
 
+// unlock hands n's lock on until a queued request takes it: one may end without it, as a commit
+// finding nothing left to commit does.
 func (m *Machine) unlock(o *op, out *Output) {
 	n := m.nodes[o.req.NodeID]
 	if n == nil || n.busy != o {
 		return
 	}
 	n.busy = nil
-	if len(n.queue) > 0 {
+	for n.busy == nil && len(n.queue) > 0 {
 		p := n.queue[0]
 		n.queue = n.queue[:copy(n.queue, n.queue[1:])]
 		m.run(p, out)
