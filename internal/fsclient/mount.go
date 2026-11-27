@@ -15,10 +15,10 @@ import (
 // MountTimer is a Mount's meta router's timer.
 const MountTimer core.TimerID = 0x66757365
 
-// MountOutput is what one call into a Mount emits. The driver writes Replies, FUSE reply frames
-// back to back, each starting with its length, and Data, each a frame at the start of a pool buffer
-// it then frees, to the device; hands each Opener's credentials to OpenerDone, which may add more;
-// and executes Actions.
+// MountOutput is what one call into a Mount emits: Replies, FUSE reply frames back to back, each
+// starting with its length; Data, each a frame at the start of a pool buffer; the Openers whose
+// credentials the machine waits for; and Actions. The driver hands it to Flush and then executes
+// Actions.
 type MountOutput struct {
 	Actions []core.Action
 	Replies []byte
@@ -238,10 +238,23 @@ func (g *Mount) Request(ctx *core.Context, now int64, frame []byte, out *MountOu
 	return nil
 }
 
-// OpenerDone hands the machine Opener token's credentials, nil when they could not be read.
-func (g *Mount) OpenerDone(ctx *core.Context, token uint64, c *Creds, out *MountOutput) {
+// Flush hands the machine each of out's Openers' credentials as creds reads them, nil when it
+// cannot, which may add more to out, then writes each of out's Replies and Data frames with write,
+// freeing the Data buffers.
+func (g *Mount) Flush(ctx *core.Context, out *MountOutput, creds func(pid uint32) *Creds, write func(frame []byte)) {
 	g.out = out
-	g.feed(ctx, func(o *Output) { g.m.OpenerDone(ctx, token, c, o) })
+	for i := 0; i < len(out.Openers); i++ {
+		token, c := out.Openers[i].Token, creds(out.Openers[i].PID)
+		g.feed(ctx, func(o *Output) { g.m.OpenerDone(ctx, token, c, o) })
+	}
+	for b := out.Replies; len(b) > 0; b = b[binary.LittleEndian.Uint32(b):] {
+		write(b[:binary.LittleEndian.Uint32(b)])
+	}
+	for _, buf := range out.Data {
+		b := ctx.Pool.Bytes(buf)
+		write(b[:binary.LittleEndian.Uint32(b)])
+		ctx.Pool.Free(buf)
+	}
 }
 
 // feed runs f on the machine and makes the calls its output asks for, the chunk calls first, as

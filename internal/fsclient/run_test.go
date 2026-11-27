@@ -734,17 +734,7 @@ func (d *daemon) pass(ctx *core.Context, acts []core.Action, f func()) []core.Ac
 // flush hands each opener the credentials of a process that holds only its request's, writes the
 // mount's replies and makes its actions.
 func (d *daemon) flush() {
-	for i := 0; i < len(d.out.Openers); i++ {
-		d.g.OpenerDone(d.ctx, d.out.Openers[i].Token, &Creds{}, &d.out)
-	}
-	for b := d.out.Replies; len(b) > 0; b = b[binary.LittleEndian.Uint32(b):] {
-		d.reply(b[:binary.LittleEndian.Uint32(b)])
-	}
-	for _, buf := range d.out.Data {
-		b := d.ctx.Pool.Bytes(buf)
-		d.reply(b[:binary.LittleEndian.Uint32(b)])
-		d.ctx.Pool.Free(buf)
-	}
+	d.g.Flush(d.ctx, &d.out, func(uint32) *Creds { return &Creds{} }, d.reply)
 	for i := range d.out.Actions {
 		d.act(&d.out.Actions[i])
 	}

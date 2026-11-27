@@ -4,7 +4,6 @@ package fuse
 
 import (
 	"bytes"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -177,20 +176,7 @@ func (d *Daemon) Serve(ctx *core.Context, acts []core.Action) ([]core.Action, er
 // flush reads the credentials of each opener the mount asked for, writes the replies it framed and
 // appends its actions to acts.
 func (d *Daemon) flush(ctx *core.Context, acts []core.Action) []core.Action {
-	for i := 0; i < len(d.out.Openers); i++ {
-		p := d.out.Openers[i]
-		d.g.OpenerDone(ctx, p.Token, d.opener(p.PID), &d.out)
-	}
-	for b := d.out.Replies; len(b) > 0; {
-		n := binary.LittleEndian.Uint32(b)
-		d.write(b[:n])
-		b = b[n:]
-	}
-	for _, buf := range d.out.Data {
-		b := ctx.Pool.Bytes(buf)
-		d.write(b[:binary.LittleEndian.Uint32(b)])
-		ctx.Pool.Free(buf)
-	}
+	d.g.Flush(ctx, &d.out, d.opener, d.write)
 	return append(acts, d.out.Actions...)
 }
 
