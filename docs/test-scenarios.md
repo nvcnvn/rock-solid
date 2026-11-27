@@ -9694,8 +9694,8 @@ and chunk devices.
   (`TestTheRequestPathAllocatesNothing`).
 - The plant `neg-raise-after-write` leaves a chunk past `alloc_end` that the purge of the file,
   unlinked after a crash, misses (`TestAWriteBeforeItsRaiseLeavesAChunkThePurgeMisses`).
-- **[property]** `TestAMountsHistoriesKeepTheirInvariantsAcrossCrashes`: two client-only nodes,
-  each a `sim.Mount` of its own with four processes on the same two root-directory files as in
+- **[property]** `TestAMountsHistoriesKeepTheirInvariantsAcrossCrashes`: two nodes' mounts, one
+  on a client-only node and one beside a MetaStore replica on a storage node, each a `sim.Mount` of its own with four processes on the same two root-directory files as in
   `TestFileHistoriesKeepCloseToOpen`, one writer of a file at a time across both, served by the
   `fsclient.Mount` the FUSE frontend ships, against three `meta.Shard` replicas, which serve
   their `Txn`s and lease reads over the meta wire and renew node-pair leases with each other, and
@@ -9703,7 +9703,7 @@ and chunk devices.
   replicas' nodes rebooted so leaders change and replicas' or daemons' nodes paused up to 2 s
   (each until 5 s before the end, a reboot's heartbeat and restart wait, so a quorum votes once
   faults heal), and each daemon crashed, half the time within 3 ms of a file's first chunk write,
-  restarting in a new session; the first node's start may unlink and create each file again
+  restarting in a new session, the storage node's taking its replica down with it; the first node's start may unlink and create each file again
   through the same `Mount` while the second node's processes go on. While a node's processes run:
   its session fenced up to 1 s apart and within 1 ms of one chunk write in 16, so a fence finds
   chunk I/O in flight, half the time handed to the devices up to 300 ms before the daemon takes
@@ -9722,24 +9722,24 @@ and chunk devices.
   with an error that lasts fails its request and one answered with any other stays in hand to go
   again, a fenced session's chunk client numbers its requests above every ID the old one took,
   and at the end no system call and no request in either machine has waited more than 100 ms.
-  Over its first 10 seeds, 726 fences find chunk I/O in flight, the devices refuse a fenced
-  session's live client 707 writes, of which it sends 231 again, 379 `Read`s fail and 390 go
-  again. The quiet time steps past the
+  Over its first 10 seeds, 341 daemon crashes, 356 fences find chunk I/O in flight, the devices
+  refuse a fenced session's live client 364 writes, of which it sends 129 again, 161 `Read`s fail
+  and 196 go again. The quiet time steps past the
   scheduler's own partitions, since a connection one breaks holds a read for an election
-  timeout. The daemon holds each read's send up to 1 ms, so requests arrive during fetches and
-  the stale-attribute check fires. A regular file's entry cached for the attribute timeout
-  (`entryCached`) fails close-to-open on each of the first 30 seeds (seed 1), and on none of them
-  with the second node's mount taken out: an open on one node then skips the `LOOKUP` that brings
-  the other's close. Still, `keep_cache` always set, the stale check always false, and the node's
-  own writes left out of the size it shows each pass the first 30 seeds with both mounts. An open's
-  `LOOKUP` that brings another node's new size or `mtime` drops every page, and a page a read in
-  flight holds locked is dropped as it unlocks, so the pages an open could keep are already
-  current; a stale reply needs a fetch answered before another node's commit to be written after a
-  later `LOOKUP` was sent and before that `LOOKUP`'s reply, and the daemon writes each reply about
-  a network delay after its fetch returns; and close-to-open checks only reads after a close,
-  whose commit makes the size shown and the committed one agree. Scripted tests catch each:
-  `TestAnOpenAfterAChangeDropsTheCache`, `TestAnAttributeReplyFetchedBeforeALaterRequestIsFetchedAgain`
-  and `TestCloseCommitsSizeAndMtimeAndReadsAreClamped`. The scripted tests also own the rule
+  timeout. Each daemon holds each read's send up to 1 ms, so requests arrive during fetches and
+  the stale-attribute check fires, and one `Read` answer in 4 up to 5 ms, with everything its
+  connection brings after it, so a fetch answered before another node's commit may come in after a
+  later `LOOKUP`. A regular file's entry cached for the attribute timeout (`entryCached`) fails
+  close-to-open on 29 of the first 30 seeds (seed 1), and on none of them with the second node's
+  mount taken out: an open on one node then skips the `LOOKUP` that brings the other's close. The
+  stale check always false (`staleKept`) fails it on 2 of the 30 (seeds 17 and 24): an attribute
+  reply fetched before another node's commit answers a `LOOKUP` sent after it. Still,
+  `keep_cache` always set and the node's own writes left out of the size it shows each pass the
+  first 30 seeds with both mounts. An open's `LOOKUP` that brings another node's new size or
+  `mtime` drops every page, and a page a read in flight holds locked is dropped as it unlocks, so
+  the pages an open could keep are already current; and close-to-open checks only reads after a
+  close, whose commit makes the size shown and the committed one agree. Scripted tests catch both:
+  `TestAnOpenAfterAChangeDropsTheCache` and `TestCloseCommitsSizeAndMtimeAndReadsAreClamped`. The scripted tests also own the rule
   against attributes fetched before the machine's own change: a fetch's answer and a later
   `Txn`'s come in order from one leader on one connection, so only a leader change between them
   could bring the fetch back after the change. The devices do not crash: a restarted primary asks the
@@ -9751,11 +9751,11 @@ and chunk devices.
   seeds (seed 1), though that rule checks the very ID the plant changes, and with it off no other
   check, close-to-open included, catches the plant on any of the 30: a late answer to the old
   session's write must meet a new request of the same ID to complete it; the old client's parts
-  never abandoned (`noAbandon`, 23 of 30, seed 1) and the chunks of a call the client refused never
-  completed (`dropRefused`, 16 of 30, seed 3) leave a request waiting past 100 ms; a `Read`
-  answered with an error that lasts sent again (`retryLasting`) fails the `Read` rule on each of
-  30 (seed 1); and a regular file's entry cached (`entryCached`) fails close-to-open on each of 30
-  (seed 1).
+  never abandoned (`noAbandon`, 22 of 30, seed 1) and the chunks of a call the client refused never
+  completed (`dropRefused`, 12 of 30, seed 2) leave a request waiting past 100 ms; a `Read`
+  answered with an error that lasts sent again (`retryLasting`) fails the `Read` rule on 29 of 30
+  (seed 1); a regular file's entry cached (`entryCached`) fails close-to-open on 29 of 30 (seed 1);
+  and the stale check always false (`staleKept`) fails it on 2 of 30 (seed 17).
 - One router output carrying both a read's answer and a `Txn`'s hands out both, though the read's
   answer, an `UNLINK`'s entry found, moves the `UNLINK` on to a call whose own pass through the
   router takes an output of its own (`TestOneRouterOutputHandsOutAReadsAnswerAndATxns`).
@@ -9860,17 +9860,24 @@ From [Inode owner](design.md#metadata-layer-metastore), the [purge model](#purge
 
 ## Multi-node mounts
 
-- Mounts of one volume on three nodes, one client-only, route every `Txn` to the shard leader on
-  another node and follow `NotLeader`.
-- **[property]** Seeded runs with failovers, partitions and paused clients: histories pass
-  close-to-open.
-- **[property]** The filesystem client's seeded run with a second mount, its own kernel writing the
-  same two files ([Filesystem client](#filesystem-client)): a regular file's entry cached for the
-  attribute timeout fails close-to-open on each of the first 30 seeds, and on none with one mount.
-  `keep_cache` always set, the stale check always false and the node's own writes left out of the
-  size it shows still pass it; their scripted tests catch them.
-- Over TCP, in Docker: three node processes, mounts on two, a file written and closed on one read on
-  the other.
+- **[property]** The filesystem client's seeded run ([Filesystem client](#filesystem-client)) has
+  two mounts of one volume writing the same two files, one on a client-only node and one on a
+  storage node beside a MetaStore replica, each routing to the shard leader on another node and
+  following `NotLeader`, under replica failovers, partitions and paused nodes; both mounts'
+  histories pass one close-to-open check. A regular file's entry cached for the attribute timeout
+  fails it on 29 of the first 30 seeds and on none with one mount, and the stale check always
+  false on 2 of 30. `keep_cache` always set and the node's own writes left out of the size it
+  shows still pass it; their scripted tests catch them.
+- Through the kernel, `TestAMountOnEachOfTwoNodesKeepsCloseToOpenAcrossAPauseAndAKill` in
+  `cmd/rock-solid`, run by `scripts/fuse-review.sh`: four node processes over TCP, storage nodes 2,
+  3 and 4 with one device each and the data group's three voters, so a failover is possible, and
+  client-only node 5, with mounts on node 2 and node 5. Four files written and closed on one mount
+  read byte-exact on the other; then three recorded processes per mount while the data group's
+  leader is paused until another voter leads, then the leader, or node 3 if node 2 leads, is
+  killed and started again; both histories pass close-to-open. It skips unless `RS_THREE_VOTERS`
+  is set until [MetaStore replicas' halts and leases on a storage
+  node](build-checklist.md#phase-4-embedded-metastore) lands: until then a group of three voters on
+  storage nodes refuses every read.
 
 ## Rest of the namespace
 
