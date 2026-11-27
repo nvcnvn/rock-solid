@@ -419,10 +419,12 @@ CommitTo(i, n) ==
 
 \* The leader sends its log and commit index to a member of its applied configuration,
 \* learners included, and learns what it holds; an append sent before the leader's latest
-\* advance and taken after it carries the commit index before it, hbCommit; the replica keeps a longer log that agrees
-\* with it, and takes the leader's otherwise; a halted replica drops it. The replica writes its hard state when its term changes, or when
-\* it appends, the newest one, or without NewestHardState only if its commit index moves in the
-\* same Ready.
+\* advance and taken after it carries the commit index before it, hbCommit, and only entries
+\* the leader held then, of which those up to its commit index are certain. The replica keeps a
+\* longer log that agrees with the entries, and takes them otherwise; a halted replica drops
+\* it. The leader's match index never falls, as etcd-raft's takes no lower answer. The replica
+\* writes its hard state when its term changes, or when it appends, the newest one, or without
+\* NewestHardState only if its commit index moves in the same Ready.
 Replicate(i, j) ==
     /\ Leads(i) /\ Live(j) /\ j # i /\ ~Halted(j)
     /\ j \in Members(AppliedConf(i))
@@ -431,14 +433,15 @@ Replicate(i, j) ==
        \/ commit[j] < commit[i] \/ match[i][j] < Len(log[i])
     /\ term' = [term EXCEPT ![j] = term[i]]
     /\ leader' = [leader EXCEPT ![j] = FALSE]
-    /\ log' = [log EXCEPT ![j] = IF IsPrefix(log[i], @) THEN @ ELSE log[i]]
-    /\ match' = [match EXCEPT ![i][j] = Len(log[i]), ![j] = NoMatch]
-    /\ \E c \in {hbCommit[i], commit[i]} : commit' = [commit EXCEPT ![j] = IF c > @ THEN c ELSE @]
+    /\ \E a \in {[ents |-> log[i], c |-> commit[i]], [ents |-> SubSeq(log[i], 1, commit[i]), c |-> hbCommit[i]]} :
+          /\ log' = [log EXCEPT ![j] = IF IsPrefix(a.ents, @) THEN @ ELSE a.ents]
+          /\ match' = [match EXCEPT ![i][j] = Max({@, Len(a.ents)}), ![j] = NoMatch]
+          /\ commit' = [commit EXCEPT ![j] = IF a.c > @ THEN a.c ELSE @]
+          /\ Persist(PassesConf(IF term[j] < term[i] \/ (log'[j] # log[j] /\ (NewestHardState \/ commit'[j] # commit[j]))
+                                THEN {j} ELSE {}, commit'), commit')
     /\ hbCommit' = [hbCommit EXCEPT ![j] = 0]
     /\ support' = [support EXCEPT ![j] = IF term[j] < term[i] THEN {} ELSE @]
     /\ fort' = [fort EXCEPT ![j] = {}]
-    /\ Persist(PassesConf(IF term[j] < term[i] \/ (log'[j] # log[j] /\ (NewestHardState \/ commit'[j] # commit[j]))
-                          THEN {j} ELSE {}, commit'), commit')
     /\ UNCHANGED <<applied, up, gone, crashes, elected, chosen, early, haltAt, out, dead, reported>>
 
 \* The leader commits on an answer, and again when it applies a configuration that a

@@ -6,11 +6,11 @@
 \* compresses into another action's step is a stutter: see "Spec conformance" in
 \* docs/test-scenarios.md. Variables no line observes stay free.
 \*
-\* Replicate hands the follower the leader's whole log and its commit index as it takes the
-\* append, where the code's follower takes the entries and the index the append left with, as
-\* etcd-raft batches a long log: the spec terms of a follower's log a line observes are a prefix
-\* of the spec's, and a commit or applied index at most the spec's. The terms pin each entry an
-\* index counts.
+\* Replicate hands the follower the leader's whole log and its commit index, or its log up to
+\* that index and the commit index before its latest advance, as it takes the append, where the
+\* code's follower takes the entries and the index the append left with, as etcd-raft batches a
+\* long log: the spec terms of a follower's log a line observes are a prefix of the spec's, and
+\* a commit or applied index at most the spec's. The terms pin each entry an index counts.
 \*
 \* TraceIncomplete is an invariant whose violation is the pass: the line counter passed the
 \* end. A run that finishes with no violation failed, and its search depth names the line no
