@@ -197,8 +197,8 @@ func (g *gen) crash(n int) {
 	g.line(`k |-> "restart", n |-> %d`, n)
 }
 
-// repliedLater reports whether node n, PG f's primary of iv, took its own disk's peering reply, or its disk answered a later primary, listing chunk c, for an interval after iv and after every interval n decided that some primary activated since: a recovery write of c in iv that lands now changes no list that decision reads, as a demoted primary's gated write lands only at the next decision its disk persists. A reply of an interval a later activated decision of n passed over is no longer read.
-func (g *gen) repliedLater(n int, f, c, iv uint64) bool {
+// repliedLater reports whether node n, PG f's primary of iv, took its own disk's peering reply, or its disk answered a later primary, listing chunk c, for an interval after iv and after every interval n decided that some primary activated since: a recovery write of c in iv that lands now changes no list that decision reads, as a demoted primary's gated write lands only at the next decision its disk persists. A reply of an interval a later activated decision of n passed over is no longer read, nor is one of an interval not yet decided whose PG's next decision in rest is of a later interval: that decision reads a later reply, taken after the write landed.
+func (g *gen) repliedLater(n int, f, c, iv uint64, rest []trace.Record) bool {
 	own, ok := g.nodeDisk[n]
 	if !ok {
 		own = uint64(n)
@@ -210,7 +210,7 @@ func (g *gen) repliedLater(n int, f, c, iv uint64) bool {
 		}
 	}
 	for k, got := range g.replies {
-		if k[1] != f || k[2] <= after {
+		if k[1] != f || k[2] <= after || !g.decisions[k] && decidedNext(rest, f) > k[2] {
 			continue
 		}
 		for d, x := range got {
@@ -220,6 +220,16 @@ func (g *gen) repliedLater(n int, f, c, iv uint64) bool {
 		}
 	}
 	return false
+}
+
+// decidedNext returns the interval of PG f's first decision in rest, or 0 for none.
+func decidedNext(rest []trace.Record, f uint64) uint64 {
+	for _, x := range rest {
+		if x.Name == trace.OutDecide && x.Fields[0] == f {
+			return x.Fields[1]
+		}
+	}
+	return 0
 }
 
 func (g *gen) line(format string, args ...any) {
@@ -777,7 +787,7 @@ func (g *gen) run(recs []trace.Record) {
 			g.recovering[n] = slices.DeleteFunc(g.recovering[n], func(x [4]uint64) bool { return x[0] == r.Fields[0] && x[2] == r.Fields[3] })
 			f, s := g.chunkField(r.Fields[0]), g.source(r.Fields[2])
 			at, kind := len(g.lines), "recovered"
-			if g.decisions[[3]uint64{uint64(n), f, r.Fields[3]}] && g.repliedLater(n, f, r.Fields[0], r.Fields[3]) {
+			if g.decisions[[3]uint64{uint64(n), f, r.Fields[3]}] && g.repliedLater(n, f, r.Fields[0], r.Fields[3], recs[i:]) {
 				kind = "recoveredlate"
 			} else if r.Fields[3] == g.activated[f] {
 				at = g.recoveredAt(f, r.Fields[0], r.Fields[3], n, s, r.Fields[1])
