@@ -54,10 +54,11 @@ type registry struct {
 }
 
 // regPlants are bugs a test plants: an orphan freed while open, as an unlink freeing an open file
-// at once, and a fenced session's opens closed once its fence commits rather than once it is
-// acknowledged.
+// at once; a fenced session's opens closed once its fence commits rather than once it is
+// acknowledged; and a new owner that frees orphans, its registry missing the opens its
+// predecessors registered.
 type regPlants struct {
-	unlinkOpen, releaseOnCommit bool
+	unlinkOpen, releaseOnCommit, newOwnerFrees bool
 }
 
 // open reports whether any mount has at open.
@@ -175,16 +176,20 @@ func (sv *Server) FreeRound(ctx *core.Context, a *RoundShard, acts []core.Action
 	return acts
 }
 
+// free proposes the frees of s's group. A replica that is not its group's sole leader since boot
+// frees none, as its registry may miss the opens an earlier leader registered, and drops them:
+// the orphans stay listed until Owner failover and grace period re-registers the opens.
 func (sv *Server) free(s *Shard, submit func(*Txn, uint64) error) {
 	g := &sv.reg
 	todo := g.frees
 	g.frees = g.spare[:0]
+	sole := s.sole() || g.plant.newOwnerFrees
 	for _, at := range todo {
 		if at.group != s.group {
 			g.frees = append(g.frees, at)
 			continue
 		}
-		if !g.freeTxn(s, at) {
+		if !sole || !g.freeTxn(s, at) {
 			continue
 		}
 		sv.next++

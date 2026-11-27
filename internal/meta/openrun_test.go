@@ -32,7 +32,11 @@ const (
 	// openCutGap is the most time between two cuts of a client from the leader, each openCut long.
 	openCutGap = core.Tick(2_000_000)
 	openCut    = core.Tick(400_000)
-	openTick   = core.TimerID(0x6f70656e)
+	// openMoveAt is when the leader first moves, and openMoveGap the most time between two moves,
+	// each a crash of its node or a transfer of its leadership to another replica.
+	openMoveAt  = core.Tick(4_000_000)
+	openMoveGap = core.Tick(3_000_000)
+	openTick    = core.TimerID(0x6f70656e)
 )
 
 // openRun runs a three-replica shard on nodes 0 to 2, each serving Txns, Reads and the open
@@ -41,8 +45,8 @@ const (
 // release it or unlink it while it is open. The run is the control plane: a client's start takes
 // a session, and a crashed client's session is fenced, then acknowledged, the table handed to every
 // replica's server each time. Faults: clients crashed up to openCrashGap apart and cut off from the
-// leader for openCut up to openCutGap apart. The leader does not change, as an owner's failover
-// is Owner failover and grace period's.
+// leader for openCut up to openCutGap apart, and the leader moved up to openMoveGap apart, its node
+// crashed or its leadership handed to another replica, whose new owner has an empty registry.
 type openRun struct {
 	t     testing.TB
 	s     *sim.Scheduler
@@ -54,13 +58,13 @@ type openRun struct {
 	tab   SessionTable
 	// opens are the inodes each session has open, as its client knows; fences the sessions
 	// whose fence is due, committed or not, and when.
-	opens                  []openHeld
-	fences                 []openFence
-	next                   uint64
-	freed                  int
-	crashAt, cutAt, healAt core.Tick
-	cut                    [2]uint32
-	err                    error
+	opens                          []openHeld
+	fences                         []openFence
+	next                           uint64
+	freed                          int
+	crashAt, cutAt, healAt, moveAt core.Tick
+	cut                            [2]uint32
+	err                            error
 }
 
 type openHeld struct{ inode, session uint64 }
@@ -77,6 +81,7 @@ func newOpenRun(t testing.TB, seed uint64, p regPlants) *openRun {
 	r := &openRun{t: t, s: sim.New(seed, set), rng: core.NewRand(seed), plant: p, next: 2, tab: SessionTable{Next: 1}}
 	r.crashAt = 2_000_000 + core.Tick(r.rng.Below(uint64(openCrashGap)))
 	r.cutAt = core.Tick(r.rng.Below(uint64(openCutGap)))
+	r.moveAt = openMoveAt + core.Tick(r.rng.Below(uint64(openMoveGap)))
 	r.inv.Register("driver contract", r.s.DriverContract)
 	r.inv.Register(invOrphanOpen, r.check)
 	for i := range 3 {
@@ -96,7 +101,7 @@ func (r *openRun) run() error {
 		if !r.s.Step() {
 			break
 		}
-		if steps%100 == 99 {
+		if steps%10 == 9 {
 			if err := r.inv.Check(); err != nil {
 				return err
 			}
@@ -147,11 +152,30 @@ func (r *openRun) check() error {
 
 func (r *openRun) leader() int {
 	for i, m := range r.reps {
-		if m.s != nil && m.s.Raft().Leader() == uint64(i)+1 {
+		if m.s != nil && r.s.Node(uint32(i)).Up() && m.s.Raft().Leader() == uint64(i)+1 {
 			return i
 		}
 	}
 	return -1
+}
+
+// move crashes the leader's node, or has it hand its leadership to another replica.
+func (r *openRun) move() {
+	l := r.leader()
+	if l < 0 {
+		return
+	}
+	if r.rng.Chance(1, 2) {
+		r.s.Reboot(uint32(l))
+		return
+	}
+	m, to := r.reps[l], (l+1+int(r.rng.Below(2)))%3
+	msg := groupMsg(r.t, dataGroup, raftpb.Message{Type: raftpb.MsgTransferLeader, From: uint64(to) + 1, To: uint64(l) + 1, Term: m.s.Raft().Term()})
+	r.s.Node(uint32(l)).Call(m.loop, func(ctx *core.Context, acts []core.Action) []core.Action {
+		m.out.Reset()
+		m.s.OnEvent(ctx, &core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: uint32(to)}, Msg: msg}, &m.out)
+		return m.finish(ctx, acts)
+	})
 }
 
 func (r *openRun) faults() {
@@ -166,6 +190,10 @@ func (r *openRun) faults() {
 			r.s.Partition(r.cut[0], r.cut[1], false)
 			r.healAt = now + openCut
 		}
+	}
+	if now >= r.moveAt {
+		r.moveAt = now + core.Tick(r.rng.Below(uint64(openMoveGap)))
+		r.move()
 	}
 	if now >= r.crashAt {
 		r.crashAt = now + core.Tick(r.rng.Below(uint64(openCrashGap)))
@@ -478,7 +506,8 @@ func (c *openClient) settle(ctx *core.Context) {
 }
 
 // An orphaned inode is never freed while a session still in the table has it open, with clients
-// crashed, their sessions fenced and acknowledged late, and clients cut off from the leader.
+// crashed, their sessions fenced and acknowledged late, clients cut off from the leader, and the
+// leader crashed or handing its leadership over.
 func TestAnOrphanIsNeverFreedWhileALiveSessionHasItOpen(t *testing.T) {
 	seeds.Run(t, 1, 20, func(seed uint64) {
 		if err := newOpenRun(t, seed, regPlants{}).run(); err != nil {
@@ -487,17 +516,18 @@ func TestAnOrphanIsNeverFreedWhileALiveSessionHasItOpen(t *testing.T) {
 	})
 }
 
-// An unlink that frees an open file at once, and a fenced session's opens closed when its fence
-// commits rather than once it is acknowledged, each free an orphan a live session has open.
+// An unlink that frees an open file at once, a fenced session's opens closed when its fence
+// commits rather than once it is acknowledged, and a new owner that frees orphans each free an
+// orphan a live session has open.
 func TestPlantedRegistryBugsFreeAnOpenOrphan(t *testing.T) {
-	for _, p := range []regPlants{{unlinkOpen: true}, {releaseOnCommit: true}} {
+	for _, p := range []regPlants{{unlinkOpen: true}, {releaseOnCommit: true}, {newOwnerFrees: true}} {
 		caught := false
-		for seed := uint64(1); seed <= 5 && !caught; seed++ {
+		for seed := uint64(1); seed <= 10 && !caught; seed++ {
 			var v *sim.Violation
 			caught = errors.As(newOpenRun(t, seed, p).run(), &v) && v.Name == invOrphanOpen
 		}
 		if !caught {
-			t.Errorf("plant %+v passed 5 seeds", p)
+			t.Errorf("plant %+v passed 10 seeds", p)
 		}
 	}
 }

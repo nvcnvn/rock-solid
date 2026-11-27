@@ -1046,7 +1046,7 @@ func TestACommittedTableReachesEveryNode(t *testing.T) {
 }
 
 // groupMsg frames a Raft message for group as raftshard's wire does.
-func groupMsg(t *testing.T, group uint64, m raftpb.Message) core.Msg {
+func groupMsg(t testing.TB, group uint64, m raftpb.Message) core.Msg {
 	var msg core.Msg
 	msg.Body[0] = core.ProtoGroup
 	binary.LittleEndian.PutUint64(msg.Body[1:], group)

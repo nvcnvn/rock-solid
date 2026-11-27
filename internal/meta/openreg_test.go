@@ -193,3 +193,21 @@ func TestAnUnlinkFreesAFileOnlyOnceNoMountHasItOpen(t *testing.T) {
 		t.Fatal("the planted bug did not free an open file")
 	}
 }
+
+// A new owner frees no orphan, as its registry lacks the opens its predecessor registered; the
+// planted bug frees one a mount has open at the old owner.
+func TestANewOwnerFreesNoOrphan(t *testing.T) {
+	for _, p := range []regPlants{{}, {newOwnerFrees: true}} {
+		o := newOwner(t, p)
+		o.reg(RegOpen, 1)
+		o.c.cut[o.l] = true
+		o.c.renewLeases()
+		o.l, o.sv = o.c.elect(), NewServer()
+		o.sv.reg.plant = p
+		o.c.heartbeat()
+		o.unlink()
+		if o.freed() != p.newOwnerFrees {
+			t.Fatalf("with %+v, the new owner freed the orphan: %v", p, o.freed())
+		}
+	}
+}

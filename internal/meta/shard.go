@@ -2,6 +2,7 @@ package meta
 
 import (
 	"fmt"
+	"math"
 
 	"go.etcd.io/raft/v3"
 	"go.etcd.io/raft/v3/raftpb"
@@ -69,7 +70,17 @@ type Shard struct {
 	// halted is the index of the committed entry the replica could not decode and stopped applying at, or 0; newest is the newest entry format it decodes.
 	halted uint64
 	newest byte
+	// first is the term of the group's first entry after its boot base, unseen while this replica has handed none over, or 0 once
+	// it restored a snapshot or when it started past that base.
+	first uint64
 }
+
+// unseen is a Shard's first before the replica hands over the entry after its boot base.
+const unseen = math.MaxUint64
+
+// sole reports whether the replica leads in the term of every entry the group has committed: a
+// leader serves Reads only once an entry of its term commits, so no other can have served one.
+func (s *Shard) sole() bool { return s.first == s.raft.Term() && s.raft.Leader() == s.id }
 
 // proposal is an entry this replica proposed as leader: its term, its Txn count, and its buffer,
 // which Raft holds until the entry applies or a later term's does.
@@ -99,6 +110,9 @@ func NewShard(cfg Config) (*Shard, error) {
 	}
 	s := &Shard{state: st, log: cfg.Raft.Storage, id: cfg.Raft.ID, group: cfg.Raft.Group}
 	s.newest = entryFormat
+	if base <= 1 && cfg.State == nil {
+		s.first = unseen
+	}
 	cfg.Raft.SnapshotData, cfg.Raft.Apply, cfg.Raft.CheckSnapshot = s.snapshotData, s.apply, CheckSnapshot
 	var err error
 	if s.raft, err = raftshard.New(cfg.Raft); err != nil {
@@ -298,6 +312,10 @@ func (s *Shard) apply(snap raftpb.Snapshot, ents []raftpb.Entry) {
 		for len(s.waits) > 0 {
 			s.settle(0, raft.ErrProposalDropped)
 		}
+		s.first = 0
+	}
+	if len(ents) > 0 && s.first == unseen {
+		s.first = ents[0].Term
 	}
 	for i := range ents {
 		if s.applyEntry(&ents[i]); s.halted != 0 {
