@@ -4,7 +4,7 @@ import "github.com/nvcnvn/rock-solid/internal/core"
 
 // CloseToOpen checks file operations recorded as a Mount's processes record them for close-to-open
 // consistency: a read in a handle opened after a close of a handle that wrote the file returns
-// the bytes that close covers, none older. It returns the index of the first read that breaks the
+// the bytes that close covers, none older. A close that failed promises nothing. It returns the index of the first read that breaks the
 // rule, and false if none does. The histories it checks are written so that a read's words name
 // what it saw: every 8-byte word a handle writes holds that handle's ID, which rises from one
 // writing handle of a file to the next, above its offset/8 (id<<32 | offset/8); one handle writes
@@ -39,7 +39,7 @@ func CloseToOpen(ops []Op) (int, bool) {
 				sessions[s].end = max(sessions[s].end, op.Input[1]+op.Output[1])
 			}
 		case FileClose:
-			if ok && op.Done && sessions[s].id != 0 {
+			if ok && op.Done && op.Output[0] == 0 && sessions[s].id != 0 {
 				closes[sessions[s].ino] = append(closes[sessions[s].ino], closed{op.Complete, sessions[s].id, sessions[s].end})
 			}
 			delete(held, op.Client)

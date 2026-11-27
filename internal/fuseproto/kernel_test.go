@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-var kernelRequests = []string{"init", "lookup", "getattr", "open", "read", "write", "flush", "release", "fsync"}
+var kernelRequests = []string{"init", "lookup", "unlink", "create", "getattr", "open", "read", "write", "flush", "release", "fsync"}
 
 func TestGoldenRequestsEncode(t *testing.T) {
 	frames := golden(t)

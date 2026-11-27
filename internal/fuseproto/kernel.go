@@ -25,8 +25,8 @@ const (
 	NotifyResend     = notifyResend
 )
 
-// AppendRequest appends r as the kernel sends it, for the opcodes a simulated kernel sends: INIT,
-// LOOKUP, GETATTR, OPEN, READ, WRITE, FLUSH, RELEASE and FSYNC.
+// AppendRequest appends r as the kernel sends it, for the opcodes a simulated kernel or setup
+// sends: INIT, LOOKUP, UNLINK, CREATE, GETATTR, OPEN, READ, WRITE, FLUSH, RELEASE and FSYNC.
 func AppendRequest(dst []byte, r *Request) []byte {
 	start := len(dst)
 	dst = le.AppendUint32(dst, 0)
@@ -45,7 +45,13 @@ func AppendRequest(dst []byte, r *Request) []byte {
 		dst = le.AppendUint32(dst, uint32(r.Init.Flags))
 		dst = le.AppendUint32(dst, uint32(r.Init.Flags>>32))
 		dst = append(dst, make([]byte, 44)...)
-	case OpLookup:
+	case OpLookup, OpUnlink:
+		dst = append(append(dst, r.Name...), 0)
+	case OpCreate:
+		dst = le.AppendUint32(dst, r.Flags)
+		dst = le.AppendUint32(dst, r.Mode)
+		dst = le.AppendUint32(dst, r.Umask)
+		dst = le.AppendUint32(dst, r.OpFlags)
 		dst = append(append(dst, r.Name...), 0)
 	case OpGetattr:
 		dst = le.AppendUint64(dst, uint64(r.OpFlags))

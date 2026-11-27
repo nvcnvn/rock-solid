@@ -524,11 +524,12 @@ func (p *Process) updateAttributes(then func()) {
 	m.send(&fuseproto.Request{Opcode: fuseproto.OpGetattr, NodeID: in.id, PID: p.client, OpFlags: fuseproto.GetattrFh, Fh: p.file.fh},
 		func(errno int32, body []byte) error {
 			valid, nsec, a, err := fuseproto.DecodeAttrOut(body)
-			if errno == 0 && err != nil {
-				errno = eio
-			}
-			if errno != 0 {
+			switch {
+			case errno != 0:
 				p.finishRead(errno)
+				return nil
+			case err != nil:
+				p.finishRead(eio)
 				return err
 			}
 			m.changeAttributes(in, &a, m.expiry(valid, nsec), version)
@@ -703,7 +704,10 @@ func (p *Process) sendWrite() {
 	m.send(&fuseproto.Request{Opcode: fuseproto.OpWrite, NodeID: in.id, PID: p.client, Fh: h.fh, Offset: uint64(start),
 		Size: uint32(count), Flags: h.flags, Data: p.wdata[start-p.wbase : start-p.wbase+count]}, func(errno int32, body []byte) error {
 		size, err := fuseproto.DecodeWrite(body)
-		if errno == 0 && (err != nil || int64(size) > count) {
+		switch {
+		case errno != 0:
+			err = nil
+		case err != nil || int64(size) > count:
 			errno = eio
 		}
 		left, off := int64(size), start%PageSize
@@ -769,7 +773,10 @@ func (p *Process) writeDirect() {
 		p.m.send(&fuseproto.Request{Opcode: fuseproto.OpWrite, NodeID: in.id, PID: p.client, Fh: h.fh, Offset: uint64(pos),
 			Size: uint32(n), Flags: h.flags, Data: p.wdata[p.written : p.written+n]}, func(errno int32, body []byte) error {
 			size, err := fuseproto.DecodeWrite(body)
-			if errno == 0 && (err != nil || int64(size) > n) {
+			switch {
+			case errno != 0:
+				err = nil
+			case err != nil || int64(size) > n:
 				errno = eio
 			}
 			if errno != 0 {

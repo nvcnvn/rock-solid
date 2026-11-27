@@ -66,6 +66,8 @@ type daemon struct {
 	churned   uint32
 	maxWrite  uint32
 	bigWrites bool
+	// errs answers every request of an opcode it holds with its errno.
+	errs map[fuseproto.Opcode]fuseproto.Errno
 
 	// read counts the requests read for each node ID, held the replies not yet written.
 	read map[uint64]uint64
@@ -133,6 +135,9 @@ func (d *daemon) deliver(a reply) {
 }
 
 func (d *daemon) reply(r *fuseproto.Request) []byte {
+	if errno, ok := d.errs[r.Opcode]; ok {
+		return fuseproto.AppendError(nil, r.Unique, errno)
+	}
 	f := d.st.inos[r.NodeID]
 	switch r.Opcode {
 	case fuseproto.OpInit:
@@ -630,6 +635,30 @@ func TestWritesGoThroughThePageCache(t *testing.T) {
 	check("a cached read racing a direct write", 0, 5, 6)
 }
 
+// A WRITE answered with an error fails the write with it, through the page cache or not, as does a
+// GETATTR a cached read revalidates with, and the kernel takes each reply.
+func TestARequestAnsweredWithAnErrorFailsItsCall(t *testing.T) {
+	for _, c := range []struct {
+		op     fuseproto.Opcode
+		direct bool
+	}{{fuseproto.OpWrite, false}, {fuseproto.OpWrite, true}, {fuseproto.OpGetattr, false}} {
+		m := newMounts(t, 1, 1, func(d *daemon) { d.attrTTL, d.entryTTL, d.direct = 0, 3600, c.direct })
+		m.file("f", words(1, 0, 8))
+		p := m.proc(0)
+		m.do(p, func() { p.Open("f", oRDWR) })
+		m.d[0].errs = map[fuseproto.Opcode]fuseproto.Errno{c.op: 5}
+		if c.op == fuseproto.OpWrite {
+			p.Write(0, words(2, 0, 2*sim.PageSize))
+		} else {
+			p.Read(0, 8)
+		}
+		m.pump()
+		if p.Busy() || p.Errno != 5 {
+			t.Errorf("op %d, direct %v, answered EIO: busy %v, errno %d", c.op, c.direct, p.Busy(), p.Errno)
+		}
+	}
+}
+
 // A size that changes drops every page, even with the mtime unchanged.
 func TestASizeChangeDropsThePages(t *testing.T) {
 	c := newMounts(t, 1, 1, func(d *daemon) { d.attrTTL, d.entryTTL = 0, 3600 })
@@ -695,6 +724,13 @@ func TestTheCloseToOpenCheck(t *testing.T) {
 		if i, broken := sim.CloseToOpen(ops); broken != c.broken || broken && i != 4 {
 			t.Errorf("%s: broken %v at %d, want %v", c.name, broken, i, c.broken)
 		}
+	}
+	failed := append([]sim.Op{}, writer...)
+	failed[2].Output[0] = 5
+	ops := append(failed, op(1, 6, 7, [4]uint64{sim.FileOpen, oRDONLY}, [4]uint64{0, 2}),
+		op(1, 7, 8, [4]uint64{sim.FileRead | file, 0, 24}, [4]uint64{0, 8, 6, 8}))
+	if _, broken := sim.CloseToOpen(ops); broken {
+		t.Error("a close that failed was held to its data")
 	}
 }
 
