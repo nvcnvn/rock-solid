@@ -202,6 +202,15 @@ func (k *rwKernel) answerRead(id core.RequestID) {
 	k.drain()
 }
 
+// answerWrite answers held chunk write id OK.
+func (k *rwKernel) answerWrite(id core.RequestID) {
+	k.rp = chunkstore.Response{Kind: chunkstore.KindReply, ID: id, Version: chunkstore.MakeVersion(1, 1)}
+	k.cev = core.Event{Kind: core.EvNetRecv, Peer: k.peer}
+	k.cev.Msg.Len = uint16(len(chunkstore.AppendResponse(k.cev.Msg.Body[:0], &k.rp)))
+	k.acts = k.d.OnEvent(&k.ctx, &k.cev, k.acts[:0])
+	k.drain()
+}
+
 func (k *rwKernel) getattr() {
 	if h := k.rw(&fuseproto.Request{Opcode: fuseproto.OpGetattr, Unique: 2, NodeID: 5}); h.Error != 0 {
 		k.t.Fatalf("getattr %+v", h)
@@ -249,5 +258,30 @@ func TestAFencedSessionsLateReplyAnswersNoRequestOfTheNext(t *testing.T) {
 	k.answerRead(k.held[1])
 	if got, ok := k.replies()[6]; !ok || got != 0 {
 		t.Fatalf("session 8's read answered %d, %v", got, ok)
+	}
+}
+
+// A late reply to a fenced session's chunk write answers no write of the new session: the new
+// client's write IDs start above the old one's as well as its read IDs.
+func TestAFencedSessionsLateWriteReplyAnswersNoWriteOfTheNext(t *testing.T) {
+	k := newRWKernel(t)
+	k.getattr()
+	k.hold = true
+	for i, off := range []uint64{0, 8192, 16384} {
+		k.send(&fuseproto.Request{Opcode: fuseproto.OpWrite, Unique: uint64(4 + 2*i), NodeID: 5, Offset: off, Size: 1024, Data: make([]byte, 1024)})
+	}
+	if len(k.held) != 3 {
+		t.Fatalf("held %x", k.held)
+	}
+	k.acts = k.d.SetSession(&k.ctx, 8, k.acts[:0])
+	k.drain()
+	k.replies()
+	k.send(&fuseproto.Request{Opcode: fuseproto.OpWrite, Unique: 20, NodeID: 5, Offset: 0, Size: 1024, Data: make([]byte, 1024)})
+	k.hold = false
+	for _, id := range k.held[:3] {
+		k.answerWrite(id)
+	}
+	if got := k.replies(); len(got) != 0 {
+		t.Fatalf("session 7's write replies answered %v (chunk requests %x)", got, k.held)
 	}
 }
