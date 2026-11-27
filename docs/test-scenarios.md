@@ -9704,7 +9704,7 @@ From [The router on the wire](design.md#metadata-layer-metastore).
   raftshard's `uncommitted` plant (`TestLeaseReadsBeforeAnEntryOfTheTermCommitsBreakTheInvariant`)
   covers the rule.
 - The plants of a leader answering reads without its lease and of a follower answering them each
-  fail that run within five seeds (`TestPlantedReadBugsBreakTheReadRun`).
+  fail that run within five seeds (`TestPlantedLeaseReadBugsBreakTheMetaReadRun`).
 
 ## FUSE mount on one node
 

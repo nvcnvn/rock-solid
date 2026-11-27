@@ -358,7 +358,7 @@ func TestReadsSeeEveryTxnAcknowledgedBeforeThem(t *testing.T) {
 
 // A leader that answers Reads without its lease, and a follower that answers them, each break the
 // Read run.
-func TestPlantedReadBugsBreakTheReadRun(t *testing.T) {
+func TestPlantedLeaseReadBugsBreakTheMetaReadRun(t *testing.T) {
 	for _, p := range []readPlants{{noLease: true}, {anyReplica: true}} {
 		caught := false
 		for seed := uint64(1); seed <= 5 && !caught; seed++ {
