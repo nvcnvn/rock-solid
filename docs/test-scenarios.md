@@ -9783,14 +9783,15 @@ upgrade](design.md#daemon-restart-and-upgrade)'s mount settings.
   cannot be read answers `EACCES`. Root of a user namespace of its own, whose status shows the
   capability, gets no override.
 - A fence fails the old session's reads and writes in flight with `EIO` and frees their buffers; a
-  late reply of the fenced session's chunk client answers no request of the new one; a request
-  after the fence names the new session.
+  late reply to the fenced session's chunk read or write answers no request of the new one; a
+  request after the fence names the new session.
 - `READ` and `WRITE` through the daemon allocate nothing and leave no pool buffer live.
-- A meta `Read` answered with a final error goes again only after the router's election wait.
+- A meta `Read` answered `ErrHalted` or `ErrOverloaded` goes again only after the router's election
+  wait; one answered `ErrMalformed` or `ErrTooLarge` answers its request `EIO` at once, or once the
+  request's other `Read`s are in. A failed read of the shard's `f` key is read again.
 - A reply frame the kernel refuses with `EINVAL` ends `Serve` with that error.
-- A mount whose device the loop refuses is unmounted again (as root).
-- A mount whose pool has no buffer to read a request into leaves its readable device unread for
-  1 ms before reading it again.
+- A mount whose pool has no buffer to read requests into, or whose device the loop refuses, is
+  unmounted again (as root).
 
 ## Inode owner's open registry
 
