@@ -463,6 +463,20 @@ func (m *Machine) ReadDone(ctx *core.Context, token uint64, kvs []meta.KV, out *
 	m.run(o, out)
 }
 
+// ReadFailed fails Read token with an error that lasts: its request is answered EIO once every
+// other answer it waits for is in.
+func (m *Machine) ReadFailed(ctx *core.Context, token uint64, out *Output) {
+	m.pool = ctx.Pool
+	w, ok := m.waits[token]
+	if !ok {
+		return
+	}
+	delete(m.waits, token)
+	w.o.pending--
+	w.o.errno = EIO
+	m.run(w.o, out)
+}
+
 // OpenerDone hands the CREATE that asked Opener token its opener's credentials, nil when they
 // could not be read, as of a process that exited, which answers EACCES.
 func (m *Machine) OpenerDone(ctx *core.Context, token uint64, c *Creds, out *Output) {
@@ -550,6 +564,17 @@ func entryKey(key []byte) bool {
 	return meta.DecodeKey(key, &k) == nil && k.Tag == meta.InodeEntry
 }
 
+// failed ends o, whose Read failed: an internal read of the shard's f key as a slot reservation
+// that got no answer, any other request with its errno.
+func (m *Machine) failed(o *op, out *Output) {
+	if o.req.Opcode == opReadFree {
+		m.alloc.SlotsFailed()
+		m.internalDone(o, out)
+		return
+	}
+	m.fail(o, o.errno, out)
+}
+
 func (m *Machine) internalDone(o *op, out *Output) {
 	m.done(o)
 	b := m.blocked
@@ -618,6 +643,10 @@ func (m *Machine) inode(o *op, dir bool, out *Output) bool {
 // run moves o on from its step, once every answer it waits for is in.
 func (m *Machine) run(o *op, out *Output) {
 	if o.pending > 0 {
+		return
+	}
+	if o.errno != 0 {
+		m.failed(o, out)
 		return
 	}
 	if o.step == 0 {

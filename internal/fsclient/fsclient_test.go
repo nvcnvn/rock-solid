@@ -1025,3 +1025,68 @@ func TestARequestAfterAFenceNamesTheNewSession(t *testing.T) {
 		t.Fatalf("the mkdir's replay key %x names session %d, want 9", tx.Replay, k.Session)
 	}
 }
+
+// A Read that failed with an error that lasts answers its request EIO once the request's other
+// Reads are in, rather than while one still names it.
+func TestAFailedReadAnswersEIOOnceTheRequestsOtherReadsAreIn(t *testing.T) {
+	h := newMount(t, Config{})
+	h.create(meta.RootInode, "f")
+	h.held = true
+	n := len(h.replies)
+	u := h.send(fuseproto.Request{Opcode: fuseproto.OpRename, NodeID: meta.RootInode, Name: []byte("f"), NewName: []byte("g"), NewDir: meta.RootInode})
+	if len(h.reads) != 2 {
+		t.Fatalf("the rename sent %d Reads, want 2", len(h.reads))
+	}
+	h.m.ReadFailed(&h.ctx, h.reads[0].Token, &h.out)
+	h.serve()
+	if len(h.replies) != n || h.m.Pending() != 1 {
+		t.Fatalf("with a Read still out the rename has %d replies and %d requests pending", len(h.replies)-n, h.m.Pending())
+	}
+	h.answerRead(h.reads[1])
+	h.serve()
+	h.errno(u, EIO)
+	if h.m.Pending() != 0 {
+		t.Fatalf("%d requests pending", h.m.Pending())
+	}
+}
+
+// A failed read of the shard's f key ends that slot reservation as one that got no answer, so
+// the MKDIR waiting on it reads the key again rather than wait for good.
+func TestAFailedReadOfTheFreeKeyIsReadAgain(t *testing.T) {
+	h := newMount(t, Config{})
+	h.held = true
+	u := h.send(fuseproto.Request{Opcode: fuseproto.OpMkdir, NodeID: meta.RootInode, Name: []byte("d")})
+	free := func() int {
+		for i, rd := range h.reads {
+			if k := (meta.Key{}); meta.DecodeKey(rd.Start, &k) == nil && k.Tag == meta.SlotFree {
+				return i
+			}
+		}
+		return -1
+	}
+	for free() < 0 && len(h.reads) > 0 {
+		rd := h.reads[0]
+		h.reads = h.reads[1:]
+		h.answerRead(rd)
+		h.serve()
+	}
+	i := free()
+	if i < 0 {
+		t.Fatal("the mkdir never read the f key")
+	}
+	rd := h.reads[i]
+	h.reads = slices.Delete(h.reads, i, i+1)
+	h.m.ReadFailed(&h.ctx, rd.Token, &h.out)
+	h.serve()
+	if free() < 0 {
+		t.Fatalf("after a failed read of the f key the machine read %+v", h.reads)
+	}
+	h.held = false
+	for len(h.reads) > 0 {
+		rd := h.reads[0]
+		h.reads = h.reads[1:]
+		h.answerRead(rd)
+		h.serve()
+	}
+	h.entry(u)
+}

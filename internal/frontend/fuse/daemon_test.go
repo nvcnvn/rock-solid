@@ -207,31 +207,60 @@ func TestAnOpenersCredentialsComeFromItsProcStatus(t *testing.T) {
 	}
 }
 
-// A Read answered with a final error goes again only after the router's election wait, rather
-// than spinning on an error that lasts.
-func TestAReadAnsweredWithAnErrorGoesAgainAfterTheRoutersWait(t *testing.T) {
-	k := newFakeKernel(t)
+// getattrAnswered serves a GETATTR of the root and answers its Read with err, returning the
+// daemon's actions.
+func (k *fakeKernel) getattrAnswered(err error) []core.Action {
 	k.req = fuseproto.AppendRequest(k.req[:0], &fuseproto.Request{Opcode: fuseproto.OpGetattr, Unique: 2, NodeID: meta.RootInode})
 	if _, err := unix.Write(k.fd, k.req); err != nil {
-		t.Fatal(err)
+		k.t.Fatal(err)
 	}
-	acts, err := k.d.Serve(&k.ctx, nil)
-	if err != nil || len(acts) != 1 || acts[0].Kind != core.ActNetSend {
-		t.Fatalf("GETATTR asked for %+v, %v", acts, err)
+	acts, serr := k.d.Serve(&k.ctx, nil)
+	if serr != nil || len(acts) != 1 || acts[0].Kind != core.ActNetSend {
+		k.t.Fatalf("GETATTR asked for %+v, %v", acts, serr)
 	}
 	_, _, token, _ := meta.Peek(&acts[0].Msg)
-	k.ans = meta.ReadAnswer{Token: token, Err: meta.ErrOverloaded}
+	k.ans = meta.ReadAnswer{Token: token, Err: err}
 	k.ev = core.Event{Kind: core.EvNetRecv, Peer: acts[0].Peer}
 	if err := meta.EncodeReadAnswer(k.ctx.Pool, 2, &k.ans, &k.ev.Msg); err != nil {
-		t.Fatal(err)
+		k.t.Fatal(err)
 	}
-	acts = k.d.OnEvent(&k.ctx, &k.ev, nil)
-	if len(acts) != 1 || acts[0].Kind != core.ActSetTimer || acts[0].Timer != RouterTimer || acts[0].At <= k.ctx.Now {
-		t.Fatalf("a Read answered ErrOverloaded asked for %+v", acts)
+	return k.d.OnEvent(&k.ctx, &k.ev, nil)
+}
+
+// A Read answered with an error that may clear, as a halted group's replacement may answer it,
+// goes again only after the router's election wait, rather than spinning on an error that lasts.
+func TestAReadAnsweredWithAnErrorGoesAgainAfterTheRoutersWait(t *testing.T) {
+	for _, e := range []error{meta.ErrHalted, meta.ErrOverloaded} {
+		k := newFakeKernel(t)
+		acts := k.getattrAnswered(e)
+		if len(acts) != 1 || acts[0].Kind != core.ActSetTimer || acts[0].Timer != RouterTimer || acts[0].At <= k.ctx.Now {
+			t.Fatalf("a Read answered %v asked for %+v", e, acts)
+		}
+		k.ctx.Now = acts[0].At
+		k.ev = core.Event{Kind: core.EvTimer, Timer: RouterTimer}
+		if acts = k.d.OnEvent(&k.ctx, &k.ev, nil); len(acts) != 1 || acts[0].Kind != core.ActNetSend {
+			t.Fatalf("after %v the router's timer asked for %+v", e, acts)
+		}
 	}
-	k.ctx.Now = acts[0].At
-	k.ev = core.Event{Kind: core.EvTimer, Timer: RouterTimer}
-	if acts = k.d.OnEvent(&k.ctx, &k.ev, nil); len(acts) != 1 || acts[0].Kind != core.ActNetSend {
-		t.Fatalf("the router's timer asked for %+v", acts)
+}
+
+// A Read answered ErrMalformed or ErrTooLarge, which asking again cannot change, answers its
+// request EIO at once, rather than leave its process waiting for good.
+func TestAReadAnsweredWithAnErrorThatLastsAnswersEIO(t *testing.T) {
+	for _, e := range []error{meta.ErrMalformed, meta.ErrTooLarge} {
+		k := newFakeKernel(t)
+		if acts := k.getattrAnswered(e); len(acts) != 0 {
+			t.Fatalf("a Read answered %v asked for %+v", e, acts)
+		}
+		n, err := unix.Read(k.fd, k.buf)
+		if err != nil {
+			t.Fatalf("no reply after %v: %v", e, err)
+		}
+		if h, _, err := fuseproto.DecodeReply(k.buf[:n]); err != nil || h.Unique != 2 || h.Error != -int32(fuseproto.EIO) {
+			t.Fatalf("after %v the kernel got %+v, %v", e, h, err)
+		}
+		if k.d.m.Pending() != 0 {
+			t.Fatalf("%d requests pending after %v", k.d.m.Pending(), e)
+		}
 	}
 }

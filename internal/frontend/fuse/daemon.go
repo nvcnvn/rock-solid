@@ -502,9 +502,10 @@ func (d *Daemon) send(ctx *core.Context, h *held, later bool) {
 	})
 }
 
-// routed runs f on the meta client and hands each answer to the filesystem client, sending again,
-// after the router's election wait, a Read answered with an error: the router has retried what it
-// can, the machine has no failed read, and at once would spin on an error that lasts.
+// routed runs f on the meta client and hands each answer to the filesystem client. A Read
+// answered ErrMalformed or ErrTooLarge fails, as asking again gets the same answer; one answered
+// any other error goes again after the router's election wait, as a halted group's replacement
+// may answer it, and at once would spin on an error that lasts.
 func (d *Daemon) routed(ctx *core.Context, f func(o *meta.RouterOutput)) {
 	o := d.routs.get()
 	defer d.routs.put()
@@ -518,12 +519,16 @@ func (d *Daemon) routed(ctx *core.Context, f func(o *meta.RouterOutput)) {
 			continue
 		}
 		delete(d.reads, a.Token)
-		if a.Err != nil {
+		if a.Err != nil && !errors.Is(a.Err, meta.ErrMalformed) && !errors.Is(a.Err, meta.ErrTooLarge) {
 			d.send(ctx, h, true)
 			continue
 		}
 		tok := h.token
 		d.free = append(d.free, h)
+		if a.Err != nil {
+			d.feed(ctx, func(out *fsclient.Output) { d.m.ReadFailed(ctx, tok, out) })
+			continue
+		}
 		d.feed(ctx, func(out *fsclient.Output) { d.m.ReadDone(ctx, tok, a.KVs, out) })
 	}
 	for i := range o.Answers {
