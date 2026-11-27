@@ -9684,9 +9684,12 @@ From [The router on the wire](design.md#metadata-layer-metastore).
 - **[property]** `TestReadsSeeEveryTxnAcknowledgedBeforeThem`: three `meta.Shard` replicas, each
   behind a `meta.Server` and renewing node-pair leases with the others, and two clients, each
   putting its own keys with rising values and reading every key through a `meta.Client`; replicas'
-  nodes rebooted, and the leader cut off from the other replicas and from one client while the
-  other client still reaches it. Every read's answer holds every `Txn` acknowledged, by either
-  client, before the read was sent.
+  nodes rebooted, and the leader cut off from the other replicas and from one client while the other
+  client still reaches it. Every read's answer holds every `Txn` acknowledged, by either client,
+  before the read was sent. A new leader serves lease reads only once an entry of its own term
+  commits; the run's window for that is one message delay, too short for it to catch, and
+  raftshard's `uncommitted` plant (`TestLeaseReadsBeforeAnEntryOfTheTermCommitsBreakTheInvariant`)
+  covers the rule.
 - The plants of a leader answering reads without its lease and of a follower answering them each
   fail that run within five seeds (`TestPlantedReadBugsBreakTheReadRun`).
 

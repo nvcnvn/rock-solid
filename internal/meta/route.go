@@ -24,7 +24,7 @@ var (
 	ErrReplicaIDs = errors.New("meta: shard map reuses a replica ID")
 	// ErrTokenInFlight reports a Txn handed a router under the token of one still in flight.
 	ErrTokenInFlight = errors.New("meta: token in flight")
-	// ErrGroupGone reports a Txn held for an election whose group left the shard map; it was never proposed, so it may be routed again.
+	// ErrGroupGone reports a Txn or Read held for an election whose group left the shard map; it was never proposed or served, so it may be routed again.
 	ErrGroupGone = errors.New("meta: txn's group left the shard map")
 )
 

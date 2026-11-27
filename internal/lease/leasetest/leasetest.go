@@ -1,5 +1,4 @@
-// Package leasetest renews a test loop's node-pair leases with its peers' loops over the network,
-// as a storage node's loop renews its own for its replicas.
+// Package leasetest renews a test loop's node-pair leases with its peers' loops over the network.
 package leasetest
 
 import (
