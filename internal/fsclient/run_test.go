@@ -49,6 +49,8 @@ const (
 	routerTimer core.TimerID = 0x66737274
 	readTimer   core.TimerID = 0x66737264
 	readRetry                = core.Tick(1000)
+	// readLatency bounds a read's round trip, drawn for each.
+	readLatency = core.Tick(1000)
 	// realtime is the wall clock's reading at CLOCK_BOOTTIME 0, in nanoseconds.
 	realtime = int64(1_700_000_000_000_000_000)
 	// liveWait is how long, at the end of the quiet time, a system call or a request in a machine
@@ -68,9 +70,9 @@ const (
 // odds, unlinks and creates each other again. The devices do not crash: a restarted primary asks
 // the control plane, which the run does not have, for a new interval.
 //
-// MetaStore reads have no wire yet: the daemon serves each from the state of an up replica that
-// has applied every entry any replica has, which a leader's lease read stands for, and holds it
-// for readRetry while none has.
+// MetaStore reads have no wire yet: the daemon holds each for a round trip of up to readLatency,
+// then serves it from the state of an up replica that has applied every entry any replica has,
+// which a leader's lease read stands for, or holds it for readRetry more while none has.
 type fsRun struct {
 	t     testing.TB
 	s     *sim.Scheduler
@@ -542,9 +544,11 @@ type daemon struct {
 	root  meta.FS
 	txns  map[uint64]sentTxn
 	held  []heldRead
-	armed bool
-	ctx   *core.Context
-	acts  []core.Action
+	// armed is set while readTimer is set, for armedAt.
+	armed   bool
+	armedAt core.Tick
+	ctx     *core.Context
+	acts    []core.Action
 }
 
 type sentTxn struct {
@@ -555,6 +559,7 @@ type sentTxn struct {
 type heldRead struct {
 	m  *Machine
 	rd Read
+	at core.Tick
 }
 
 func (r *fsRun) bootDaemon(n *sim.Node) {
@@ -662,7 +667,11 @@ func (d *daemon) onEvent(ctx *core.Context, ev *core.Event, acts []core.Action) 
 			held := d.held
 			d.held = nil
 			for _, h := range held {
-				d.read(h.m, h.rd)
+				if h.at > ctx.Now {
+					d.hold(h)
+				} else {
+					d.serve(h)
+				}
 			}
 		case ev.Kind == core.EvPeerLost:
 			d.routed(func(o *meta.RouterOutput) { d.mc.OnEvent(ctx, ev, o) })
@@ -778,23 +787,34 @@ func (d *daemon) routed(f func(o *meta.RouterOutput)) {
 	}
 }
 
-// read serves rd from the current state, or holds it for readRetry while none is.
+// read holds rd for its round trip.
 func (d *daemon) read(m *Machine, rd Read) {
+	rd.Start, rd.End = bytes.Clone(rd.Start), bytes.Clone(rd.End)
+	d.hold(heldRead{m, rd, d.ctx.Now + core.Tick(d.r.rng.Below(uint64(readLatency)))})
+}
+
+// hold keeps h until its time, arming readTimer for it if the timer is not armed sooner.
+func (d *daemon) hold(h heldRead) {
+	d.held = append(d.held, h)
+	if !d.armed || h.at < d.armedAt {
+		d.armed, d.armedAt = true, h.at
+		d.acts = append(d.acts, core.Action{Kind: core.ActSetTimer, Timer: readTimer, At: h.at})
+	}
+}
+
+// serve answers h from the current state, or holds it for readRetry while none is.
+func (d *daemon) serve(h heldRead) {
 	s := d.r.current()
 	if s == nil {
-		rd.Start, rd.End = bytes.Clone(rd.Start), bytes.Clone(rd.End)
-		d.held = append(d.held, heldRead{m, rd})
-		if !d.armed {
-			d.armed = true
-			d.acts = append(d.acts, core.Action{Kind: core.ActSetTimer, Timer: readTimer, At: d.ctx.Now + readRetry})
-		}
+		h.at = d.ctx.Now + readRetry
+		d.hold(h)
 		return
 	}
 	var res meta.ScanResult
-	if err := s.Scan(rd.Start, rd.End, rd.Limit, &res); err != nil {
+	if err := s.Scan(h.rd.Start, h.rd.End, h.rd.Limit, &res); err != nil {
 		panic(err)
 	}
-	d.feed(m, func(o *Output) { m.ReadDone(d.ctx, rd.Token, res.KVs, o) })
+	d.feed(h.m, func(o *Output) { h.m.ReadDone(d.ctx, h.rd.Token, res.KVs, o) })
 }
 
 // reply writes a reply to the mount, or takes a setup reply and sends setup's next request.
