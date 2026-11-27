@@ -121,8 +121,10 @@ type node struct {
 	attr meta.Attr
 	// parent is a directory's, read with its attributes.
 	parent uint64
-	// last is the sequence of the last request read for the inode.
+	// last is the sequence of the last request read for the inode, and changed that of the
+	// machine's last change of its attributes.
 	last    uint64
+	changed uint64
 	lookups uint64
 	opens   int
 	// opened is the attributes its last open saw, which say whether the kernel's pages are current.
@@ -183,19 +185,19 @@ type op struct {
 	// refetched is a request that fetched its attributes again once they went stale, and expire
 	// one answering with stale attributes, which the kernel is told to hold for no time.
 	refetched, expire bool
-	over     uint64
-	omode    uint64
-	wtime    int64
-	fields   [6]meta.Field
-	child    uint64
-	mode     uint64
-	fresh    bool
-	slot     uint32
-	attr     meta.Attr
-	pend     meta.Purge
-	mreq     meta.Request
-	fs       meta.FS
-	errno    fuseproto.Errno
+	over              uint64
+	omode             uint64
+	wtime             int64
+	fields            [6]meta.Field
+	child             uint64
+	mode              uint64
+	fresh             bool
+	slot              uint32
+	attr              meta.Attr
+	pend              meta.Purge
+	mreq              meta.Request
+	fs                meta.FS
+	errno             fuseproto.Errno
 }
 
 // New is a mount's machine.
@@ -346,6 +348,12 @@ func (m *Machine) forget(ino, n uint64) {
 	}
 	nd.lookups -= min(n, nd.lookups)
 	m.drop(ino, nd)
+}
+
+// change notes that the machine changed n's attributes, so a fetch read before is fetched again.
+func (m *Machine) change(n *node) {
+	m.seq++
+	n.changed = m.seq
 }
 
 func (m *Machine) drop(ino uint64, n *node) {

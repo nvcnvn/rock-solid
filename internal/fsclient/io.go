@@ -68,9 +68,13 @@ func (m *Machine) raised(o *op, out *Output) {
 	n := m.node(ino)
 	switch o.step {
 	case 0:
-		m.get(o, 0, ino, meta.InodeAttr, nil, out)
+		m.fetch(o, ino, false, out)
 		o.step = writeReread
 	case writeReread:
+		if m.older(o, ino) {
+			m.fetch(o, ino, false, out)
+			return
+		}
 		if _, ok := m.took(o, ino); !ok {
 			m.fail(o, ENOENT, out)
 			return
@@ -95,6 +99,7 @@ func (m *Machine) raised(o *op, out *Output) {
 		m.build(o, o.fs.SetAttr(ino, &a, &b, nil), out)
 	case -1:
 		n.attr = o.attr
+		m.change(n)
 		n.step = min(maxRaise, max(n.step, 1)*2)
 		m.unlock(o, out)
 		m.landed(o, n, out)
@@ -224,6 +229,7 @@ func (m *Machine) commit(o *op, out *Output) {
 		m.build(o, o.fs.SetAttr(ino, &a, &b, nil), out)
 	case -1:
 		n.attr = o.attr
+		m.change(n)
 		if n.lastWrite <= o.wtime && n.written <= o.attr.Size {
 			n.wrote, n.written = false, 0
 		}

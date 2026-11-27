@@ -111,6 +111,7 @@ func (m *Machine) create(o *op, out *Output) {
 		}
 		n := m.node(o.child)
 		n.attr = o.attr
+		m.change(n)
 		if mkdir {
 			n.parent, n.lookups = dir, n.lookups+1
 			e := m.entry(o.child, &o.attr)
@@ -199,6 +200,7 @@ func (m *Machine) unlink(o *op, out *Output) {
 	case -1:
 		if n := m.nodes[o.child]; n != nil && n.attr.Nlink > 0 {
 			n.attr.Nlink--
+			m.change(n)
 		}
 		m.empty(o, out)
 	}
@@ -263,6 +265,7 @@ func (m *Machine) rename(o *op, out *Output) {
 	case -1:
 		if n := m.nodes[o.over]; o.over != o.child && n != nil && n.attr.Nlink > 0 {
 			n.attr.Nlink--
+			m.change(n)
 		}
 		m.empty(o, out)
 	}
@@ -334,6 +337,7 @@ func (m *Machine) setattr(o *op, out *Output) {
 		}
 	case -1:
 		n.attr = o.attr
+		m.change(n)
 		a := shown(n)
 		fa := fuseAttr(ino, &a)
 		_, valid := m.timeouts(a.Mode)

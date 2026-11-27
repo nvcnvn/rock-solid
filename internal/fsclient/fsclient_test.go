@@ -733,3 +733,30 @@ func TestAStreamOfRequestsCannotStarveAGetattr(t *testing.T) {
 		t.Fatalf("the first getattr answered with attr_valid %d: %v", va, err)
 	}
 }
+
+// An open's fetch read before a close committed the size, and answered after the commit, is
+// fetched again rather than taken: a read in the handle then sees the whole file.
+func TestAFetchFromBeforeTheMachinesOwnCommitIsNotTaken(t *testing.T) {
+	h := newMount(t, Config{})
+	ino, fh := h.create(meta.RootInode, "f")
+	h.ok(h.write(ino, fh, 0, []byte("hello")))
+	h.held = true
+	flush := h.send(fuseproto.Request{Opcode: fuseproto.OpFlush, NodeID: ino, Fh: fh})
+	h.send(fuseproto.Request{Opcode: fuseproto.OpOpen, NodeID: ino})
+	if len(h.sent) != 1 || len(h.reads) != 1 {
+		t.Fatalf("%d Txns and %d reads in flight", len(h.sent), len(h.reads))
+	}
+	var before meta.ScanResult
+	if err := h.s.Scan(h.reads[0].Start, h.reads[0].End, h.reads[0].Limit, &before); err != nil {
+		t.Fatal(err)
+	}
+	old := slices.Clone(before.KVs)
+	h.held = false
+	h.answerTxn(h.sent[0])
+	h.m.ReadDone(&h.ctx, h.reads[0].Token, old, &h.out)
+	h.serve()
+	h.ok(flush)
+	if got := h.read(ino, fh, 0, 100); string(got) != "hello" {
+		t.Fatalf("read after the open gave %q", got)
+	}
+}

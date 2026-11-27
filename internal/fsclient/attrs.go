@@ -19,7 +19,7 @@ func (m *Machine) fetch(o *op, ino uint64, dir bool, out *Output) {
 // the reply to a request sent before the inode's attributes last changed, so a reply of older
 // attributes written after a later request was sent would land and the fresh one be dropped.
 func (m *Machine) stale(o *op, ino uint64) bool {
-	if m.node(ino).last > o.fetch {
+	if m.older(o, ino) || m.node(ino).last > o.fetch {
 		return true
 	}
 	for _, p := range m.ops {
@@ -43,6 +43,10 @@ func (m *Machine) refetch(o *op, ino uint64) bool {
 	o.refetched = true
 	return true
 }
+
+// older reports attributes of ino that o fetched before the machine last changed them, which
+// may predate that change.
+func (m *Machine) older(o *op, ino uint64) bool { return m.node(ino).changed > o.fetch }
 
 // took decodes the attributes fetch read for ino into its node; false when the inode is gone.
 func (m *Machine) took(o *op, ino uint64) (*node, bool) {
@@ -149,6 +153,10 @@ func (m *Machine) open(o *op, out *Output) {
 	if o.step == 0 {
 		m.fetch(o, ino, false, out)
 		o.step = 1
+		return
+	}
+	if m.older(o, ino) {
+		m.fetch(o, ino, false, out)
 		return
 	}
 	n, ok := m.took(o, ino)
