@@ -49,6 +49,9 @@ const (
 	// between two fences.
 	faultGap = core.Tick(8_000_000)
 	fenceGap = core.Tick(1_000_000)
+	// fenceLag is the most time, in a fence the devices are handed first, before the daemon takes
+	// the new session: past ClientRetryAfter, so the old client sends a refused write again.
+	fenceLag = 3 * chunkstore.ClientRetryAfter
 	// routerTimer is the client loop's router's timer.
 	routerTimer core.TimerID = 0x66737274
 	// readTimer is the client loop's timer for held reads, and readLatency the most a read is held
@@ -73,7 +76,8 @@ const (
 // file's first and one time in 32 for another; it restarts in a new session that, before its
 // processes start, creates each file not yet made and, with even odds, unlinks and creates each
 // other again. While the processes run, until runFor: the session fenced up to fenceGap apart, and
-// within 1 ms of one write in 16; one allocation in allocOdds refused; and one Read in
+// within 1 ms of one write in 16, half the time handed to the devices up to fenceLag before the
+// daemon takes it, so they refuse the old session's writes while its client is live; one allocation in allocOdds refused; and one Read in
 // readErrOdds answered with an error, half of them lasting. A system call such a fault overlaps
 // may fail EIO, a read may come back short, and the process goes on. The devices do not crash: a
 // restarted primary asks the control plane, which the run does not have, for a new interval.
@@ -103,14 +107,19 @@ type fsRun struct {
 	// when a replica's node reboots.
 	crashAt, fenceAt, rebootAt core.Tick
 	crashes                    int
-	// session is the daemon's node's: each start and each fence takes the next.
-	session uint64
+	// session is the daemon's node's: each start and each fence takes the next. takeAt is when the
+	// daemon takes a session the devices have first, 0 if none waits, and refusedIDs the IDs of the
+	// writes the devices refused the old session's client since.
+	session    uint64
+	takeAt     core.Tick
+	refusedIDs map[core.RequestID]bool
 	// faultAt are the times of the faults that may fail a system call in flight with EIO: fences,
 	// refused allocations and Reads answered with an error that lasts.
 	faultAt []core.Tick
 	// abandons counts fences with chunk I/O in flight, lasting and transient the Read errors the
-	// mount took of each kind.
-	abandons, lasting, transient int
+	// mount took of each kind, refused the writes the devices refused a fenced session's live
+	// client and retried those it sent again.
+	abandons, lasting, transient, refused, retried int
 	// ended is set for the check at the end of the quiet time.
 	ended bool
 	// idErr, errnoErr, purgeErr, readErr and idsErr are the first inode handed out twice, system
@@ -148,7 +157,7 @@ func newFSRun(t testing.TB, seed uint64, p plants) *fsRun {
 	set.PoolBytes = 64 << 20
 	set.PartitionNum, set.PartitionDen = 1, 4000
 	r := &fsRun{t: t, s: sim.New(seed, set), rng: core.NewRand(seed), plant: p, last: map[uint64]uint64{},
-		creates: map[uint64]string{}, mtimes: map[uint64]int64{}}
+		creates: map[uint64]string{}, mtimes: map[uint64]int64{}, refusedIDs: map[core.RequestID]bool{}}
 	r.files = [2]runFile{{name: "a"}, {name: "b"}}
 	r.rebootAt = core.Tick(r.rng.Below(uint64(faultGap)))
 	r.hist = sim.NewHistory(r.s, 1<<14)
@@ -198,6 +207,9 @@ func (r *fsRun) run() error {
 		now := r.s.Time()
 		if now >= runFor+quietFor {
 			break
+		}
+		if r.takeAt != 0 && now >= r.takeAt && r.s.Node(clientNode).Up() {
+			r.take()
 		}
 		if now < runFor {
 			r.faults()
@@ -621,6 +633,7 @@ type daemon struct {
 	ans     meta.ReadAnswer
 	txn     meta.Txn
 	upd     chunkstore.Update
+	rp      chunkstore.Response
 	held    []heldSend
 	// armed is set while readTimer is set, for armedAt.
 	armed   bool
@@ -644,6 +657,8 @@ func metaDisk(i int) uint32 { return uint32(11 + i) }
 func (r *fsRun) bootDaemon(n *sim.Node) {
 	r.incs++
 	r.session++
+	r.takeAt = 0
+	clear(r.refusedIDs)
 	r.crashAt = r.s.Time() + core.Tick(r.rng.Below(uint64(faultGap)))
 	r.fenceAt = r.s.Time() + core.Tick(r.rng.Below(uint64(fenceGap)))
 	d := &daemon{r: r, n: n, g: NewMount(Config{Volume: vol, Pool: 1, Mount: 1, SlotLimit: 1 << 20}, 2*r.incs)}
@@ -797,6 +812,10 @@ func (d *daemon) wrote(msg *core.Msg) {
 	if r.rng.Chance(1, 16) {
 		r.fenceAt = min(r.fenceAt, r.s.Time()+core.Tick(r.rng.Below(1000)))
 	}
+	if r.takeAt != 0 && r.refusedIDs[d.upd.ID] {
+		delete(r.refusedIDs, d.upd.ID)
+		r.retried++
+	}
 }
 
 // hold keeps h until its time, arming readTimer for it if the timer is not armed sooner.
@@ -886,6 +905,13 @@ func (d *daemon) onEvent(ctx *core.Context, ev *core.Event, acts []core.Action) 
 // request and one answered with any other stays in hand to go again.
 func (d *daemon) answer(ev *core.Event, tok uint64) {
 	r := d.r
+	if ev.Kind == core.EvNetRecv && r.takeAt != 0 && ev.Peer.Node >= devAt(0).Node && ev.Peer.Node < clientNode {
+		frame, data := chunkstore.Frame(d.ctx.Pool, &ev.Msg)
+		if chunkstore.DecodeResponse(frame, data, &d.rp) == nil && d.rp.Kind == chunkstore.KindReply && d.rp.Status == chunkstore.StatusRefused {
+			r.refusedIDs[d.rp.ID] = true
+			r.refused++
+		}
+	}
 	_, kind, _, _ := meta.Peek(&ev.Msg)
 	h, sent := d.g.reads[tok]
 	if ev.Kind != core.EvNetRecv || kind != meta.KindReadAnswer || !sent || meta.DecodeReadAnswer(d.ctx.Pool, &ev.Msg, &d.ans) != nil || d.ans.Err == nil {
@@ -955,11 +981,25 @@ func (d *daemon) Next(ctx *core.Context, acts []core.Action) []core.Action {
 // run, before the quiet time.
 func (r *fsRun) injects() bool { return r.d.ready && r.s.Time() < runFor }
 
-// fence starts a new session on the daemon's node, which tend hands the devices, fencing the
-// old one.
+// fence starts a new session on the daemon's node, fencing the old one: half the time the daemon
+// takes it at once and tend hands it the devices after, and half the time tend hands it the
+// devices first and the daemon takes it up to fenceLag later.
 func (r *fsRun) fence() {
-	d := r.d
 	r.session++
+	if r.rng.Chance(1, 2) {
+		if r.takeAt == 0 {
+			r.takeAt = r.s.Time() + 1 + core.Tick(r.rng.Below(uint64(fenceLag)))
+		}
+		return
+	}
+	r.take()
+}
+
+// take hands the daemon the node's session, abandoning the old one's chunk client.
+func (r *fsRun) take() {
+	d := r.d
+	r.takeAt = 0
+	clear(r.refusedIDs)
 	r.faultAt = append(r.faultAt, r.s.Time())
 	d.n.Call(d.loop, func(ctx *core.Context, acts []core.Action) []core.Action {
 		return d.pass(ctx, acts, func() {
@@ -1140,7 +1180,7 @@ func (p runPool) Free(b core.IOBuf) {
 // ancestor, at each daemon crash every chunk it wrote lies below alloc_end or in its purge
 // entry, and at the end of the quiet time no system call or request has waited past liveWait.
 func TestAMountsHistoriesKeepTheirInvariantsAcrossCrashes(t *testing.T) {
-	var abandons, lasting, transient int
+	var abandons, lasting, transient, refused, retried int
 	seeds.Run(t, 1, 10, func(seed uint64) {
 		r := newFSRun(t, seed, plants{})
 		if err := r.run(); err != nil {
@@ -1150,9 +1190,10 @@ func TestAMountsHistoriesKeepTheirInvariantsAcrossCrashes(t *testing.T) {
 			t.Fatalf("seed %d: %d operations, %d daemon crashes", seed, n, r.crashes)
 		}
 		abandons, lasting, transient = abandons+r.abandons, lasting+r.lasting, transient+r.transient
+		refused, retried = refused+r.refused, retried+r.retried
 	})
-	if seeds.Default() && (abandons < 100 || lasting < 100 || transient < 100) {
-		t.Fatalf("%d fences abandoned chunk I/O in flight, %d Reads failed and %d went again", abandons, lasting, transient)
+	if seeds.Default() && (abandons < 100 || lasting < 100 || transient < 100 || refused < 100 || retried < 100) {
+		t.Fatalf("%d fences abandoned chunk I/O in flight, %d Reads failed and %d went again; devices refused a fenced session's live client %d writes, %d sent again", abandons, lasting, transient, refused, retried)
 	}
 }
 

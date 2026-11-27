@@ -9703,19 +9703,21 @@ and chunk devices.
   faults heal), and the daemon crashed, half the time within 3 ms of a file's first chunk write,
   restarting in a new session that may unlink and create each file again through the same
   `Mount`. While the processes run: the session fenced up to 1 s apart and within 1 ms of one
-  chunk write in 16, so a fence finds chunk I/O in flight; one pool allocation in 100 refused,
-  which fails a chunk write the client cannot take; and one `Read` in 200 answered `ErrMalformed`,
-  `ErrTooLarge`, `ErrOverloaded` or `ErrHalted`. Then 3 s without faults. Histories pass
-  close-to-open, a read such a fault overlaps may come back short;
-  every system call succeeds or, overlapped by a fence, a refused allocation or a lasting `Read`
-  error, fails `EIO`, after which its process goes on and writes again what did not land; no
-  inode is handed out twice, no `mtime` goes backwards, every file's entry is in its directory's
-  slot, no directory is its own ancestor, at each daemon crash every chunk written lies below
-  `alloc_end` or within its purge entry, a `Read` answered with an error that lasts fails its
-  request and one answered with any other stays in hand to go again, a fenced session's chunk
-  client numbers its requests above every ID the old one took, and at the end no system call and
-  no request in the machine has waited more than 100 ms. Over its first 10 seeds, 627 fences
-  find chunk I/O in flight, 173 `Read`s fail and 197 go again. The quiet time steps past the
+  chunk write in 16, so a fence finds chunk I/O in flight, half the time handed to the devices up
+  to 300 ms before the daemon takes it, so they refuse the old session's writes while its client
+  is live and it sends them again; one pool allocation in 100 refused, which fails a chunk write
+  the client cannot take; and one `Read` in 200 answered `ErrMalformed`, `ErrTooLarge`,
+  `ErrOverloaded` or `ErrHalted`. Then 3 s without faults. Histories pass close-to-open, a read
+  such a fault overlaps may come back short; every system call succeeds or, overlapped by a
+  fence, a refused allocation or a lasting `Read` error, fails `EIO`, after which its process goes
+  on and writes again what did not land; no inode is handed out twice, no `mtime` goes backwards,
+  every file's entry is in its directory's slot, no directory is its own ancestor, at each daemon
+  crash every chunk written lies below `alloc_end` or within its purge entry, a `Read` answered
+  with an error that lasts fails its request and one answered with any other stays in hand to go
+  again, a fenced session's chunk client numbers its requests above every ID the old one took,
+  and at the end no system call and no request in the machine has waited more than 100 ms. Over
+  its first 10 seeds, 506 fences find chunk I/O in flight, the devices refuse a fenced session's
+  live client 593 writes, of which it sends 200 again, 183 `Read`s fail and 219 go again. The quiet time steps past the
   scheduler's own partitions, since a connection one breaks holds a read for an election
   timeout. The daemon holds each read's send up to 1 ms, so requests arrive during fetches and
   the stale-attribute check fires. Still, `keep_cache` always set, the stale check always false,
@@ -9733,10 +9735,13 @@ and chunk devices.
   each of the run's first 30 seeds (`TestARaiseAfterItsChunkWriteFailsTheMountsRun`, seed 1).
 - Each of the `Mount`'s plants fails the run (`TestPlantedMountBugsFailTheMountsRun`): a fenced
   session's chunk client numbering from 0 (`noIDBase`) fails the ID rule on each of the first 30
-  seeds (seed 1); the old client's parts never abandoned (`noAbandon`, 23 of 30, seed 1) and the
-  chunks of a call the client refused never completed (`dropRefused`, 8 of 30, seed 3) leave a
-  request waiting past 100 ms; a `Read` answered with an error that lasts sent again
-  (`retryLasting`) fails the `Read` rule on each of 30 (seed 1).
+  seeds (seed 1), though that rule checks the very ID the plant changes, and with it off no other
+  check, close-to-open included, catches the plant on any of the 30: a late answer to the old
+  session's write must meet a new request of the same ID to complete it; the old client's parts
+  never abandoned (`noAbandon`, 18 of 30, seed 1) and the chunks of a call the client refused never
+  completed (`dropRefused`, 16 of 30, seed 3) leave a request waiting past 100 ms; a `Read`
+  answered with an error that lasts sent again (`retryLasting`) fails the `Read` rule on each of
+  30 (seed 1).
 - One router output carrying both a read's answer and a `Txn`'s hands out both, though the read's
   answer, an `UNLINK`'s entry found, moves the `UNLINK` on to a call whose own pass through the
   router takes an output of its own (`TestOneRouterOutputHandsOutAReadsAnswerAndATxns`).
