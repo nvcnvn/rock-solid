@@ -194,7 +194,7 @@ Line(l) ==
     \/ /\ l.k = "mayfail"
        /\ \/ UNCHANGED vars
           \/ /\ LostAbove(l)
-             /\ \E r \in {x \in pend : x.c = l.c /\ x.v = l.v} : OwnFail(l.n, r)
+             /\ \E r \in {x \in ownw : x.c = l.c /\ x.v = l.v} : OwnFail(l.n, r)
     \/ /\ l.k = "restart"
        /\ Restart(l.n)
     \/ /\ l.k = "format"

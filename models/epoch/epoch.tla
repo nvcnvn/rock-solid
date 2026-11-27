@@ -1672,26 +1672,33 @@ GoneRefusesRecovery(n, c, d) ==
 \* disk error or a crash, after it went out to members, while the primary is
 \* still in its interval or has not decided its next one: peering answers only
 \* once a disk's records are durable or failed. The primary refuses
-\* its client and ends the interval. Only the newest version on its log fails: a
-\* record that fails below a later logged one, reported as held whole up to the
-\* failure, is not modelled.
+\* its client and ends the interval. A node that adopted a table where it no
+\* longer leads the PG refused the client and gated the version (Adopt); its
+\* record fails until a later interval of the PG is decided. Only the newest
+\* version on its log fails: a record that fails below a later logged one,
+\* reported as held whole up to the failure, is not modelled.
 OwnFail(n, r) ==
     LET p == ChunkPG[r.c]
         own == ddisk[n]
+        g == [c |-> r.c, v |-> r.v]
     IN /\ r.n = n
        /\ r \in ownw
        /\ Running(n)
-       /\ \/ pr[n][p].iv = IvOfV(r.v)
-          \/ ~Decided(n, p, pr[n][p].iv)
-       /\ Leads(n, p)
+       /\ \/ /\ r \in pend
+             /\ \/ pr[n][p].iv = IvOfV(r.v)
+                \/ ~Decided(n, p, pr[n][p].iv)
+             /\ Leads(n, p)
+          \/ /\ g \in gat[own]
+             /\ ~\E x \in dec : x.p = p /\ x.k > IvOfV(r.v)
        /\ Newest(dlog[own][r.c]) = r.v
        /\ Fault("ownfail")
        /\ dlog' = [dlog EXCEPT ![own][r.c] = @ \ {r.v}]
-       /\ ids' = [ids EXCEPT ![own] = {g \in @ : g.c # r.c \/ g.v # r.v}]
+       /\ ids' = [ids EXCEPT ![own] = {x \in @ : x.c # r.c \/ x.v # r.v}]
+       /\ gat' = [gat EXCEPT ![own] = @ \ {g}]
        /\ pend' = pend \ {r}
        /\ ownw' = ownw \ {r}
-       /\ pr' = [pr EXCEPT ![n][p].ask = TRUE]
-       /\ UNCHANGED <<wm, ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, rcv, miss, persIv, drp, rdrp, ldrp, imf, mrecv, gat, failed,
+       /\ pr' = IF Leads(n, p) THEN [pr EXCEPT ![n][p].ask = TRUE] ELSE pr
+       /\ UNCHANGED <<wm, ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, rcv, miss, persIv, drp, rdrp, ldrp, imf, mrecv, failed,
                       pv, pin, known, dec, act, rm, vers, ackd, wst, sends, dmn, bad, refd,
                       leaseVars, now, raw, boot, rawR, bootR, slew, runId, frz, suspAt, rstAt,
                       rq, gm, hbm, lastAsk, lastHb, net, arrived, dirty, hs, raftVars>>
@@ -2339,7 +2346,7 @@ Choices ==
     \/ \E n \in Node : Isolate(n)
     \/ \E m \in rm : MemberFail(m) \/ GoneRefuses(m)
     \/ \E n \in Node, c \in Chunk, d \in Disk : GoneRefusesRecovery(n, c, d)
-    \/ \E n \in Node, r \in pend : OwnFail(n, r)
+    \/ \E n \in Node, r \in ownw : OwnFail(n, r)
     \/ \E r \in pend : LoseAnswer(r)
     \/ \E n \in Node : \E x \in pin[n] : LoseReanswer(n, x)
     \/ \E d \in Disk, i \in 1..Len(Writes) : Trim(d, i)
