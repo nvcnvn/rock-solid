@@ -1,5 +1,7 @@
-// Package fsclient is the daemon's sans-IO machine for one FUSE mount: decoded requests in;
-// MetaStore reads and Txns, chunk-client calls and FUSE replies out.
+// Package fsclient is the daemon's sans-IO half of one FUSE mount: the Machine, decoded requests in
+// and MetaStore reads and Txns, chunk-client calls and FUSE replies out, and the Mount that makes
+// those calls through a meta.Client and a chunk client, request frames in and actions and reply
+// frames out.
 package fsclient
 
 import (
@@ -30,6 +32,7 @@ const (
 	ENAMETOOLONG fuseproto.Errno = 36
 	ENOTEMPTY    fuseproto.Errno = 39
 	ENODATA      fuseproto.Errno = 61
+	EPROTO       fuseproto.Errno = 71
 	EOPNOTSUPP   fuseproto.Errno = 95
 )
 
@@ -118,6 +121,10 @@ func (o *Output) Reset() {
 type plants struct {
 	// raiseAfterWrite raises alloc_end after the chunk write past it rather than before.
 	raiseAfterWrite bool
+	// noIDBase starts a fenced session's chunk client numbering at 0, noAbandon leaves the old
+	// client's parts in flight, dropRefused completes no chunk of a call the client refused, and
+	// retryLasting sends again a Read answered with an error that lasts.
+	noIDBase, noAbandon, dropRefused, retryLasting bool
 }
 
 // Machine serves one mount. Each request names its inodes by FUSE node ID, which is the inode ID.

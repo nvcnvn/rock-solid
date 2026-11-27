@@ -113,7 +113,7 @@ func (k *rwKernel) rw(r *fuseproto.Request) fuseproto.OutHeader {
 		k.pfd = []unix.PollFd{{Fd: int32(k.fd), Events: unix.POLLIN}}
 	}
 	if c, _ := unix.Poll(k.pfd, 1000); c == 0 {
-		k.t.Fatalf("no reply to op %d (pending %d, chunk client pending %d, refused %v)", r.Opcode, k.d.m.Pending(), k.d.cl.Pending(), k.d.Refused())
+		k.t.Fatalf("no reply to op %d (refused %v)", r.Opcode, k.d.Refused())
 	}
 	n, err := unix.Read(k.fd, k.buf)
 	if err != nil {
@@ -230,9 +230,6 @@ func TestAFenceFailsTheReadsAndWritesInFlight(t *testing.T) {
 	k.drain()
 	if got := k.replies(); got[4] != -int32(fuseproto.EIO) || got[6] != -int32(fuseproto.EIO) {
 		t.Fatalf("after the fence the kernel got %v, want EIO for 4 and 6", got)
-	}
-	if k.d.m.Pending() != 0 || k.d.cl.Pending() != 0 {
-		t.Fatalf("%d requests and %d chunk parts pending after the fence", k.d.m.Pending(), k.d.cl.Pending())
 	}
 	if live := k.ctx.Pool.(*core.Pool).Live(); live != 1 {
 		t.Errorf("%d pool buffers live after the fence", live)

@@ -179,11 +179,11 @@ func TestAnInitOfAnotherMajorEndsServeWithItsError(t *testing.T) {
 	if _, err := unix.Write(k.fd, k.req); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := k.d.Serve(&k.ctx, nil); !errors.Is(err, ErrMajor) {
+	if _, err := k.d.Serve(&k.ctx, nil); !errors.Is(err, fsclient.ErrMajor) {
 		t.Fatalf("Serve returned %v", err)
 	}
 	n, _ := unix.Read(k.fd, k.buf)
-	if h, _, err := fuseproto.DecodeReply(k.buf[:n]); err != nil || h.Unique != 2 || h.Error != -int32(eproto) {
+	if h, _, err := fuseproto.DecodeReply(k.buf[:n]); err != nil || h.Unique != 2 || h.Error != -int32(fsclient.EPROTO) {
 		t.Fatalf("INIT 8 answered %+v, %v", h, err)
 	}
 }
@@ -233,11 +233,11 @@ func TestAReadAnsweredWithAnErrorGoesAgainAfterTheRoutersWait(t *testing.T) {
 	for _, e := range []error{meta.ErrHalted, meta.ErrOverloaded} {
 		k := newFakeKernel(t)
 		acts := k.getattrAnswered(e)
-		if len(acts) != 1 || acts[0].Kind != core.ActSetTimer || acts[0].Timer != RouterTimer || acts[0].At <= k.ctx.Now {
+		if len(acts) != 1 || acts[0].Kind != core.ActSetTimer || acts[0].Timer != fsclient.MountTimer || acts[0].At <= k.ctx.Now {
 			t.Fatalf("a Read answered %v asked for %+v", e, acts)
 		}
 		k.ctx.Now = acts[0].At
-		k.ev = core.Event{Kind: core.EvTimer, Timer: RouterTimer}
+		k.ev = core.Event{Kind: core.EvTimer, Timer: fsclient.MountTimer}
 		if acts = k.d.OnEvent(&k.ctx, &k.ev, nil); len(acts) != 1 || acts[0].Kind != core.ActNetSend {
 			t.Fatalf("after %v the router's timer asked for %+v", e, acts)
 		}
@@ -258,9 +258,6 @@ func TestAReadAnsweredWithAnErrorThatLastsAnswersEIO(t *testing.T) {
 		}
 		if h, _, err := fuseproto.DecodeReply(k.buf[:n]); err != nil || h.Unique != 2 || h.Error != -int32(fuseproto.EIO) {
 			t.Fatalf("after %v the kernel got %+v, %v", e, h, err)
-		}
-		if k.d.m.Pending() != 0 {
-			t.Fatalf("%d requests pending after %v", k.d.m.Pending(), e)
 		}
 	}
 }

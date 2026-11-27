@@ -57,7 +57,7 @@ func serveRoot(dev Device) error {
 		var reply []byte
 		switch r.Opcode {
 		case fuseproto.OpInit:
-			o, err := Negotiate(&r.Init)
+			o, err := fsclient.Negotiate(&r.Init)
 			if err != nil {
 				return err
 			}

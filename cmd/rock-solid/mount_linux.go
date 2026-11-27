@@ -11,6 +11,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/driver/tcp"
 	"github.com/nvcnvn/rock-solid/internal/frontend/fuse"
+	"github.com/nvcnvn/rock-solid/internal/fsclient"
 	"github.com/nvcnvn/rock-solid/internal/loop"
 	"github.com/nvcnvn/rock-solid/internal/node"
 )
@@ -39,7 +40,7 @@ func (m *mount) takes(ctls []core.NodeID, ev *core.Event) bool {
 	case core.EvNetRecv, core.EvPeerLost:
 		return !slices.Contains(ctls, ev.Peer)
 	case core.EvTimer:
-		return ev.Timer == fuse.RouterTimer || ev.Timer == fuse.ReadyTimer || ev.Timer == chunkstore.ClientTimer
+		return ev.Timer == fsclient.MountTimer || ev.Timer == fuse.ReadyTimer || ev.Timer == chunkstore.ClientTimer
 	}
 	return false
 }
