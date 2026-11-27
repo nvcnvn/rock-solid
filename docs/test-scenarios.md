@@ -9595,7 +9595,9 @@ and chunk devices.
   `EOPNOTSUPP` for a non-empty file (`TestACreateWithoutExclOpensTheFileAnotherNodeCreatedFirst`);
   with `case_index`, one that loses only the folded name is `EEXIST`, and one whose name is
   unlinked before it reads the file creates it again under its own inode
-  (`TestACreateThatLosesItsNameAnswersByWhatHoldsIt`).
+  (`TestACreateThatLosesItsNameAnswersByWhatHoldsIt`); one whose file is unlinked after it read
+  the entry, before the attributes, creates it again under a fresh inode, not the unlinked one
+  (`TestACreateFindingTheFileGoneAfterItsEntryUsesAFreshInode`).
 - A mutating `Txn` names the mount's oldest request in hand, and a request whose answer was lost,
   resent after a later one's `Txn` applied, has one effect: an unlink answers as it first did, not
   `ENOENT`, which setting the oldest to the request's own ID or dropping the replay key gives
@@ -9603,15 +9605,20 @@ and chunk devices.
 - A write past `alloc_end` raises it by 1, 2, 4, … up to 16 chunks first, committing the size
   written so far in the same `Txn` (`TestWritesRaiseAllocEndFirstByDoublingSteps`); a write
   queued behind two flushes, the second finding nothing left to commit, still runs
-  (`TestARequestQueuedBehindTwoCommitsRuns`); `close` and
+  (`TestARequestQueuedBehindTwoCommitsRuns`), as does a flush behind a write that found another's
+  raise covers it (`TestAWriteCoveredByAnotherRaiseHandsTheInodeOn`); `close` and
   `fsync` commit size and `mtime = max(last write's time, mtime + 1 ns)`, and a read past the size
   is clamped (`TestCloseCommitsSizeAndMtimeAndReadsAreClamped`).
 - `LOOKUP` answers current attributes and a missing name `ENOENT`
   (`TestLookupAnswersCurrentAttributesAndAMissingNameWithENOENT`); an attribute reply fetched
   before a later request for its inode is fetched again
-  (`TestAnAttributeReplyFetchedBeforeALaterRequestIsFetchedAgain`); an open's fetch read
-  before the machine's own commit is fetched again, so a read after it is not short
-  (`TestAFetchFromBeforeTheMachinesOwnCommitIsNotTaken`); an open after the attributes
+  (`TestAnAttributeReplyFetchedBeforeALaterRequestIsFetchedAgain`); an open's or a getattr's
+  fetch read before the machine's own commit is fetched again, so the getattr answers the whole
+  size and a read after the open is not short (`TestAFetchFromBeforeTheMachinesOwnCommitIsNotTaken`);
+  a getattr's fetch read before the machine's own raise or `setattr` is too, so a later raise's
+  check passes the first time (`TestAGetattrFetchFromBeforeTheMachinesOwnChangeIsNotTaken`), and
+  so is a failed raise's reread from before the machine's own unlink
+  (`TestARaisesRereadFromBeforeTheMachinesOwnUnlinkIsReadAgain`); an open after the attributes
   changed is answered without `keep_cache` (`TestAnOpenAfterAChangeDropsTheCache`);
   `READDIRPLUS` lists every name across calls (`TestReaddirplusListsEveryNameAcrossCalls`).
 - The first create in a slot waits for one reservation `Txn`; a `mkdir` in a fresh slot creates in
@@ -9638,9 +9645,14 @@ and chunk devices.
   breaks holds a read for an election timeout. The daemon holds each read up to 1 ms before it sends
   it, so requests arrive during fetches and the stale-attribute check fires, in 56,761 of its
   105,694 calls over the first 10 seeds. Still, `keep_cache` always set, the stale check always
-  false, and the node's own writes left out of the size it shows each pass the run's 150 seeds; the
-  scripted tests catch all three. The run has one node, so no other node's close is ever seen; the
-  scripted tests own that side of Tier 1. The devices do not crash: a restarted primary asks the
+  false, and the node's own writes left out of the size it shows each pass the run's 150 seeds:
+  its one kernel's page cache sees every write the node makes, and a change it never saw comes only
+  from a daemon restart's unlink and create. Scripted tests catch each:
+  `TestAnOpenAfterAChangeDropsTheCache`, `TestAnAttributeReplyFetchedBeforeALaterRequestIsFetchedAgain`
+  and `TestCloseCommitsSizeAndMtimeAndReadsAreClamped`. A second mount in the run, which would catch
+  them, is owed by [Multi-node mounts](#multi-node-mounts). The scripted tests also own the rule
+  against attributes fetched before the machine's own change, since a fetch's answer and a later
+  `Txn`'s come from the leader in order on one connection. The devices do not crash: a restarted primary asks the
   control plane for a new interval, which the run does not model.
 - The plant `neg-raise-after-write` fails "a purge never misses a chunk written before a crash" on
   each of the run's first 30 seeds (`TestARaiseAfterItsChunkWriteFailsTheMountsRun`, seed 1).
@@ -9704,6 +9716,8 @@ upgrade](design.md#daemon-restart-and-upgrade)'s mount settings.
   write, read back, close, reopen from another process and read the same bytes, unlink, `ls`.
 - Another uid reads the mount (`allow_other`).
 - `testing.AllocsPerRun` of a request's path through the driver and the machine is 0.
+- A `CREATE` that opens another node's file, mode 0600 and another uid's, with `O_RDWR` answers
+  `EACCES`.
 
 ## Inode owner's open registry
 
@@ -9735,6 +9749,9 @@ From [Inode owner](design.md#metadata-layer-metastore), the [purge model](#purge
   another node and follow `NotLeader`.
 - **[property]** Seeded runs with failovers, partitions and paused clients: histories pass
   close-to-open.
+- **[property]** The filesystem client's seeded run with a second mount, its own kernel writing the
+  same two files: `keep_cache` always set, the stale check always false and the node's own writes
+  left out of the size it shows each fail close-to-open.
 - Over TCP, in Docker: three node processes, mounts on two, a file written and closed on one read on
   the other.
 
@@ -9836,7 +9853,8 @@ handoff spikes.
 - A holder takes every descriptor, clone and memfd from a root peer only; a successor adopts them
   and refuses saved `INIT` parameters other than its own.
 - After `kill -9`, the successor's `NOTIFY_RESEND` brings back every unanswered request; a resent
-  `mkdir` the dead process applied returns its first result, not `EEXIST`.
+  `mkdir` the dead process applied returns its first result, not `EEXIST`, and a resent `CREATE`
+  or `MKDIR` the dead process applied answers the inode it made.
 - A planned handoff drains and stalls the mount for a few ms.
 - Handles that held unflushed data fail their next `write`, `fsync` or `close` with `EIO`.
 - The successor closes none of its predecessor's files until its incarnation's version is
