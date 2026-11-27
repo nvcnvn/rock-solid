@@ -723,25 +723,6 @@ func TestARequestQueuedBehindTwoCommitsRuns(t *testing.T) {
 	}
 }
 
-// A GETATTR whose fetches keep going stale, each answered after the next GETATTR is read, is
-// fetched again once and then answered with an attribute timeout of 0.
-func TestAStreamOfRequestsCannotStarveAGetattr(t *testing.T) {
-	h := newMount(t, Config{})
-	ino, _ := h.create(meta.RootInode, "f")
-	h.held, h.replies = true, nil
-	first := h.send(fuseproto.Request{Opcode: fuseproto.OpGetattr, NodeID: ino})
-	for range 50 {
-		h.send(fuseproto.Request{Opcode: fuseproto.OpGetattr, NodeID: ino})
-		rd := h.reads[0]
-		h.reads = h.reads[1:]
-		h.answerRead(rd)
-		h.serve()
-	}
-	if va, _, _, err := fuseproto.DecodeAttrOut(h.ok(first)); err != nil || va != 0 {
-		t.Fatalf("the first getattr answered with attr_valid %d: %v", va, err)
-	}
-}
-
 // An open's fetch read before a close committed the size, and answered after the commit, is
 // fetched again rather than taken: a read in the handle then sees the whole file.
 func TestAFetchFromBeforeTheMachinesOwnCommitIsNotTaken(t *testing.T) {

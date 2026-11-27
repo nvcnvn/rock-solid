@@ -185,22 +185,19 @@ type op struct {
 	// resolved is a LOOKUP that has read its entry; again a request retried after a check failed.
 	resolved bool
 	again    bool
-	// refetched is a request that fetched its attributes again once they went stale, and expire
-	// one answering with stale attributes, which the kernel is told to hold for no time.
-	refetched, expire bool
-	over              uint64
-	omode             uint64
-	wtime             int64
-	fields            [6]meta.Field
-	child             uint64
-	mode              uint64
-	fresh             bool
-	slot              uint32
-	attr              meta.Attr
-	pend              meta.Purge
-	mreq              meta.Request
-	fs                meta.FS
-	errno             fuseproto.Errno
+	over     uint64
+	omode    uint64
+	wtime    int64
+	fields   [6]meta.Field
+	child    uint64
+	mode     uint64
+	fresh    bool
+	slot     uint32
+	attr     meta.Attr
+	pend     meta.Purge
+	mreq     meta.Request
+	fs       meta.FS
+	errno    fuseproto.Errno
 }
 
 // New is a mount's machine.

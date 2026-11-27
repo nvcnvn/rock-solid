@@ -9609,8 +9609,7 @@ and chunk devices.
 - `LOOKUP` answers current attributes and a missing name `ENOENT`
   (`TestLookupAnswersCurrentAttributesAndAMissingNameWithENOENT`); an attribute reply fetched
   before a later request for its inode is fetched again
-  (`TestAnAttributeReplyFetchedBeforeALaterRequestIsFetchedAgain`), only once, then answered with
-  an attribute timeout of 0 (`TestAStreamOfRequestsCannotStarveAGetattr`); an open's fetch read
+  (`TestAnAttributeReplyFetchedBeforeALaterRequestIsFetchedAgain`); an open's fetch read
   before the machine's own commit is fetched again, so a read after it is not short
   (`TestAFetchFromBeforeTheMachinesOwnCommitIsNotTaken`); an open after the attributes
   changed is answered without `keep_cache` (`TestAnOpenAfterAChangeDropsTheCache`);
