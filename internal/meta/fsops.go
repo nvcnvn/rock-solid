@@ -255,8 +255,8 @@ func (f *FS) remove(inode uint64, a *Attr, pending *Purge) {
 	}
 }
 
-// unlink drops one of inode's links, which it had when read as a: the last link of an inode no
-// one has open removes it, an open one becomes an orphan.
+// unlink drops one of inode's links, which it had when read as a: the last link of an inode not
+// open removes it, an open one becomes an orphan.
 func (f *FS) unlink(inode uint64, a *Attr, open bool, pending *Purge, now int64) {
 	if a.Nlink <= 1 && !open {
 		f.remove(inode, a, pending)
@@ -270,6 +270,15 @@ func (f *FS) unlink(inode uint64, a *Attr, open bool, pending *Purge, now int64)
 	if b.Nlink == 0 {
 		f.op(Put(f.slotKey(slotOf(inode), SlotOrphan, inode), nil))
 	}
+}
+
+// Free moves orphan inode, read as a with its purge entry pending, nil when it has none, to the
+// purge list: remove's Txn, which also deletes its orphan entry.
+func (f *FS) Free(inode uint64, a *Attr, pending *Purge) error {
+	f.begin(slotOf(inode))
+	f.remove(inode, a, pending)
+	f.op(Delete(f.slotKey(slotOf(inode), SlotOrphan, inode)))
+	return f.end()
 }
 
 // Root creates a volume's root directory and its slot counters, once.
@@ -414,6 +423,8 @@ func (f *FS) Link(dir, up uint64, name []byte, child uint64, a *Attr, now int64)
 }
 
 // Unlink removes name, child's entry in dir; child was read as a, with its purge entry pending.
+// With open, the last link's removal makes child an orphan, which its owner frees once no mount
+// has it open, as every client's unlink does.
 func (f *FS) Unlink(dir uint64, name []byte, child uint64, a *Attr, open bool, pending *Purge, now int64) error {
 	f.begin(slotOf(dir))
 	f.drop(dir, name, child, a.Mode, now)

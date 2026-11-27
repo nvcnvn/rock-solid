@@ -33,7 +33,7 @@ CONSTANTS
     MissingPunchSucceeds,   \* a punch to a missing chunk succeeds
     PurgerTermFence,        \* a primary rejects punches from an older term of the purger
     IncarnationFence,       \* a crashed daemon's writes are fenced before its files are released
-    OrphanWhileOpen,        \* unlink of an open file makes an orphan
+    OrphanWhileOpen,        \* unlink makes an orphan, freed at its last close
     OrphanAfterGrace,       \* an orphan moves to the purge list only after the grace period
     GraceUntilReregistered, \* the grace period lasts until every live session re-registered
     ReleaseOnAck,           \* a fenced session's opens count as closed at its acknowledgment
@@ -296,14 +296,14 @@ MemTailFlush(i) ==
 CutAll(i) == [ghost EXCEPT !.cut[i] = [b \in Bytes |-> @[b] \/ data[i][b] = 1],
                            !.acked[i] = [b \in Bytes |-> FALSE]]
 
-\* Removing the last link: if the owner sees the file open (or is in its grace period),
-\* the inode becomes an orphan; otherwise one transaction removes its keys and adds a
-\* purge entry for chunks 0 .. alloc_end.
+\* Removing the last link makes the inode an orphan, which the owner frees once no node has
+\* it open: the unlink's transaction cannot ask the owner, whose registry is not replicated, and
+\* an open the owner registers between the unlink's proposal and its apply would be missed.
 Unlink(i) ==
     /\ linked[i] /\ budget.u > 0
     /\ linked' = [linked EXCEPT ![i] = FALSE]
     /\ budget' = [budget EXCEPT !.u = @ - 1]
-    /\ IF OrphanWhileOpen /\ (reg[i] # {} \/ grace)
+    /\ IF OrphanWhileOpen
        THEN /\ orphan' = [orphan EXCEPT ![i] = TRUE]
             /\ UNCHANGED <<gone, entry, ghost>>
        ELSE /\ gone' = [gone EXCEPT ![i] = TRUE]

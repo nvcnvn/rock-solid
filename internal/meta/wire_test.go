@@ -118,7 +118,7 @@ func fuzzWire(f *testing.F, kind byte, decode func(pool core.BufPool, m *core.Ms
 		case KindAnswer:
 			_ = EncodeAnswer(pool, 5, &Answer{Token: 9, Result: Result{FailedCheck: 0, Actual: v, Updated: []uint64{1}}, Err: NotLeader{Group: 5, Leader: 1}}, &m)
 		case KindRead:
-			_ = EncodeRead(pool, 5, 9, &Read{Start: v, End: append(v, 0), Limit: 3}, &m)
+			_ = EncodeRead(pool, 5, 9, &Read{Start: v, End: append(v, 0), Limit: 3, Reg: byte(len(v)) % 3, Session: 7, Mount: 2}, &m)
 		case KindReadAnswer:
 			_ = EncodeReadAnswer(pool, 5, &ReadAnswer{Token: 9, KVs: []KV{{Key: b("k"), Value: v}, {Key: v, Value: nil}}, More: true}, &m)
 		}
@@ -219,7 +219,8 @@ func TestReadsAndTheirAnswersCrossTheWireWhole(t *testing.T) {
 	}
 	long := bytes.Repeat(b("k"), MaxKey+1)
 	for _, rd := range []Read{{Start: b("a"), End: b("b"), Limit: 1}, {Start: nil, End: nil, Limit: MaxScanBytes}, {Start: b("a"), End: []byte{}, Limit: 2},
-		{Start: long, End: long, Limit: 7}, {Start: b("a"), Limit: 1 << 30}} {
+		{Start: long, End: long, Limit: 7}, {Start: b("a"), Limit: 1 << 30}, {Start: b("a"), Limit: 1, Reg: RegOpen, Session: 1 << 40, Mount: 3},
+		{Start: long, End: long, Limit: 1, Reg: RegRelease, Session: 2, Mount: 1 << 31}} {
 		var m core.Msg
 		if err := EncodeRead(pool, 5, 9, &rd, &m); err != nil {
 			t.Fatal(err)
@@ -227,7 +228,8 @@ func TestReadsAndTheirAnswersCrossTheWireWhole(t *testing.T) {
 		var got Read
 		g, k, tok, _ := Peek(&m)
 		if err := DecodeRead(pool, &m, &got); err != nil || g != 5 || k != KindRead || tok != 9 || !bytes.Equal(got.Start, rd.Start) ||
-			!bytes.Equal(got.End, rd.End) || (got.End == nil) != (rd.End == nil) || got.Limit != min(rd.Limit, MaxScanBytes) {
+			!bytes.Equal(got.End, rd.End) || (got.End == nil) != (rd.End == nil) || got.Limit != min(rd.Limit, MaxScanBytes) ||
+			got.Reg != rd.Reg || got.Session != rd.Session || got.Mount != rd.Mount {
 			t.Fatalf("sent %+v, got %+v, %v", rd, got, err)
 		}
 		free(&m)
@@ -548,7 +550,7 @@ func TestAnAnswerOfUnknownOutcomeIsNeverResent(t *testing.T) {
 				t.Fatal(err)
 			}
 			sv := NewServer()
-			sv.waits[ServerToken|1] = wait{dataGroup, core.NodeID{Node: 3}, tok}
+			sv.waits[ServerToken|1] = wait{group: dataGroup, peer: core.NodeID{Node: 3}, token: tok}
 			applied := Answer{Token: ServerToken | 1, Result: Result{FailedCheck: 0, Actual: bytes.Repeat(b("x"), 1000)}}
 			acts := sv.Reply(&core.Context{Pool: full}, []Answer{applied}, nil)
 			if len(acts) != 1 || acts[0].Msg.Buf != core.NoBuf {

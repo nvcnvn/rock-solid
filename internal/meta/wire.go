@@ -16,7 +16,8 @@ import (
 // body in a pool buffer. A Txn's body is its entry encoding. An Answer's is its error's code, a
 // NotLeader's group, leader, node and term, FailedCheck+1 as a uvarint, Actual as a presence byte
 // and its bytes, and Updated as a count and 8 bytes each. A Read's is its start's bytes, its end as
-// a presence byte and its bytes, and its limit as a uvarint; a ReadAnswer's is its error's code and
+// a presence byte and its bytes, its limit as a uvarint and, for an open or release, Reg, Session
+// and Mount; a ReadAnswer's is its error's code and
 // a NotLeader's fields as an Answer's, then, with no error, More as a byte and its KVs as a count
 // and each key's and value's bytes.
 const (
@@ -219,10 +220,24 @@ func DecodeAnswer(pool core.BufPool, msg *core.Msg, a *Answer) error {
 
 // Read asks a group's leader for the keys of [Start, End), a nil End the rest of the key space, at
 // most Limit of them and MaxScanBytes of keys and values, from its state at one instant.
+// Reg makes the Read an open or a release of the file whose attributes Start names, by Session's
+// Mount, at the file's owner ("Inode owner" in docs/design.md).
 type Read struct {
 	Start, End []byte
 	Limit      int
+	Reg        byte
+	Session    uint64
+	Mount      uint32
 }
+
+// A Read's Reg: none, an open, or a release.
+const (
+	RegNone byte = iota
+	RegOpen
+	RegRelease
+)
+
+const regLen = 1 + 8 + 4
 
 // check reports the Scan error a leader would refuse r with: ErrLimit, or ErrTooLarge for a bound
 // longer than MaxKey + 1 bytes.
@@ -232,6 +247,9 @@ func (r *Read) check() error {
 	}
 	if len(r.Start) > MaxKey+1 || len(r.End) > MaxKey+1 {
 		return ErrTooLarge
+	}
+	if r.Reg > RegRelease {
+		return ErrMalformed
 	}
 	return nil
 }
@@ -256,6 +274,9 @@ func EncodeRead(pool core.BufPool, group, token uint64, r *Read, msg *core.Msg) 
 	if r.End != nil {
 		n += bytesLen(r.End)
 	}
+	if r.Reg != RegNone {
+		n += regLen
+	}
 	dst, err := frameMsg(pool, group, KindRead, token, n, msg)
 	if err != nil {
 		return err
@@ -266,7 +287,11 @@ func EncodeRead(pool core.BufPool, group, token uint64, r *Read, msg *core.Msg) 
 	} else {
 		dst = appendBytes(append(dst, 1), r.End)
 	}
-	if len(binary.AppendUvarint(dst, limit)) != n {
+	dst = binary.AppendUvarint(dst, limit)
+	if r.Reg != RegNone {
+		dst = le.AppendUint32(le.AppendUint64(append(dst, r.Reg), r.Session), r.Mount)
+	}
+	if len(dst) != n {
 		panic("meta: a Read's encoding is not the size counted")
 	}
 	return nil
@@ -287,10 +312,15 @@ func DecodeRead(pool core.BufPool, msg *core.Msg, r *Read) error {
 		end = d.bytes()
 	}
 	limit := d.uvarint()
-	if d.bad || len(d.b) != 0 || present > 1 || limit > MaxScanBytes {
+	*r = Read{Start: start, End: end, Limit: int(limit)}
+	tail := len(d.b) == regLen
+	if tail {
+		r.Reg, r.Session, r.Mount = d.b[0], le.Uint64(d.b[1:]), le.Uint32(d.b[9:])
+		d.b = nil
+	}
+	if d.bad || len(d.b) != 0 || present > 1 || limit > MaxScanBytes || tail && r.Reg == RegNone {
 		return ErrMalformed
 	}
-	*r = Read{Start: start, End: end, Limit: int(limit)}
 	if r.check() != nil {
 		return ErrMalformed
 	}
@@ -557,6 +587,7 @@ type Server struct {
 	ra    ReadAnswer
 	scan  ScanResult
 	plant readPlants
+	reg   registry
 }
 
 // readPlants are bugs a test plants: a leader that answers Reads without its lease, and a
@@ -568,16 +599,19 @@ type readPlants struct {
 // ServerHeld is a new Server's Held.
 const ServerHeld = 1024
 
-// wait is a Txn proposed: its group, and the loop and token it came under.
+// wait is a Txn proposed: its group, the loop and token it came under, and the inode it makes an
+// orphan, if any.
 type wait struct {
-	group uint64
-	peer  core.NodeID
-	token uint64
+	group    uint64
+	peer     core.NodeID
+	token    uint64
+	orphan   inodeAt
+	orphaned bool
 }
 
 // NewServer makes a server.
 func NewServer() *Server {
-	return &Server{Held: ServerHeld, waits: map[uint64]wait{}, held: map[uint64]int{}}
+	return &Server{Held: ServerHeld, waits: map[uint64]wait{}, held: map[uint64]int{}, reg: registry{freeing: map[uint64]inodeAt{}}}
 }
 
 // Serve takes ev, a Txn message, and proposes it on s, the replica of its group Peek names, or
@@ -595,7 +629,7 @@ func (sv *Server) Serve(ctx *core.Context, ev *core.Event, s *Shard, out *Output
 		sv.next++
 		local := ServerToken | sv.next
 		if err = s.submit(ctx, &sv.t, local, out); err == nil {
-			sv.waits[local] = wait{group, ev.Peer, token}
+			sv.waits[local] = sv.wait(group, ev.Peer, token)
 		}
 	}
 	return sv.refuse(ctx, ev, group, token, ok, err, acts)
@@ -616,7 +650,7 @@ func (sv *Server) ServeRound(ctx *core.Context, ev *core.Event, a *RoundShard, a
 	default:
 		sv.next++
 		local := ServerToken | sv.next
-		sv.waits[local] = wait{group, ev.Peer, token}
+		sv.waits[local] = sv.wait(group, ev.Peer, token)
 		sv.held[group]++
 		if acts, err = a.submit(ctx, &sv.t, local, acts); err != nil {
 			sv.release(local)
@@ -644,6 +678,9 @@ func (sv *Server) ServeRead(ctx *core.Context, ev *core.Event, s *Shard, acts []
 	default:
 		if err = s.Scan(sv.rd.Start, sv.rd.End, sv.rd.Limit, &sv.scan); err == nil {
 			sv.ra.KVs, sv.ra.More = sv.scan.KVs, sv.scan.More
+		}
+		if err == nil && sv.rd.Reg != RegNone {
+			err = sv.reg.register(group, &sv.rd, sv.scan.KVs)
 		}
 	}
 	if ok {
@@ -687,15 +724,27 @@ func (sv *Server) refuse(ctx *core.Context, ev *core.Event, group, token uint64,
 // Txn came from, and leaves the others, which are their proposers'.
 func (sv *Server) Reply(ctx *core.Context, answers []Answer, acts []core.Action) []core.Action {
 	for i := range answers {
+		if sv.reg.answered(&answers[i]) {
+			continue
+		}
 		w, ok := sv.release(answers[i].Token)
 		if !ok {
 			continue
+		}
+		if w.orphaned {
+			sv.reg.look(w.orphan)
 		}
 		sv.a = answers[i]
 		sv.a.Token = w.token
 		acts = sv.answer(ctx, w.group, w.peer, acts)
 	}
 	return acts
+}
+
+// wait is the wait of sv.t, sent to group under token from peer.
+func (sv *Server) wait(group uint64, peer core.NodeID, token uint64) wait {
+	at, ok := orphans(group, &sv.t)
+	return wait{group, peer, token, at, ok}
 }
 
 // release forgets the Txn proposed under token, if it waits, and returns its wait.
