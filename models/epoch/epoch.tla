@@ -67,7 +67,7 @@ MaxMembers == 8
 MaxDisk == Cardinality(Node) + MaxFormat
 Disk == 1..MaxDisk
 NoMiss == -1
-NoRcv == [v |-> 0, k |-> 0]
+NoRcv == [v |-> 0, k |-> 0, cut |-> 0]
 NoWin == [w |-> FALSE, w1s |-> 0, w1r |-> 0, w1g |-> 0, B |-> 0,
           lg |-> FALSE, a |-> FALSE, as |-> 0, asB |-> 0, ag |-> 0, am |-> Drift,
           ep |-> 0, lastg |-> 0, has |-> FALSE, rn |-> 0]
@@ -100,7 +100,7 @@ VARIABLES
     run,      \* [Node -> Nat]: process incarnation
     rsIv,     \* [Node -> [PG -> Nat]]: the interval a restarted primary may not peer in
     dlog,     \* [Disk -> [Chunk -> SUBSET Nat]]: versions in each disk's log
-    rcv,      \* [Disk -> [Chunk -> [v, k]]]: the version a disk's last recovery of a chunk was logged under, and its interval
+    rcv,      \* [Disk -> [Chunk -> [v, k, cut]]]: the version a disk's last recovery of a chunk was logged under, its interval, and that of the last one from another disk or leaving only its own interval's versions
     miss,     \* [Disk -> [Chunk -> Int]]: persisted missing list
     persIv,   \* [Disk -> [PG -> Nat]]: the interval whose missing list a disk persisted
     drp,      \* [Disk -> SUBSET [c, v]]: versions a store dropped at a decision its disk persisted
@@ -776,19 +776,21 @@ LapseFor(J, p, k) ==
 \* settled away stay in its log, never mapped, and so do those its store
 \* dropped at a decision the disk persisted, at the decision's marker, live and
 \* on replay. Recovery maps the copied versions, so it clears the chunk's
-\* drops, the settled ones of its own interval's activation and earlier ones
-\* too, which it may copy back from its source. Replay gates every version of
-\* an interval, mapped or not, so it can drop more than the live store did,
-\* but only on a chunk the disk lists at the decision, which recovery
-\* rewrites: conformance compares this with the store's map only on chunks the
-\* disk does not list. The versions a recovery copied, those of intervals
-\* before its own, go with the version it was logged under when that drops, or
-\* when a later activated decision keeps a version below it (Uncopied).
+\* drops, and a recovery from another disk the settled ones of its own
+\* interval's activation and earlier ones too, which it may copy back from its
+\* source; one from the disk itself copies only what the disk holds, so those
+\* stay settled away. Replay gates every version of an interval, mapped or not,
+\* so it can drop more than the live store did, but only on a chunk the disk
+\* lists at the decision, which recovery rewrites: conformance compares this
+\* with the store's map only on chunks the disk does not list. The versions a
+\* recovery copied, those of intervals before its own, go with the version it
+\* was logged under when that drops, or when a later activated decision keeps a
+\* version below it (Uncopied).
 DropsOf(d, c) ==
     UNION {y.gone[c] : y \in {x \in dec :
               /\ x.n = dnode[d]
               /\ x.p = ChunkPG[c]
-              /\ x.k > rcv[d][c].k
+              /\ x.k > rcv[d][c].cut
               /\ x.r = run[x.n]
               /\ [p |-> x.p, k |-> x.k, r |-> x.r] \in act}}
     \cup {g.v : g \in {y \in drp[d] \cup ldrp[d] : y.c = c}}
@@ -1272,7 +1274,7 @@ RecoverFrom(n, p, c, d, m, rv) ==
                       own == {g \in ids[d] : g.c # c \/ g.v \in dlog'[d][c] \/ Bug("KeepDroppedIds")}
                   IN /\ wm' = [wm EXCEPT ![d] = W]
                      /\ ids' = [ids EXCEPT ![d] = {g \in own \cup E : g.w \notin W}]
-       /\ rcv' = [rcv EXCEPT ![d][c] = [v |-> rv, k |-> k]]
+               /\ rcv' = [rcv EXCEPT ![d][c] = [v |-> rv, k |-> k, cut |-> IF s # d \/ \A v \in dlog'[d][c] : IvOfV(v) = k THEN k ELSE @.cut]]
        /\ miss' = [miss EXCEPT ![d][c] = NoMiss]
        /\ drp' = [drp EXCEPT ![d] = {g \in @ : g.c # c}]
        /\ rdrp' = [rdrp EXCEPT ![d] = {g \in @ : g.c # c}]

@@ -156,10 +156,12 @@ KnownIds(d, c) == {g \in ids[d] : g.c = c /\ g.v \in Known(d, c)}
 
 \* The entry of write w in n's pin that an order, reanswer or stale line takes.
 \* A write's entries differ only in hold, and a step's guards see hold only in
-\* Fenced, which a later hold, or none, meets no more often. Taking the
-\* earliest-held entry the step allows leaves the one that can do the most,
-\* so no behaviour is lost, and the trace does not double its states at each
-\* line of a write sent again while held.
+\* Fenced. The step takes the earliest-held entry it allows, which a later
+\* hold, or none, is fenced no more often than, so the trace does not double
+\* its states at each line of a write sent again while held. A later Send of w
+\* merges into the [w, 0] this leaves, where taking [w, 0] would have kept two
+\* entries, so the choice may reject a trace the spec accepts, never accepts
+\* one it rejects, and hides no bug of the code.
 Took(n, w, fenceable) ==
     LET S == {y \in pin[n] : y.w = w /\ ~(fenceable /\ Fenced(n, y))}
         H == {y \in S : y.hold # 0}

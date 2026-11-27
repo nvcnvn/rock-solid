@@ -30,7 +30,8 @@ env:
   RUN: ^TestPeeringKeepsAcknowledgedWritesAcrossPrimaries$|^TestConformResendSeeds$|^TestConformReplacementSeeds$
   COUNT: "500"
   # Plants run from seed 0: conform.sh fails a caught plant that fires on none of seeds 0 to 39, the
-  # nightly run's 40, which take 1 h 47 m on the SYS-2. The gate's 10 take about a quarter of that;
+  # nightly run's 40, which take about 2 h 30 m on the SYS-2 with the resend plants, an estimate until
+  # a nightly run times them. The gate's 10 take about a quarter of that;
   # every caught plant is rejected on one of them, and one that stops firing there gives no evidence
   # instead of failing until that night.
   PLANT_COUNT: "40"
