@@ -17,6 +17,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/fuseproto"
 	"github.com/nvcnvn/rock-solid/internal/lease"
+	"github.com/nvcnvn/rock-solid/internal/lease/leasetest"
 	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/meta"
 	nodepkg "github.com/nvcnvn/rock-solid/internal/node"
@@ -45,12 +46,12 @@ const (
 	quietFor = core.Tick(3_000_000)
 	// faultGap is the most time between two daemon crashes, and between two reboots.
 	faultGap = core.Tick(8_000_000)
-	// The client loop's timers: its router's and the held reads' retry.
+	// routerTimer is the client loop's router's timer.
 	routerTimer core.TimerID = 0x66737274
+	// readTimer is the client loop's timer for held reads, and readLatency the most a read is held
+	// before it is sent, drawn for each.
 	readTimer   core.TimerID = 0x66737264
-	readRetry                = core.Tick(1000)
-	// readLatency bounds a read's round trip, drawn for each.
-	readLatency = core.Tick(1000)
+	readLatency              = core.Tick(1000)
 	// realtime is the wall clock's reading at CLOCK_BOOTTIME 0, in nanoseconds.
 	realtime = int64(1_700_000_000_000_000_000)
 	// liveWait is how long, at the end of the quiet time, a system call or a request in a machine
@@ -59,7 +60,8 @@ const (
 )
 
 // fsRun is one node's mount against a three-replica MetaStore shard and three chunk devices.
-// Nodes 0 to 2 each run a meta.Shard replica, served over the meta wire; nodes 3 to 5 each run a
+// Nodes 0 to 2 each run a meta.Shard replica, its Txns and Reads served over the meta wire, and
+// renew node-pair leases with each other; nodes 3 to 5 each run a
 // node.Device, whose placement table puts four PGs of one member on them. The daemon on node 6 runs
 // a Machine per mount, a meta.Client and a chunkstore.Client, behind a sim.Mount whose processes
 // open the root directory's two files by name, read, read through a mapping, write the whole file
@@ -70,9 +72,8 @@ const (
 // odds, unlinks and creates each other again. The devices do not crash: a restarted primary asks
 // the control plane, which the run does not have, for a new interval.
 //
-// MetaStore reads have no wire yet: the daemon holds each for a round trip of up to readLatency,
-// then serves it from the state of an up replica that has applied every entry any replica has,
-// which a leader's lease read stands for, or holds it for readRetry more while none has.
+// The daemon holds each read for up to readLatency before it sends it, so requests arrive during
+// fetches and the machines' stale-attribute rule runs.
 type fsRun struct {
 	t     testing.TB
 	s     *sim.Scheduler
@@ -173,24 +174,29 @@ func sink(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
 }
 
 // run steps the run under its faults for runFor, then heals every partition and runs quietFor
-// more without faults, checking the invariants every 2,000 steps and at the end.
+// more without faults, Step's own partitions included, checking the invariants every 2,000 steps and at the end.
 func (r *fsRun) run() error {
 	for steps := 0; ; steps++ {
 		now := r.s.Time()
 		if now >= runFor+quietFor {
 			break
 		}
-		if now >= runFor {
+		if now < runFor {
+			r.faults()
+			if !r.s.Step() {
+				break
+			}
+		} else {
 			for a := range uint32(clientNode + 1) {
 				for b := range uint32(clientNode + 1) {
 					r.s.Heal(a, b)
 				}
 			}
-		} else {
-			r.faults()
-		}
-		if !r.s.Step() {
-			break
+			cs := r.s.Choices()
+			if len(cs) == 0 {
+				break
+			}
+			r.s.Take(cs[r.rng.Below(uint64(len(cs)))])
 		}
 		r.tend()
 		if steps%2000 == 1999 {
@@ -403,6 +409,7 @@ type metaRep struct {
 	loop   core.NodeID
 	s      *meta.Shard
 	sv     *meta.Server
+	pair   *leasetest.Pair
 	out    meta.Output
 	recs   [][]byte
 	flight []byte
@@ -431,12 +438,17 @@ func (m *metaRep) boot(n *sim.Node) {
 		if first {
 			start = lease.Time{}
 		}
-		cfg := meta.Config{Raft: raftshard.Config{Group: runGroup, ID: uint64(m.i) + 1, Storage: st, Seed: rng.Uint64(), Timer: 1,
-			Holder: lease.NewHolder(lease.DefaultConfig), Grantor: lease.NewGrantor(lease.DefaultConfig, rng.Uint64(), start)},
+		h, g := lease.NewHolder(lease.DefaultConfig), lease.NewGrantor(lease.DefaultConfig, rng.Uint64(), start)
+		cfg := meta.Config{Raft: raftshard.Config{Group: runGroup, ID: uint64(m.i) + 1, Storage: st, Seed: rng.Uint64(), Timer: 1, Holder: h, Grantor: g},
 			Tree: lsm.Config{MaxPiece: 64 << 10}}
+		var peers []core.NodeID
 		for j := range 3 {
 			cfg.Raft.Peers = append(cfg.Raft.Peers, raftshard.Peer{ID: uint64(j) + 1, Node: core.NodeID{Node: uint32(j)}})
+			if j != m.i {
+				peers = append(peers, core.NodeID{Node: uint32(j)})
+			}
 		}
+		m.pair = leasetest.New(h, g, peers, rng)
 		var err error
 		if m.s, err = meta.NewShard(cfg); err != nil {
 			m.r.t.Fatal(err)
@@ -449,11 +461,17 @@ func (m *metaRep) boot(n *sim.Node) {
 
 func (m *metaRep) onEvent(ctx *core.Context, ev *core.Event, acts []core.Action) []core.Action {
 	m.out.Reset()
+	acts, isLease := m.pair.OnEvent(ctx, ev, acts)
+	_, kind, _, _ := meta.Peek(&ev.Msg)
 	switch {
+	case isLease:
+		return acts
 	case ev.Kind == core.EvNetRecv && !ev.Msg.Group():
 		return sink(ctx, ev, acts)
-	case ev.Kind == core.EvNetRecv && len(ev.Msg.Inline()) > 9 && ev.Msg.Inline()[9] == meta.KindTxn:
+	case ev.Kind == core.EvNetRecv && kind == meta.KindTxn:
 		acts = m.sv.Serve(ctx, ev, m.s, &m.out, acts)
+	case ev.Kind == core.EvNetRecv && kind == meta.KindRead:
+		acts = m.sv.ServeRead(ctx, ev, m.s, acts)
 	case ev.Kind == core.EvDiskDone:
 		if ev.Err != core.DiskOK {
 			panic(ev.Err)
@@ -461,6 +479,9 @@ func (m *metaRep) onEvent(ctx *core.Context, ev *core.Event, acts []core.Action)
 		m.recs, m.flight = append(m.recs, m.flight), nil
 		m.s.Durable(ctx, uint64(ev.IO), &m.out)
 	default:
+		if ev.Kind == core.EvTimer {
+			acts = m.pair.Tick(ctx, acts)
+		}
 		m.s.OnEvent(ctx, ev, &m.out)
 	}
 	return m.finish(ctx, acts)
@@ -543,6 +564,7 @@ type daemon struct {
 	step  int
 	root  meta.FS
 	txns  map[uint64]sentTxn
+	reads map[uint64]heldRead
 	held  []heldRead
 	// armed is set while readTimer is set, for armedAt.
 	armed   bool
@@ -566,7 +588,7 @@ func (r *fsRun) bootDaemon(n *sim.Node) {
 	r.incs++
 	r.crashAt = r.s.Time() + core.Tick(r.rng.Below(uint64(faultGap)))
 	cfg := Config{Volume: vol, Pool: 1, Session: runSession, Mount: uint32(2 * r.incs), SlotLimit: 1 << 20}
-	d := &daemon{r: r, n: n, setup: New(cfg), txns: map[uint64]sentTxn{}}
+	d := &daemon{r: r, n: n, setup: New(cfg), txns: map[uint64]sentTxn{}, reads: map[uint64]heldRead{}}
 	cfg.Mount++
 	d.m = New(cfg)
 	d.setup.plant, d.m.plant = r.plant, r.plant
@@ -670,7 +692,7 @@ func (d *daemon) onEvent(ctx *core.Context, ev *core.Event, acts []core.Action) 
 				if h.at > ctx.Now {
 					d.hold(h)
 				} else {
-					d.serve(h)
+					d.send(h)
 				}
 			}
 		case ev.Kind == core.EvPeerLost:
@@ -762,12 +784,29 @@ func (d *daemon) txn(m *Machine, s TxnSend) {
 	d.txns[tok] = sentTxn{m, s.Token}
 }
 
-// routed runs f on the meta client and hands each answer to the machine that sent its Txn.
+// routed runs f on the meta client and hands each answer to the machine that sent its Txn or Read,
+// sending again a Read whose answer promises nothing.
 func (d *daemon) routed(f func(o *meta.RouterOutput)) {
 	d.rout.Reset()
 	f(&d.rout)
 	d.acts = append(d.acts, d.rout.Actions...)
-	answers := slices.Clone(d.rout.Answers)
+	reads, answers := slices.Clone(d.rout.Reads), slices.Clone(d.rout.Answers)
+	for i := range reads {
+		a := &reads[i]
+		s, ok := d.reads[a.Token]
+		if !ok {
+			continue
+		}
+		delete(d.reads, a.Token)
+		switch {
+		case errResend(a.Err):
+			d.read(s.m, s.rd)
+		case a.Err != nil:
+			panic(fmt.Sprintf("read %+v: %v", s.rd, a.Err))
+		default:
+			d.feed(s.m, func(o *Output) { s.m.ReadDone(d.ctx, s.rd.Token, a.KVs, o) })
+		}
+	}
 	for i := range answers {
 		a := &answers[i]
 		s, ok := d.txns[a.Token]
@@ -787,7 +826,7 @@ func (d *daemon) routed(f func(o *meta.RouterOutput)) {
 	}
 }
 
-// read holds rd for its round trip.
+// read holds rd for up to readLatency before it is sent.
 func (d *daemon) read(m *Machine, rd Read) {
 	rd.Start, rd.End = bytes.Clone(rd.Start), bytes.Clone(rd.End)
 	d.hold(heldRead{m, rd, d.ctx.Now + core.Tick(d.r.rng.Below(uint64(readLatency)))})
@@ -802,19 +841,17 @@ func (d *daemon) hold(h heldRead) {
 	}
 }
 
-// serve answers h from the current state, or holds it for readRetry while none is.
-func (d *daemon) serve(h heldRead) {
-	s := d.r.current()
-	if s == nil {
-		h.at = d.ctx.Now + readRetry
-		d.hold(h)
-		return
+// send sends h's read to the shard leader over the meta wire.
+func (d *daemon) send(h heldRead) {
+	var tok uint64
+	var err error
+	d.routed(func(o *meta.RouterOutput) {
+		tok, err = d.mc.Read(d.ctx, &meta.Read{Start: h.rd.Start, End: h.rd.End, Limit: h.rd.Limit}, o)
+	})
+	if err != nil {
+		panic(fmt.Sprintf("the router refused %+v: %v", h.rd, err))
 	}
-	var res meta.ScanResult
-	if err := s.Scan(h.rd.Start, h.rd.End, h.rd.Limit, &res); err != nil {
-		panic(err)
-	}
-	d.feed(h.m, func(o *Output) { h.m.ReadDone(d.ctx, h.rd.Token, res.KVs, o) })
+	d.reads[tok] = h
 }
 
 // reply writes a reply to the mount, or takes a setup reply and sends setup's next request.
@@ -1000,5 +1037,44 @@ func TestARaiseAfterItsChunkWriteFailsTheMountsRun(t *testing.T) {
 	r.inv.Only(invPurgeMisses)
 	if err := r.run(); err == nil || !strings.Contains(err.Error(), invPurgeMisses) {
 		t.Fatalf("the planted run gave %v", err)
+	}
+}
+
+// A router output that carries both a Read's answer and a Txn's hands out both, though the Read's
+// answer, an UNLINK's entry found absent, moves setup on to a CREATE whose Txn's own pass through
+// the router resets its output.
+func TestOneRouterOutputHandsOutAReadsAnswerAndATxns(t *testing.T) {
+	r := newFSRun(t, 1, plants{})
+	var tok uint64
+	for tok == 0 {
+		if r.s.Time() >= runFor {
+			t.Fatal("no setup UNLINK read its entry")
+		}
+		r.faults()
+		r.s.Step()
+		r.tend()
+		for k, h := range r.d.reads {
+			if w, ok := h.m.waits[h.rd.Token]; ok && h.m == r.d.setup && w.o.req.Opcode == fuseproto.OpUnlink {
+				tok = k
+			}
+		}
+	}
+	const other = ^uint64(0)
+	d := r.d
+	d.txns[other] = sentTxn{m: d.m, token: other}
+	sent := len(d.txns)
+	d.n.Call(d.loop, func(ctx *core.Context, acts []core.Action) []core.Action {
+		return d.pass(ctx, acts, func() {
+			d.routed(func(o *meta.RouterOutput) {
+				o.Reads = append(o.Reads, meta.ReadAnswer{Token: tok})
+				o.Answers = append(o.Answers, meta.Answer{Token: other, Result: meta.Result{FailedCheck: -1}})
+			})
+		})
+	})
+	if _, ok := d.txns[other]; ok {
+		t.Fatal("the Txn's answer was lost")
+	}
+	if len(d.txns) != sent {
+		t.Fatalf("setup's CREATE sent %d Txns, want 1", len(d.txns)-sent+1)
 	}
 }

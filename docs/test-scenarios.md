@@ -9624,25 +9624,29 @@ and chunk devices.
 - The plant `neg-raise-after-write` leaves a chunk past `alloc_end` that the purge of the file,
   unlinked after a crash, misses (`TestAWriteBeforeItsRaiseLeavesAChunkThePurgeMisses`).
 - **[property]** `TestAMountsHistoriesKeepTheirInvariantsAcrossCrashes`: one node's `sim.Mount`,
-  four processes on two root-directory files as in `TestFileHistoriesKeepCloseToOpen`, against
-  three `meta.Shard` replicas over the meta wire and three `node.Device` chunk devices; for 30 s
-  partitions, replicas' nodes rebooted so leaders change (until 5 s before the end, a reboot's
-  heartbeat and restart wait, so a quorum votes once faults heal), and the daemon crashed, half the
-  time within 3 ms of a file's first chunk write, restarting as a new mount that may unlink and
-  create each file again; then 3 s without faults. Histories pass close-to-open, every system call
-  succeeds, no inode is handed out twice, no `mtime` goes backwards, every file's entry is in its
-  directory's slot, no directory is its own ancestor, at each daemon crash every chunk written
-  lies below `alloc_end` or within its purge entry, and at the end no system call and no request
-  in the machines has waited more than 100 ms. Until **MetaStore reads over the wire**, the run
-  holds each read for a round trip of up to 1 ms, then serves it from a replica that has applied
-  every entry any replica has, so requests arrive during fetches and the stale-attribute rule
-  runs: over its 150 seeds `keep_cache` always set, the stale check always false, and the node's
-  own writes left out of the size it shows each fail close-to-open. The run has one node, so no
-  other node's close is ever seen; the scripted tests own that side of Tier 1. The devices do not
-  crash: a restarted primary asks the control plane for a new interval, which the run does not
-  model.
+  four processes on two root-directory files as in `TestFileHistoriesKeepCloseToOpen`, against three
+  `meta.Shard` replicas, which serve its `Txn`s and lease reads over the meta wire and renew
+  node-pair leases with each other, and three `node.Device` chunk devices; for 30 s partitions,
+  replicas' nodes rebooted so leaders change (until 5 s before the end, a reboot's heartbeat and
+  restart wait, so a quorum votes once faults heal), and the daemon crashed, half the time within 3
+  ms of a file's first chunk write, restarting as a new mount that may unlink and create each file
+  again; then 3 s without faults. Histories pass close-to-open, every system call succeeds, no inode
+  is handed out twice, no `mtime` goes backwards, every file's entry is in its directory's slot, no
+  directory is its own ancestor, at each daemon crash every chunk written lies below `alloc_end` or
+  within its purge entry, and at the end no system call and no request in the machines has waited
+  more than 100 ms. The quiet time steps past the scheduler's own partitions, since a connection one
+  breaks holds a read for an election timeout. The daemon holds each read up to 1 ms before it sends
+  it, so requests arrive during fetches and the stale-attribute check fires, in 56,761 of its
+  105,694 calls over the first 10 seeds. Still, `keep_cache` always set, the stale check always
+  false, and the node's own writes left out of the size it shows each pass the run's 150 seeds; the
+  scripted tests catch all three. The run has one node, so no other node's close is ever seen; the
+  scripted tests own that side of Tier 1. The devices do not crash: a restarted primary asks the
+  control plane for a new interval, which the run does not model.
 - The plant `neg-raise-after-write` fails "a purge never misses a chunk written before a crash" on
   each of the run's first 30 seeds (`TestARaiseAfterItsChunkWriteFailsTheMountsRun`, seed 1).
+- One router output carrying both a read's answer and a `Txn`'s hands out both, though the read's
+  answer moves setup on to a `Txn` whose own pass through the router resets that output
+  (`TestOneRouterOutputHandsOutAReadsAnswerAndATxns`).
 
 ## Volume records and the first data group
 
