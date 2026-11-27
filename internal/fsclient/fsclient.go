@@ -61,11 +61,15 @@ type Config struct {
 	Strict bool
 }
 
-// Read asks for the keys of [Start, End), at most Limit, from the shard leader's lease reads.
+// Read asks for the keys of [Start, End), at most Limit, from the shard leader's lease reads; Reg
+// makes it an open or a release of the file by Session's Mount at the file's owner.
 type Read struct {
 	Token      uint64
 	Start, End []byte
 	Limit      int
+	Reg        byte
+	Session    uint64
+	Mount      uint32
 }
 
 // TxnSend is a Txn to send, which stays unchanged until TxnDone settles Token.
@@ -687,15 +691,7 @@ func (m *Machine) run(o *op, out *Output) {
 	case fuseproto.OpReaddirplus:
 		m.readdir(o, out)
 	case fuseproto.OpRelease, fuseproto.OpReleasedir:
-		if h := m.handles[o.req.Fh]; h != nil {
-			delete(m.handles, o.req.Fh)
-			m.freeFh = append(m.freeFh, h)
-			if n := m.nodes[h.ino]; n != nil && o.req.Opcode == fuseproto.OpRelease {
-				n.opens--
-				defer m.drop(h.ino, n)
-			}
-		}
-		m.empty(o, out)
+		m.release(o, out)
 	case fuseproto.OpStatfs:
 		out.Replies = fuseproto.AppendStatfs(out.Replies, o.req.Unique, &fuseproto.Statfs{Blocks: 1 << 40, Bfree: 1 << 40, Bavail: 1 << 40, Files: 1 << 40, Ffree: 1 << 40, Bsize: core.BlockSize, NameLen: NameMax, Frsize: core.BlockSize})
 		m.done(o)

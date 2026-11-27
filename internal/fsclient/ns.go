@@ -45,6 +45,7 @@ const (
 	createOpen = iota + 20
 	createFetch
 	createOpened
+	createRegistered
 )
 
 func (m *Machine) create(o *op, out *Output) {
@@ -65,16 +66,19 @@ func (m *Machine) create(o *op, out *Output) {
 			m.fail(o, EISDIR, out)
 			return
 		}
+		if releasing(o, m.node(o.child)) {
+			return
+		}
 		m.node(o.child).last = max(m.node(o.child).last, o.seq)
-		m.fetch(o, o.child, false, out)
+		m.opening(o, o.child, out)
 		o.step = createOpened
 	case createOpened:
 		if m.stale(o, o.child) {
-			m.fetch(o, o.child, false, out)
+			m.opening(o, o.child, out)
 			return
 		}
 		n, ok := m.took(o, o.child)
-		if !ok {
+		if !ok || unregistered(n) {
 			o.child = 0
 			m.recreate(o, out)
 			return
@@ -93,6 +97,13 @@ func (m *Machine) create(o *op, out *Output) {
 			return
 		}
 		m.handOut(o, n, o.child, true, out)
+	case createRegistered:
+		var a meta.Attr
+		if !o.got[0].ok || meta.DecodeAttr(o.got[0].v, &a) != nil || a.Nlink == 0 && m.node(o.child).opens == 0 {
+			m.fail(o, ENOENT, out)
+			return
+		}
+		m.handOut(o, m.node(o.child), o.child, true, out)
 	case 0:
 		if len(o.req.Name) > NameMax {
 			m.fail(o, ENAMETOOLONG, out)
@@ -138,7 +149,9 @@ func (m *Machine) create(o *op, out *Output) {
 			out.Replies = fuseproto.AppendEntry(out.Replies, o.req.Unique, &e)
 			m.end(o, out)
 		} else {
-			m.handOut(o, n, o.child, true, out)
+			m.get(o, 0, o.child, meta.InodeAttr, nil, out)
+			m.reg(meta.RegOpen, out)
+			o.step = createRegistered
 		}
 	}
 }
@@ -214,12 +227,6 @@ func took2(o *op, s int, a *meta.Attr, p *meta.Purge) (pending *meta.Purge, ok b
 	return nil, true
 }
 
-// open reports whether this mount has ino open, which stands for the owner's open registry.
-func (m *Machine) opened(ino uint64) bool {
-	n := m.nodes[ino]
-	return n != nil && n.opens > 0
-}
-
 // unlink serves UNLINK and RMDIR.
 func (m *Machine) unlink(o *op, out *Output) {
 	dir, rmdir := o.req.NodeID, o.req.Opcode == fuseproto.OpRmdir
@@ -251,7 +258,7 @@ func (m *Machine) unlink(o *op, out *Output) {
 			return
 		}
 		o.step = 3
-		m.build(o, o.fs.Unlink(dir, o.req.Name, o.child, &o.attr, m.opened(o.child), pending, o.now), out)
+		m.build(o, o.fs.Unlink(dir, o.req.Name, o.child, &o.attr, true, pending, o.now), out)
 	case -1:
 		if n := m.nodes[o.child]; n != nil && n.attr.Nlink > 0 {
 			n.attr.Nlink--
@@ -313,7 +320,7 @@ func (m *Machine) rename(o *op, out *Output) {
 				m.run(o, out)
 				return
 			}
-			r.OverAttr, r.OverOpen, r.OverPending = &o.attr, m.opened(o.over), pending
+			r.OverAttr, r.OverOpen, r.OverPending = &o.attr, true, pending
 		}
 		o.step = 3
 		m.build(o, o.fs.Rename(&r, o.now), out)

@@ -619,6 +619,9 @@ func (r *fsRun) answerErr(ctx *core.Context, ev *core.Event, acts []core.Action)
 
 func (m *metaRep) finish(ctx *core.Context, acts []core.Action) []core.Action {
 	acts = m.sv.Reply(ctx, m.out.Answers, acts)
+	m.out.Answers = m.out.Answers[:0]
+	m.sv.Free(ctx, m.s, &m.out)
+	acts = m.sv.Reply(ctx, m.out.Answers, acts)
 	acts = append(acts, m.out.Raft.Actions...)
 	if f := m.out.Raft.Flush; f != 0 {
 		m.flight = raftshard.AppendRound(nil, &m.out.Raft.Round)

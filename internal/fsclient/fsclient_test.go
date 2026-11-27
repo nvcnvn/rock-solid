@@ -35,6 +35,7 @@ type mount struct {
 	data   map[uint64][]byte
 	// held keeps the calls of the next requests for the test to answer.
 	held    bool
+	regs    []Read
 	reads   []Read
 	txns    []meta.Txn
 	sent    []TxnSend
@@ -147,6 +148,11 @@ func (h *mount) serve() {
 		}
 		for _, s := range o.Txns {
 			h.txns = append(h.txns, *s.Txn)
+		}
+		for _, rd := range o.Reads {
+			if rd.Reg != meta.RegNone {
+				h.regs = append(h.regs, rd)
+			}
 		}
 		if h.held {
 			h.reads = append(h.reads, o.Reads...)
@@ -363,6 +369,74 @@ func TestAnOpenAfterAChangeDropsTheCache(t *testing.T) {
 	if o := h.open(ino); o.Flags&fuseproto.OpenKeepCache == 0 {
 		t.Fatal("a second open with no change between dropped the cache")
 	}
+}
+
+// wantRegs fails unless the machine's open and release Reads since the last call are regs, each
+// of the mount's session and mount.
+func (h *mount) wantRegs(regs ...byte) {
+	h.t.Helper()
+	var got []byte
+	for _, rd := range h.regs {
+		if rd.Session != 7 || rd.Mount != 1 {
+			h.t.Fatalf("a registration named session %d mount %d", rd.Session, rd.Mount)
+		}
+		got = append(got, rd.Reg)
+	}
+	if !bytes.Equal(got, regs) {
+		h.t.Fatalf("registrations %v, want %v", got, regs)
+	}
+	h.regs = nil
+}
+
+// Every open and create registers the mount's open at the file's owner, and the file's last
+// release deregisters it before its reply; an open that arrives meanwhile waits for that answer,
+// so the owner never takes it first.
+func TestOpensAndTheLastReleaseRegisterAtTheOwner(t *testing.T) {
+	h := newMount(t, Config{})
+	ino, fh := h.create(meta.RootInode, "f")
+	h.wantRegs(meta.RegOpen)
+	fh2, err := fuseproto.DecodeOpen(h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpOpen, NodeID: ino})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.wantRegs(meta.RegOpen)
+	h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpRelease, NodeID: ino, Fh: fh}))
+	h.wantRegs()
+	h.held = true
+	rel := h.send(fuseproto.Request{Opcode: fuseproto.OpRelease, NodeID: ino, Fh: fh2.Fh})
+	h.wantRegs(meta.RegRelease)
+	open := h.send(fuseproto.Request{Opcode: fuseproto.OpOpen, NodeID: ino})
+	if len(h.reads) != 1 || len(h.replies) != 3 {
+		t.Fatalf("%d reads sent and %d replies with the last release unanswered", len(h.reads), len(h.replies))
+	}
+	h.held = false
+	rd := h.reads[0]
+	h.reads = nil
+	h.answerRead(rd)
+	h.serve()
+	h.ok(rel)
+	h.ok(open)
+	h.wantRegs(meta.RegOpen)
+}
+
+// An unlink, of an open file or not, and a rename over a file each leave the inode an orphan for
+// its owner to free, and an open of an orphan the mount does not have open is ENOENT.
+func TestAnUnlinkLeavesAnOrphanForTheOwner(t *testing.T) {
+	h := newMount(t, Config{})
+	ino, _ := h.create(meta.RootInode, "f")
+	other, fh := h.create(meta.RootInode, "g")
+	h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpRelease, NodeID: other, Fh: fh}))
+	h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpUnlink, NodeID: meta.RootInode, Name: []byte("g")}))
+	h.create(meta.RootInode, "h")
+	h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpRename, NodeID: meta.RootInode, Name: []byte("h"), NewDir: meta.RootInode, NewName: []byte("f")}))
+	for _, i := range []uint64{ino, other} {
+		var k meta.Key
+		if kvs := h.scanNow(Read{Start: h.m.key(nil, i, meta.SlotOrphan, nil), End: h.m.key(nil, i, meta.SlotOrphan+1, nil), Limit: 1}); len(kvs) != 1 ||
+			meta.DecodeKey(kvs[0].Key, &k) != nil || k.ID != i {
+			t.Fatalf("inode %d is not an orphan: %v", i, kvs)
+		}
+	}
+	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpOpen, NodeID: other}), ENOENT)
 }
 
 func TestNamespaceRequestsAnswerTheirChecksErrnos(t *testing.T) {

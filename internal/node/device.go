@@ -471,6 +471,9 @@ func (d *Device) settle(ctx *core.Context, err error, out *DeviceOutput) {
 	case d.phase == recovering || d.phase == formatting:
 		d.fail(out)
 	}
+	for _, a := range d.metas {
+		out.Actions = d.sv.FreeRound(ctx, a, out.Actions)
+	}
 	d.flush(out)
 }
 

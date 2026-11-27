@@ -14,6 +14,66 @@ func (m *Machine) fetch(o *op, ino uint64, dir bool, out *Output) {
 	o.fetch = m.seq
 }
 
+// opening reads ino's attributes as fetch does, and registers the mount's open of it at its owner.
+func (m *Machine) opening(o *op, ino uint64, out *Output) {
+	m.fetch(o, ino, false, out)
+	m.reg(meta.RegOpen, out)
+}
+
+// reg makes the Read just sent an open or a release of the file by this mount.
+func (m *Machine) reg(reg byte, out *Output) {
+	rd := &out.Reads[len(out.Reads)-1]
+	rd.Reg, rd.Session, rd.Mount = reg, m.cfg.Session, m.cfg.Mount
+}
+
+// unregistered reports a file its owner took no open of: one with no link that this mount does not
+// have open already.
+func unregistered(n *node) bool { return n.attr.Nlink == 0 && n.opens == 0 }
+
+// releasing reports a release of n in flight, and queues o behind it: an open sent before its
+// answer could reach the owner first and be deregistered.
+func releasing(o *op, n *node) bool {
+	if n.busy == nil || n.busy.req.Opcode != fuseproto.OpRelease {
+		return false
+	}
+	n.queue = append(n.queue, o)
+	return true
+}
+
+// release ends a handle; the last of a file's on the mount deregisters the mount's open at the
+// file's owner before its reply, holding the inode so no open overtakes it.
+func (m *Machine) release(o *op, out *Output) {
+	h := m.handles[o.req.Fh]
+	if o.step == 1 {
+		m.empty(o, out)
+		return
+	}
+	if h == nil {
+		m.empty(o, out)
+		return
+	}
+	n := m.nodes[h.ino]
+	last := n != nil && o.req.Opcode == fuseproto.OpRelease && n.opens == 1
+	if last && !m.lock(o, n) {
+		return
+	}
+	delete(m.handles, o.req.Fh)
+	m.freeFh = append(m.freeFh, h)
+	if n == nil || o.req.Opcode != fuseproto.OpRelease {
+		m.empty(o, out)
+		return
+	}
+	n.opens--
+	defer m.drop(h.ino, n)
+	if !last {
+		m.empty(o, out)
+		return
+	}
+	m.get(o, 0, h.ino, meta.InodeAttr, nil, out)
+	m.reg(meta.RegRelease, out)
+	o.step = 1
+}
+
 // stale reports attributes of ino that o fetched before the machine read a later request for the
 // inode, or a later LOOKUP that has not yet read its entry and so may name it: the kernel drops
 // the reply to a request sent before the inode's attributes last changed, so a reply of older
@@ -134,16 +194,19 @@ func (m *Machine) getattr(o *op, out *Output) {
 func (m *Machine) open(o *op, out *Output) {
 	ino := o.req.NodeID
 	if o.step == 0 {
-		m.fetch(o, ino, false, out)
+		if releasing(o, m.node(ino)) {
+			return
+		}
+		m.opening(o, ino, out)
 		o.step = 1
 		return
 	}
 	if m.older(o, ino) {
-		m.fetch(o, ino, false, out)
+		m.opening(o, ino, out)
 		return
 	}
 	n, ok := m.took(o, ino)
-	if !ok {
+	if !ok || unregistered(n) {
 		m.fail(o, ENOENT, out)
 		return
 	}

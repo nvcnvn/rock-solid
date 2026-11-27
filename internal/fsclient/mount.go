@@ -337,7 +337,7 @@ func (g *Mount) read(ctx *core.Context, rd Read) {
 		h = new(sentRead)
 	}
 	h.token = rd.Token
-	h.rd = meta.Read{Start: append(h.rd.Start[:0], rd.Start...), End: append(h.rd.End[:0], rd.End...), Limit: rd.Limit}
+	h.rd = meta.Read{Start: append(h.rd.Start[:0], rd.Start...), End: append(h.rd.End[:0], rd.End...), Limit: rd.Limit, Reg: rd.Reg, Session: rd.Session, Mount: rd.Mount}
 	if rd.End == nil {
 		h.rd.End = nil
 	}
