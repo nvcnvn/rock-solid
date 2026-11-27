@@ -96,12 +96,12 @@ purge/neg-overwrite-entry	open	Purger
 purge/neg-progress-before-punch	open	Purger
 purge/neg-purger-no-term	open	Purger
 purge/neg-raise-after-write	fsclient.raiseAfterWrite	TestARaiseAfterItsChunkWriteFailsTheMountsRun
-purge/neg-release-on-commit	open	Inode owner's open registry
+purge/neg-release-on-commit	meta.releaseOnCommit	TestPlantedRegistryBugsFreeAnOpenOrphan
 purge/neg-skip-partial-block	open	Truncate
 purge/neg-tail-in-memory	open	Truncate
 purge/neg-trunc-at-chunk	open	Truncate
 purge/neg-unchecked-removal	open	Purger
-purge/neg-unlink-open	open	Inode owner's open registry
+purge/neg-unlink-open	meta.unlinkOpen	TestPlantedRegistryBugsFreeAnOpenOrphan
 recall/neg-ack-before-size	open	phase 7
 recall/neg-answer-early	open	phase 7
 recall/neg-any-ack	open	phase 7
