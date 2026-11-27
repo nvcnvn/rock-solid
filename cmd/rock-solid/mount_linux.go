@@ -15,6 +15,10 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/node"
 )
 
+// poolWait is how long the mount leaves its device unread while the pool has no buffer to read a
+// request into: the pool says nothing when one frees, and the device stays readable.
+const poolWait = core.Tick(1_000)
+
 // mount is a node's FUSE mount, served on loop 0 beside the node's machine, a loop that hosts no
 // MetaStore replica: the daemon mounts once the node's session has started and its shard map
 // places every voter, and hands the daemon every session, table and membership the node takes.
@@ -52,7 +56,10 @@ func (m *mount) onEvent(ctx *core.Context, ev *core.Event, acts []core.Action) [
 	}
 	acts, err := m.d.Serve(ctx, acts)
 	m.logRefused()
-	if err != nil {
+	switch {
+	case errors.Is(err, fuse.ErrShort):
+		m.drv.l.Pause(m.drv.c, ctx.Now+poolWait)
+	case err != nil:
 		if !errors.Is(err, fuse.ErrGone) {
 			log.Printf("mount %s: %v", m.path, err)
 		}

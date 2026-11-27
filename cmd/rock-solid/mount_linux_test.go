@@ -16,6 +16,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/driver/tcp"
+	"github.com/nvcnvn/rock-solid/internal/frontend/fuse"
 	"github.com/nvcnvn/rock-solid/internal/loop"
 	"github.com/nvcnvn/rock-solid/internal/meta"
 )
@@ -154,3 +155,50 @@ func TestAMountWhoseDeviceTheLoopRefusesLeavesNothingMounted(t *testing.T) {
 	}
 }
 
+// serveTimes is a loop's machine for a mount alone, keeping when the mount's device was reported readable.
+type serveTimes struct {
+	m  *mount
+	at []core.Tick
+}
+
+func (s *serveTimes) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
+	if ev.Kind == core.EvTimer && ev.Timer == fuse.ReadyTimer {
+		s.at = append(s.at, ctx.Now)
+	}
+	return s.m.onEvent(ctx, ev, out)
+}
+
+// A mount whose pool has no buffer to read a request into leaves its readable device unread for
+// poolWait, rather than wake its loop every pass, and then reads it again.
+func TestAMountShortOfBuffersWaitsBeforeReadingAgain(t *testing.T) {
+	k, err := loop.NewEpoll("/nonexistent/vmclock0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(k.Close)
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM|unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = unix.Close(fds[0]); _ = unix.Close(fds[1]) })
+	if _, err := unix.Write(fds[0], []byte("a request")); err != nil {
+		t.Fatal(err)
+	}
+	td := tcp.New(tcp.Config{Self: core.NodeID{Node: 2}, Seed: 1})
+	s := &serveTimes{m: newMount(nodeConfig{Mount: 1}, td)}
+	l := loop.New(loop.Config{Node: 2, Pool: core.NewPool([][]byte{make([]byte, 4096)}, 0)}, k, s, s.m.drv)
+	td.L, s.m.drv.l = l, l
+	c, err := l.AddConn(fds[1], true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Own(c)
+	s.m.d.Attach(fuse.Device{Fd: fds[1]})
+	s.m.drv.c, s.m.drv.on = c, true
+	for end := time.Now().Add(time.Second); len(s.at) < 2 && time.Now().Before(end); {
+		l.Pass()
+	}
+	if len(s.at) < 2 || s.at[1]-s.at[0] < poolWait {
+		t.Fatalf("the device was read at %v, %d µs apart at least", s.at, poolWait)
+	}
+}

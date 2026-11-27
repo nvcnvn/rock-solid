@@ -32,6 +32,10 @@ const batch = 64
 // ErrGone is a device whose connection the kernel ended: the mount was unmounted or aborted.
 var ErrGone = errors.New("fuse: the mount's connection is gone")
 
+// ErrShort is a pool with no buffer to read a request into: Serve read nothing, and the device
+// stays readable.
+var ErrShort = errors.New("fuse: no buffer to read a request into")
+
 // Device is a mount's /dev/fuse descriptor, non-blocking: each read takes one request, each write
 // one reply.
 type Device struct{ Fd int }
@@ -273,13 +277,13 @@ func (d *Daemon) OnEvent(ctx *core.Context, ev *core.Event, acts []core.Action) 
 }
 
 // Serve reads and serves up to batch requests from the device; ErrGone once the kernel ended the
-// connection.
+// connection, ErrShort while the pool has no buffer to read into.
 func (d *Daemon) Serve(ctx *core.Context, acts []core.Action) ([]core.Action, error) {
 	d.acts = acts
 	if d.buf == core.NoBuf {
 		b, err := ctx.Pool.Alloc(ReadBuffer)
 		if err != nil {
-			return acts, nil
+			return acts, ErrShort
 		}
 		d.buf = b
 	}
