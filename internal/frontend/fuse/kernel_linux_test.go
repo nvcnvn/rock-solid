@@ -1,0 +1,113 @@
+package fuse
+
+import (
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"golang.org/x/sys/unix"
+
+	"github.com/nvcnvn/rock-solid/internal/fuseproto"
+)
+
+// mountDir is a fresh directory to mount on under $RS_FUSE_DIR, as root, unmounted at the end; the
+// test skips without both, since a mount with allow_other needs root.
+func mountDir(t *testing.T) string {
+	base := os.Getenv("RS_FUSE_DIR")
+	switch {
+	case base == "":
+		t.Skip("RS_FUSE_DIR names no directory to mount under")
+	case os.Geteuid() != 0:
+		t.Skip("mounting with allow_other needs root")
+	}
+	dir, err := os.MkdirTemp(base, "mnt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(dir) })
+	return dir
+}
+
+// serveRoot answers the kernel's requests on dev until the connection ends: INIT as the daemon
+// does, GETATTR with a root directory of mode 0755, and everything else ENOSYS.
+func serveRoot(dev Device) error {
+	buf := make([]byte, ReadBuffer)
+	for {
+		if _, err := unix.Poll([]unix.PollFd{{Fd: int32(dev.Fd), Events: unix.POLLIN}}, -1); err != nil && err != unix.EINTR {
+			return err
+		}
+		n, err := dev.Read(buf)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			continue
+		}
+		var r fuseproto.Request
+		if err := fuseproto.Decode(buf[:n], &r); err != nil {
+			return err
+		}
+		var reply []byte
+		switch r.Opcode {
+		case fuseproto.OpInit:
+			o, err := Negotiate(&r.Init)
+			if err != nil {
+				return err
+			}
+			reply = fuseproto.AppendInit(nil, r.Unique, &o)
+		case fuseproto.OpGetattr:
+			reply = fuseproto.AppendAttr(nil, r.Unique, 0, 0, &fuseproto.Attr{Ino: 1, Mode: unix.S_IFDIR | 0o755, Nlink: 2})
+		case fuseproto.OpForget, fuseproto.OpBatchForget:
+			continue
+		default:
+			reply = fuseproto.AppendError(nil, r.Unique, fuseproto.ENOSYS)
+		}
+		if err := dev.Write(reply); err != nil {
+			return err
+		}
+	}
+}
+
+// Through the kernel: the mount takes allow_other and default_permissions, the device's framing
+// serves the INIT and GETATTR a stat needs, and another uid stats the mount.
+func TestAMountServesStatToAnotherUID(t *testing.T) {
+	dir := mountDir(t)
+	dev, err := Mount(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- serveRoot(dev) }()
+	t.Cleanup(func() {
+		if err := unix.Unmount(dir, unix.MNT_DETACH); err != nil {
+			t.Errorf("unmount: %v", err)
+		}
+		if err := <-done; !errors.Is(err, ErrGone) {
+			t.Errorf("the server ended with %v", err)
+		}
+		_ = unix.Close(dev.Fd)
+	})
+	st, err := os.Stat(dir)
+	if err != nil || st.Mode() != os.ModeDir|0o755 {
+		t.Fatalf("stat of the mount: %v, %v", st, err)
+	}
+	info, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var line string
+	for l := range strings.SplitSeq(string(info), "\n") {
+		if f := strings.Fields(l); len(f) > 4 && f[4] == filepath.Clean(dir) {
+			line = l
+		}
+	}
+	if !strings.Contains(line, "allow_other") || !strings.Contains(line, "default_permissions") || !strings.Contains(line, "fuse.rock-solid") {
+		t.Fatalf("mountinfo: %q", line)
+	}
+	if out, err := exec.Command("setpriv", "--reuid=65534", "--regid=65534", "--clear-groups", "stat", "-c", "%a", dir).CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "755" {
+		t.Fatalf("stat as uid 65534: %s, %v", out, err)
+	}
+}

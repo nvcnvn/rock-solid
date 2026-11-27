@@ -1,0 +1,147 @@
+package fuse
+
+import (
+	"testing"
+
+	"golang.org/x/sys/unix"
+
+	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/fuseproto"
+	"github.com/nvcnvn/rock-solid/internal/meta"
+)
+
+// fakeKernel is the kernel's end of a datagram socket pair standing in for /dev/fuse, which keeps
+// each request and reply whole as the device does, and a one-voter data group at node 2's loop 1
+// whose answers the test writes.
+type fakeKernel struct {
+	t    testing.TB
+	fd   int
+	d    *Daemon
+	ctx  core.Context
+	acts []core.Action
+	buf  []byte
+	req  []byte
+	a    core.Action
+	ev   core.Event
+	rd   meta.Read
+	ans  meta.ReadAnswer
+	kv   [1]meta.KV
+	root []byte
+}
+
+func newFakeKernel(t testing.TB) *fakeKernel {
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = unix.Close(fds[0]); _ = unix.Close(fds[1]) })
+	if err := unix.SetNonblock(fds[1], true); err != nil {
+		t.Fatal(err)
+	}
+	k := &fakeKernel{t: t, fd: fds[0], d: New(Config{Volume: 1, Pool: 1, Inc: 1}), buf: make([]byte, 4096),
+		root: meta.AppendAttr(nil, &meta.Attr{Mode: meta.ModeDir | 0o755, Nlink: 2})}
+	k.ctx.Pool = core.NewPool([][]byte{make([]byte, 4<<20)}, 0)
+	k.d.Attach(Device{Fd: fds[1]})
+	k.acts = k.d.SetSession(&k.ctx, 7, k.acts[:0])
+	plans := []meta.Group{{ID: 1}, {ID: 2, Start: []byte{meta.SpaceCtl + 1}, Voters: []meta.Replica{{ID: 1, Node: 2, Disk: 1}}}}
+	k.acts = k.d.SetMembership(&k.ctx, plans, []meta.DiskAddr{{Disk: 1, At: core.NodeID{Node: 2, Loop: 1}}}, k.acts[:0])
+	if !k.d.Ready() {
+		t.Fatal("the daemon is not ready with a session and a map")
+	}
+	return k
+}
+
+// call writes request r as the kernel would, serves it, answers each Read the daemon sends with
+// the root's attributes, and returns the reply's header and body.
+func (k *fakeKernel) call(r *fuseproto.Request) (fuseproto.OutHeader, []byte) {
+	k.req = fuseproto.AppendRequest(k.req[:0], r)
+	if _, err := unix.Write(k.fd, k.req); err != nil {
+		k.t.Fatal(err)
+	}
+	acts, err := k.d.Serve(&k.ctx, k.acts[:0])
+	if err != nil {
+		k.t.Fatal(err)
+	}
+	k.acts = acts
+	for len(k.acts) > 0 {
+		k.a = k.acts[0]
+		k.acts = k.acts[:0]
+		a := &k.a
+		if a.Kind != core.ActNetSend || a.Peer != (core.NodeID{Node: 2, Loop: 1}) {
+			k.t.Fatalf("the daemon asked for %+v", a)
+		}
+		_, _, token, _ := meta.Peek(&a.Msg)
+		if err := meta.DecodeRead(k.ctx.Pool, &a.Msg, &k.rd); err != nil {
+			k.t.Fatal(err)
+		}
+		k.kv[0] = meta.KV{Key: k.rd.Start, Value: k.root}
+		k.ans = meta.ReadAnswer{Token: token, KVs: k.kv[:]}
+		k.ev = core.Event{Kind: core.EvNetRecv, Peer: a.Peer}
+		if err := meta.EncodeReadAnswer(k.ctx.Pool, 2, &k.ans, &k.ev.Msg); err != nil {
+			k.t.Fatal(err)
+		}
+		if a.Msg.Buf != core.NoBuf {
+			k.ctx.Pool.Free(a.Msg.Buf)
+		}
+		k.acts = k.d.OnEvent(&k.ctx, &k.ev, k.acts[:0])
+	}
+	n, err := unix.Read(k.fd, k.buf)
+	if err != nil {
+		k.t.Fatalf("no reply: %v", err)
+	}
+	h, body, err := fuseproto.DecodeReply(k.buf[:n])
+	if err != nil || h.Unique != r.Unique {
+		k.t.Fatalf("reply %+v to request %d: %v", h, r.Unique, err)
+	}
+	return h, body
+}
+
+// The daemon answers INIT itself, an opcode the codec does not decode with ENOSYS, and GETATTR
+// through the filesystem client's read of the attributes.
+func TestTheDaemonAnswersInitAnUnknownOpcodeAndGetattrOnItsDevice(t *testing.T) {
+	k := newFakeKernel(t)
+	h, body := k.call(&fuseproto.Request{Opcode: fuseproto.OpInit, Unique: 2, Init: fuseproto.InitIn{Major: 7, Minor: 45, MaxReadahead: 1 << 17, Flags: 1<<64 - 1}})
+	if o, err := fuseproto.DecodeInitOut(body); h.Error != 0 || err != nil || o.Flags&fuseproto.FlagParallelDirops == 0 {
+		t.Fatalf("INIT answered %+v %+v, %v", h, o, err)
+	}
+	unknown := fuseproto.AppendRequest(nil, &fuseproto.Request{Opcode: fuseproto.OpGetattr, Unique: 4, NodeID: 1})
+	unknown[4] = 200
+	if _, err := unix.Write(k.fd, unknown); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.d.Serve(&k.ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	n, _ := unix.Read(k.fd, k.buf)
+	if h, _, err := fuseproto.DecodeReply(k.buf[:n]); err != nil || h.Unique != 4 || h.Error != -int32(fuseproto.ENOSYS) {
+		t.Fatalf("opcode 200 answered %+v, %v", h, err)
+	}
+	h, body = k.call(&fuseproto.Request{Opcode: fuseproto.OpGetattr, Unique: 6, NodeID: meta.RootInode})
+	if _, _, a, err := fuseproto.DecodeAttrOut(body); h.Error != 0 || err != nil || a.Mode != uint32(meta.ModeDir|0o755) || a.Ino != meta.RootInode {
+		t.Fatalf("GETATTR answered %+v %+v, %v", h, a, err)
+	}
+}
+
+// A GETATTR's whole path, from the device through the machine and the meta client and back to the
+// device, allocates nothing.
+func TestAGetattrsPathThroughTheDaemonAllocatesNothing(t *testing.T) {
+	k := newFakeKernel(t)
+	r := fuseproto.Request{Opcode: fuseproto.OpGetattr, Unique: 2, NodeID: meta.RootInode}
+	k.call(&r)
+	if n := testing.AllocsPerRun(100, func() {
+		r.Unique += 2
+		k.call(&r)
+	}); n != 0 {
+		t.Fatalf("%v allocations a GETATTR", n)
+	}
+}
+
+func BenchmarkGetattrThroughTheDaemon(b *testing.B) {
+	k := newFakeKernel(b)
+	r := fuseproto.Request{Opcode: fuseproto.OpGetattr, Unique: 2, NodeID: meta.RootInode}
+	b.ReportAllocs()
+	for b.Loop() {
+		r.Unique += 2
+		k.call(&r)
+	}
+}
