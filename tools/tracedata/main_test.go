@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/trace"
@@ -72,6 +73,24 @@ func TestRecoveryLateForAReplyListingNothingThatItsDecisionListed(t *testing.T) 
 		}
 		if got := g.repliedLater(node, pg, chunk, iv, nil); got != listed {
 			t.Errorf("decision listed %v: repliedLater %v", listed, got)
+		}
+	}
+}
+
+func TestMergedSendMovesAfterTheTakeItMergedWith(t *testing.T) {
+	const w = 4
+	for _, c := range []struct {
+		name       string
+		unanswered int
+		want       []string
+	}{
+		{"no send since the take", 0, []string{"[take]", "[send]", "[x]"}},
+		{"a send since the take", 1, []string{"[send]", "[take]", "[x]"}},
+	} {
+		g := &gen{lines: []string{"[send]", "[take]", "[x]"}, mergedAt: map[int]int{w: 0}, takenAt: map[int]int{w: 1}, unanswered: map[int]int{w: c.unanswered}}
+		g.takeMerged(w)
+		if !slices.Equal(g.lines, c.want) {
+			t.Errorf("%s: lines %q, want %q", c.name, g.lines, c.want)
 		}
 	}
 }

@@ -317,6 +317,15 @@ func (g *gen) moveBack(from, to int) {
 	}
 }
 
+// takeMerged moves the newest send of write w the spec's pin merged with an attempt already taken to just after that
+// take, as an order or reanswer with no send since it takes another attempt the primary held beside that one.
+func (g *gen) takeMerged(w int) {
+	if m, ok := g.mergedAt[w]; ok && g.unanswered[w] == 0 && m < g.takenAt[w] {
+		g.moveLine(m, g.takenAt[w])
+		delete(g.mergedAt, w)
+	}
+}
+
 // moveLine moves line from to just after line to, a later one, and keeps the marked positions on the lines they name.
 func (g *gen) moveLine(from, to int) {
 	l := g.lines[from]
@@ -751,6 +760,7 @@ func (g *gen) run(recs []trace.Record) {
 		case trace.OutOrder:
 			w := g.wid[[2]uint64{r.Fields[3], r.Fields[0]}]
 			g.verWrite[[2]uint64{r.Fields[1], r.Fields[2]}] = w
+			g.takeMerged(w)
 			g.unanswered[w] = 0
 			g.takenAt[w] = len(g.lines)
 			g.line(`k |-> "order", n |-> %d, w |-> %d, c |-> %d, v |-> %s`, n, w, g.chunk(r.Fields[1]), ver(r.Fields[2]))
@@ -845,11 +855,7 @@ func (g *gen) run(recs []trace.Record) {
 				g.line(`k |-> "reanswered", c |-> %d, v |-> %s`, g.chunk(r.Fields[0]), ver(r.Fields[1]))
 				break
 			}
-			// An attempt the primary held beside the one it took, which the pin merged, is the spec's send after that step.
-			if m, ok := g.mergedAt[w]; ok && g.unanswered[w] == 0 && m < g.takenAt[w] {
-				g.moveLine(m, g.takenAt[w])
-				delete(g.mergedAt, w)
-			}
+			g.takeMerged(w)
 			g.unanswered[w] = 0
 			g.takenAt[w] = len(g.lines)
 			g.line(`k |-> "reanswer", n |-> %d, w |-> %d, c |-> %d, v |-> %s, heard |-> %s`, n, w, g.chunk(r.Fields[0]), ver(r.Fields[1]), g.answered(w))
