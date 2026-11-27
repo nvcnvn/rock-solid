@@ -316,11 +316,11 @@ func (d *Device) Store() *chunkstore.Store { return d.st }
 func (d *Device) OnEvent(ctx *core.Context, ev *core.Event, out *DeviceOutput) {
 	switch {
 	case ev.Kind == core.EvNetRecv && ev.Msg.Group():
-		out.Actions = d.recvGroup(ctx, ev, out.Actions)
+		out.Actions = d.free(ctx, d.recvGroup(ctx, ev, out.Actions))
 		return
 	case ev.Kind == core.EvTimer && ev.Timer >= MetaTimer && ev.Timer-MetaTimer < core.TimerID(len(d.metas)):
 		if a := d.metas[ev.Timer-MetaTimer]; a != nil && !d.closed(int(ev.Timer-MetaTimer)) {
-			out.Actions = a.OnEvent(ctx, ev, out.Actions)
+			out.Actions = d.free(ctx, a.OnEvent(ctx, ev, out.Actions))
 		}
 		return
 	case d.rep != nil:
@@ -471,9 +471,6 @@ func (d *Device) settle(ctx *core.Context, err error, out *DeviceOutput) {
 	case d.phase == recovering || d.phase == formatting:
 		d.fail(out)
 	}
-	for _, a := range d.metas {
-		out.Actions = d.sv.FreeRound(ctx, a, out.Actions)
-	}
 	d.flush(out)
 }
 
@@ -529,6 +526,17 @@ func (d *Device) Disks(ctx *core.Context, ds []meta.DiskAddr, gs []meta.PoolGran
 	d.take(ctx, out)
 }
 
+// free proposes, on each replica here, the frees of the orphans the server holds that no mount has
+// open, which a Read served, an answer replied or a session table may have left.
+func (d *Device) free(ctx *core.Context, acts []core.Action) []core.Action {
+	for i, a := range d.metas {
+		if !d.closed(i) {
+			acts = d.sv.FreeRound(ctx, a, acts)
+		}
+	}
+	return acts
+}
+
 // TakeMembership hands rep each disk's loop, size, log reserve and fill, and the pools' grants, from the leader's answer to a node's report.
 func TakeMembership(ctx *core.Context, rep *chunkstore.Replica, ds []meta.DiskAddr, gs []meta.PoolGrant) {
 	for _, a := range ds {
@@ -543,11 +551,14 @@ func TakeMembership(ctx *core.Context, rep *chunkstore.Replica, ds []meta.DiskAd
 	}
 }
 
-// Hand hands the replica the session table h carries, answering its ask h.Answers.
+// Hand hands the replica and the server the session table h carries, answering the replica's ask
+// h.Answers.
 func (d *Device) Hand(ctx *core.Context, h *Hand, out *DeviceOutput) {
 	if h.Table.Version > d.sess.Version || h.Table.Version == d.sess.Version && h.Table.Next > d.sess.Next {
 		d.sess = h.Table
 	}
+	d.sv.SetSessions(&h.Table)
+	out.Actions = d.free(ctx, out.Actions)
 	if d.rep != nil {
 		d.rep.SetSessions(ctx, h.Table, h.Answers, &d.rout)
 		d.take(ctx, out)

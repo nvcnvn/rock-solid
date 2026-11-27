@@ -416,6 +416,83 @@ func TestADeviceServesReadsOfTheGroupsItLeads(t *testing.T) {
 	}
 }
 
+// A device's server takes the session tables its node hands it and frees an orphan at its last
+// close: a fenced session's open closes at its acknowledgment, and the last mount's at its release.
+func TestADeviceFreesAnOrphanAtItsLastClose(t *testing.T) {
+	nm := newNodeMetas(t)
+	if err := nm.m.d.AddMeta(nm.replica()); err != nil {
+		t.Fatal(err)
+	}
+	nm.lead()
+	const file = 5
+	a := meta.Attr{Mode: meta.ModeFile | 0o644, Nlink: 1, AllocEnd: 1}
+	fs := meta.FS{Volume: 1}
+	ops := []func() error{
+		func() error { return fs.Root(&meta.Attr{Mode: meta.ModeDir | 0o755, Nlink: 2}) },
+		func() error { return fs.Create(meta.RootInode, meta.RootInode, []byte("f"), file, &a, nil, 1) },
+	}
+	for i, op := range ops {
+		if err := op(); err != nil {
+			t.Fatal(err)
+		}
+		nm.postTxn(uint64(i)+1, &fs.Txn)
+	}
+	attr := key(t, &meta.Key{Space: meta.SpaceFS, Volume: 1, Inode: file, Tag: meta.InodeAttr})
+	for session := uint64(1); session <= 2; session++ {
+		nm.postRead(&meta.Read{Start: attr, End: append(slices.Clone(attr), 0), Limit: 1, Reg: meta.RegOpen, Session: session, Mount: 1})
+	}
+	if err := fs.Unlink(meta.RootInode, []byte("f"), file, &a, true, nil, 2); err != nil {
+		t.Fatal(err)
+	}
+	nm.postTxn(3, &fs.Txn)
+	purge := key(t, &meta.Key{Space: meta.SpaceFS, Volume: 1, Tag: meta.SlotPurge, ID: file})
+	freed := func() bool {
+		v, ok := nm.m.d.Meta(nodeMetaGroup).Shard().State().Tree().Get(purge)
+		return ok && v != nil
+	}
+	for tok := uint64(1); tok <= 3; tok++ {
+		if err, ok := nm.answers[tok]; !ok || err != nil {
+			t.Fatalf("Txn %d was answered %v, %v", tok, ok, err)
+		}
+	}
+	nm.take(node.Output{Hands: []node.Hand{{Device: 7, Table: chunkstore.SessionTable{Version: 1, Acked: 1, Next: 3, Live: []uint64{1}}}}})
+	if freed() {
+		t.Fatal("an orphan session 1 has open was freed")
+	}
+	nm.postRead(&meta.Read{Start: attr, End: append(slices.Clone(attr), 0), Limit: 1, Reg: meta.RegRelease, Session: 1, Mount: 1})
+	if !freed() {
+		t.Fatal("the orphan was not freed at its last release, after its other opener's fence was acknowledged")
+	}
+}
+
+func key(t *testing.T, k *meta.Key) []byte {
+	b, err := meta.AppendKey(nil, k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// postTxn sends t to nodeMetaGroup's replica under token, and settles.
+func (nm *nodeMetas) postTxn(token uint64, t *meta.Txn) {
+	ev := core.Event{Kind: core.EvNetRecv, Peer: nodeMetaPeer}
+	if err := meta.EncodeTxn(nm.l.Context().Pool, nodeMetaGroup, token, t, &ev.Msg); err != nil {
+		nm.t.Fatal(err)
+	}
+	nm.l.Inbox().Post(&ev)
+	nm.settle()
+}
+
+// postRead sends rd to nodeMetaGroup's replica, and settles.
+func (nm *nodeMetas) postRead(rd *meta.Read) {
+	ev := core.Event{Kind: core.EvNetRecv, Peer: nodeMetaPeer}
+	if err := meta.EncodeRead(nm.l.Context().Pool, nodeMetaGroup, 100, rd, &ev.Msg); err != nil {
+		nm.t.Fatal(err)
+	}
+	nm.l.Inbox().Post(&ev)
+	nm.settle()
+}
+
 // The Txns a server hands a replica on the round driver while its round is in flight gather
 // unanswered, which the disk does not bound; past the server's Held of them it refuses the next
 // with ErrOverloaded, over the wire.

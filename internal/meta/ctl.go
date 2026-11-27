@@ -138,8 +138,8 @@ type Control struct {
 	watch       chunkstore.Watcher
 }
 
-// commit is the Txn in flight: the state it gives, how much of the staged reports and edits it took, and the edits
-// of those it leaves staged, which its table stopped before.
+// commit is the Txn in flight: the state it gives, how much of the staged reports and edits it took, the edits
+// of those it leaves staged, which its table stopped before, and whether it fences or acknowledges sessions.
 type commit struct {
 	next                  ctlState
 	token                 uint64
@@ -148,7 +148,7 @@ type commit struct {
 	plans                 []Group
 	asks, acts, rc, edits int
 	kept                  []chunkstore.Edit
-	fenced, session       bool
+	push, session         bool
 	started               []SessionStart
 }
 
@@ -583,7 +583,7 @@ func (c *Control) Answer(st *State, a *Answer, out *ControlOutput) error {
 	for _, s := range p.started {
 		c.hear(s.ID)
 	}
-	out.Started, out.SessionPush = append(out.Started, p.started...), p.fenced
+	out.Started, out.SessionPush = append(out.Started, p.started...), p.push
 	if !c.resend {
 		out.Plans = append(out.Plans, p.plans...)
 	}

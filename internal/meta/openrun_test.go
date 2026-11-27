@@ -204,8 +204,7 @@ func (r *openRun) faults() {
 
 // tell hands the session table to every replica's server.
 func (r *openRun) tell() {
-	tab := r.tab
-	tab.Sessions = slices.Clone(r.tab.Sessions)
+	tab := r.tab.Storage()
 	for _, m := range r.reps {
 		if m.s == nil || !r.s.Node(uint32(m.i)).Up() {
 			continue

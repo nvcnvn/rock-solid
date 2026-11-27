@@ -479,7 +479,7 @@ func TestAFencePushesTheSessionTableToEveryNodeHeardFrom(t *testing.T) {
 		}
 	}
 	for n := range uint32(3) {
-		if got := pushed[core.NodeID{Node: n + 2, Loop: 1}]; len(got) != 2 || got[0] != 0 || got[1] != 1 {
+		if got := pushed[core.NodeID{Node: n + 2, Loop: 1}]; len(got) < 2 || got[0] != 0 || got[1] != 1 {
 			t.Errorf("node %d got %v, want version 1 under token 0", n+2, got)
 		}
 	}

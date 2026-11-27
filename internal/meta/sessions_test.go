@@ -112,8 +112,8 @@ func TestASessionStartsRenewsInMemoryAndIsFencedThenAcknowledged(t *testing.T) {
 		r.heartbeat(&nr)
 	}
 	r.sessStep()
-	if s := r.ctl.SessionTable(); s.Acked != 1 || len(s.Sessions) != 0 {
-		t.Fatalf("after the acknowledgment %+v", s)
+	if s := r.ctl.SessionTable(); s.Acked != 1 || len(s.Sessions) != 0 || !r.out.SessionPush {
+		t.Fatalf("after the acknowledgment %+v, push %v", s, r.out.SessionPush)
 	}
 	r.ctl.StartSession(2, 11)
 	if out := r.sessStep(); out.Started[0].ID != 11 {

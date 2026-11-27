@@ -1606,10 +1606,11 @@ func (s *Store) Overwrites(c core.ChunkID, off, n uint32, epoch uint64) bool {
 }
 
 // SessionTable is the control plane's session table as a storage node checks writes against it:
-// its version, the next session ID it hands out, and its live sessions in order.
+// its version, the version every storage node acknowledged, the next session ID it hands out, and
+// its live sessions in order.
 type SessionTable struct {
-	Version, Next uint64
-	Live          []uint64
+	Version, Acked, Next uint64
+	Live                 []uint64
 }
 
 // Fenced reports whether session id was handed out and is no longer live.

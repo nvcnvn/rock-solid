@@ -204,7 +204,7 @@ func EncodeSessionFetch(pool core.BufPool, group, token uint64, msg *core.Msg) e
 // EncodeSessions writes t, answering the fetch token or pushed with token 0, into msg, or returns
 // the pool's error.
 func EncodeSessions(pool core.BufPool, group, token uint64, t *chunkstore.SessionTable, msg *core.Msg) error {
-	body := binary.AppendUvarint(binary.AppendUvarint(nil, t.Version), t.Next)
+	body := binary.AppendUvarint(binary.AppendUvarint(binary.AppendUvarint(nil, t.Version), t.Acked), t.Next)
 	body = binary.AppendUvarint(body, uint64(len(t.Live)))
 	last := uint64(0)
 	for _, id := range t.Live {
@@ -214,7 +214,8 @@ func EncodeSessions(pool core.BufPool, group, token uint64, t *chunkstore.Sessio
 }
 
 // DecodeSessions decodes a session table message into t, reusing its Live; one that does not
-// decode, or whose live IDs are not rising, nonzero and below its next ID, is ErrMalformed. Peek
+// decode, acknowledges past its version, or whose live IDs are not rising, nonzero and below its
+// next ID, is ErrMalformed. Peek
 // gives the fetch it answers.
 func DecodeSessions(pool core.BufPool, msg *core.Msg, t *chunkstore.SessionTable) error {
 	b, err := msgBody(pool, KindSessions, msg)
@@ -222,7 +223,7 @@ func DecodeSessions(pool core.BufPool, msg *core.Msg, t *chunkstore.SessionTable
 		return err
 	}
 	d := decoder{b: b}
-	*t = chunkstore.SessionTable{Version: d.uvarint(), Next: d.uvarint(), Live: t.Live[:0]}
+	*t = chunkstore.SessionTable{Version: d.uvarint(), Acked: d.uvarint(), Next: d.uvarint(), Live: t.Live[:0]}
 	last := uint64(0)
 	for n := d.count(); n > 0; n-- {
 		gap := d.uvarint()
@@ -232,7 +233,7 @@ func DecodeSessions(pool core.BufPool, msg *core.Msg, t *chunkstore.SessionTable
 		last += gap
 		t.Live = append(t.Live, last)
 	}
-	if d.bad || len(d.b) != 0 || len(t.Live) > 0 && last >= t.Next {
+	if d.bad || len(d.b) != 0 || t.Acked > t.Version || len(t.Live) > 0 && last >= t.Next {
 		return ErrMalformed
 	}
 	return nil

@@ -3,6 +3,7 @@ package meta
 import (
 	"testing"
 
+	"github.com/nvcnvn/rock-solid/internal/chunkstore"
 	"github.com/nvcnvn/rock-solid/internal/core"
 )
 
@@ -129,7 +130,7 @@ func (o *owner) unlink() {
 	o.step(func(*core.Context, *Output) {})
 }
 
-func (o *owner) table(t SessionTable) {
+func (o *owner) table(t chunkstore.SessionTable) {
 	o.step(func(*core.Context, *Output) { o.sv.SetSessions(&t) })
 }
 
@@ -155,19 +156,22 @@ func TestAnOrphanIsFreedAtItsLastRelease(t *testing.T) {
 	}
 }
 
-// A fenced session's opens count until it leaves the table, once its fence is acknowledged; the
-// planted bug closes them when it commits.
+// A fenced session's opens count until a table acknowledges a version at or above the first that
+// showed it fenced; the planted bug closes them when its fence commits.
 func TestAFencedSessionsOpensCloseOnlyOnceItsFenceIsAcknowledged(t *testing.T) {
 	for _, p := range []regPlants{{}, {releaseOnCommit: true}} {
 		o := newOwner(t, p)
-		o.table(SessionTable{Version: 1, Next: 3, Sessions: []SessionEntry{{ID: 1}, {ID: 2}}})
+		o.table(chunkstore.SessionTable{Version: 1, Next: 4, Live: []uint64{1, 2, 3}})
 		o.reg(RegOpen, 2)
+		o.reg(RegOpen, 3)
 		o.unlink()
-		o.table(SessionTable{Version: 2, Next: 3, Sessions: []SessionEntry{{ID: 1}, {ID: 2, Fenced: 2}}})
+		o.table(chunkstore.SessionTable{Version: 3, Acked: 1, Next: 4, Live: []uint64{1, 3}})
+		o.table(chunkstore.SessionTable{Version: 4, Acked: 2, Next: 4, Live: []uint64{1}})
+		o.reg(RegRelease, 3)
 		if o.freed() != p.releaseOnCommit {
-			t.Fatalf("with %+v, freed when the fence committed: %v", p, o.freed())
+			t.Fatalf("with %+v, freed before session 2's fence was acknowledged: %v", p, o.freed())
 		}
-		o.table(SessionTable{Version: 2, Acked: 2, Next: 3, Sessions: []SessionEntry{{ID: 1}}})
+		o.table(chunkstore.SessionTable{Version: 4, Acked: 3, Next: 4, Live: []uint64{1}})
 		if !o.freed() {
 			t.Fatal("the orphan was not freed once its holder's fence was acknowledged")
 		}

@@ -47,7 +47,7 @@ func TestNodeMessagesCrossTheWireWhole(t *testing.T) {
 			pool.Free(m.Buf)
 		}
 	}
-	for _, st := range []chunkstore.SessionTable{{}, {Version: 3, Next: 9, Live: []uint64{1, 5, 8}}, {Version: 1, Next: many[99] + 1, Live: many}} {
+	for _, st := range []chunkstore.SessionTable{{}, {Version: 3, Acked: 2, Next: 9, Live: []uint64{1, 5, 8}}, {Version: 1, Next: many[99] + 1, Live: many}} {
 		var m core.Msg
 		if err := EncodeSessions(pool, 1, 7, &st, &m); err != nil {
 			t.Fatal(err)
@@ -56,7 +56,7 @@ func TestNodeMessagesCrossTheWireWhole(t *testing.T) {
 		if _, _, tok, _ := Peek(&m); tok != 7 {
 			t.Fatalf("token %d", tok)
 		}
-		if err := DecodeSessions(pool, &m, &got); err != nil || got.Version != st.Version || got.Next != st.Next || !slices.Equal(got.Live, st.Live) {
+		if err := DecodeSessions(pool, &m, &got); err != nil || got.Version != st.Version || got.Acked != st.Acked || got.Next != st.Next || !slices.Equal(got.Live, st.Live) {
 			t.Fatalf("decoded %v: %+v, sent %+v", err, got, st)
 		}
 		if m.Buf != core.NoBuf {
@@ -77,6 +77,12 @@ func TestASessionTableWhoseLiveIDsDoNotRiseBelowNextIsMalformed(t *testing.T) {
 		if err := DecodeSessions(pool, &m, &st); err != ErrMalformed {
 			t.Errorf("live %v decodes: %v", live, err)
 		}
+	}
+	var m core.Msg
+	st := chunkstore.SessionTable{Version: 1, Acked: 2, Next: 9}
+	_ = EncodeSessions(pool, 1, 0, &st, &m)
+	if err := DecodeSessions(pool, &m, &st); err != ErrMalformed {
+		t.Errorf("a table acknowledged past its version decodes: %v", err)
 	}
 }
 
@@ -156,7 +162,7 @@ func FuzzDecodeNodeReport(f *testing.F) {
 
 func FuzzDecodeSessions(f *testing.F) {
 	fuzzNodeWire(f, func(pool core.BufPool, m *core.Msg) {
-		_ = EncodeSessions(pool, 1, 4, &chunkstore.SessionTable{Version: 2, Next: 9, Live: []uint64{3, 8}}, m)
+		_ = EncodeSessions(pool, 1, 4, &chunkstore.SessionTable{Version: 2, Acked: 1, Next: 9, Live: []uint64{3, 8}}, m)
 	}, func(pool core.BufPool, m *core.Msg) (core.Msg, bool) {
 		var st chunkstore.SessionTable
 		var again core.Msg

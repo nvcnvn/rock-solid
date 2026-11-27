@@ -88,9 +88,9 @@ type SessionTable struct {
 	Sessions             []SessionEntry
 }
 
-// Storage is t as a storage node holds it: its version, next session ID and live sessions.
+// Storage is t as a storage node holds it: its versions, next session ID and live sessions.
 func (t *SessionTable) Storage() chunkstore.SessionTable {
-	s := chunkstore.SessionTable{Version: t.Version, Next: t.Next}
+	s := chunkstore.SessionTable{Version: t.Version, Acked: t.Acked, Next: t.Next}
 	for _, e := range t.Sessions {
 		if e.Fenced == 0 {
 			s.Live = append(s.Live, e.ID)
@@ -359,15 +359,15 @@ func (c *Control) sessionStep(t lease.Time, token uint64, head bool, out *Contro
 	for _, tm := range c.timers {
 		if len(ops) < maxSessionOps && c.due(&tm, t) {
 			i, _ := slices.BinarySearchFunc(n.Sessions, tm.id, cmpSession)
-			n.Sessions[i].Fenced, p.fenced = c.sess.Version+1, true
+			n.Sessions[i].Fenced, p.push = c.sess.Version+1, true
 			ops = append(ops, Put(sessionKey(tm.id), appendSession(nil, &n.Sessions[i])))
 		}
 	}
-	if p.fenced {
+	if p.push {
 		n.Version++
 	}
 	if c.sess.Version > c.sess.Acked && c.acknowledged(c.sess.Version) {
-		n.Acked = c.sess.Version
+		n.Acked, p.push = c.sess.Version, true
 	}
 	n.Sessions = slices.DeleteFunc(n.Sessions, func(e SessionEntry) bool {
 		left := e.Fenced != 0 && e.Fenced <= n.Acked && len(ops) < maxSessionOps

@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"slices"
 
+	"github.com/nvcnvn/rock-solid/internal/chunkstore"
 	"github.com/nvcnvn/rock-solid/internal/core"
 )
 
@@ -24,9 +25,12 @@ type opener struct {
 	mount   uint32
 }
 
+// openRow is a mount's open of an inode, and the newest table version of a session not live in the
+// first table that showed it so, which its fence is at or below, or 0.
 type openRow struct {
-	at  inodeAt
-	who opener
+	at     inodeAt
+	who    opener
+	fenced uint64
 }
 
 func cmpRow(a, b openRow) int {
@@ -41,7 +45,7 @@ type registry struct {
 	frees   []inodeAt
 	spare   []inodeAt
 	freeing map[uint64]inodeAt
-	sess    SessionTable
+	sess    chunkstore.SessionTable
 	known   bool
 	fs      FS
 	key     []byte
@@ -62,14 +66,11 @@ func (g *registry) open(at inodeAt) bool {
 	return i < len(g.rows) && g.rows[i].at == at
 }
 
-// holds reports whether session id's opens count, which is until it leaves the table, once every
-// storage node holds its fence. Before any table, and for an ID the table has not handed out, it does.
+// holds reports whether session id may register an open: before any table, while live, and for
+// an ID the table has not handed out.
 func (g *registry) holds(id uint64) bool {
-	if !g.known || id >= g.sess.Next {
-		return true
-	}
-	i, ok := slices.BinarySearchFunc(g.sess.Sessions, id, cmpSession)
-	return ok && (g.sess.Sessions[i].Fenced == 0 || !g.plant.releaseOnCommit)
+	_, live := slices.BinarySearch(g.sess.Live, id)
+	return !g.known || live || id >= g.sess.Next
 }
 
 func (g *registry) look(at inodeAt) {
@@ -88,7 +89,7 @@ func (g *registry) register(group uint64, rd *Read, kvs []KV) error {
 	}
 	var a Attr
 	found := len(kvs) > 0 && bytes.Equal(kvs[0].Key, rd.Start) && DecodeAttr(kvs[0].Value, &a) == nil
-	row := openRow{inodeAt{group, k.Volume, k.Inode}, opener{rd.Session, rd.Mount}}
+	row := openRow{at: inodeAt{group, k.Volume, k.Inode}, who: opener{rd.Session, rd.Mount}}
 	i, there := slices.BinarySearchFunc(g.rows, row, cmpRow)
 	switch {
 	case rd.Reg == RegOpen && !there && found && a.Nlink > 0 && g.holds(rd.Session):
@@ -127,24 +128,30 @@ func (g *registry) answered(a *Answer) bool {
 	return true
 }
 
-// SetSessions takes the committed session table t, a newer one than any before: the opens of a
-// session that has left it close, which frees each orphan it was the last to have open.
-func (sv *Server) SetSessions(t *SessionTable) {
+// SetSessions takes t, the committed session table as storage nodes hold it, if no older than the
+// last: the opens of a session no longer live close once t acknowledges a version at or above the
+// one that first showed it so, which frees each orphan it was the last to have open.
+func (sv *Server) SetSessions(t *chunkstore.SessionTable) {
 	g := &sv.reg
 	if g.known && (t.Version < g.sess.Version || t.Version == g.sess.Version && t.Acked < g.sess.Acked) {
 		return
 	}
 	g.sess.Version, g.sess.Acked, g.sess.Next = t.Version, t.Acked, t.Next
-	g.sess.Sessions = append(g.sess.Sessions[:0], t.Sessions...)
+	g.sess.Live = append(g.sess.Live[:0], t.Live...)
 	g.known = true
 	j := 0
 	for _, r := range g.rows {
-		if g.holds(r.who.session) {
-			g.rows[j] = r
-			j++
-		} else {
-			g.look(r.at)
+		switch {
+		case g.holds(r.who.session):
+		case r.fenced == 0:
+			r.fenced = t.Version
 		}
+		if r.fenced != 0 && (r.fenced <= t.Acked || g.plant.releaseOnCommit) {
+			g.look(r.at)
+			continue
+		}
+		g.rows[j] = r
+		j++
 	}
 	g.rows = g.rows[:j]
 }
