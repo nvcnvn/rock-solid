@@ -22,7 +22,7 @@ go test -c -o "$work/cmd.test" ./cmd/rock-solid
 go build -o "$work/rock-solid" ./cmd/rock-solid
 echo "== kernel tests"
 (cd "$work" && sudo env RS_FUSE_DIR="$work" "$work/fuse.test" -test.run 'TestAMount' -test.count=1 -test.v)
-(cd "$work" && sudo env RS_FUSE_DIR="$work" RS_URING_DIR="$work" "$work/cmd.test" -test.run '^TestAMount(CreatesWritesReadsAndUnlinksThroughTheKernel|NobodyServesLeavesNothingMounted)$' -test.count=1 -test.v -test.timeout 10m)
+(cd "$work" && sudo env RS_FUSE_DIR="$work" RS_URING_DIR="$work" "$work/cmd.test" -test.run '^TestAMount(CreatesWritesReadsAndUnlinksThroughTheKernel|NobodyServesLeavesNothingMounted|OnEachOfTwoNodesKeepsCloseToOpenAcrossAPauseAndAKill)$' -test.count=1 -test.v -test.timeout 10m)
 
 echo "== ctl and node from the shell"
 rs="$work/rock-solid"
