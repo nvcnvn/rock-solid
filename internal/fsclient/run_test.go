@@ -32,6 +32,7 @@ const (
 	invSlot        = "a file's entry is in its directory's slot"
 	invAncestor    = "no directory is its own ancestor"
 	invErrno       = "every system call of the run succeeds"
+	invLive        = "once faults heal, no system call or request waits longer than liveWait"
 )
 
 const (
@@ -39,6 +40,9 @@ const (
 	runSession = 1
 	runBlocks  = 1 << 18
 	runFor     = core.Tick(30_000_000)
+	// quietFor is the run's time without faults after them, long enough for an election and the
+	// router's wait to retry a Txn it held for one.
+	quietFor = core.Tick(3_000_000)
 	// faultGap is the most time between two daemon crashes, and between two reboots.
 	faultGap = core.Tick(8_000_000)
 	// The client loop's timers: its router's and the held reads' retry.
@@ -47,6 +51,9 @@ const (
 	readRetry                = core.Tick(1000)
 	// realtime is the wall clock's reading at CLOCK_BOOTTIME 0, in nanoseconds.
 	realtime = int64(1_700_000_000_000_000_000)
+	// liveWait is how long, at the end of the quiet time, a system call or a request in a machine
+	// may have waited.
+	liveWait = core.Tick(100_000)
 )
 
 // fsRun is one node's mount against a three-replica MetaStore shard and three chunk devices.
@@ -54,8 +61,8 @@ const (
 // node.Device, whose placement table puts four PGs of one member on them. The daemon on node 6 runs
 // a Machine per mount, a meta.Client and a chunkstore.Client, behind a sim.Mount whose processes
 // open the root directory's two files by name, read, read through a mapping, write the whole file
-// and fsync, one writer of a file at a time. Faults: partitions, and up to faultGap apart a
-// replica's node rebooted, so leaders change, and the daemon crashed, also within 3 ms of a chunk
+// and fsync, one writer of a file at a time. Faults: partitions, and up to faultGap apart until
+// rebootsEnd a replica's node rebooted, so leaders change, and the daemon crashed, also within 3 ms of a chunk
 // write it calls, half the time for a file's first and one time in 32 for another; it restarts as
 // a new mount that, before its processes start, creates each file not yet made and, with even
 // odds, unlinks and creates each other again. The devices do not crash: a restarted primary asks
@@ -86,6 +93,8 @@ type fsRun struct {
 	// crashAt is when the daemon crashes next, rebootAt when a replica's node reboots.
 	crashAt, rebootAt core.Tick
 	crashes           int
+	// ended is set for the check at the end of the quiet time.
+	ended bool
 	// idErr, errnoErr and purgeErr are the first inode handed out twice, system call failed and
 	// chunk a crash left past alloc_end and the purge entry.
 	idErr, errnoErr, purgeErr error
@@ -100,6 +109,10 @@ type runFile struct {
 	size   int64
 	writer *runProc
 }
+
+// rebootsEnd is when replicas' nodes stop rebooting: one rebooted then is down a second and
+// grants no vote for its restart wait, so a quorum votes again from runFor.
+var rebootsEnd = runFor - 1_000_000 - lease.DefaultConfig.Lease
 
 // clientNode is the daemon's node; nodes 0 to 2 run the shard's replicas.
 const clientNode = 6
@@ -127,6 +140,7 @@ func newFSRun(t testing.TB, seed uint64, p plants) *fsRun {
 	r.inv.Register(invSlot, r.slotsKept)
 	r.inv.Register(invAncestor, r.noCycle)
 	r.inv.Register(invPurgeMisses, func() error { return r.purgeErr })
+	r.inv.Register(invLive, r.live)
 	r.inv.Register(invCloseToOpen, func() error {
 		if i, broken := sim.CloseToOpen(r.hist.Ops()); broken {
 			return fmt.Errorf("operation %d: %+v", i, r.hist.Ops()[i])
@@ -156,12 +170,12 @@ func sink(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
 	return out
 }
 
-// run steps the run under its faults for runFor, then heals every partition and runs a second
+// run steps the run under its faults for runFor, then heals every partition and runs quietFor
 // more without faults, checking the invariants every 2,000 steps and at the end.
 func (r *fsRun) run() error {
 	for steps := 0; ; steps++ {
 		now := r.s.Time()
-		if now >= runFor+1_000_000 {
+		if now >= runFor+quietFor {
 			break
 		}
 		if now >= runFor {
@@ -183,11 +197,39 @@ func (r *fsRun) run() error {
 			}
 		}
 	}
+	r.ended = true
 	return r.inv.Check()
 }
 
-// faults crashes the daemon at crashAt, checking the chunks it wrote first, and reboots a replica's
-// node at rebootAt, each drawn again up to faultGap later.
+// live checks, at the end of the quiet time, that no process's system call and no request in
+// the daemon's machines has waited longer than liveWait.
+func (r *fsRun) live() error {
+	d := r.d
+	if !r.ended || !d.n.Up() {
+		return nil
+	}
+	now := r.s.Time()
+	for _, pr := range d.procs {
+		if !pr.p.Busy() {
+			continue
+		}
+		if op := r.hist.Ops()[pr.op]; now-op.Invoke > liveWait {
+			return fmt.Errorf("client %d's system call %+v has waited %d µs", pr.client, op, now-op.Invoke)
+		}
+	}
+	at := realtime + int64(d.n.Context().Now)*1000
+	for _, m := range []*Machine{d.setup, d.m} {
+		for _, o := range m.ops {
+			if o.req.Opcode < opReserveSlots && at-o.now > int64(liveWait)*1000 {
+				return fmt.Errorf("request %+v at step %d has waited %d µs, with %d Txns in flight", o.req, o.step, (at-o.now)/1000, len(d.txns))
+			}
+		}
+	}
+	return nil
+}
+
+// faults crashes the daemon at crashAt, checking the chunks it wrote first, and before rebootsEnd
+// reboots a replica's node at rebootAt, each drawn again up to faultGap later.
 func (r *fsRun) faults() {
 	now := r.s.Time()
 	if c := r.s.Node(clientNode); c.Up() && now >= r.crashAt {
@@ -206,7 +248,7 @@ func (r *fsRun) faults() {
 		r.crashes++
 		r.s.CrashRandom(clientNode)
 	}
-	if now >= r.rebootAt {
+	if now >= r.rebootAt && now < rebootsEnd {
 		r.rebootAt = now + core.Tick(r.rng.Below(uint64(faultGap)))
 		if i := uint32(r.rng.Below(3)); r.s.Node(i).Up() {
 			r.s.Reboot(i)
@@ -493,6 +535,7 @@ type daemon struct {
 	mount  *sim.Mount
 	frames [][]byte
 	ready  bool
+	procs  []*runProc
 	// steps are setup's requests in order, and step the next to send.
 	steps []fuseproto.Request
 	step  int
@@ -544,7 +587,9 @@ func (r *fsRun) bootDaemon(n *sim.Node) {
 	n.AddActor(d.loop, d)
 	for range 4 {
 		r.clients++
-		n.AddActor(d.loop, &runProc{d: d, p: d.mount.Process(r.clients - 1), client: r.clients - 1})
+		pr := &runProc{d: d, p: d.mount.Process(r.clients - 1), client: r.clients - 1}
+		d.procs = append(d.procs, pr)
+		n.AddActor(d.loop, pr)
 	}
 	n.Call(d.loop, func(ctx *core.Context, acts []core.Action) []core.Action {
 		return d.pass(ctx, acts, func() {
@@ -913,8 +958,8 @@ func (p detachPool) Free(b core.IOBuf) {
 // across partitions, storage nodes rebooted and the daemon crashed and restarted: histories of
 // opens by path keep close-to-open, every system call succeeds, no inode is handed out twice, no
 // mtime goes backwards, every file's entry is in its directory's slot, no directory is its own
-// ancestor, and at each daemon crash every chunk it wrote lies below alloc_end or in its purge
-// entry.
+// ancestor, at each daemon crash every chunk it wrote lies below alloc_end or in its purge
+// entry, and at the end of the quiet time no system call or request has waited past liveWait.
 func TestAMountsHistoriesKeepTheirInvariantsAcrossCrashes(t *testing.T) {
 	seeds.Run(t, 1, 10, func(seed uint64) {
 		r := newFSRun(t, seed, plants{})
