@@ -2,12 +2,14 @@ package fuse
 
 import (
 	"errors"
+	"slices"
 	"testing"
 
 	"golang.org/x/sys/unix"
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/fsclient"
 	"github.com/nvcnvn/rock-solid/internal/fuseproto"
 	"github.com/nvcnvn/rock-solid/internal/meta"
 )
@@ -181,5 +183,24 @@ func TestAnInitOfAnotherMajorEndsServeWithItsError(t *testing.T) {
 	n, _ := unix.Read(k.fd, k.buf)
 	if h, _, err := fuseproto.DecodeReply(k.buf[:n]); err != nil || h.Unique != 2 || h.Error != -int32(eproto) {
 		t.Fatalf("INIT 8 answered %+v, %v", h, err)
+	}
+}
+
+// A process's supplementary groups and CAP_DAC_OVERRIDE come from its /proc status; one whose
+// status cannot be read, or lacks either line, has no credentials.
+func TestAnOpenersCredentialsComeFromItsProcStatus(t *testing.T) {
+	var c fsclient.Creds
+	status := "Name:\tcat\nUid:\t0\t0\t0\t0\nGroups:\t5 1000 \nCapEff:\t0000000000000002\n"
+	if !parseStatus([]byte(status), &c) || !slices.Equal(c.Groups, []uint32{5, 1000}) || !c.Override {
+		t.Fatalf("parsed %+v", c)
+	}
+	if !parseStatus([]byte("Groups:\t\nCapEff:\t000001fffffffffd\n"), &c) || len(c.Groups) != 0 || c.Override {
+		t.Fatalf("parsed %+v from no groups and no CAP_DAC_OVERRIDE", c)
+	}
+	if parseStatus([]byte("Groups:\t5\n"), &c) {
+		t.Fatal("a status without CapEff parsed")
+	}
+	if New(Config{}).opener(1<<31) != nil {
+		t.Fatal("a process that does not exist has credentials")
 	}
 }

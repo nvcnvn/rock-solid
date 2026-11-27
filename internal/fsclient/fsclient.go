@@ -82,6 +82,20 @@ type ChunkCall struct {
 	Data  []byte
 }
 
+// Opener asks for the credentials of process PID beyond its request's, for a CREATE that opens a
+// file already there; OpenerDone settles Token.
+type Opener struct {
+	Token uint64
+	PID   uint32
+}
+
+// Creds is a process's credentials beyond a request's: its supplementary groups, and Override when
+// it holds CAP_DAC_OVERRIDE.
+type Creds struct {
+	Groups   []uint32
+	Override bool
+}
+
 // Output is what one call into the machine emits; the driver makes its calls in order.
 type Output struct {
 	// Replies holds FUSE reply frames back to back, each starting with its length, and Data the
@@ -92,11 +106,12 @@ type Output struct {
 	Reads   []Read
 	Txns    []TxnSend
 	Chunks  []ChunkCall
+	Openers []Opener
 }
 
 // Reset empties the output for reuse.
 func (o *Output) Reset() {
-	o.Replies, o.Data, o.Reads, o.Txns, o.Chunks = o.Replies[:0], o.Data[:0], o.Reads[:0], o.Txns[:0], o.Chunks[:0]
+	o.Replies, o.Data, o.Reads, o.Txns, o.Chunks, o.Openers = o.Replies[:0], o.Data[:0], o.Reads[:0], o.Txns[:0], o.Chunks[:0], o.Openers[:0]
 }
 
 // plants are bugs a test plants.
@@ -206,6 +221,9 @@ type op struct {
 	mreq     meta.Request
 	fs       meta.FS
 	errno    fuseproto.Errno
+	// asked is a CREATE that asked for its opener's credentials, known that it has them in creds.
+	asked, known bool
+	creds        Creds
 }
 
 // New is a mount's machine.
@@ -274,7 +292,7 @@ func (m *Machine) done(o *op) {
 	if o.buf != core.NoBuf {
 		m.pool.Free(o.buf)
 	}
-	*o = op{scan: o.scan[:0], vbuf: o.vbuf[:0], names: o.names[:0], reply: o.reply[:0], fs: o.fs, buf: core.NoBuf}
+	*o = op{scan: o.scan[:0], vbuf: o.vbuf[:0], names: o.names[:0], reply: o.reply[:0], fs: o.fs, buf: core.NoBuf, creds: Creds{Groups: o.creds.Groups[:0]}}
 	m.free = append(m.free, o)
 }
 
@@ -441,6 +459,24 @@ func (m *Machine) ReadDone(ctx *core.Context, token uint64, kvs []meta.KV, out *
 		o.got[w.slot] = got{o.vbuf[start:len(o.vbuf):len(o.vbuf)], true}
 	} else {
 		o.got[w.slot] = got{}
+	}
+	m.run(o, out)
+}
+
+// OpenerDone hands the CREATE that asked Opener token its opener's credentials, nil when they
+// could not be read, as of a process that exited, which answers EACCES.
+func (m *Machine) OpenerDone(ctx *core.Context, token uint64, c *Creds, out *Output) {
+	m.pool = ctx.Pool
+	w, ok := m.waits[token]
+	if !ok {
+		return
+	}
+	delete(m.waits, token)
+	o := w.o
+	o.pending--
+	o.known = c != nil
+	if c != nil {
+		o.creds.Groups, o.creds.Override = append(o.creds.Groups[:0], c.Groups...), c.Override
 	}
 	m.run(o, out)
 }

@@ -1,6 +1,8 @@
 package fsclient
 
 import (
+	"slices"
+
 	"github.com/nvcnvn/rock-solid/internal/fuseproto"
 	"github.com/nvcnvn/rock-solid/internal/meta"
 )
@@ -77,7 +79,12 @@ func (m *Machine) create(o *op, out *Output) {
 			m.recreate(o, out)
 			return
 		}
-		if !mayOpen(&n.attr, &o.req) {
+		if !o.asked {
+			o.asked = true
+			out.Openers = append(out.Openers, Opener{Token: m.token(o, 0), PID: o.req.PID})
+			return
+		}
+		if !o.known || !mayOpen(&n.attr, &o.req, &o.creds) {
 			m.fail(o, EACCES, out)
 			return
 		}
@@ -136,22 +143,23 @@ func (m *Machine) create(o *op, out *Output) {
 	}
 }
 
-// mayOpen reports whether r's opener may open a file of attributes a with r's access mode, as
-// open(2) checks: a CREATE reply makes the kernel skip that check (FMODE_CREATED in fs/namei.c's
-// do_open), so a CREATE that opens a file already there checks it. Root may open any file;
-// supplementary groups are not in the request, so only the opener's own gid counts.
-func mayOpen(a *meta.Attr, r *fuseproto.Request) bool {
+// mayOpen reports whether r's opener, of credentials c beyond the request's, may open a file of
+// attributes a with r's access mode, as open(2) checks: a CREATE reply makes the kernel skip that
+// check (FMODE_CREATED in fs/namei.c's do_open), so a CREATE that opens a file already there
+// checks it. CAP_DAC_OVERRIDE opens any file, whatever the uid; otherwise only the first class
+// the opener is in counts: owner, then group, by its gid or a supplementary group, then other.
+func mayOpen(a *meta.Attr, r *fuseproto.Request, c *Creds) bool {
 	want := [4]uint64{4, 2, 6, 6}[r.Flags&3]
 	if r.Flags&oTrunc != 0 {
 		want |= 2
 	}
 	bits := a.Mode & 7
 	switch {
-	case r.UID == 0:
+	case c.Override:
 		return true
 	case uint64(r.UID) == a.UID:
 		bits = a.Mode >> 6 & 7
-	case uint64(r.GID) == a.GID:
+	case uint64(r.GID) == a.GID || slices.Contains(c.Groups, uint32(a.GID)):
 		bits = a.Mode >> 3 & 7
 	}
 	return bits&want == want

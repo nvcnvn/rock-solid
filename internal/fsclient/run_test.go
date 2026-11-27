@@ -724,6 +724,9 @@ func (d *daemon) feed(m *Machine, f func(o *Output)) {
 	for _, rd := range o.Reads {
 		d.read(m, rd)
 	}
+	for _, p := range o.Openers {
+		d.feed(m, func(o *Output) { m.OpenerDone(d.ctx, p.Token, &Creds{}, o) })
+	}
 }
 
 func (d *daemon) chunk(c ChunkCall) {

@@ -1,10 +1,13 @@
 package fuse
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
+	"strconv"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -90,6 +93,7 @@ type Daemon struct {
 	acts    []core.Action
 	fetch   uint64
 	refused error
+	creds   fsclient.Creds
 	outs    stack[fsclient.Output]
 	routs   stack[meta.RouterOutput]
 	couts   stack[chunkstore.ClientOutput]
@@ -345,6 +349,49 @@ func (d *Daemon) feed(ctx *core.Context, f func(o *fsclient.Output)) {
 	for _, rd := range o.Reads {
 		d.read(ctx, rd)
 	}
+	for _, p := range o.Openers {
+		c := d.opener(p.PID)
+		d.feed(ctx, func(out *fsclient.Output) { d.m.OpenerDone(ctx, p.Token, c, out) })
+	}
+}
+
+// opener reads process pid's credentials from /proc, nil when it cannot, as once it exited.
+func (d *Daemon) opener(pid uint32) *fsclient.Creds {
+	b, err := os.ReadFile("/proc/" + strconv.FormatUint(uint64(pid), 10) + "/status")
+	if err != nil || pid == 0 || !parseStatus(b, &d.creds) {
+		return nil
+	}
+	return &d.creds
+}
+
+const capDacOverride = 1
+
+// parseStatus takes the supplementary groups of a /proc/<pid>/status and whether its effective
+// capabilities hold CAP_DAC_OVERRIDE into c; false unless it holds both lines, well formed.
+func parseStatus(b []byte, c *fsclient.Creds) bool {
+	c.Groups, c.Override = c.Groups[:0], false
+	var groups, caps bool
+	for line := range bytes.Lines(b) {
+		k, v, _ := bytes.Cut(line, []byte(":"))
+		switch string(k) {
+		case "Groups":
+			for f := range bytes.FieldsSeq(v) {
+				g, err := strconv.ParseUint(string(f), 10, 32)
+				if err != nil {
+					return false
+				}
+				c.Groups = append(c.Groups, uint32(g))
+			}
+			groups = true
+		case "CapEff":
+			e, err := strconv.ParseUint(string(bytes.TrimSpace(v)), 16, 64)
+			if err != nil {
+				return false
+			}
+			c.Override, caps = e&(1<<capDacOverride) != 0, true
+		}
+	}
+	return groups && caps
 }
 
 func (d *Daemon) write(frame []byte) {

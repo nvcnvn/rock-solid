@@ -40,6 +40,9 @@ type mount struct {
 	sent    []TxnSend
 	chunks  []ChunkCall
 	replies [][]byte
+	// creds are the credentials of each process ID beyond a request's, none when nil and no
+	// groups and no capability when missing.
+	creds map[uint32]*Creds
 }
 
 func newMount(t *testing.T, cfg Config) *mount {
@@ -151,8 +154,15 @@ func (h *mount) serve() {
 			h.chunks = append(h.chunks, o.Chunks...)
 			return
 		}
-		if len(o.Reads)+len(o.Txns)+len(o.Chunks) == 0 {
+		if len(o.Reads)+len(o.Txns)+len(o.Chunks)+len(o.Openers) == 0 {
 			return
+		}
+		for _, p := range o.Openers {
+			c, ok := h.creds[p.PID]
+			if !ok {
+				c = &Creds{}
+			}
+			h.m.OpenerDone(&h.ctx, p.Token, c, &h.out)
 		}
 		for _, rd := range o.Reads {
 			h.answerRead(rd)
@@ -643,26 +653,33 @@ func TestACreateWithoutExclOpensTheFileAnotherNodeCreatedFirst(t *testing.T) {
 // A CREATE that opens another node's file checks the opener's access as open(2) would, since the
 // kernel skips its own check of a file the reply says was created: another uid's O_RDWR, or
 // O_RDONLY with O_TRUNC, of a 0600 file answers EACCES, while its owner, a uid of its group on
-// a 0660 file and root open it; O_TRUNC asks for write access, which a 0640 file's group lacks.
+// a 0660 file and a process with CAP_DAC_OVERRIDE open it; O_TRUNC asks for write access, which a
+// 0640 file's group lacks. Root without the capability is checked like any uid, a supplementary
+// group counts as the gid does, and an opener whose credentials cannot be read is refused.
 func TestACreateOpeningAnotherNodesFileChecksTheOpenersAccess(t *testing.T) {
 	h := newMount(t, Config{})
 	other := *h
 	other.m, other.out, other.replies = New(Config{Volume: vol, Session: 8, Mount: 1, SlotLimit: 1 << 20}), Output{}, nil
-	open := func(name string, mode, uid, gid, flags uint32) uint64 {
-		return h.send(fuseproto.Request{Opcode: fuseproto.OpCreate, NodeID: meta.RootInode, Name: []byte(name), Mode: uint32(meta.ModeFile) | mode, UID: uid, GID: gid, Flags: flags})
+	const root, member, gone = 10, 11, 12
+	h.creds = map[uint32]*Creds{root: {Override: true}, member: {Groups: []uint32{5, 1000}}, gone: nil}
+	open := func(name string, uid, gid, pid, flags uint32) uint64 {
+		return h.send(fuseproto.Request{Opcode: fuseproto.OpCreate, NodeID: meta.RootInode, Name: []byte(name), Mode: uint32(meta.ModeFile | 0o644), UID: uid, GID: gid, PID: pid, Flags: flags})
 	}
 	const oRDWR = 2
 	other.ok(other.send(fuseproto.Request{Opcode: fuseproto.OpCreate, NodeID: meta.RootInode, Name: []byte("p"), Mode: uint32(meta.ModeFile | 0o600), UID: 1000, GID: 1000}))
-	h.errno(open("p", 0o644, 1001, 1001, oRDWR), EACCES)
-	h.errno(open("p", 0o644, 1001, 1000, oTrunc), EACCES)
-	h.ok(open("p", 0o644, 1000, 1000, oRDWR))
-	h.ok(open("p", 0o644, 0, 0, oRDWR))
+	h.errno(open("p", 1001, 1001, 1, oRDWR), EACCES)
+	h.errno(open("p", 1001, 1000, 1, oTrunc), EACCES)
+	h.ok(open("p", 1000, 1000, 1, oRDWR))
+	h.ok(open("p", 0, 0, root, oRDWR))
+	h.errno(open("p", 0, 0, 1, oRDWR), EACCES)
+	h.errno(open("p", 1000, 1000, gone, oRDWR), EACCES)
 	other.ok(other.send(fuseproto.Request{Opcode: fuseproto.OpCreate, NodeID: meta.RootInode, Name: []byte("g"), Mode: uint32(meta.ModeFile | 0o660), UID: 1000, GID: 1000}))
-	h.ok(open("g", 0o644, 1001, 1000, oRDWR))
-	h.errno(open("g", 0o644, 1001, 1001, 0), EACCES)
+	h.ok(open("g", 1001, 1000, 1, oRDWR))
+	h.errno(open("g", 1001, 1001, 1, 0), EACCES)
+	h.ok(open("g", 1001, 1001, member, oRDWR))
 	other.ok(other.send(fuseproto.Request{Opcode: fuseproto.OpCreate, NodeID: meta.RootInode, Name: []byte("r"), Mode: uint32(meta.ModeFile | 0o640), UID: 1000, GID: 1000}))
-	h.errno(open("r", 0o644, 1001, 1000, oTrunc), EACCES)
-	h.ok(open("r", 0o644, 1001, 1000, 0))
+	h.errno(open("r", 1001, 1000, 1, oTrunc), EACCES)
+	h.ok(open("r", 1001, 1000, 1, 0))
 }
 
 // A request served from answers the machine has seen before allocates nothing: lookups,
