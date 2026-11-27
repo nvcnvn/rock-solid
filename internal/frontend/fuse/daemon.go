@@ -89,11 +89,10 @@ type Daemon struct {
 	free    []*held
 	rq      fuseproto.Request
 	acts    []core.Action
-	// Fetch is the newest placement epoch the chunk client waits for, 0 when none.
-	Fetch uint64
-	outs  stack[fsclient.Output]
-	routs stack[meta.RouterOutput]
-	couts stack[chunkstore.ClientOutput]
+	fetch   uint64
+	outs    stack[fsclient.Output]
+	routs   stack[meta.RouterOutput]
+	couts   stack[chunkstore.ClientOutput]
 }
 
 // held is a Read in flight, kept by the daemon since the router keeps a pointer to it.
@@ -130,6 +129,12 @@ func New(cfg Config) *Daemon {
 // Ready reports whether the daemon can serve: it holds a session and a shard map that places
 // every voter's loop.
 func (d *Daemon) Ready() bool { return d.m != nil && d.mapped }
+
+// WantsTable reports that the daemon holds no placement table, or its chunk client waits for a newer one.
+func (d *Daemon) WantsTable() bool { return d.table.Epoch == 0 || d.fetch > d.table.Epoch }
+
+// Volume is the mount's volume.
+func (d *Daemon) Volume() uint32 { return d.cfg.Volume }
 
 // Attach makes dev the device the daemon serves.
 func (d *Daemon) Attach(dev Device) { d.dev = dev }
@@ -169,9 +174,6 @@ func (d *Daemon) SetTable(ctx *core.Context, t *chunkstore.Table, delta *chunkst
 		d.table = next
 	default:
 		return acts
-	}
-	if d.Fetch <= d.table.Epoch {
-		d.Fetch = 0
 	}
 	if d.cl != nil {
 		t := d.table
@@ -353,7 +355,7 @@ func (d *Daemon) chunked(ctx *core.Context, f func(o *chunkstore.ClientOutput)) 
 	o.Reset()
 	f(o)
 	d.acts = append(d.acts, o.Actions...)
-	d.Fetch = max(d.Fetch, o.Fetch)
+	d.fetch = max(d.fetch, o.Fetch)
 	for i := range o.Done {
 		d.feed(ctx, func(out *fsclient.Output) { d.m.ChunkDone(ctx, &o.Done[i], out) })
 	}

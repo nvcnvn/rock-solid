@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"slices"
 	"strconv"
@@ -116,6 +117,9 @@ type nodeConfig struct {
 	// holds a client session and neither metadata nor a PG member.
 	MetaOnly bool
 	Client   bool
+	// Mount is the volume the node mounts at MountPath, 0 for none.
+	Mount     uint32
+	MountPath string
 }
 
 // release is the format level this build's nodes report.
@@ -123,7 +127,7 @@ const release = 1
 
 // machine is the configuration of cfg's node machine.
 func (cfg nodeConfig) machine() node.Config {
-	nc := node.Config{Node: cfg.Node, Release: release, Group: cfg.Group, Seed: rand.Uint64(), MetaOnly: cfg.MetaOnly, Client: cfg.Client}
+	nc := node.Config{Node: cfg.Node, Release: release, Group: cfg.Group, Seed: rand.Uint64(), MetaOnly: cfg.MetaOnly, Client: cfg.Client, Session: cfg.Mount != 0}
 	for _, v := range cfg.Ctls {
 		nc.Ctls = append(nc.Ctls, core.NodeID{Node: v.Node})
 	}
@@ -285,8 +289,17 @@ func parseNode(args []string) (nodeConfig, error) {
 	pool := fs.Uint("pool", 1, "the pool the node's stores serve")
 	fs.Int64Var(&cfg.Memory, "memory", 0, "the daemon's memory budget in MiB, which GOMEMLIMIT is held at less the slabs mapped outside the Go heap; 0 leaves GOMEMLIMIT alone")
 	role := fs.String("role", "storage", "storage, holding PG members and metadata, meta, holding metadata alone, or client, holding a client session and no device")
+	mount := fs.String("mount", "", "a volume to mount through FUSE as volume:path, such as 1:/mnt/vol1")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
+	}
+	if *mount != "" {
+		v, path, ok := strings.Cut(*mount, ":")
+		id, err := strconv.ParseUint(v, 10, 32)
+		if !ok || err != nil || id == 0 || !filepath.IsAbs(path) {
+			return cfg, fmt.Errorf("-mount %q is not volume:path with a volume above 0 and an absolute path", *mount)
+		}
+		cfg.Mount, cfg.MountPath = uint32(id), path
 	}
 	if *role != "storage" && *role != "meta" && *role != "client" {
 		return cfg, fmt.Errorf("-role %q is not storage, meta or client", *role)

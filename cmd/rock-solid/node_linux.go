@@ -96,6 +96,10 @@ func (p *storageNode) add(dm *deviceMachine, path string) error {
 	td := tcp.New(tcp.Config{Self: core.NodeID{Node: p.cfg.Node, Loop: id}, Seed: rand.Uint64(), Dial: p.dial})
 	var m loop.Machine = p.nm
 	var d loop.Driver = td
+	if dm == nil && p.cfg.Mount != 0 {
+		p.nm.mnt = newMount(p.cfg, td)
+		d = p.nm.mnt.drv
+	}
 	if dm != nil {
 		m = dm
 		nl.pages = loop.NewSlab(pageRegion)
@@ -115,6 +119,9 @@ func (p *storageNode) add(dm *deviceMachine, path string) error {
 	}
 	nl.l = loop.New(loop.Config{Node: p.cfg.Node, ID: uint16(id), Pool: nl.pool}, nl.k, m, d)
 	td.L, nl.mail.in = nl.l, nl.l.Inbox()
+	if dm == nil && p.nm.mnt != nil {
+		p.nm.mnt.drv.l = nl.l
+	}
 	if nl.ring != nil {
 		if err := nl.l.AttachDisk(nl.ring); err != nil {
 			return err
@@ -186,6 +193,7 @@ type nodeMachine struct {
 	cfg node.Config
 	n   *node.Node
 	out node.Output
+	mnt *mount
 }
 
 func (m *nodeMachine) OnEvent(ctx *core.Context, ev *core.Event, acts []core.Action) []core.Action {
@@ -195,8 +203,15 @@ func (m *nodeMachine) OnEvent(ctx *core.Context, ev *core.Event, acts []core.Act
 		m.n.Start(ctx, &m.out)
 	}
 	m.p.loops[0].mail.run(ctx)
-	if !wake(ev) {
+	switch {
+	case wake(ev):
+	case m.mnt != nil && m.mnt.takes(m.cfg.Ctls, ev):
+		acts = m.mnt.onEvent(ctx, ev, acts)
+	default:
 		m.n.OnEvent(ctx, ev, &m.out)
+	}
+	if m.mnt != nil {
+		acts = m.mnt.take(ctx, m.n, &m.out, acts)
 	}
 	for _, nl := range m.p.loops[1:] {
 		if o, ok := m.out.Clone(); ok {

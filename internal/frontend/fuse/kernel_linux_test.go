@@ -107,7 +107,21 @@ func TestAMountServesStatToAnotherUID(t *testing.T) {
 	if !strings.Contains(line, "allow_other") || !strings.Contains(line, "default_permissions") || !strings.Contains(line, "fuse.rock-solid") {
 		t.Fatalf("mountinfo: %q", line)
 	}
-	if out, err := exec.Command("setpriv", "--reuid=65534", "--regid=65534", "--clear-groups", "stat", "-c", "%a", dir).CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "755" {
+	if out, err := asNobody(t, dir, "stat", "-L", "-c", "%a", "/dev/fd/3/").CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "755" {
 		t.Fatalf("stat as uid 65534: %s, %v", out, err)
 	}
+}
+
+// asNobody is a command run as uid 65534 holding dir as its fd 3, so that it reaches the mount by
+// /dev/fd/3 whatever the permissions of the directories above it.
+func asNobody(t *testing.T, dir string, args ...string) *exec.Cmd {
+	fd, err := unix.Open(dir, unix.O_PATH|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := os.NewFile(uintptr(fd), dir)
+	t.Cleanup(func() { _ = f.Close() })
+	c := exec.Command("setpriv", append([]string{"--reuid=65534", "--regid=65534", "--clear-groups"}, args...)...)
+	c.ExtraFiles = []*os.File{f}
+	return c
 }

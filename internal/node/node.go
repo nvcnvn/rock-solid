@@ -35,6 +35,7 @@ type Config struct {
 	Seed     uint64
 	MetaOnly bool
 	Client   bool
+	Session  bool
 }
 
 // Hand is a session table for the replica on Device, answering its ask Answers, 0 when unasked.
@@ -198,7 +199,7 @@ func (n *Node) FetchTable(ctx *core.Context, out *Output) {
 func New(cfg Config) *Node {
 	n := &Node{cfg: cfg, rng: core.NewRand(cfg.Seed)}
 	n.start = uint64(n.rng.Uint32()) << 32
-	if cfg.Client {
+	if cfg.Client || cfg.Session {
 		n.sess = meta.NewSessionClient(meta.ClientLease, cfg.Node, n.rng)
 	}
 	return n
