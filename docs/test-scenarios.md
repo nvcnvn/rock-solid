@@ -9517,7 +9517,10 @@ read past a shrunk end would count as short.
   `TestTheCloseToOpenCheck`: a read of the close's data passes, and so do zeros past its end;
   one with an older word, a zero word before the end or short of the close's size fails, and
   either passes in a handle opened before the close returned; a word at another offset fails
-  whenever the handle opened.
+  whenever the handle opened; and a close that failed holds no later open to its data.
+- **Error replies** (`TestARequestAnsweredWithAnErrorFailsItsCall`): a `WRITE`, through the page
+  cache or direct, and the `GETATTR` a cached read revalidates with, answered with an errno, fail
+  their system call with it, and the kernel takes the reply.
 - **The size at open** (`TestAReadAfterAnotherNodesCloseSeesItsSizeOnlyWhenTheOpenLooksItUp`): A
   grows a file from one page to three and closes; on B, which cached the size of one page, a
   writer opens and writes two pages, its `WRITE` held, and a reader opens and reads the third
@@ -9692,23 +9695,33 @@ and chunk devices.
 - The plant `neg-raise-after-write` leaves a chunk past `alloc_end` that the purge of the file,
   unlinked after a crash, misses (`TestAWriteBeforeItsRaiseLeavesAChunkThePurgeMisses`).
 - **[property]** `TestAMountsHistoriesKeepTheirInvariantsAcrossCrashes`: one node's `sim.Mount`,
-  four processes on two root-directory files as in `TestFileHistoriesKeepCloseToOpen`, against three
-  `meta.Shard` replicas, which serve its `Txn`s and lease reads over the meta wire and renew
-  node-pair leases with each other, and three `node.Device` chunk devices; for 30 s partitions,
-  replicas' nodes rebooted so leaders change (until 5 s before the end, a reboot's heartbeat and
-  restart wait, so a quorum votes once faults heal), and the daemon crashed, half the time within 3
-  ms of a file's first chunk write, restarting as a new mount that may unlink and create each file
-  again; then 3 s without faults. Histories pass close-to-open, every system call succeeds, no inode
-  is handed out twice, no `mtime` goes backwards, every file's entry is in its directory's slot, no
-  directory is its own ancestor, at each daemon crash every chunk written lies below `alloc_end` or
-  within its purge entry, and at the end no system call and no request in the machines has waited
-  more than 100 ms. The quiet time steps past the scheduler's own partitions, since a connection one
-  breaks holds a read for an election timeout. The daemon holds each read up to 1 ms before it sends
-  it, so requests arrive during fetches and the stale-attribute check fires, in 56,761 of its
-  105,694 calls over the first 10 seeds. Still, `keep_cache` always set, the stale check always
-  false, and the node's own writes left out of the size it shows each pass the run's 150 seeds:
-  its one kernel's page cache sees every write the node makes, and a change it never saw comes only
-  from a daemon restart's unlink and create. Scripted tests catch each:
+  four processes on two root-directory files as in `TestFileHistoriesKeepCloseToOpen`, served by
+  the `fsclient.Mount` the FUSE frontend ships, against three `meta.Shard` replicas, which serve
+  its `Txn`s and lease reads over the meta wire and renew node-pair leases with each other, and
+  three `node.Device` chunk devices. For 30 s: partitions, replicas' nodes rebooted so leaders
+  change (until 5 s before the end, a reboot's heartbeat and restart wait, so a quorum votes once
+  faults heal), and the daemon crashed, half the time within 3 ms of a file's first chunk write,
+  restarting in a new session that may unlink and create each file again through the same
+  `Mount`. While the processes run: the session fenced up to 1 s apart and within 1 ms of one
+  chunk write in 16, so a fence finds chunk I/O in flight; one pool allocation in 100 refused,
+  which fails a chunk write the client cannot take; and one `Read` in 200 answered `ErrMalformed`,
+  `ErrTooLarge`, `ErrOverloaded` or `ErrHalted`. Then 3 s without faults. Histories pass
+  close-to-open, a read such a fault overlaps counting as failed, since it may come back short;
+  every system call succeeds or, overlapped by a fence, a refused allocation or a lasting `Read`
+  error, fails `EIO`, after which its process goes on and writes again what did not land; no
+  inode is handed out twice, no `mtime` goes backwards, every file's entry is in its directory's
+  slot, no directory is its own ancestor, at each daemon crash every chunk written lies below
+  `alloc_end` or within its purge entry, a `Read` answered with an error that lasts fails its
+  request and one answered with any other stays in hand to go again, a fenced session's chunk
+  client numbers its requests above every ID the old one took, and at the end no system call and
+  no request in the machine has waited more than 100 ms. Over its first 10 seeds, 627 fences
+  find chunk I/O in flight, 173 `Read`s fail and 197 go again. The quiet time steps past the
+  scheduler's own partitions, since a connection one breaks holds a read for an election
+  timeout. The daemon holds each read's send up to 1 ms, so requests arrive during fetches and
+  the stale-attribute check fires. Still, `keep_cache` always set, the stale check always false,
+  and the node's own writes left out of the size it shows each pass the run's 150 seeds: its one
+  kernel's page cache sees every write the node makes, and a change it never saw comes only from
+  a daemon restart's unlink and create. Scripted tests catch each:
   `TestAnOpenAfterAChangeDropsTheCache`, `TestAnAttributeReplyFetchedBeforeALaterRequestIsFetchedAgain`
   and `TestCloseCommitsSizeAndMtimeAndReadsAreClamped`. A second mount in the run, which would catch
   them, is owed by [Multi-node mounts](#multi-node-mounts). The scripted tests also own the rule
@@ -9718,9 +9731,15 @@ and chunk devices.
   control plane for a new interval, which the run does not model.
 - The plant `neg-raise-after-write` fails "a purge never misses a chunk written before a crash" on
   each of the run's first 30 seeds (`TestARaiseAfterItsChunkWriteFailsTheMountsRun`, seed 1).
+- Each of the `Mount`'s plants fails the run (`TestPlantedMountBugsFailTheMountsRun`): a fenced
+  session's chunk client numbering from 0 (`noIDBase`) fails the ID rule on each of the first 30
+  seeds (seed 1); the old client's parts never abandoned (`noAbandon`, 23 of 30, seed 1) and the
+  chunks of a call the client refused never completed (`dropRefused`, 8 of 30, seed 3) leave a
+  request waiting past 100 ms; a `Read` answered with an error that lasts sent again
+  (`retryLasting`) fails the `Read` rule on each of 30 (seed 1).
 - One router output carrying both a read's answer and a `Txn`'s hands out both, though the read's
-  answer moves setup on to a `Txn` whose own pass through the router resets that output
-  (`TestOneRouterOutputHandsOutAReadsAnswerAndATxns`).
+  answer, an `UNLINK`'s entry found, moves the `UNLINK` on to a call whose own pass through the
+  router takes an output of its own (`TestOneRouterOutputHandsOutAReadsAnswerAndATxns`).
 
 ## Volume records and the first data group
 
