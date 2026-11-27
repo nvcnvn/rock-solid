@@ -54,13 +54,13 @@ type openRun struct {
 	tab   SessionTable
 	// opens are the inodes each session has open, as its client knows; fences the sessions
 	// whose fence is due, committed or not, and when.
-	opens  []openHeld
-	fences []openFence
-	next   uint64
-	freed  int
+	opens                  []openHeld
+	fences                 []openFence
+	next                   uint64
+	freed                  int
 	crashAt, cutAt, healAt core.Tick
-	cut    [2]uint32
-	err    error
+	cut                    [2]uint32
+	err                    error
 }
 
 type openHeld struct{ inode, session uint64 }
