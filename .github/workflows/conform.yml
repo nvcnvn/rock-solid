@@ -41,14 +41,15 @@ env:
   JOBS: "6"
 
 jobs:
-  # On the SYS-2, never for a pull request: a fork's code must not run on it.
+  # On the SYS-2, never for a pull request: a fork's code must not run on it. The box has two runners
+  # in one capped slice: a gate's jobs take sys2-gate, so they never wait behind a nightly's hours.
   traces:
     if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
         mode: [sweep, plants]
-    runs-on: [self-hosted, sys2]
+    runs-on: [self-hosted, "${{ inputs.scripted && 'sys2-gate' || 'sys2' }}"]
     timeout-minutes: 340
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
