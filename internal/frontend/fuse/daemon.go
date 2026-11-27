@@ -361,11 +361,21 @@ func (d *Daemon) feed(ctx *core.Context, f func(o *fsclient.Output)) {
 	}
 }
 
-// opener reads process pid's credentials from /proc, nil when it cannot, as once it exited.
+// opener reads process pid's credentials from /proc, nil when it cannot, as once it exited. Its
+// capabilities count only in the daemon's user namespace: root of a namespace of its own holds
+// them over that namespace's objects, not the mount's.
 func (d *Daemon) opener(pid uint32) *fsclient.Creds {
-	b, err := os.ReadFile("/proc/" + strconv.FormatUint(uint64(pid), 10) + "/status")
+	proc := "/proc/" + strconv.FormatUint(uint64(pid), 10)
+	b, err := os.ReadFile(proc + "/status")
 	if err != nil || pid == 0 || !parseStatus(b, &d.creds) {
 		return nil
+	}
+	ns, err := os.Readlink(proc + "/ns/user")
+	if err != nil {
+		return nil
+	}
+	if self, err := os.Readlink("/proc/self/ns/user"); err != nil || ns != self {
+		d.creds.Override = false
 	}
 	return &d.creds
 }

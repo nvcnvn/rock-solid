@@ -5,12 +5,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"golang.org/x/sys/unix"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/fsclient"
 	"github.com/nvcnvn/rock-solid/internal/fuseproto"
 )
 
@@ -145,3 +148,25 @@ func TestAReplyTheKernelRefusesEndsServe(t *testing.T) {
 	}
 }
 
+// Root of a user namespace of its own holds CAP_DAC_OVERRIDE over that namespace's objects, not
+// the mount's: its credentials carry no override, though its status shows the capability.
+func TestAnOpenerInAnotherUserNamespaceHasNoOverride(t *testing.T) {
+	c := exec.Command("sleep", "60")
+	c.SysProcAttr = &syscall.SysProcAttr{
+		Cloneflags:  syscall.CLONE_NEWUSER,
+		UidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
+		GidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
+	}
+	if err := c.Start(); err != nil {
+		t.Skipf("no user namespace to start a process in: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Process.Kill(); _ = c.Wait() })
+	pid := uint32(c.Process.Pid)
+	var in fsclient.Creds
+	if b, err := os.ReadFile("/proc/" + strconv.Itoa(c.Process.Pid) + "/status"); err != nil || !parseStatus(b, &in) || !in.Override {
+		t.Fatalf("the process's status gave %+v, %v", in, err)
+	}
+	if cr := New(Config{}).opener(pid); cr == nil || cr.Override {
+		t.Fatalf("the opener's credentials are %+v", cr)
+	}
+}
