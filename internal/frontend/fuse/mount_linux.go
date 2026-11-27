@@ -23,3 +23,13 @@ func Mount(path string) (Device, error) {
 	}
 	return Device{Fd: fd}, nil
 }
+
+// Unmount undoes a Mount nobody serves, as one whose device could not join its loop: it closes dev,
+// which aborts the connection, and detaches the mount at path.
+func Unmount(dev Device, path string) error {
+	_ = unix.Close(dev.Fd)
+	if err := unix.Unmount(path, unix.MNT_DETACH); err != nil {
+		return fmt.Errorf("fuse: unmount %s: %w", path, err)
+	}
+	return nil
+}

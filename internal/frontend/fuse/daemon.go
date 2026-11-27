@@ -93,6 +93,7 @@ type Daemon struct {
 	acts    []core.Action
 	fetch   uint64
 	refused error
+	broken  error
 	creds   fsclient.Creds
 	outs    stack[fsclient.Output]
 	routs   stack[meta.RouterOutput]
@@ -138,7 +139,9 @@ func (d *Daemon) Ready() bool { return d.m != nil && d.mapped }
 func (d *Daemon) WantsTable() bool { return d.table.Epoch == 0 || d.fetch > d.table.Epoch }
 
 // Refused takes the last error the device gave a reply since the last call, nil if none: the
-// kernel failed that request and the mount serves on.
+// kernel failed that request and the mount serves on. EINVAL is not among them: the kernel gives
+// it a frame it cannot take, before it finds the request, which then never ends; only an encoder
+// bug writes one, so Serve returns it and the mount ends.
 func (d *Daemon) Refused() error {
 	err := d.refused
 	d.refused = nil
@@ -292,8 +295,11 @@ func (d *Daemon) Serve(ctx *core.Context, acts []core.Action) ([]core.Action, er
 		if err := d.request(ctx, buf[:n]); err != nil {
 			return d.acts, err
 		}
+		if d.broken != nil {
+			return d.acts, d.broken
+		}
 	}
-	return d.acts, nil
+	return d.acts, d.broken
 }
 
 // request serves one frame: INIT here, every other request through the filesystem client.
@@ -395,7 +401,10 @@ func parseStatus(b []byte, c *fsclient.Creds) bool {
 }
 
 func (d *Daemon) write(frame []byte) {
-	if err := d.dev.Write(frame); err != nil && !errors.Is(err, ErrGone) {
+	switch err := d.dev.Write(frame); {
+	case errors.Is(err, unix.EINVAL):
+		d.broken = fmt.Errorf("fuse: the kernel refused a reply's frame: %w", err)
+	case err != nil && !errors.Is(err, ErrGone):
 		d.refused = err
 	}
 }

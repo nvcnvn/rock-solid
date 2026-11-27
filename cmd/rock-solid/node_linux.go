@@ -98,6 +98,7 @@ func (p *storageNode) add(dm *deviceMachine, path string) error {
 	var d loop.Driver = td
 	if dm == nil && p.cfg.Mount != 0 {
 		p.nm.mnt = newMount(p.cfg, td)
+		p.nm.mnt.stop = p.Stop
 		d = p.nm.mnt.drv
 	}
 	if dm != nil {
@@ -151,7 +152,7 @@ func (p *storageNode) dial(peer core.NodeID) (int, error) {
 	return tcp.DialTCP(netip.AddrPortFrom(ap.Addr(), ap.Port()+uint16(peer.Loop)))
 }
 
-// Run runs every loop until Stop.
+// Run runs every loop until Stop, and returns why a mount that failed to start stopped them.
 func (p *storageNode) Run() error {
 	var wg sync.WaitGroup
 	for _, nl := range p.loops[1:] {
@@ -160,6 +161,9 @@ func (p *storageNode) Run() error {
 	p.loops[0].l.Run()
 	wg.Wait()
 	p.close()
+	if p.nm.mnt != nil {
+		return p.nm.mnt.err
+	}
 	return nil
 }
 

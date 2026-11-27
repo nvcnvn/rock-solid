@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"math/rand/v2"
 	"slices"
@@ -22,6 +23,9 @@ type mount struct {
 	drv     *mountDriver
 	path    string
 	mounted bool
+	// stop stops the node, and err is why: a mount that could not start.
+	stop func()
+	err  error
 }
 
 func newMount(cfg nodeConfig, td *tcp.Driver) *mount {
@@ -92,12 +96,14 @@ func (m *mount) take(ctx *core.Context, n *node.Node, out *node.Output, acts []c
 	m.mounted = true
 	dev, err := fuse.Mount(m.path)
 	if err != nil {
-		log.Printf("%v", err)
+		m.err = err
+		m.stop()
 		return acts
 	}
 	c, err := m.drv.l.AddConn(dev.Fd, true)
 	if err != nil {
-		log.Printf("mount %s: %v", m.path, err)
+		m.err = errors.Join(fmt.Errorf("mount %s: %w", m.path, err), fuse.Unmount(dev, m.path))
+		m.stop()
 		return acts
 	}
 	m.drv.l.Own(c)
