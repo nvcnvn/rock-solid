@@ -32,20 +32,23 @@ const (
 	invMtime       = "no file's mtime goes backwards"
 	invSlot        = "a file's entry is in its directory's slot"
 	invAncestor    = "no directory is its own ancestor"
-	invErrno       = "every system call of the run succeeds"
+	invErrno       = "every system call of the run succeeds, or fails EIO under a fault injected while it ran"
 	invLive        = "once faults heal, no system call or request waits longer than liveWait"
+	invIDs         = "a fenced session's chunk client numbers its requests above every ID the old one took"
+	invReadErr     = "a Read answered with an error that lasts fails its request, and one answered with any other goes again"
 )
 
 const (
-	runGroup   = 5
-	runSession = 1
-	runBlocks  = 1 << 18
-	runFor     = core.Tick(30_000_000)
+	runGroup  = 5
+	runBlocks = 1 << 18
+	runFor    = core.Tick(30_000_000)
 	// quietFor is the run's time without faults after them, long enough for an election and the
 	// router's wait to retry a Txn it held for one.
 	quietFor = core.Tick(3_000_000)
-	// faultGap is the most time between two daemon crashes, and between two reboots.
+	// faultGap is the most time between two daemon crashes, and between two reboots, and fenceGap
+	// between two fences.
 	faultGap = core.Tick(8_000_000)
+	fenceGap = core.Tick(1_000_000)
 	// routerTimer is the client loop's router's timer.
 	routerTimer core.TimerID = 0x66737274
 	// readTimer is the client loop's timer for held reads, and readLatency the most a read is held
@@ -60,20 +63,23 @@ const (
 )
 
 // fsRun is one node's mount against a three-replica MetaStore shard and three chunk devices.
-// Nodes 0 to 2 each run a meta.Shard replica, its Txns and Reads served over the meta wire, and
-// renew node-pair leases with each other; nodes 3 to 5 each run a
-// node.Device, whose placement table puts four PGs of one member on them. The daemon on node 6 runs
-// a Machine per mount, a meta.Client and a chunkstore.Client, behind a sim.Mount whose processes
-// open the root directory's two files by name, read, read through a mapping, write the whole file
-// and fsync, one writer of a file at a time. Faults: partitions, and up to faultGap apart until
-// rebootsEnd a replica's node rebooted, so leaders change, and the daemon crashed, also within 3 ms of a chunk
-// write it calls, half the time for a file's first and one time in 32 for another; it restarts as
-// a new mount that, before its processes start, creates each file not yet made and, with even
-// odds, unlinks and creates each other again. The devices do not crash: a restarted primary asks
-// the control plane, which the run does not have, for a new interval.
+// Nodes 0 to 2 each run a meta.Shard replica on loop 1, its Txns and Reads served over the meta
+// wire, and renew node-pair leases with each other; nodes 3 to 5 each run a node.Device, whose
+// placement table puts four PGs of one member on them. The daemon on node 6 runs the Mount that
+// ships, behind a sim.Mount whose processes open the root directory's two files by name, read,
+// read through a mapping, write the whole file and fsync, one writer of a file at a time. Faults:
+// partitions, and up to faultGap apart until rebootsEnd a replica's node rebooted, so leaders
+// change, and the daemon crashed, also within 3 ms of a chunk write it sends, half the time for a
+// file's first and one time in 32 for another; it restarts in a new session that, before its
+// processes start, creates each file not yet made and, with even odds, unlinks and creates each
+// other again. While the processes run, until runFor: the session fenced up to fenceGap apart, and
+// within 1 ms of one write in 16; one allocation in allocOdds refused; and one Read in
+// readErrOdds answered with an error, half of them lasting. A system call such a fault overlaps
+// may fail EIO, a read may come back short, and the process goes on. The devices do not crash: a
+// restarted primary asks the control plane, which the run does not have, for a new interval.
 //
-// The daemon holds each read for up to readLatency before it sends it, so requests arrive during
-// fetches and the machines' stale-attribute rule runs.
+// The daemon holds each read's send for up to readLatency, so requests arrive during fetches and
+// the machine's stale-attribute rule runs.
 type fsRun struct {
 	t     testing.TB
 	s     *sim.Scheduler
@@ -93,15 +99,25 @@ type fsRun struct {
 	last    map[uint64]uint64
 	creates map[uint64]string
 	mtimes  map[uint64]int64
-	// crashAt is when the daemon crashes next, rebootAt when a replica's node reboots.
-	crashAt, rebootAt core.Tick
-	crashes           int
+	// crashAt is when the daemon crashes next, fenceAt when its session is fenced and rebootAt
+	// when a replica's node reboots.
+	crashAt, fenceAt, rebootAt core.Tick
+	crashes                    int
+	// session is the daemon's node's: each start and each fence takes the next.
+	session uint64
+	// faultAt are the times of the faults that may fail a system call in flight with EIO: fences,
+	// refused allocations and Reads answered with an error that lasts.
+	faultAt []core.Tick
+	// abandons counts fences with chunk I/O in flight, lasting and transient the Read errors the
+	// mount took of each kind.
+	abandons, lasting, transient int
 	// ended is set for the check at the end of the quiet time.
 	ended bool
-	// idErr, errnoErr and purgeErr are the first inode handed out twice, system call failed and
-	// chunk a crash left past alloc_end and the purge entry.
-	idErr, errnoErr, purgeErr error
-	scan                      meta.ScanResult
+	// idErr, errnoErr, purgeErr, readErr and idsErr are the first inode handed out twice, system
+	// call failed, chunk a crash left past alloc_end and the purge entry, Read error handled
+	// against its kind and fenced session's chunk client numbering below the old one's.
+	idErr, errnoErr, purgeErr, readErr, idsErr error
+	scan                                       meta.ScanResult
 }
 
 // runFile is a name of the root directory: its inode, the most any writer of it wrote, and the
@@ -144,8 +160,10 @@ func newFSRun(t testing.TB, seed uint64, p plants) *fsRun {
 	r.inv.Register(invAncestor, r.noCycle)
 	r.inv.Register(invPurgeMisses, func() error { return r.purgeErr })
 	r.inv.Register(invLive, r.live)
+	r.inv.Register(invReadErr, func() error { return r.readErr })
+	r.inv.Register(invIDs, func() error { return r.idsErr })
 	r.inv.Register(invCloseToOpen, func() error {
-		if i, broken := sim.CloseToOpen(r.hist.Ops()); broken {
+		if i, broken := sim.CloseToOpen(r.unfaulted()); broken {
 			return fmt.Errorf("operation %d: %+v", i, r.hist.Ops()[i])
 		}
 		return nil
@@ -226,18 +244,17 @@ func (r *fsRun) live() error {
 		}
 	}
 	at := realtime + int64(d.n.Context().Now)*1000
-	for _, m := range []*Machine{d.setup, d.m} {
-		for _, o := range m.ops {
-			if o.req.Opcode < opReserveSlots && at-o.now > int64(liveWait)*1000 {
-				return fmt.Errorf("request %+v at step %d has waited %d µs, with %d Txns in flight", o.req, o.step, (at-o.now)/1000, len(d.txns))
-			}
+	for _, o := range d.g.m.ops {
+		if o.req.Opcode < opReserveSlots && at-o.now > int64(liveWait)*1000 {
+			return fmt.Errorf("request %+v at step %d has waited %d µs, with %d Txns in flight", o.req, o.step, (at-o.now)/1000, len(d.g.txns))
 		}
 	}
 	return nil
 }
 
-// faults crashes the daemon at crashAt, checking the chunks it wrote first, and before rebootsEnd
-// reboots a replica's node at rebootAt, each drawn again up to faultGap later.
+// faults crashes the daemon at crashAt, checking the chunks it wrote first, fences its session at
+// fenceAt while the run injects faults, and before rebootsEnd reboots a replica's node at
+// rebootAt, each drawn again up to faultGap, or fenceGap, later.
 func (r *fsRun) faults() {
 	now := r.s.Time()
 	if c := r.s.Node(clientNode); c.Up() && now >= r.crashAt {
@@ -256,6 +273,10 @@ func (r *fsRun) faults() {
 		r.crashes++
 		r.s.CrashRandom(clientNode)
 	}
+	if c := r.s.Node(clientNode); c.Up() && r.injects() && now >= r.fenceAt {
+		r.fenceAt = now + core.Tick(r.rng.Below(uint64(fenceGap)))
+		r.fence()
+	}
 	if now >= r.rebootAt && now < rebootsEnd {
 		r.rebootAt = now + core.Tick(r.rng.Below(uint64(faultGap)))
 		if i := uint32(r.rng.Below(3)); r.s.Node(i).Up() {
@@ -273,8 +294,9 @@ func runTable() chunkstore.Table {
 	return t
 }
 
-// tend hands each opened device that has not had them since it started the membership of all
-// three, its session table and the placement table.
+// tend hands each opened device that has not had them since it started or the daemon's node took
+// its session the membership of all three, a session table with only that session live, and the
+// placement table.
 func (r *fsRun) tend() {
 	for _, dv := range r.devs {
 		if dv.log == 0 {
@@ -288,12 +310,12 @@ func (r *fsRun) tend() {
 	}
 	for i, dv := range r.devs {
 		n := r.s.Node(devAt(i).Node)
-		if !n.Up() || !dv.opened || dv.handed {
+		if !n.Up() || !dv.opened || dv.session == r.session {
 			continue
 		}
-		dv.handed = true
+		dv.session = r.session
 		o := nodepkg.Output{Member: true, Disks: ds, Table: &tbl,
-			Hands: []nodepkg.Hand{{Device: uint64(i) + 1, Table: chunkstore.SessionTable{Version: 1, Next: runSession + 1, Live: []uint64{runSession}}}}}
+			Hands: []nodepkg.Hand{{Device: uint64(i) + 1, Table: chunkstore.SessionTable{Version: r.session, Next: r.session + 1, Live: []uint64{r.session}}}}}
 		n.Call(dv.loop, func(ctx *core.Context, acts []core.Action) []core.Action {
 			dv.out.Reset()
 			dv.d.Take(ctx, &o, &dv.out)
@@ -431,6 +453,8 @@ func (m *metaRep) boot(n *sim.Node) {
 	rng := n.Fork()
 	first := m.s == nil
 	m.flight, m.sv = nil, meta.NewServer()
+	// Loop 0 of a node hosts no MetaStore replica.
+	n.Start(sim.MachineFunc(sink), nil)
 	m.loop = n.Start(sim.MachineFunc(m.onEvent), n.Disk(0))
 	n.Call(m.loop, func(ctx *core.Context, acts []core.Action) []core.Action {
 		// A new group's grantors have granted nothing, so they start with no restart wait.
@@ -443,9 +467,10 @@ func (m *metaRep) boot(n *sim.Node) {
 			Tree: lsm.Config{MaxPiece: 64 << 10}}
 		var peers []core.NodeID
 		for j := range 3 {
-			cfg.Raft.Peers = append(cfg.Raft.Peers, raftshard.Peer{ID: uint64(j) + 1, Node: core.NodeID{Node: uint32(j)}})
+			at := core.NodeID{Node: uint32(j), Loop: 1}
+			cfg.Raft.Peers = append(cfg.Raft.Peers, raftshard.Peer{ID: uint64(j) + 1, Node: at})
 			if j != m.i {
-				peers = append(peers, core.NodeID{Node: uint32(j)})
+				peers = append(peers, at)
 			}
 		}
 		m.pair = leasetest.New(h, g, peers, rng)
@@ -470,6 +495,8 @@ func (m *metaRep) onEvent(ctx *core.Context, ev *core.Event, acts []core.Action)
 		return sink(ctx, ev, acts)
 	case ev.Kind == core.EvNetRecv && kind == meta.KindTxn:
 		acts = m.sv.Serve(ctx, ev, m.s, &m.out, acts)
+	case ev.Kind == core.EvNetRecv && kind == meta.KindRead && m.r.injects() && m.r.rng.Chance(1, readErrOdds):
+		acts = m.r.answerErr(ctx, ev, acts)
 	case ev.Kind == core.EvNetRecv && kind == meta.KindRead:
 		acts = m.sv.ServeRead(ctx, ev, m.s, acts)
 	case ev.Kind == core.EvDiskDone:
@@ -485,6 +512,29 @@ func (m *metaRep) onEvent(ctx *core.Context, ev *core.Event, acts []core.Action)
 		m.s.OnEvent(ctx, ev, &m.out)
 	}
 	return m.finish(ctx, acts)
+}
+
+// readErrOdds is the odds against a replica answering a Read of the processes' with an error.
+const readErrOdds = 200
+
+// readErrs are the errors a Read may be answered with, the first two lasting.
+var readErrs = [...]error{meta.ErrMalformed, meta.ErrTooLarge, meta.ErrOverloaded, meta.ErrHalted}
+
+// answerErr answers Read ev with one of readErrs.
+func (r *fsRun) answerErr(ctx *core.Context, ev *core.Event, acts []core.Action) []core.Action {
+	group, _, token, _ := meta.Peek(&ev.Msg)
+	err := readErrs[r.rng.Below(uint64(len(readErrs)))]
+	if lasting(err) {
+		r.faultAt = append(r.faultAt, r.s.Time())
+	}
+	if ev.Msg.Buf != core.NoBuf {
+		ctx.Pool.Free(ev.Msg.Buf)
+	}
+	a := core.Action{Kind: core.ActNetSend, Peer: ev.Peer, Reply: true}
+	if err := meta.EncodeReadAnswer(ctx.Pool, group, &meta.ReadAnswer{Token: token, Err: err}, &a.Msg); err != nil {
+		panic(err)
+	}
+	return append(acts, a)
 }
 
 func (m *metaRep) finish(ctx *core.Context, acts []core.Action) []core.Action {
@@ -510,11 +560,12 @@ type devRep struct {
 	log     uint64
 	reserve uint64
 	opened  bool
-	handed  bool
+	// session is the one the device was handed live.
+	session uint64
 }
 
 func (dv *devRep) boot(n *sim.Node) {
-	dv.opened, dv.handed = false, false
+	dv.opened, dv.session = false, 0
 	rng := n.Fork()
 	dv.loop = n.Start(sim.MachineFunc(dv.onEvent), n.Disk(0))
 	n.Call(dv.loop, func(ctx *core.Context, acts []core.Action) []core.Action {
@@ -543,29 +594,34 @@ func (dv *devRep) finish(acts []core.Action) []core.Action {
 	return append(acts, dv.out.Actions...)
 }
 
-// daemon is one start of the daemon on node 3: setup, a mount that unlinks and creates the files
-// again before the processes start, then m serving the sim.Mount.
+// daemon is one start of the daemon on node 6: the Mount serving the sim.Mount, whose processes
+// start once setup's requests, sent through the same Mount after the Txn that creates the root,
+// have unlinked and created the files again.
 type daemon struct {
 	r      *fsRun
 	n      *sim.Node
 	loop   core.NodeID
-	setup  *Machine
-	m      *Machine
-	mc     *meta.Client
-	rout   meta.RouterOutput
-	cl     *chunkstore.Client
-	cout   chunkstore.ClientOutput
+	g      *Mount
+	out    MountOutput
 	mount  *sim.Mount
 	frames [][]byte
 	ready  bool
 	procs  []*runProc
-	// steps are setup's requests in order, and step the next to send.
-	steps []fuseproto.Request
-	step  int
-	root  meta.FS
-	txns  map[uint64]sentTxn
-	reads map[uint64]heldRead
-	held  []heldRead
+	// steps are setup's requests in order, step the next to send, and advance set once its last
+	// reply is in.
+	steps   []fuseproto.Request
+	step    int
+	advance bool
+	frame   []byte
+	// rc sends the root's Txn under rootTok, from a client of its own on the same loop.
+	rc      *meta.Client
+	rout    meta.RouterOutput
+	root    meta.FS
+	rootTok uint64
+	ans     meta.ReadAnswer
+	txn     meta.Txn
+	upd     chunkstore.Update
+	held    []heldSend
 	// armed is set while readTimer is set, for armedAt.
 	armed   bool
 	armedAt core.Tick
@@ -573,31 +629,36 @@ type daemon struct {
 	acts    []core.Action
 }
 
-type sentTxn struct {
-	m     *Machine
-	token uint64
-}
-
-type heldRead struct {
-	m  *Machine
-	rd Read
+// heldSend is a Read's send the daemon holds until at.
+type heldSend struct {
+	a  core.Action
 	at core.Tick
 }
 
+// setupUnique is where setup's request uniques start, above any the kernel takes.
+const setupUnique = 1 << 40
+
+// metaDisk is the disk of replica i's node, which the shard map names its voter by.
+func metaDisk(i int) uint32 { return uint32(11 + i) }
+
 func (r *fsRun) bootDaemon(n *sim.Node) {
 	r.incs++
+	r.session++
 	r.crashAt = r.s.Time() + core.Tick(r.rng.Below(uint64(faultGap)))
-	cfg := Config{Volume: vol, Pool: 1, Session: runSession, Mount: uint32(2 * r.incs), SlotLimit: 1 << 20}
-	d := &daemon{r: r, n: n, setup: New(cfg), txns: map[uint64]sentTxn{}, reads: map[uint64]heldRead{}}
-	cfg.Mount++
-	d.m = New(cfg)
-	d.setup.plant, d.m.plant = r.plant, r.plant
+	r.fenceAt = r.s.Time() + core.Tick(r.rng.Below(uint64(fenceGap)))
+	d := &daemon{r: r, n: n, g: NewMount(Config{Volume: vol, Pool: 1, Mount: 1, SlotLimit: 1 << 20}, 2*r.incs)}
 	router, err := meta.NewRouter(&meta.ShardMap{Groups: []meta.Group{{ID: 1}, {ID: runGroup, Start: []byte{meta.SpaceCtl + 1}, Voters: []meta.Replica{{ID: 1, Node: 0}, {ID: 2, Node: 1}, {ID: 3, Node: 2}}}}}, routerTimer)
 	if err != nil {
 		r.t.Fatal(err)
 	}
-	d.mc = meta.NewClient(router, r.incs)
-	d.cl = chunkstore.NewClient(chunkstore.ClientConfig{Session: runSession, Incarnation: r.incs})
+	d.rc = meta.NewClient(router, 2*r.incs+1)
+	plan := meta.Group{ID: runGroup, Start: []byte{meta.SpaceCtl + 1}}
+	disks := make([]meta.DiskAddr, 0, 6)
+	for i := range 3 {
+		d.rc.SetLoop(uint32(i), runGroup, 1)
+		plan.Voters = append(plan.Voters, meta.Replica{ID: uint64(i) + 1, Node: uint32(i), Disk: metaDisk(i)})
+		disks = append(disks, meta.DiskAddr{Disk: uint32(i) + 1, At: devAt(i)}, meta.DiskAddr{Disk: metaDisk(i), At: core.NodeID{Node: uint32(i), Loop: 1}})
+	}
 	d.mount = sim.NewMount(r.s.Time, r.hist)
 	r.d = d
 	for i := range r.files {
@@ -620,228 +681,126 @@ func (r *fsRun) bootDaemon(n *sim.Node) {
 	}
 	n.Call(d.loop, func(ctx *core.Context, acts []core.Action) []core.Action {
 		return d.pass(ctx, acts, func() {
-			for i := range 3 {
-				d.cl.SetAddr(uint32(i)+1, devAt(i))
+			d.g.SetSession(d.ctx, r.session, &d.out)
+			d.g.m.plant, d.g.plant = r.plant, r.plant
+			d.g.SetMembership(d.ctx, []meta.Group{{ID: 1}, plan}, disks, &d.out)
+			tbl := runTable()
+			d.g.SetTable(d.ctx, &tbl, nil, &d.out)
+			d.root.Volume = vol
+			if err := d.root.Root(&rootAttr); err != nil {
+				panic(err)
 			}
-			d.chunked(func(ctx *core.Context, o *chunkstore.ClientOutput) { d.cl.SetTable(ctx, runTable(), o) })
-			d.next()
+			d.sendRoot()
 		})
 	})
 }
 
-// pass runs f as one pass of the daemon's loop and returns the actions it took.
+// pass runs f as one pass of the daemon's loop, with the pool the mount allocates from, flushes
+// what the mount emitted and returns the actions it took.
 func (d *daemon) pass(ctx *core.Context, acts []core.Action, f func()) []core.Action {
-	d.ctx, d.acts = ctx, acts
+	c := *ctx
+	c.Pool = runPool{BufPool: ctx.Pool, d: d}
+	d.ctx, d.acts = &c, acts
+	d.out.Reset()
 	f()
+	d.flush()
+	for d.advance {
+		d.advance = false
+		d.out.Reset()
+		d.next()
+		d.flush()
+	}
 	for fr, ok := d.mount.Read(); ok; fr, ok = d.mount.Read() {
 		d.frames = append(d.frames, fr)
 	}
 	return d.acts
 }
 
-// next sends setup's next request, or once none is left lets the processes start.
-func (d *daemon) next() {
-	if d.step == 0 && d.root.Txn.Ops == nil {
-		d.root.Volume = vol
-		if err := d.root.Root(&rootAttr); err != nil {
-			panic(err)
-		}
-		d.sendRoot()
-		return
+// flush hands each opener the credentials of a process that holds only its request's, writes the
+// mount's replies and makes its actions.
+func (d *daemon) flush() {
+	for i := 0; i < len(d.out.Openers); i++ {
+		d.g.OpenerDone(d.ctx, d.out.Openers[i].Token, &Creds{}, &d.out)
 	}
-	if d.step == len(d.steps) {
-		d.ready = true
-		return
+	for b := d.out.Replies; len(b) > 0; b = b[binary.LittleEndian.Uint32(b):] {
+		d.reply(b[:binary.LittleEndian.Uint32(b)])
 	}
-	d.step++
-	rq := d.steps[d.step-1]
-	rq.Unique = 2 * uint64(d.step)
-	d.feed(d.setup, func(o *Output) { d.setup.Request(d.ctx, d.realtime(), &rq, o) })
-}
-
-// sendRoot sends the Txn that creates the volume's root once, whose failed check on a later
-// start says it is there.
-func (d *daemon) sendRoot() {
-	d.routed(func(o *meta.RouterOutput) {
-		tok, err := d.mc.Txn(d.ctx, &d.root.Txn, o)
-		if err != nil {
-			panic(err)
-		}
-		d.txns[tok] = sentTxn{}
-	})
-}
-
-func (d *daemon) realtime() int64 { return realtime + int64(d.ctx.Now)*1000 }
-
-func (d *daemon) onEvent(ctx *core.Context, ev *core.Event, acts []core.Action) []core.Action {
-	return d.pass(ctx, acts, func() {
-		switch {
-		case ev.Kind == core.EvNetRecv && ev.Msg.Group():
-			d.routed(func(o *meta.RouterOutput) { d.mc.OnEvent(ctx, ev, o) })
-		case ev.Kind == core.EvNetRecv:
-			d.chunked(func(ctx *core.Context, o *chunkstore.ClientOutput) { d.cl.OnEvent(ctx, ev, o) })
-		case ev.Kind == core.EvTimer && ev.Timer == routerTimer:
-			d.routed(func(o *meta.RouterOutput) { d.mc.OnEvent(ctx, ev, o) })
-		case ev.Kind == core.EvTimer && ev.Timer == chunkstore.ClientTimer:
-			d.chunked(func(ctx *core.Context, o *chunkstore.ClientOutput) { d.cl.OnEvent(ctx, ev, o) })
-		case ev.Kind == core.EvTimer && ev.Timer == readTimer:
-			d.armed = false
-			held := d.held
-			d.held = nil
-			for _, h := range held {
-				if h.at > ctx.Now {
-					d.hold(h)
-				} else {
-					d.send(h)
-				}
-			}
-		case ev.Kind == core.EvPeerLost:
-			d.routed(func(o *meta.RouterOutput) { d.mc.OnEvent(ctx, ev, o) })
-			d.chunked(func(ctx *core.Context, o *chunkstore.ClientOutput) { d.cl.OnEvent(ctx, ev, o) })
-		}
-	})
-}
-
-// feed runs f on machine m and makes the calls its output asks for, the chunk calls first, as
-// their data aliases the machine's memory only until they are made.
-func (d *daemon) feed(m *Machine, f func(o *Output)) {
-	var o Output
-	f(&o)
-	for _, c := range o.Chunks {
-		d.chunk(c)
-	}
-	for _, s := range o.Txns {
-		d.txn(m, s)
-	}
-	for b := o.Replies; len(b) > 0; b = b[binary.LittleEndian.Uint32(b):] {
-		d.reply(m, b[:binary.LittleEndian.Uint32(b)])
-	}
-	for _, buf := range o.Data {
+	for _, buf := range d.out.Data {
 		b := d.ctx.Pool.Bytes(buf)
-		d.reply(m, b[:binary.LittleEndian.Uint32(b)])
+		d.reply(b[:binary.LittleEndian.Uint32(b)])
 		d.ctx.Pool.Free(buf)
 	}
-	for _, rd := range o.Reads {
-		d.read(m, rd)
-	}
-	for _, p := range o.Openers {
-		d.feed(m, func(o *Output) { m.OpenerDone(d.ctx, p.Token, &Creds{}, o) })
+	for i := range d.out.Actions {
+		d.act(&d.out.Actions[i])
 	}
 }
 
-func (d *daemon) chunk(c ChunkCall) {
-	var err error
-	if c.Read {
-		d.chunked(func(ctx *core.Context, o *chunkstore.ClientOutput) {
-			err = d.cl.Read(ctx, c.Token, c.File, c.Off, c.N, o)
-		})
-	} else {
-		r := d.r
-		last := (c.Off + uint64(len(c.Data)) - 1) / core.ChunkSize
-		l, ok := r.last[uint64(c.File.Inode)]
-		if !ok || l < last {
-			r.last[uint64(c.File.Inode)] = last
+// act makes action a, holding a Read's send for up to readLatency, and notes the inodes a Txn
+// creates and the chunks a write goes to.
+func (d *daemon) act(a *core.Action) {
+	if a.Kind == core.ActNetSend {
+		switch _, kind, _, ok := meta.Peek(&a.Msg); {
+		case ok && kind == meta.KindRead && a.Msg.Buf == core.NoBuf:
+			d.hold(heldSend{*a, d.ctx.Now + core.Tick(d.r.rng.Below(uint64(readLatency)))})
+			return
+		case ok && kind == meta.KindTxn:
+			d.created(&a.Msg)
+		case !ok && a.Peer.Node >= devAt(0).Node && a.Peer.Node < clientNode:
+			d.wrote(&a.Msg)
 		}
-		if r.rng.Chance(1, 32) || !ok && r.rng.Chance(1, 2) {
-			r.crashAt = min(r.crashAt, r.s.Time()+core.Tick(r.rng.Below(3000)))
-		}
-		d.chunked(func(ctx *core.Context, o *chunkstore.ClientOutput) {
-			err = d.cl.Write(ctx, c.Token, c.File, c.Off, c.Data, false, o)
-		})
 	}
-	if err != nil {
-		panic(fmt.Sprintf("chunk call %+v: %v", c, err))
-	}
+	d.acts = append(d.acts, *a)
 }
 
-// chunked runs f on the chunk client and hands each completion to the mount's machine, as
-// setup makes no chunk calls.
-func (d *daemon) chunked(f func(ctx *core.Context, o *chunkstore.ClientOutput)) {
-	d.cout.Reset()
-	ctx := *d.ctx
-	ctx.Pool = detachPool{BufPool: d.ctx.Pool, s: d.r.s, node: clientNode}
-	f(&ctx, &d.cout)
-	d.acts = append(d.acts, d.cout.Actions...)
-	done := slices.Clone(d.cout.Done)
-	for i := range done {
-		d.feed(d.m, func(o *Output) { d.m.ChunkDone(d.ctx, &done[i], o) })
-	}
-}
-
-func (d *daemon) txn(m *Machine, s TxnSend) {
+// created checks that no inode a Txn creates was created by a request of another replay key.
+func (d *daemon) created(msg *core.Msg) {
 	r := d.r
-	if s.Txn.Replay != nil {
-		for _, op := range s.Txn.Ops {
-			var k meta.Key
-			if op.Kind != meta.OpPut || meta.DecodeKey(op.Key, &k) != nil || k.Tag != meta.InodeEntry {
-				continue
-			}
-			ino, _, err := meta.DecodeEntry(op.Value)
-			if prev, ok := r.creates[ino]; err == nil && ok && prev != string(s.Txn.Replay) && r.idErr == nil {
-				r.idErr = fmt.Errorf("inode %x created by request %x and by %x", ino, prev, s.Txn.Replay)
-			}
-			r.creates[ino] = string(s.Txn.Replay)
-		}
+	if err := meta.DecodeTxn(d.ctx.Pool, msg, &d.txn); err != nil {
+		panic(err)
 	}
-	d.routed(func(o *meta.RouterOutput) {
-		tok, err := d.mc.Txn(d.ctx, s.Txn, o)
-		if err != nil {
-			panic(fmt.Sprintf("the router refused %+v: %v", *s.Txn, err))
-		}
-		d.txns[tok] = sentTxn{m, s.Token}
-	})
-}
-
-// routed runs f on the meta client and hands each answer to the machine that sent its Txn or Read,
-// sending again a Read whose answer promises nothing.
-func (d *daemon) routed(f func(o *meta.RouterOutput)) {
-	d.rout.Reset()
-	f(&d.rout)
-	d.acts = append(d.acts, d.rout.Actions...)
-	reads, answers := slices.Clone(d.rout.Reads), slices.Clone(d.rout.Answers)
-	for i := range reads {
-		a := &reads[i]
-		s, ok := d.reads[a.Token]
-		if !ok {
-			continue
-		}
-		delete(d.reads, a.Token)
-		switch {
-		case errResend(a.Err):
-			d.read(s.m, s.rd)
-		case a.Err != nil:
-			panic(fmt.Sprintf("read %+v: %v", s.rd, a.Err))
-		default:
-			d.feed(s.m, func(o *Output) { s.m.ReadDone(d.ctx, s.rd.Token, a.KVs, o) })
-		}
+	if d.txn.Replay == nil {
+		return
 	}
-	for i := range answers {
-		a := &answers[i]
-		s, ok := d.txns[a.Token]
-		if !ok {
+	for _, op := range d.txn.Ops {
+		var k meta.Key
+		if op.Kind != meta.OpPut || meta.DecodeKey(op.Key, &k) != nil || k.Tag != meta.InodeEntry {
 			continue
 		}
-		delete(d.txns, a.Token)
-		if s.m == nil {
-			if errResend(a.Err) {
-				d.sendRoot()
-			} else {
-				d.next()
-			}
-			continue
+		ino, _, err := meta.DecodeEntry(op.Value)
+		if prev, ok := r.creates[ino]; err == nil && ok && prev != string(d.txn.Replay) && r.idErr == nil {
+			r.idErr = fmt.Errorf("inode %x created by request %x and by %x", ino, prev, d.txn.Replay)
 		}
-		d.feed(s.m, func(o *Output) { s.m.TxnDone(d.ctx, s.token, &a.Result, a.Err, o) })
+		r.creates[ino] = string(d.txn.Replay)
 	}
 }
 
-// read holds rd for up to readLatency before it is sent.
-func (d *daemon) read(m *Machine, rd Read) {
-	rd.Start, rd.End = bytes.Clone(rd.Start), bytes.Clone(rd.End)
-	d.hold(heldRead{m, rd, d.ctx.Now + core.Tick(d.r.rng.Below(uint64(readLatency)))})
+// wrote notes the chunk a write goes to and, half the time for a file's first and one time in 32
+// for another, crashes the daemon within 3 ms; one time in 16 it fences its session within 1 ms,
+// while the write is in flight.
+func (d *daemon) wrote(msg *core.Msg) {
+	r := d.r
+	frame, data := chunkstore.Frame(d.ctx.Pool, msg)
+	if kind, err := chunkstore.Peek(frame); err != nil || kind != chunkstore.KindWrite {
+		return
+	}
+	if err := chunkstore.DecodeUpdate(frame, data, &d.upd); err != nil {
+		panic(err)
+	}
+	ino, last := uint64(d.upd.Chunk.Inode), uint64(d.upd.Chunk.Index)
+	l, ok := r.last[ino]
+	if !ok || l < last {
+		r.last[ino] = last
+	}
+	if r.rng.Chance(1, 32) || !ok && r.rng.Chance(1, 2) {
+		r.crashAt = min(r.crashAt, r.s.Time()+core.Tick(r.rng.Below(3000)))
+	}
+	if r.rng.Chance(1, 16) {
+		r.fenceAt = min(r.fenceAt, r.s.Time()+core.Tick(r.rng.Below(1000)))
+	}
 }
 
 // hold keeps h until its time, arming readTimer for it if the timer is not armed sooner.
-func (d *daemon) hold(h heldRead) {
+func (d *daemon) hold(h heldSend) {
 	d.held = append(d.held, h)
 	if !d.armed || h.at < d.armedAt {
 		d.armed, d.armedAt = true, h.at
@@ -849,20 +808,109 @@ func (d *daemon) hold(h heldRead) {
 	}
 }
 
-// send sends h's read to the shard leader over the meta wire.
-func (d *daemon) send(h heldRead) {
-	d.routed(func(o *meta.RouterOutput) {
-		tok, err := d.mc.Read(d.ctx, &meta.Read{Start: h.rd.Start, End: h.rd.End, Limit: h.rd.Limit}, o)
-		if err != nil {
-			panic(fmt.Sprintf("the router refused %+v: %v", h.rd, err))
+// sendRoot sends the Txn that creates the volume's root, whose failed check on a later start says
+// it is there.
+func (d *daemon) sendRoot() {
+	d.rout.Reset()
+	tok, err := d.rc.Txn(d.ctx, &d.root.Txn, &d.rout)
+	if err != nil {
+		panic(err)
+	}
+	d.rootTok = tok
+	d.routedRoot()
+}
+
+// routedRoot makes the root client's actions and, once the root's Txn is answered, sends setup's
+// first request, or the Txn again for an answer that promises nothing.
+func (d *daemon) routedRoot() {
+	d.acts = append(d.acts, d.rout.Actions...)
+	for _, a := range d.rout.Answers {
+		switch {
+		case a.Token != d.rootTok:
+		case errResend(a.Err):
+			d.sendRoot()
+		default:
+			d.advance = true
 		}
-		d.reads[tok] = h
+	}
+}
+
+// next sends setup's next request, or once none is left lets the processes start.
+func (d *daemon) next() {
+	if d.step == len(d.steps) {
+		d.ready = true
+		return
+	}
+	d.step++
+	rq := d.steps[d.step-1]
+	rq.Unique = setupUnique + 2*uint64(d.step)
+	d.frame = fuseproto.AppendRequest(d.frame[:0], &rq)
+	if err := d.g.Request(d.ctx, d.realtime(), d.frame, &d.out); err != nil {
+		panic(err)
+	}
+}
+
+func (d *daemon) realtime() int64 { return realtime + int64(d.ctx.Now)*1000 }
+
+func (d *daemon) onEvent(ctx *core.Context, ev *core.Event, acts []core.Action) []core.Action {
+	return d.pass(ctx, acts, func() {
+		_, _, tok, _ := meta.Peek(&ev.Msg)
+		switch {
+		case ev.Kind == core.EvTimer && ev.Timer == readTimer:
+			d.armed = false
+			held := d.held
+			d.held = nil
+			for _, h := range held {
+				if h.at > d.ctx.Now {
+					d.hold(h)
+				} else {
+					d.acts = append(d.acts, h.a)
+				}
+			}
+		case ev.Kind == core.EvTimer && ev.Timer == routerTimer, ev.Kind == core.EvNetRecv && ev.Msg.Group() && tok>>32 == d.rootTok>>32:
+			d.rout.Reset()
+			d.rc.OnEvent(d.ctx, ev, &d.rout)
+			d.routedRoot()
+		case ev.Kind == core.EvPeerLost:
+			d.rout.Reset()
+			d.rc.OnEvent(d.ctx, ev, &d.rout)
+			d.routedRoot()
+			d.g.OnEvent(d.ctx, ev, &d.out)
+		default:
+			d.answer(ev, tok)
+		}
 	})
 }
 
+// answer hands the mount ev, checking that a Read answered with an error that lasts fails its
+// request and one answered with any other stays in hand to go again.
+func (d *daemon) answer(ev *core.Event, tok uint64) {
+	r := d.r
+	_, kind, _, _ := meta.Peek(&ev.Msg)
+	h, sent := d.g.reads[tok]
+	if ev.Kind != core.EvNetRecv || kind != meta.KindReadAnswer || !sent || meta.DecodeReadAnswer(d.ctx.Pool, &ev.Msg, &d.ans) != nil || d.ans.Err == nil {
+		d.g.OnEvent(d.ctx, ev, &d.out)
+		return
+	}
+	mt, err := h.token, d.ans.Err
+	d.g.OnEvent(d.ctx, ev, &d.out)
+	if _, still := d.g.reads[tok]; still {
+		return
+	}
+	_, waits := d.g.m.waits[mt]
+	switch {
+	case waits == lasting(err) && r.readErr == nil:
+		r.readErr = fmt.Errorf("a Read answered %v left its request waiting: %v", err, waits)
+	case waits:
+		r.transient++
+	default:
+		r.lasting++
+	}
+}
+
 // reply writes a reply to the mount, or takes a setup reply and sends setup's next request.
-func (d *daemon) reply(m *Machine, frame []byte) {
-	if m == d.m {
+func (d *daemon) reply(frame []byte) {
+	if binary.LittleEndian.Uint64(frame[8:]) < setupUnique {
 		if err := d.mount.Write(frame); err != nil {
 			panic(fmt.Sprintf("the mount refused a reply: %v", err))
 		}
@@ -887,7 +935,7 @@ func (d *daemon) reply(m *Machine, frame []byte) {
 			}
 		}
 	}
-	d.next()
+	d.advance = true
 }
 
 // Ready reports a request the kernel queued, which the daemon reads in order.
@@ -897,18 +945,33 @@ func (d *daemon) Next(ctx *core.Context, acts []core.Action) []core.Action {
 	return d.pass(ctx, acts, func() {
 		fr := d.frames[0]
 		d.frames = d.frames[1:]
-		var rq fuseproto.Request
-		if err := fuseproto.Decode(fr, &rq); err != nil {
+		if err := d.g.Request(d.ctx, d.realtime(), fr, &d.out); err != nil {
 			panic(err)
 		}
-		if rq.Opcode == fuseproto.OpInit {
-			flags := uint64(fuseproto.FlagAsyncRead | fuseproto.FlagBigWrites | fuseproto.FlagAutoInvalData | fuseproto.FlagParallelDirops | fuseproto.FlagMaxPages)
-			if err := d.mount.Write(fuseproto.AppendInit(nil, rq.Unique, &fuseproto.InitOut{Major: 7, Minor: 45, Flags: flags, MaxWrite: 128 << 10, MaxPages: 32})); err != nil {
-				panic(err)
+	})
+}
+
+// injects reports whether faults that fail system calls are injected now: while the processes
+// run, before the quiet time.
+func (r *fsRun) injects() bool { return r.d.ready && r.s.Time() < runFor }
+
+// fence starts a new session on the daemon's node, which tend hands the devices, fencing the
+// old one.
+func (r *fsRun) fence() {
+	d := r.d
+	r.session++
+	r.faultAt = append(r.faultAt, r.s.Time())
+	d.n.Call(d.loop, func(ctx *core.Context, acts []core.Action) []core.Action {
+		return d.pass(ctx, acts, func() {
+			if d.g.cl.Pending() > 0 {
+				r.abandons++
 			}
-			return
-		}
-		d.feed(d.m, func(o *Output) { d.m.Request(ctx, d.realtime(), &rq, o) })
+			old := d.g.cl.LastID()
+			d.g.SetSession(d.ctx, r.session, &d.out)
+			if d.g.cl.LastID() < old && r.idsErr == nil {
+				r.idsErr = fmt.Errorf("session %d's chunk client starts at ID %d, below the old one's %d", r.session, d.g.cl.LastID(), old)
+			}
+		})
 	})
 }
 
@@ -921,8 +984,10 @@ type runProc struct {
 	file          int
 	id            uint64
 	written, size int64
-	left          int
-	wake          core.Tick
+	// writing is set while its last call is a write, whose bytes that did not land go again.
+	writing bool
+	left    int
+	wake    core.Tick
 	// client is its number in the history, op the index of its last call, and failed set once a
 	// call failed, after which it stops.
 	client uint32
@@ -949,12 +1014,23 @@ func (pr *runProc) Next(ctx *core.Context, acts []core.Action) []core.Action {
 
 func (pr *runProc) next() {
 	r, p := pr.d.r, pr.p
-	if p.Errno != 0 {
-		if r.errnoErr == nil {
-			r.errnoErr = fmt.Errorf("client %d's system call %+v failed with errno %d", pr.client, r.hist.Ops()[pr.op], p.Errno)
+	if pr.writing {
+		op := r.hist.Ops()[pr.op]
+		pr.written, pr.writing = int64(op.Input[1]), false
+		if p.Errno == 0 {
+			pr.written += int64(op.Output[1])
 		}
-		pr.failed = true
-		return
+	}
+	if p.Errno != 0 {
+		op := r.hist.Ops()[pr.op]
+		if p.Errno != int32(EIO) || !r.faulted(op.Invoke, op.Complete) {
+			if r.errnoErr == nil {
+				r.errnoErr = fmt.Errorf("client %d's system call %+v failed with errno %d", pr.client, op, p.Errno)
+			}
+			pr.failed = true
+			return
+		}
+		pr.failedUnder(op)
 	}
 	if pr.closing {
 		if f := &r.files[pr.file]; f.writer == pr {
@@ -977,7 +1053,7 @@ func (pr *runProc) next() {
 	case pr.id != 0 && pr.written < pr.size && (pr.left == 0 || rng.Chance(3, 4)):
 		n := min(pr.size-pr.written, 8*int64(rng.Range(1, 1024)))
 		p.Write(pr.written, words(pr.id, pr.written, int(n)))
-		pr.written += n
+		pr.written, pr.writing = pr.written+n, true
 		f.size = max(f.size, pr.written)
 	case pr.left > 0:
 		pr.left--
@@ -996,6 +1072,34 @@ func (pr *runProc) next() {
 	}
 }
 
+// failedUnder takes back an open that failed under a fault: the process holds no file.
+func (pr *runProc) failedUnder(op sim.Op) {
+	if op.Input[0]&0xff == sim.FileOpen {
+		if f := &pr.d.r.files[pr.file]; f.writer == pr {
+			f.writer = nil
+		}
+		pr.open, pr.id = false, 0
+	}
+}
+
+// unfaulted is the history with each read a fault overlapped marked failed, as a fault may cut
+// it short.
+func (r *fsRun) unfaulted() []sim.Op {
+	ops := slices.Clone(r.hist.Ops())
+	for i := range ops {
+		if k := ops[i].Input[0] & 0xff; (k == sim.FileRead || k == sim.FileMapRead) && r.faulted(ops[i].Invoke, ops[i].Complete) {
+			ops[i].Output[0] = uint64(EIO)
+		}
+	}
+	return ops
+}
+
+// faulted reports whether a fault that may fail a system call was injected from invoke to complete.
+func (r *fsRun) faulted(invoke, complete core.Tick) bool {
+	i, _ := slices.BinarySearch(r.faultAt, invoke)
+	return i < len(r.faultAt) && r.faultAt[i] <= complete
+}
+
 // words is n bytes at off as a handle id writes them for CloseToOpen.
 func words(id uint64, off int64, n int) []byte {
 	b := make([]byte, n)
@@ -1005,15 +1109,27 @@ func words(id uint64, off int64, n int) []byte {
 	return b
 }
 
-// detachPool frees a buffer only after copying it into each send of it still in the network.
-type detachPool struct {
+// runPool is the pool the daemon's mount allocates from. While the run injects faults it refuses
+// one allocation in allocOdds, and it frees a buffer only after copying it into each send of it still
+// in the network.
+type runPool struct {
 	core.BufPool
-	s    *sim.Scheduler
-	node uint32
+	d *daemon
 }
 
-func (p detachPool) Free(b core.IOBuf) {
-	p.s.Detach(p.node, b)
+// allocOdds is the odds against an allocation being refused.
+const allocOdds = 100
+
+func (p runPool) Alloc(n int) (core.IOBuf, error) {
+	if r := p.d.r; r.injects() && r.rng.Chance(1, allocOdds) {
+		r.faultAt = append(r.faultAt, r.s.Time())
+		return core.NoBuf, &core.PoolExhaustedError{Requested: n}
+	}
+	return p.BufPool.Alloc(n)
+}
+
+func (p runPool) Free(b core.IOBuf) {
+	p.d.r.s.Detach(clientNode, b)
 	p.BufPool.Free(b)
 }
 
@@ -1024,6 +1140,7 @@ func (p detachPool) Free(b core.IOBuf) {
 // ancestor, at each daemon crash every chunk it wrote lies below alloc_end or in its purge
 // entry, and at the end of the quiet time no system call or request has waited past liveWait.
 func TestAMountsHistoriesKeepTheirInvariantsAcrossCrashes(t *testing.T) {
+	var abandons, lasting, transient int
 	seeds.Run(t, 1, 10, func(seed uint64) {
 		r := newFSRun(t, seed, plants{})
 		if err := r.run(); err != nil {
@@ -1032,7 +1149,35 @@ func TestAMountsHistoriesKeepTheirInvariantsAcrossCrashes(t *testing.T) {
 		if n := len(r.hist.Ops()); n < 200 || r.crashes == 0 {
 			t.Fatalf("seed %d: %d operations, %d daemon crashes", seed, n, r.crashes)
 		}
+		abandons, lasting, transient = abandons+r.abandons, lasting+r.lasting, transient+r.transient
 	})
+	if seeds.Default() && (abandons < 100 || lasting < 100 || transient < 100) {
+		t.Fatalf("%d fences abandoned chunk I/O in flight, %d Reads failed and %d went again", abandons, lasting, transient)
+	}
+}
+
+// Planted, each of the mount's bugs under the fault that reaches it fails the run: a fenced
+// session's chunk client numbering from 0, whose requests late answers to the old one's match;
+// the old client's parts left in flight, and the chunks of a call the chunk client refused left
+// uncompleted, either leaving a request waiting; and a Read answered with an error that lasts sent
+// again.
+func TestPlantedMountBugsFailTheMountsRun(t *testing.T) {
+	for _, c := range []struct {
+		p    plants
+		seed uint64
+		inv  string
+	}{
+		{plants{noIDBase: true}, 1, invIDs},
+		{plants{noAbandon: true}, 1, invLive},
+		{plants{dropRefused: true}, 3, invLive},
+		{plants{retryLasting: true}, 1, invReadErr},
+	} {
+		r := newFSRun(t, c.seed, c.p)
+		r.inv.Only(c.inv)
+		if err := r.run(); err == nil || !strings.Contains(err.Error(), c.inv) {
+			t.Errorf("planted %+v, seed %d: %v", c.p, c.seed, err)
+		}
+	}
 }
 
 // Planted, a raise of alloc_end after the chunk write past it leaves, at a daemon crash between
@@ -1047,11 +1192,12 @@ func TestARaiseAfterItsChunkWriteFailsTheMountsRun(t *testing.T) {
 }
 
 // A router output that carries both a Read's answer and a Txn's hands out both, though the Read's
-// answer, an UNLINK's entry found absent, moves setup on to a CREATE whose Txn's own pass through
-// the router resets its output.
+// answer, an UNLINK's entry found, moves the UNLINK on to a call whose own pass through the router
+// takes an output of its own.
 func TestOneRouterOutputHandsOutAReadsAnswerAndATxns(t *testing.T) {
 	r := newFSRun(t, 1, plants{})
-	var tok uint64
+	var tok, ino uint64
+	var key []byte
 	for tok == 0 {
 		if r.s.Time() >= runFor {
 			t.Fatal("no setup UNLINK read its entry")
@@ -1059,28 +1205,35 @@ func TestOneRouterOutputHandsOutAReadsAnswerAndATxns(t *testing.T) {
 		r.faults()
 		r.s.Step()
 		r.tend()
-		for k, h := range r.d.reads {
-			if w, ok := h.m.waits[h.rd.Token]; ok && h.m == r.d.setup && w.o.req.Opcode == fuseproto.OpUnlink {
-				tok = k
+		g := r.d.g
+		for _, k := range slices.Sorted(maps.Keys(g.reads)) {
+			h := g.reads[k]
+			if w, ok := g.m.waits[h.token]; ok && w.o.req.Opcode == fuseproto.OpUnlink {
+				for _, f := range r.files {
+					if f.name == string(w.o.req.Name) {
+						tok, ino, key = k, f.ino, bytes.Clone(h.rd.Start)
+					}
+				}
 			}
 		}
 	}
 	const other = ^uint64(0)
 	d := r.d
-	d.txns[other] = sentTxn{m: d.m, token: other}
-	sent := len(d.txns)
+	g := d.g
+	g.txns[other] = other
+	before := len(g.reads) + len(g.txns)
 	d.n.Call(d.loop, func(ctx *core.Context, acts []core.Action) []core.Action {
 		return d.pass(ctx, acts, func() {
-			d.routed(func(o *meta.RouterOutput) {
-				o.Reads = append(o.Reads, meta.ReadAnswer{Token: tok})
+			g.routed(d.ctx, func(o *meta.RouterOutput) {
+				o.Reads = append(o.Reads, meta.ReadAnswer{Token: tok, KVs: []meta.KV{{Key: key, Value: meta.AppendEntry(nil, ino, meta.ModeFile)}}})
 				o.Answers = append(o.Answers, meta.Answer{Token: other, Result: meta.Result{FailedCheck: -1}})
 			})
 		})
 	})
-	if _, ok := d.txns[other]; ok {
+	if _, ok := g.txns[other]; ok {
 		t.Fatal("the Txn's answer was lost")
 	}
-	if len(d.txns) != sent {
-		t.Fatalf("setup's CREATE sent %d Txns, want 1", len(d.txns)-sent+1)
+	if after := len(g.reads) + len(g.txns); after < before-1 {
+		t.Fatalf("the UNLINK went on to nothing: %d reads and Txns in flight, %d before", after, before)
 	}
 }
