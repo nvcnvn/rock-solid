@@ -125,6 +125,8 @@ type plants struct {
 	// client's parts in flight, dropRefused completes no chunk of a call the client refused, and
 	// retryLasting sends again a Read answered with an error that lasts.
 	noIDBase, noAbandon, dropRefused, retryLasting bool
+	// entryCached gives a regular file's entry the attribute timeout.
+	entryCached bool
 }
 
 // Machine serves one mount. Each request names its inodes by FUSE node ID, which is the inode ID.
@@ -741,7 +743,7 @@ func (m *Machine) timeouts(mode uint64) (entry, attr uint64) {
 	if m.cfg.Strict {
 		return 0, 0
 	}
-	if mode&meta.ModeType == meta.ModeFile {
+	if mode&meta.ModeType == meta.ModeFile && !m.plant.entryCached {
 		return 0, 1
 	}
 	return 1, 1
