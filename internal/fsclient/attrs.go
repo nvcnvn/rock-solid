@@ -19,6 +19,9 @@ func (m *Machine) fetch(o *op, ino uint64, dir bool, out *Output) {
 // the reply to a request sent before the inode's attributes last changed, so a reply of older
 // attributes written after a later request was sent would land and the fresh one be dropped.
 func (m *Machine) stale(o *op, ino uint64) bool {
+	if m.plant.staleKept {
+		return false
+	}
 	if m.older(o, ino) || m.node(ino).last > o.fetch {
 		return true
 	}

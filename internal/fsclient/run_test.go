@@ -59,6 +59,11 @@ const (
 	// before it is sent, drawn for each.
 	readTimer   core.TimerID = 0x66737264
 	readLatency              = core.Tick(1000)
+	// answerLatency is the most the daemon holds one Read answer in answerOdds, and what its
+	// connection brings after it, before it takes them, so a fetch answered before another node's
+	// commit may come in after a later LOOKUP.
+	answerLatency = core.Tick(5000)
+	answerOdds    = 4
 	// realtime is the wall clock's reading at CLOCK_BOOTTIME 0, in nanoseconds.
 	realtime = int64(1_700_000_000_000_000_000)
 	// liveWait is how long, at the end of the quiet time, a system call or a request in a machine
@@ -66,28 +71,32 @@ const (
 	liveWait = core.Tick(100_000)
 )
 
-// fsRun is two client-only nodes' mounts of one volume against a three-replica MetaStore shard
-// and three chunk devices. Nodes 0 to 2 each run a meta.Shard replica on loop 1, its Txns and
-// Reads served over the meta wire, and renew node-pair leases with each other; nodes 3 to 5 each
-// run a node.Device, whose placement table puts four PGs of one member on them. The daemons on
-// nodes 6 and 7 each run the Mount that ships, behind a sim.Mount, a kernel of its own, whose
+// fsRun is two nodes' mounts of one volume, one on a client-only node and one on a storage node,
+// against a three-replica MetaStore shard and three chunk devices. Nodes 0 to 2 each run a
+// meta.Shard replica on loop 1, its Txns and Reads served over the meta wire, and renew node-pair
+// leases with each other; nodes 3 to 5 each run a node.Device, whose placement table puts four PGs
+// of one member on them. Daemon 0 on client-only node 6 and daemon 1 on loop 0 of node 2, beside
+// replica 2, each run the Mount that ships, behind a sim.Mount, a kernel of its own, whose
 // processes open the root directory's two files by name, read, read through a mapping, write the
 // whole file and fsync, one writer of a file at a time across both nodes, so each node's reads
 // follow the other's closes. Faults: partitions; up to faultGap apart until rebootsEnd a replica's
 // node rebooted, so leaders change, and a replica's or a daemon's node paused; and each daemon
 // crashed, also within 3 ms of a chunk write it sends, half the time for a file's first and one
-// time in 32 for another. A daemon restarts in a new session; node 6's, before its processes
-// start, creates each file not yet made and, with even odds, unlinks and creates each other again,
-// while node 7's processes go on. While a daemon's processes run, until runFor: its session fenced
-// up to fenceGap apart, and within 1 ms of one write in 16, half the time handed to the devices up
-// to fenceLag before the daemon takes it, so they refuse the old session's writes while its client
-// is live; one allocation in allocOdds refused; and one Read in readErrOdds answered with an
-// error, half of them lasting. A system call such a fault overlaps may fail EIO, a read may come
-// back short, and the process goes on. The devices do not crash: a restarted primary asks the
-// control plane, which the run does not have, for a new interval.
+// time in 32 for another; daemon 1's crash takes replica 2 down with it. A daemon restarts in a new
+// session; daemon 0's, before its processes start, creates each file not yet made and, with even
+// odds, unlinks and creates each other again, while daemon 1's processes go on. While a daemon's
+// processes run, until runFor: its session fenced up to fenceGap apart, and within 1 ms of one
+// write in 16, half the time handed to the devices up to fenceLag before the daemon takes it, so
+// they refuse the old session's writes while its client is live; one allocation in allocOdds
+// refused; and one Read in readErrOdds answered with an error, half of them lasting. A system call
+// such a fault overlaps may fail EIO, a read may come back short, and the process goes on. The
+// devices do not crash: a restarted primary asks the control plane, which the run does not have,
+// for a new interval.
 //
 // Each daemon holds each read's send for up to readLatency, so requests arrive during fetches and
-// the machine's stale-attribute rule runs.
+// the machine's stale-attribute rule runs, and one Read answer in answerOdds for up to
+// answerLatency, with what its connection brings after it, so a fetch answered before another
+// node's commit may come in after a later LOOKUP.
 type fsRun struct {
 	t     testing.TB
 	s     *sim.Scheduler
@@ -100,7 +109,7 @@ type fsRun struct {
 	ds    [clientNodes]*daemon
 	files [2]runFile
 	// incs counts the daemons' starts, clients the history's clients and ids the writing handles;
-	// nodeOf is each client's node, from firstClient.
+	// nodeOf is each client's daemon.
 	incs, ids  uint64
 	clients    uint32
 	nodeOf     []int
@@ -118,7 +127,7 @@ type fsRun struct {
 	// faultAt are, per client node, the times of the faults that may fail a system call in flight
 	// with EIO: fences, refused allocations and Reads answered with an error that lasts.
 	faultAt [clientNodes][]core.Tick
-	// setups are the times from each crash of node 6's daemon to its next start's processes
+	// setups are the times from each crash of daemon 0 to its next start's processes
 	// starting, during which its setup may unlink and create files again, and unlinked the
 	// inodes setup unlinked.
 	setups   [][2]core.Tick
@@ -149,8 +158,15 @@ type runFile struct {
 // grants no vote for its restart wait, so a quorum votes again from runFor.
 var rebootsEnd = runFor - sim.Heartbeat - lease.DefaultConfig.Lease
 
-// firstClient is the first daemon's node, of clientNodes; nodes 0 to 2 run the shard's replicas.
+// clientNodes is the number of daemons, each on its node of clientAt: client-only node
+// firstClient, and node 2, a storage node, whose loop 0 runs the daemon beside replica 2 on loop 1
+// as a mount on a storage node does; nodes 0 to 2 run the shard's replicas.
 const firstClient, clientNodes = 6, 2
+
+var clientAt = [clientNodes]uint32{firstClient, 2}
+
+// daemonOf is the daemon whose node is id, -1 for none.
+func daemonOf(id uint32) int { return slices.Index(clientAt[:], id) }
 
 // devAt is the loop of chunk device i.
 func devAt(i int) core.NodeID { return core.NodeID{Node: uint32(3 + i)} }
@@ -196,9 +212,7 @@ func newFSRun(t testing.TB, seed uint64, p plants) *fsRun {
 			n.Start(sim.MachineFunc(sink), nil)
 		})
 	}
-	for k := range clientNodes {
-		r.s.AddNode(sim.DefaultClock, nil, func(n *sim.Node) { r.bootDaemon(n, k) })
-	}
+	r.s.AddNode(sim.DefaultClock, nil, func(n *sim.Node) { r.bootDaemon(n, 0) })
 	return r
 }
 
@@ -229,8 +243,8 @@ func (r *fsRun) run() error {
 				break
 			}
 		} else {
-			for a := range uint32(firstClient + clientNodes) {
-				for b := range uint32(firstClient + clientNodes) {
+			for a := range uint32(firstClient + 1) {
+				for b := range uint32(firstClient + 1) {
 					r.s.Heal(a, b)
 				}
 			}
@@ -319,9 +333,9 @@ func (r *fsRun) faults() {
 	}
 	if now >= r.pauseAt && now < rebootsEnd {
 		r.pauseAt = now + core.Tick(r.rng.Below(uint64(faultGap)))
-		id := uint32(r.rng.Below(3 + clientNodes))
-		if id >= 3 {
-			id += firstClient - 3
+		id := uint32(r.rng.Below(4))
+		if id == 3 {
+			id = firstClient
 		}
 		if n := r.s.Node(id); n.Up() && !n.Paused() {
 			stop := pauseStops[r.rng.Below(uint64(len(pauseStops)))]
@@ -510,7 +524,11 @@ func (m *metaRep) boot(n *sim.Node) {
 	first := m.s == nil
 	m.flight, m.sv = nil, meta.NewServer()
 	// Loop 0 of a node hosts no MetaStore replica.
-	n.Start(sim.MachineFunc(sink), nil)
+	if k := daemonOf(n.ID()); k >= 0 {
+		m.r.bootDaemon(n, k)
+	} else {
+		n.Start(sim.MachineFunc(sink), nil)
+	}
 	m.loop = n.Start(sim.MachineFunc(m.onEvent), n.Disk(0))
 	n.Call(m.loop, func(ctx *core.Context, acts []core.Action) []core.Action {
 		// A new group's grantors have granted nothing, so they start with no restart wait.
@@ -581,7 +599,7 @@ func (r *fsRun) answerErr(ctx *core.Context, ev *core.Event, acts []core.Action)
 	group, _, token, _ := meta.Peek(&ev.Msg)
 	err := readErrs[r.rng.Below(uint64(len(readErrs)))]
 	if lasting(err) {
-		k := ev.Peer.Node - firstClient
+		k := daemonOf(ev.Peer.Node)
 		r.faultAt[k] = append(r.faultAt[k], r.s.Time())
 	}
 	if ev.Msg.Buf != core.NoBuf {
@@ -651,7 +669,7 @@ func (dv *devRep) finish(acts []core.Action) []core.Action {
 	return append(acts, dv.out.Actions...)
 }
 
-// daemon is one start of the daemon on node firstClient+k: the Mount serving the sim.Mount, whose
+// daemon is one start of daemon k, on node clientAt[k]: the Mount serving the sim.Mount, whose
 // processes start once setup's requests, sent through the same Mount after the Txn that creates
 // the root, have unlinked and created the files again.
 type daemon struct {
@@ -694,10 +712,12 @@ type daemon struct {
 	refusedIDs               map[core.RequestID]bool
 }
 
-// heldSend is a Read's send the daemon holds until at.
+// heldSend is a Read's send, or with recv a Read's answer, that the daemon holds until at.
 type heldSend struct {
-	a  core.Action
-	at core.Tick
+	a    core.Action
+	ev   core.Event
+	recv bool
+	at   core.Tick
 }
 
 // setupUnique is where setup's request uniques start, above any the kernel takes.
@@ -796,7 +816,7 @@ func (d *daemon) act(a *core.Action) {
 	if a.Kind == core.ActNetSend {
 		switch _, kind, _, ok := meta.Peek(&a.Msg); {
 		case ok && kind == meta.KindRead && a.Msg.Buf == core.NoBuf:
-			d.hold(heldSend{*a, d.ctx.Now + core.Tick(d.r.rng.Below(uint64(readLatency)))})
+			d.hold(heldSend{a: *a, at: d.ctx.Now + core.Tick(d.r.rng.Below(uint64(readLatency)))})
 			return
 		case ok && kind == meta.KindTxn:
 			d.created(&a.Msg)
@@ -855,6 +875,33 @@ func (d *daemon) wrote(msg *core.Msg) {
 	if d.takeAt != 0 && d.refusedIDs[d.upd.ID] {
 		delete(d.refusedIDs, d.upd.ID)
 		r.retried++
+	}
+}
+
+// heldFrom reports whether the daemon holds a message from peer, and until when the last: a
+// connection delivers in order, so what comes after it is held as long.
+func (d *daemon) heldFrom(peer core.NodeID) (core.Tick, bool) {
+	var at core.Tick
+	held := false
+	for _, h := range d.held {
+		if h.recv && h.ev.Peer == peer {
+			at, held = max(at, h.at), true
+		}
+	}
+	return at, held
+}
+
+// release takes every message held from peer, in order, before its connection's loss.
+func (d *daemon) release(peer core.NodeID) {
+	held := d.held
+	d.held = nil
+	for _, h := range held {
+		if h.recv && h.ev.Peer == peer {
+			_, _, tok, _ := meta.Peek(&h.ev.Msg)
+			d.answer(&h.ev, tok)
+		} else {
+			d.held = append(d.held, h)
+		}
 	}
 }
 
@@ -935,9 +982,13 @@ func (d *daemon) onEvent(ctx *core.Context, ev *core.Event, acts []core.Action) 
 			held := d.held
 			d.held = nil
 			for _, h := range held {
-				if h.at > d.ctx.Now {
+				switch {
+				case h.at > d.ctx.Now:
 					d.hold(h)
-				} else {
+				case h.recv:
+					_, _, tok, _ := meta.Peek(&h.ev.Msg)
+					d.answer(&h.ev, tok)
+				default:
 					d.acts = append(d.acts, h.a)
 				}
 			}
@@ -946,11 +997,22 @@ func (d *daemon) onEvent(ctx *core.Context, ev *core.Event, acts []core.Action) 
 			d.rc.OnEvent(d.ctx, ev, &d.rout)
 			d.routedRoot()
 		case ev.Kind == core.EvPeerLost:
+			d.release(ev.Peer)
 			d.rout.Reset()
 			d.rc.OnEvent(d.ctx, ev, &d.rout)
 			d.routedRoot()
 			d.g.OnEvent(d.ctx, ev, &d.out)
 		default:
+			if ev.Kind == core.EvNetRecv {
+				at, held := d.heldFrom(ev.Peer)
+				if _, kind, _, ok := meta.Peek(&ev.Msg); ok && kind == meta.KindReadAnswer && d.r.rng.Chance(1, answerOdds) {
+					at, held = max(at, d.ctx.Now+1+core.Tick(d.r.rng.Below(uint64(answerLatency)))), true
+				}
+				if held {
+					d.hold(heldSend{ev: *ev, recv: true, at: at})
+					return
+				}
+			}
 			d.answer(ev, tok)
 		}
 	})
@@ -1039,8 +1101,8 @@ func (d *daemon) injects() bool { return d.ready && d.r.s.Time() < runFor }
 // injects reports whether faults that fail system calls are injected now on node id's daemon, if
 // it runs one.
 func (r *fsRun) injects(id uint32) bool {
-	k := int(id) - firstClient
-	return k >= 0 && k < clientNodes && r.ds[k].injects()
+	k := daemonOf(id)
+	return k >= 0 && r.ds[k].injects()
 }
 
 // fence starts a new session on d's node, fencing the old one: half the time the daemon takes it
@@ -1199,9 +1261,9 @@ func (pr *runProc) failedUnder(op sim.Op) {
 }
 
 // excused reports a call that failed with errno under a fault the run injected: EIO under a fault
-// on the process's node, and, on node 7, which no setup runs on, an open that failed ENOENT while
-// node 6's setup ran or any call on a file that setup unlinked, which until the inode owner's open
-// registry counts node 7's opens may free the inode under them.
+// on the process's node, and, for daemon 1, which runs no setup, an open that failed ENOENT while
+// daemon 0's setup ran or any call on a file that setup unlinked, which until the inode owner's
+// open registry counts daemon 1's opens may free the inode under them.
 func (r *fsRun) excused(pr *runProc, op sim.Op, errno int32) bool {
 	k := pr.d.k
 	if errno == int32(EIO) && r.faulted(k, op.Invoke, op.Complete) {
@@ -1305,8 +1367,9 @@ func TestAMountsHistoriesKeepTheirInvariantsAcrossCrashes(t *testing.T) {
 // session's chunk client numbering from 0, whose requests late answers to the old one's match;
 // the old client's parts left in flight, and the chunks of a call the chunk client refused left
 // uncompleted, either leaving a request waiting; a Read answered with an error that lasts sent
-// again; and a regular file's entry cached, so an open on one node skips the LOOKUP that brings
-// the other's close.
+// again; a regular file's entry cached, so an open on one node skips the LOOKUP that brings
+// the other's close; and attributes fetched before another node's commit written for a LOOKUP
+// read after it, their answer held up behind that LOOKUP.
 func TestPlantedMountBugsFailTheMountsRun(t *testing.T) {
 	for _, c := range []struct {
 		p    plants
@@ -1315,9 +1378,10 @@ func TestPlantedMountBugsFailTheMountsRun(t *testing.T) {
 	}{
 		{plants{noIDBase: true}, 1, invIDs},
 		{plants{noAbandon: true}, 1, invLive},
-		{plants{dropRefused: true}, 3, invLive},
+		{plants{dropRefused: true}, 2, invLive},
 		{plants{retryLasting: true}, 1, invReadErr},
 		{plants{entryCached: true}, 1, invCloseToOpen},
+		{plants{staleKept: true}, 17, invCloseToOpen},
 	} {
 		r := newFSRun(t, c.seed, c.p)
 		r.inv.Only(c.inv)
