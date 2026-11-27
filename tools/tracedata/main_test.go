@@ -61,3 +61,17 @@ func TestPastRefusalOnlyAtTheFailOfItsVersion(t *testing.T) {
 		t.Errorf("lines %q, want [a] alone", g.lines)
 	}
 }
+
+func TestRecoveryLateForAReplyListingNothingThatItsDecisionListed(t *testing.T) {
+	const node, pg, chunk, iv = 1, 7, 9, 3
+	for _, listed := range []bool{false, true} {
+		g := &gen{decisions: map[[3]uint64]bool{{node, pg, iv}: true, {node + 1, pg, iv + 1}: true}, listedBy: map[[4]uint64]bool{},
+			replies: map[[3]uint64]map[uint64]*reply{{node + 1, pg, iv + 1}: {node: {chunks: map[uint64][3]uint64{chunk: {5, 5, 0}}}}}}
+		if listed {
+			g.listedBy[[4]uint64{pg, iv + 1, node, chunk}] = true
+		}
+		if got := g.repliedLater(node, pg, chunk, iv, nil); got != listed {
+			t.Errorf("decision listed %v: repliedLater %v", listed, got)
+		}
+	}
+}

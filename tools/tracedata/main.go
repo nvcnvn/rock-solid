@@ -86,6 +86,8 @@ type gen struct {
 	cur       *reply
 	// decisions holds each [node, pg, interval] an OutDecide named.
 	decisions map[[3]uint64]bool
+	// listedBy holds each [pg, interval, disk, chunk] a decision listed.
+	listedBy map[[4]uint64]bool
 	// disks maps a disk ID to the spec's: one formatted again takes the next past the nodes.
 	diskIDs map[uint64]uint64
 	fmts    int
@@ -199,7 +201,7 @@ func (g *gen) crash(n int) {
 	g.line(`k |-> "restart", n |-> %d`, n)
 }
 
-// repliedLater reports whether node n, PG f's primary of iv, took its own disk's peering reply, or its disk answered a later primary, listing chunk c, for an interval after iv and after every interval n decided that some primary activated since: a recovery write of c in iv that lands now changes no list that decision reads, as a demoted primary's gated write lands only at the next decision its disk persists. A reply of an interval a later activated decision of n passed over is no longer read, nor is one of an interval not yet decided whose PG's next decision in rest is of a later interval: that decision reads a later reply, taken after the write landed.
+// repliedLater reports whether node n, PG f's primary of iv, took its own disk's peering reply, or its disk answered a later primary, listing chunk c, or one whose decision listed c on that disk, for an interval after iv and after every interval n decided that some primary activated since: a recovery write of c in iv that lands now changes no list that decision reads, as a demoted primary's gated write lands only at the next decision its disk persists. A reply of an interval a later activated decision of n passed over is no longer read, nor is one of an interval not yet decided whose PG's next decision in rest is of a later interval: that decision reads a later reply, taken after the write landed.
 func (g *gen) repliedLater(n int, f, c, iv uint64, rest []trace.Record) bool {
 	own, ok := g.nodeDisk[n]
 	if !ok {
@@ -216,7 +218,7 @@ func (g *gen) repliedLater(n int, f, c, iv uint64, rest []trace.Record) bool {
 			continue
 		}
 		for d, x := range got {
-			if g.disk(d) == own && x.chunks[c][2] != 0 {
+			if g.disk(d) == own && (x.chunks[c][2] != 0 || g.listedBy[[4]uint64{f, k[2], d, c}]) {
 				return true
 			}
 		}
@@ -904,6 +906,7 @@ func (g *gen) run(recs []trace.Record) {
 			var listed []string
 			for ; i < len(recs) && recs[i].Name == trace.OutListed && recs[i].Node == r.Node; i++ {
 				listed = append(listed, fmt.Sprintf("[d |-> %d, c |-> %d, v |-> %s]", g.disk(recs[i].Fields[0]), g.chunk(recs[i].Fields[1]), ver(recs[i].Fields[2])))
+				g.listedBy[[4]uint64{r.Fields[0], r.Fields[1], recs[i].Fields[0], recs[i].Fields[1]}] = true
 			}
 			g.decide(n, r, kept, listed)
 			g.persistedUnrecorded(n, r, recs[i:])
@@ -1098,7 +1101,7 @@ func main() {
 	}
 	g := &gen{entries: map[uint64]*entry{}, initial: map[uint64]entry{}, wid: map[[2]uint64]int{}, byID: map[uint64]int{}, verWrite: map[[2]uint64]int{}, answer: map[int]string{}, unanswered: map[int]int{}, mergedAt: map[int]int{}, takenAt: map[int]int{}, heardOK: map[string]bool{}, watermark: map[[3]uint64]uint64{}, epochs: map[uint64]int{}, replies: map[[3]uint64]map[uint64]*reply{}, decisions: map[[3]uint64]bool{},
 		lists: map[[3]uint64]bool{}, operatorAsk: map[uint64]bool{}, restarted: map[[2]uint64]bool{}, diskIDs: map[uint64]uint64{}, primary: map[uint64]int{}, ownOpen: map[int][][2]uint64{}, memberOpen: map[int][][2]uint64{},
-		activated: map[uint64]uint64{}, tableIv: map[uint64]map[uint64]uint64{}, left: map[[2]uint64]int{}, formatAt: map[uint64]int{}, outOfPool: map[uint64]bool{}, nodeDisk: map[int]uint64{}, recovering: map[int][][4]uint64{}, orderAt: map[[2]uint64]int{}, served: map[[3]uint64]bool{}, landAt: map[[3]uint64]int{}, refused: map[uint64][]refusal{}, past: map[[2]uint64][]string{}}
+		activated: map[uint64]uint64{}, tableIv: map[uint64]map[uint64]uint64{}, left: map[[2]uint64]int{}, formatAt: map[uint64]int{}, outOfPool: map[uint64]bool{}, nodeDisk: map[int]uint64{}, recovering: map[int][][4]uint64{}, orderAt: map[[2]uint64]int{}, served: map[[3]uint64]bool{}, landAt: map[[3]uint64]int{}, refused: map[uint64][]refusal{}, past: map[[2]uint64][]string{}, listedBy: map[[4]uint64]bool{}}
 	recs := g.load(flag.Arg(0))
 	if len(recs) == 0 {
 		fatal("no table in the trace")
