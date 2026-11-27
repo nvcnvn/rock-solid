@@ -204,3 +204,32 @@ func TestAnOpenersCredentialsComeFromItsProcStatus(t *testing.T) {
 		t.Fatal("a process that does not exist has credentials")
 	}
 }
+
+// A Read answered with a final error goes again only after the router's election wait, rather
+// than spinning on an error that lasts.
+func TestAReadAnsweredWithAnErrorGoesAgainAfterTheRoutersWait(t *testing.T) {
+	k := newFakeKernel(t)
+	k.req = fuseproto.AppendRequest(k.req[:0], &fuseproto.Request{Opcode: fuseproto.OpGetattr, Unique: 2, NodeID: meta.RootInode})
+	if _, err := unix.Write(k.fd, k.req); err != nil {
+		t.Fatal(err)
+	}
+	acts, err := k.d.Serve(&k.ctx, nil)
+	if err != nil || len(acts) != 1 || acts[0].Kind != core.ActNetSend {
+		t.Fatalf("GETATTR asked for %+v, %v", acts, err)
+	}
+	_, _, token, _ := meta.Peek(&acts[0].Msg)
+	k.ans = meta.ReadAnswer{Token: token, Err: meta.ErrOverloaded}
+	k.ev = core.Event{Kind: core.EvNetRecv, Peer: acts[0].Peer}
+	if err := meta.EncodeReadAnswer(k.ctx.Pool, 2, &k.ans, &k.ev.Msg); err != nil {
+		t.Fatal(err)
+	}
+	acts = k.d.OnEvent(&k.ctx, &k.ev, nil)
+	if len(acts) != 1 || acts[0].Kind != core.ActSetTimer || acts[0].Timer != RouterTimer || acts[0].At <= k.ctx.Now {
+		t.Fatalf("a Read answered ErrOverloaded asked for %+v", acts)
+	}
+	k.ctx.Now = acts[0].At
+	k.ev = core.Event{Kind: core.EvTimer, Timer: RouterTimer}
+	if acts = k.d.OnEvent(&k.ctx, &k.ev, nil); len(acts) != 1 || acts[0].Kind != core.ActNetSend {
+		t.Fatalf("the router's timer asked for %+v", acts)
+	}
+}

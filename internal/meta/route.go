@@ -321,6 +321,15 @@ func (r *Router) Txn(ctx *core.Context, t *Txn, token uint64, out *RouterOutput)
 // it, to its group's leader, or refuses it with its Scan error or RouteScan's before sending
 // anything.
 func (r *Router) Read(ctx *core.Context, rd *Read, token uint64, out *RouterOutput) error {
+	return r.read(ctx, rd, token, false, out)
+}
+
+// ReadLater is Read, held for an election wait before it is sent, as after a final error.
+func (r *Router) ReadLater(ctx *core.Context, rd *Read, token uint64, out *RouterOutput) error {
+	return r.read(ctx, rd, token, true, out)
+}
+
+func (r *Router) read(ctx *core.Context, rd *Read, token uint64, later bool, out *RouterOutput) error {
 	if _, ok := r.at[token]; ok {
 		return ErrTokenInFlight
 	}
@@ -331,7 +340,14 @@ func (r *Router) Read(ctx *core.Context, rd *Read, token uint64, out *RouterOutp
 	if err != nil {
 		return err
 	}
-	r.fly(ctx, flight{token: token, group: g, node: noNode, read: rd}, out)
+	f := flight{token: token, group: g, node: noNode, read: rd}
+	if later {
+		r.at[token] = len(r.flights)
+		r.flights = append(r.flights, f)
+		r.park(ctx, &r.flights[len(r.flights)-1], out)
+		return nil
+	}
+	r.fly(ctx, f, out)
 	return nil
 }
 

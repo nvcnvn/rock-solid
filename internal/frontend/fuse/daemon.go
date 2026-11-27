@@ -463,12 +463,19 @@ func (d *Daemon) read(ctx *core.Context, rd fsclient.Read) {
 	if rd.End == nil {
 		h.rd.End = nil
 	}
-	d.send(ctx, h)
+	d.send(ctx, h, false)
 }
 
-func (d *Daemon) send(ctx *core.Context, h *held) {
+// send sends h's Read, after the router's election wait when later.
+func (d *Daemon) send(ctx *core.Context, h *held, later bool) {
 	d.routed(ctx, func(o *meta.RouterOutput) {
-		tok, err := d.mc.Read(ctx, &h.rd, o)
+		var tok uint64
+		var err error
+		if later {
+			tok, err = d.mc.ReadLater(ctx, &h.rd, o)
+		} else {
+			tok, err = d.mc.Read(ctx, &h.rd, o)
+		}
 		if err != nil {
 			panic(fmt.Sprintf("fuse: the router refused a Read: %v", err))
 		}
@@ -476,9 +483,9 @@ func (d *Daemon) send(ctx *core.Context, h *held) {
 	})
 }
 
-// routed runs f on the meta client and hands each answer to the filesystem client, sending again
-// a Read answered with an error: the router has retried what it can, and the machine has no
-// failed read.
+// routed runs f on the meta client and hands each answer to the filesystem client, sending again,
+// after the router's election wait, a Read answered with an error: the router has retried what it
+// can, the machine has no failed read, and at once would spin on an error that lasts.
 func (d *Daemon) routed(ctx *core.Context, f func(o *meta.RouterOutput)) {
 	o := d.routs.get()
 	defer d.routs.put()
@@ -493,7 +500,7 @@ func (d *Daemon) routed(ctx *core.Context, f func(o *meta.RouterOutput)) {
 		}
 		delete(d.reads, a.Token)
 		if a.Err != nil {
-			d.send(ctx, h)
+			d.send(ctx, h, true)
 			continue
 		}
 		tok := h.token

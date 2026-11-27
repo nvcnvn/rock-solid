@@ -455,6 +455,16 @@ func (c *Client) Read(ctx *core.Context, rd *Read, out *RouterOutput) (uint64, e
 	return c.next, nil
 }
 
+// ReadLater is Read, held for the router's election wait before it is sent.
+func (c *Client) ReadLater(ctx *core.Context, rd *Read, out *RouterOutput) (uint64, error) {
+	c.next++
+	if err := c.R.ReadLater(ctx, rd, c.next, out); err != nil {
+		return 0, err
+	}
+	c.send(ctx, out)
+	return c.next, nil
+}
+
 // OnEvent takes an Answer or ReadAnswer message, the router's timer or a lost peer; it frees a
 // message's buffer and drops one that is neither. An answer whose body does not decode settles its
 // Txn or Read as dropped, since the router has no timeout.
