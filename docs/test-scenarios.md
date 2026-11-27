@@ -9662,6 +9662,30 @@ From [Key layout](design.md#metadata-layer-metastore) and [Sharding](design.md#m
   data group, a second create taking the next ID, and both the group and the volumes kept across a
   restart of the node and the control plane.
 
+## MetaStore reads over the wire
+
+From [The router on the wire](design.md#metadata-layer-metastore).
+
+- A `Read` and a `ReadAnswer` cross the wire whole, inline or in a pool buffer, a nil end apart
+  from an empty one and every error code included, and a limit above `MaxScanBytes` travels as
+  `MaxScanBytes` (`TestReadsAndTheirAnswersCrossTheWireWhole`), with fuzzed decoders
+  (`FuzzDecodeReadMsg`, `FuzzDecodeReadAnswerMsg`).
+- A read sent to a follower is answered `NotLeader`, resent to the leader and answered from its
+  state under its lease; a leader cut off past its lease, though it still leads its term, answers
+  `NotLeader` naming none, and the router tries again after an election timeout and is answered by
+  the new leader (`TestAReadCrossesTheWireToTheLeaderUnderItsLease`).
+- A storage node's device answers a read of the group it leads from its replica and one of a group
+  it hosts no replica of `NotLeader` naming none (`TestADeviceServesReadsOfTheGroupsItLeads`).
+- Serving a point read at a leader allocates nothing (`BenchmarkServeRead`: 0 allocs).
+- **[property]** `TestReadsSeeEveryTxnAcknowledgedBeforeThem`: three `meta.Shard` replicas, each
+  behind a `meta.Server` and renewing node-pair leases with the others, and two clients, each
+  putting its own keys with rising values and reading every key through a `meta.Client`; replicas'
+  nodes rebooted, and the leader cut off from the other replicas and from one client while the
+  other client still reaches it. Every read's answer holds every `Txn` acknowledged, by either
+  client, before the read was sent.
+- The plants of a leader answering reads without its lease and of a follower answering them each
+  fail that run within five seeds (`TestPlantedReadBugsBreakTheReadRun`).
+
 ## FUSE mount on one node
 
 From [Client design](design.md#client-design) and [Daemon restart and

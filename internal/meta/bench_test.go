@@ -3,6 +3,7 @@ package meta
 import (
 	"encoding/binary"
 	"flag"
+	"slices"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -108,6 +109,33 @@ func BenchmarkPointRead(b *testing.B) {
 		end := keys[i%len(keys)]
 		if err := s.Scan(end[:len(end)-1], end, 1, &r); err != nil || len(r.KVs) != 1 {
 			b.Fatal(err, len(r.KVs))
+		}
+	}
+}
+
+// BenchmarkServeRead serves a point read of one file's attributes over the wire at a leader under
+// its lease: decode, lease check, Scan and answer.
+func BenchmarkServeRead(b *testing.B) {
+	c := newGroup(b, 3, false)
+	c.renewLeases()
+	l := c.elect()
+	c.heartbeat()
+	k := attr(1, 2, 1)
+	c.txn(l, Txn{Ops: []Op{Put(k, make([]byte, 80))}}, 1)
+	c.settle()
+	ctx := c.ctx(l)
+	sv := NewServer()
+	ev := core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: 3}}
+	if err := EncodeRead(ctx.Pool, dataGroup, 9, &Read{Start: k, End: append(slices.Clone(k), 0), Limit: 1}, &ev.Msg); err != nil {
+		b.Fatal(err)
+	}
+	acts := make([]core.Action, 0, 1)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		acts = sv.ServeRead(&ctx, &ev, c.n[l].s, acts[:0])
+		if len(acts) != 1 || acts[0].Msg.Buf != core.NoBuf || sv.ra.Err != nil || len(sv.ra.KVs) != 1 {
+			b.Fatalf("answered %+v", sv.ra)
 		}
 	}
 }

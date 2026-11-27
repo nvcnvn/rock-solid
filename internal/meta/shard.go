@@ -168,12 +168,8 @@ func (s *Shard) submit(ctx *core.Context, t *Txn, token uint64, out *Output) err
 	if t.Replay != nil && writesReplayTagged(t) {
 		return ErrReplayTagged
 	}
-	if lead := s.raft.Leader(); lead != s.id {
-		nl := NotLeader{Group: s.group, Term: s.raft.Term()}
-		if node, ok := s.raft.Node(lead); ok && lead != 0 {
-			nl.Leader, nl.Node = lead, node.Node
-		}
-		return nl
+	if s.raft.Leader() != s.id {
+		return s.notLeader()
 	}
 	if s.halted != 0 {
 		return ErrHalted
@@ -192,6 +188,18 @@ func (s *Shard) submit(ctx *core.Context, t *Txn, token uint64, out *Output) err
 	}
 	s.after()
 	return nil
+}
+
+// notLeader is the replica's refusal of what only a leader serves: its term and the leader it
+// heard in it, or none when it heard none or leads itself.
+func (s *Shard) notLeader() NotLeader {
+	nl := NotLeader{Group: s.group, Term: s.raft.Term()}
+	if lead := s.raft.Leader(); lead != s.id && lead != 0 {
+		if node, ok := s.raft.Node(lead); ok {
+			nl.Leader, nl.Node = lead, node.Node
+		}
+	}
+	return nl
 }
 
 // after answers every Txn waiting or gathered dropped once the replica left its group or halted,

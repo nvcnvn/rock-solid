@@ -3,11 +3,14 @@ package meta
 import (
 	"bytes"
 	"errors"
+	"slices"
 	"testing"
 
 	"go.etcd.io/raft/v3"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/lease"
+	"github.com/nvcnvn/rock-solid/internal/raftshard"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
@@ -109,10 +112,15 @@ func fuzzWire(f *testing.F, kind byte, decode func(pool core.BufPool, m *core.Ms
 	for _, v := range [][]byte{b("v"), bytes.Repeat(b("w"), 300)} {
 		tx := Txn{Ops: []Op{Put(attr(1, 2, 1), v), CheckAbsent(b("k"), true)}, Replay: replayKey(1, 1)}
 		var m core.Msg
-		if kind == KindTxn {
+		switch kind {
+		case KindTxn:
 			_ = EncodeTxn(pool, 5, 9, &tx, &m)
-		} else {
+		case KindAnswer:
 			_ = EncodeAnswer(pool, 5, &Answer{Token: 9, Result: Result{FailedCheck: 0, Actual: v, Updated: []uint64{1}}, Err: NotLeader{Group: 5, Leader: 1}}, &m)
+		case KindRead:
+			_ = EncodeRead(pool, 5, 9, &Read{Start: v, End: append(v, 0), Limit: 3}, &m)
+		case KindReadAnswer:
+			_ = EncodeReadAnswer(pool, 5, &ReadAnswer{Token: 9, KVs: []KV{{Key: b("k"), Value: v}, {Key: v, Value: nil}}, More: true}, &m)
 		}
 		all := wireBytes(pool, &m)
 		f.Add(all[:m.Len], all[m.Len:])
@@ -170,6 +178,91 @@ func FuzzDecodeAnswerMsg(f *testing.F) {
 	})
 }
 
+func FuzzDecodeReadMsg(f *testing.F) {
+	fuzzWire(f, KindRead, func(pool core.BufPool, m *core.Msg) (core.Msg, bool) {
+		var rd Read
+		var again core.Msg
+		g, _, tok, _ := Peek(m)
+		if DecodeRead(pool, m, &rd) != nil {
+			return again, false
+		}
+		if err := EncodeRead(pool, g, tok, &rd, &again); err != nil {
+			panic(err)
+		}
+		return again, true
+	})
+}
+
+func FuzzDecodeReadAnswerMsg(f *testing.F) {
+	fuzzWire(f, KindReadAnswer, func(pool core.BufPool, m *core.Msg) (core.Msg, bool) {
+		var a ReadAnswer
+		var again core.Msg
+		g, _, _, _ := Peek(m)
+		if DecodeReadAnswer(pool, m, &a) != nil {
+			return again, false
+		}
+		if err := EncodeReadAnswer(pool, g, &a, &again); err != nil {
+			panic(err)
+		}
+		return again, true
+	})
+}
+
+// Reads and their answers decode as they were sent, a nil end apart from an empty one, inline or
+// in a buffer, every error code included, and a limit above MaxScanBytes goes as MaxScanBytes.
+func TestReadsAndTheirAnswersCrossTheWireWhole(t *testing.T) {
+	pool := sim.NewPool(1<<20, 0)
+	free := func(m *core.Msg) {
+		if m.Buf != core.NoBuf {
+			pool.Free(m.Buf)
+		}
+	}
+	long := bytes.Repeat(b("k"), MaxKey+1)
+	for _, rd := range []Read{{Start: b("a"), End: b("b"), Limit: 1}, {Start: nil, End: nil, Limit: MaxScanBytes}, {Start: b("a"), End: []byte{}, Limit: 2},
+		{Start: long, End: long, Limit: 7}, {Start: b("a"), Limit: 1 << 30}} {
+		var m core.Msg
+		if err := EncodeRead(pool, 5, 9, &rd, &m); err != nil {
+			t.Fatal(err)
+		}
+		var got Read
+		g, k, tok, _ := Peek(&m)
+		if err := DecodeRead(pool, &m, &got); err != nil || g != 5 || k != KindRead || tok != 9 || !bytes.Equal(got.Start, rd.Start) ||
+			!bytes.Equal(got.End, rd.End) || (got.End == nil) != (rd.End == nil) || got.Limit != min(rd.Limit, MaxScanBytes) {
+			t.Fatalf("sent %+v, got %+v, %v", rd, got, err)
+		}
+		free(&m)
+	}
+	for _, rd := range []Read{{Start: b("a"), Limit: 0}, {Start: append(long, 0), Limit: 1}, {End: append(long, 0), Limit: 1}} {
+		var m core.Msg
+		if err := EncodeRead(pool, 5, 9, &rd, &m); err != ErrLimit && err != ErrTooLarge {
+			t.Fatalf("encoded %+v: %v", rd, err)
+		}
+	}
+	var many []KV
+	for i := range 300 {
+		many = append(many, KV{Key: attr(1, 2, uint64(i)+1), Value: bytes.Repeat(b("v"), i)})
+	}
+	for _, a := range []ReadAnswer{{Token: 1}, {Token: 2, KVs: []KV{{Key: b("k"), Value: []byte{}}}, More: true}, {Token: 3, KVs: many},
+		{Token: 4, Err: NotLeader{Group: 5, Leader: 2, Node: 1, Term: 7}}, {Token: 5, Err: ErrHalted}, {Token: 6, Err: raft.ErrProposalDropped}} {
+		var m core.Msg
+		if err := EncodeReadAnswer(pool, 5, &a, &m); err != nil {
+			t.Fatal(err)
+		}
+		var got ReadAnswer
+		if err := DecodeReadAnswer(pool, &m, &got); err != nil || got.Token != a.Token || got.Err != a.Err || got.More != a.More ||
+			!slices.EqualFunc(got.KVs, a.KVs, func(x, y KV) bool { return bytes.Equal(x.Key, y.Key) && bytes.Equal(x.Value, y.Value) }) {
+			t.Fatalf("sent %+v, got %+v, %v", a, got, err)
+		}
+		if (m.Buf != core.NoBuf) != (len(a.KVs) > 1) {
+			t.Fatalf("an answer of %d KVs travels in a buffer: %v", len(a.KVs), m.Buf != core.NoBuf)
+		}
+		free(&m)
+	}
+	if pool.Live() != 0 {
+		t.Fatalf("%d buffers live", pool.Live())
+	}
+}
+
 // wired is a group's replicas each with a Server, and a Client on node 3 whose router starts at
 // the voter on node first.
 type wired struct {
@@ -178,6 +271,8 @@ type wired struct {
 	servers []*Server
 	ctx     core.Context
 	out     RouterOutput
+	// timer is whether the client set its router's timer.
+	timer bool
 }
 
 func newWired(t *testing.T, first int) *wired {
@@ -203,6 +298,10 @@ func (w *wired) run(t *testing.T) []core.NodeID {
 		acts := w.out.Actions
 		w.out.Actions = nil
 		for _, a := range acts {
+			if a.Kind == core.ActSetTimer {
+				w.timer = true
+				continue
+			}
 			if a.Kind != core.ActNetSend {
 				t.Fatalf("the client asked for %+v", a)
 			}
@@ -213,7 +312,12 @@ func (w *wired) run(t *testing.T) []core.NodeID {
 				w.ctx.Pool.Free(a.Msg.Buf)
 			}
 			var replies []core.Action
+			_, kind, _, _ := Peek(&ev.Msg)
 			w.c.call(n, func(ctx *core.Context, o *Output) {
+				if kind == KindRead {
+					replies = w.servers[n].ServeRead(ctx, &ev, w.c.n[n].s, nil)
+					return
+				}
 				replies = w.servers[n].Serve(ctx, &ev, w.c.n[n].s, o, nil)
 				replies = w.servers[n].Reply(ctx, o.Answers, replies)
 			})
@@ -281,6 +385,67 @@ func TestATxnCrossesTheWireToTheLeader(t *testing.T) {
 	}
 	if w.ctx.Pool.(*sim.Pool).Live() != 0 {
 		t.Fatal("the client holds a buffer")
+	}
+}
+
+// A Read sent to a follower is answered NotLeader, resent to the leader and answered there from its
+// state under its lease; a leader without its lease refuses it NotLeader naming none, and the
+// client holds it for an election timeout before it tries a voter again.
+func TestAReadCrossesTheWireToTheLeaderUnderItsLease(t *testing.T) {
+	w := newWired(t, 0)
+	w.c.renewLeases()
+	l := w.c.elect()
+	w.c.heartbeat()
+	f := (l + 1) % 3
+	m := oneShard(f)
+	if err := w.cl.R.SetMap(&m, &w.out); err != nil {
+		t.Fatal(err)
+	}
+	w.c.txn(l, Txn{Ops: []Op{Put(attr(1, 2, 1), b("v"))}}, 1)
+	w.c.settle()
+	ctx := w.c.ctx(l)
+	if !w.c.n[l].s.Raft().LeaseRead(&ctx) {
+		t.Fatal("the leader holds no lease")
+	}
+	rd := Read{Start: attr(1, 2, 1), End: attr(1, 2, 2), Limit: 5}
+	tok, err := w.cl.Read(&w.ctx, &rd, &w.out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	to := w.run(t)
+	if len(to) != 2 || to[0].Node != uint32(f) || to[1].Node != uint32(l) {
+		t.Fatalf("the Read went to %v; the leader is %d", to, l)
+	}
+	if len(w.out.Reads) != 1 || w.out.Reads[0].Token != tok || w.out.Reads[0].Err != nil || len(w.out.Reads[0].KVs) != 1 ||
+		!bytes.Equal(w.out.Reads[0].KVs[0].Value, b("v")) {
+		t.Fatalf("the client answered %+v", w.out.Reads)
+	}
+	w.out.Reset()
+	w.c.cut[l] = true
+	for range 2 * lease.DefaultConfig.Lease / raftshard.TickInterval {
+		w.c.tick()
+	}
+	w.c.renewLeases()
+	w.c.heartbeat()
+	w.c.cut[l] = false
+	ctx = w.c.ctx(l)
+	if w.c.n[l].s.Raft().Leader() != uint64(l)+1 || w.c.n[l].s.Raft().LeaseRead(&ctx) {
+		t.Fatal("the cut-off leader does not lead without its lease")
+	}
+	if _, err := w.cl.Read(&w.ctx, &rd, &w.out); err != nil {
+		t.Fatal(err)
+	}
+	if to := w.run(t); len(to) != 1 || to[0].Node != uint32(l) || len(w.out.Reads) != 0 || !w.timer {
+		t.Fatalf("sent to %v, answered %+v; timer set %v", to, w.out.Reads, w.timer)
+	}
+	for range 3 {
+		if len(w.out.Reads) == 0 {
+			w.cl.OnEvent(&w.ctx, &core.Event{Kind: core.EvTimer, Timer: 1}, &w.out)
+			w.run(t)
+		}
+	}
+	if len(w.out.Reads) != 1 || w.out.Reads[0].Err != nil || len(w.out.Reads[0].KVs) != 1 || w.ctx.Pool.(*sim.Pool).Live() != 0 {
+		t.Fatalf("after the election wait the client answered %+v", w.out.Reads)
 	}
 }
 

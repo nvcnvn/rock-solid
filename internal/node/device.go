@@ -325,8 +325,8 @@ func (d *Device) OnEvent(ctx *core.Context, ev *core.Event, out *DeviceOutput) {
 	d.settle(ctx, nil, out)
 }
 
-// recvGroup hands a MetaStore group's message to the device's replica of the group: a Txn through
-// the server, which answers one for a group hosted nowhere here as NotLeader; an ask about a
+// recvGroup hands a MetaStore group's message to the device's replica of the group: a Txn or Read
+// through the server, which answers one for a group hosted nowhere here as NotLeader; an ask about a
 // replica the device does not host, once its store serves and so has restored every replica the
 // disk holds, is answered Gone, unless the device removed it and a restart would still restore
 // it; another message for no replica here, or for a closed one, is dropped.
@@ -343,6 +343,12 @@ func (d *Device) recvGroup(ctx *core.Context, ev *core.Event, acts []core.Action
 	switch group, id, asked := raftshard.Asked(&ev.Msg); {
 	case len(in) > 9 && in[9] == meta.KindTxn:
 		return d.sv.ServeRound(ctx, ev, a, acts)
+	case len(in) > 9 && in[9] == meta.KindRead:
+		var s *meta.Shard
+		if a != nil && a.Err() == nil {
+			s = a.Shard()
+		}
+		return d.sv.ServeRead(ctx, ev, s, acts)
 	case asked && d.phase == opened && (a == nil || a.ReplicaID() != id):
 		if d.leftOut(group, id) && raftshard.Gone(&ev.Msg, ev.Peer, &gone) {
 			acts = append(acts, gone)

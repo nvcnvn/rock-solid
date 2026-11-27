@@ -201,30 +201,32 @@ func replayIn(start, end []byte) bool {
 // electionWait is how long a router holds a Txn whose group has no known leader before it tries a voter again.
 const electionWait = raftshard.ElectionTick * raftshard.TickInterval
 
-// Send is a Txn for its driver to send to Node, which hosts a replica of Group, under Token.
+// Send is a Txn, or a Read, for its driver to send to Node, which hosts a replica of Group, under Token.
 type Send struct {
 	Token uint64
 	Group uint64
 	Node  uint32
 	Txn   *Txn
+	Read  *Read
 }
 
-// RouterOutput is what one call into a Router hands its driver: the Txns to send, the answers
-// final for their callers, and its timer.
+// RouterOutput is what one call into a Router hands its driver: the Txns and Reads to send, the
+// answers final for their callers, and its timer.
 type RouterOutput struct {
 	Sends   []Send
 	Answers []Answer
+	Reads   []ReadAnswer
 	Actions []core.Action
 }
 
 // Reset empties the output for reuse.
 func (o *RouterOutput) Reset() {
-	o.Sends, o.Answers, o.Actions = o.Sends[:0], o.Answers[:0], o.Actions[:0]
+	o.Sends, o.Answers, o.Reads, o.Actions = o.Sends[:0], o.Answers[:0], o.Reads[:0], o.Actions[:0]
 }
 
-// Router is a daemon's side of the sharded API: it routes each Txn through the shard map to its
-// group's leader from its route cache, learns the leader from a NotLeader answer and resends,
-// and, when no leader is known, tries the group's voters in turn, one per election timeout.
+// Router is a daemon's side of the sharded API: it routes each Txn and Read through the shard map
+// to its group's leader from its route cache, learns the leader from a NotLeader answer and
+// resends, and, when no leader is known, tries the group's voters in turn, one per election timeout.
 type Router struct {
 	m     ShardMap
 	timer core.TimerID
@@ -246,12 +248,13 @@ type route struct {
 	guesses int
 }
 
-// flight is a Txn sent and not yet answered, or parked until the timer.
+// flight is a Txn or Read sent and not yet answered, or parked until the timer.
 type flight struct {
 	token  uint64
 	group  uint64
 	node   uint32
 	txn    *Txn
+	read   *Read
 	parked bool
 }
 
@@ -274,7 +277,11 @@ func (r *Router) SetMap(m *ShardMap, out *RouterOutput) error {
 	}
 	for i := len(r.flights) - 1; i >= 0; i-- {
 		if f := &r.flights[i]; f.parked && r.m.index(f.group) < 0 {
-			r.finish(i, &Answer{Token: f.token, Result: Result{FailedCheck: -1}, Err: ErrGroupGone}, out)
+			if f.read != nil {
+				r.finishRead(i, &ReadAnswer{Token: f.token, Err: ErrGroupGone}, out)
+			} else {
+				r.finish(i, &Answer{Token: f.token, Result: Result{FailedCheck: -1}, Err: ErrGroupGone}, out)
+			}
 		}
 	}
 	return nil
@@ -306,24 +313,60 @@ func (r *Router) Txn(ctx *core.Context, t *Txn, token uint64, out *RouterOutput)
 	if err != nil {
 		return err
 	}
-	r.at[token] = len(r.flights)
-	r.flights = append(r.flights, flight{token: token, group: g, node: noNode, txn: t})
-	r.send(ctx, len(r.flights)-1, out)
+	r.fly(ctx, flight{token: token, group: g, node: noNode, txn: t}, out)
 	return nil
+}
+
+// Read sends rd, which stays the caller's and unchanged until a ReadAnswer under token settles
+// it, to its group's leader, or refuses it with its Scan error or RouteScan's before sending
+// anything.
+func (r *Router) Read(ctx *core.Context, rd *Read, token uint64, out *RouterOutput) error {
+	if _, ok := r.at[token]; ok {
+		return ErrTokenInFlight
+	}
+	if err := rd.check(); err != nil {
+		return err
+	}
+	g, err := r.m.RouteScan(rd.Start, rd.End)
+	if err != nil {
+		return err
+	}
+	r.fly(ctx, flight{token: token, group: g, node: noNode, read: rd}, out)
+	return nil
+}
+
+func (r *Router) fly(ctx *core.Context, f flight, out *RouterOutput) {
+	r.at[f.token] = len(r.flights)
+	r.flights = append(r.flights, f)
+	r.send(ctx, len(r.flights)-1, out)
 }
 
 // Answer takes a node's answer to a Txn sent: a NotLeader updates the route cache of the Txn's
 // group and resends the Txn, which no replica proposed, and any other answer is final. An answer
 // to no Txn in flight, or to one held for an election, is dropped.
 func (r *Router) Answer(ctx *core.Context, a *Answer, out *RouterOutput) {
-	i, ok := r.at[a.Token]
-	if !ok || r.flights[i].parked {
-		return
-	}
-	nl, ok := a.Err.(NotLeader)
-	if !ok {
+	if i, ok := r.answered(ctx, a.Token, a.Err, false, out); ok {
 		r.finish(i, a, out)
-		return
+	}
+}
+
+// ReadAnswer takes a node's answer to a Read sent, as Answer takes a Txn's.
+func (r *Router) ReadAnswer(ctx *core.Context, a *ReadAnswer, out *RouterOutput) {
+	if i, ok := r.answered(ctx, a.Token, a.Err, true, out); ok {
+		r.finishRead(i, a, out)
+	}
+}
+
+// answered resends the flight under token, a Read's if read, after a NotLeader, or returns its
+// index when err is final; it drops an answer to no such flight in flight.
+func (r *Router) answered(ctx *core.Context, token uint64, err error, read bool, out *RouterOutput) (int, bool) {
+	i, ok := r.at[token]
+	if !ok || r.flights[i].parked || (r.flights[i].read != nil) != read {
+		return 0, false
+	}
+	nl, ok := err.(NotLeader)
+	if !ok {
+		return i, true
 	}
 	f := &r.flights[i]
 	c := r.route(f.group)
@@ -335,11 +378,13 @@ func (r *Router) Answer(ctx *core.Context, a *Answer, out *RouterOutput) {
 		c.term, c.node, c.known = nl.Term, nl.Node, nl.Leader != 0
 	}
 	r.send(ctx, i, out)
+	return 0, false
 }
 
-// OnEvent handles the router's timer, which resends the Txns held for an election, and a lost
-// peer, which fails the Txns sent to it as dropped, since each may or may not have applied, and
-// is forgotten as the leader of every group.
+// OnEvent handles the router's timer, which resends the Txns and Reads held for an election, and
+// a lost peer, which fails the Txns sent to it as dropped, since each may or may not have
+// applied, holds the Reads sent to it for an election, since a Read changes nothing, and is
+// forgotten as the leader of every group.
 func (r *Router) OnEvent(ctx *core.Context, ev *core.Event, out *RouterOutput) {
 	switch {
 	case ev.Kind == core.EvTimer && ev.Timer == r.timer:
@@ -357,7 +402,11 @@ func (r *Router) OnEvent(ctx *core.Context, ev *core.Event, out *RouterOutput) {
 			}
 		}
 		for i := len(r.flights) - 1; i >= 0; i-- {
-			if f := &r.flights[i]; !f.parked && f.node == ev.Peer.Node {
+			switch f := &r.flights[i]; {
+			case f.parked || f.node != ev.Peer.Node:
+			case f.read != nil:
+				r.park(ctx, f, out)
+			default:
 				r.finish(i, &Answer{Token: f.token, Result: Result{FailedCheck: -1}, Err: raft.ErrProposalDropped}, out)
 			}
 		}
@@ -387,7 +436,7 @@ func (r *Router) send(ctx *core.Context, i int, out *RouterOutput) {
 		r.park(ctx, f, out)
 		return
 	}
-	out.Sends = append(out.Sends, Send{Token: f.token, Group: f.group, Node: f.node, Txn: f.txn})
+	out.Sends = append(out.Sends, Send{Token: f.token, Group: f.group, Node: f.node, Txn: f.txn, Read: f.read})
 }
 
 func (r *Router) park(ctx *core.Context, f *flight, out *RouterOutput) {
@@ -404,6 +453,16 @@ const noNode = ^uint32(0)
 // finish hands a's copy out as flight i's final answer and forgets the flight.
 func (r *Router) finish(i int, a *Answer, out *RouterOutput) {
 	out.Answers = append(out.Answers, *a)
+	r.forget(i)
+}
+
+// finishRead hands a's copy out as Read flight i's final answer and forgets the flight.
+func (r *Router) finishRead(i int, a *ReadAnswer, out *RouterOutput) {
+	out.Reads = append(out.Reads, *a)
+	r.forget(i)
+}
+
+func (r *Router) forget(i int) {
 	delete(r.at, r.flights[i].token)
 	last := len(r.flights) - 1
 	if i != last {

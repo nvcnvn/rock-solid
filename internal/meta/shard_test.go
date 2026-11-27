@@ -37,6 +37,9 @@ type node struct {
 	recs [][]byte
 	// late holds what the replica handed over, for a shard that applies it only once the call returns.
 	late []raftpb.Entry
+	// holder and grantor are its node's node-pair leases, which renewLeases renews.
+	holder  *lease.Holder
+	grantor *lease.Grantor
 }
 
 type envelope struct {
@@ -105,8 +108,8 @@ func (c *group) start(i int) {
 	for j := range c.n {
 		cfg.Raft.Peers = append(cfg.Raft.Peers, raftshard.Peer{ID: uint64(j) + 1, Node: core.NodeID{Node: uint32(j)}})
 	}
-	cfg.Raft.Holder = lease.NewHolder(lease.DefaultConfig)
-	cfg.Raft.Grantor = lease.NewGrantor(lease.DefaultConfig, uint64(i)+1, lease.Time{})
+	r.holder, r.grantor = lease.NewHolder(lease.DefaultConfig), lease.NewGrantor(lease.DefaultConfig, uint64(i)+1, lease.Time{})
+	cfg.Raft.Holder, cfg.Raft.Grantor = r.holder, r.grantor
 	var err error
 	if c.late {
 		r.s, err = newLateShard(cfg, r)
@@ -253,6 +256,27 @@ func (c *group) elect() int {
 	}
 	c.t.Fatal("no leader")
 	return -1
+}
+
+// renewLeases has every replica not cut off renew its node's lease from every other's, twice
+// rate_gap apart, so each holder has the rate bound a lease needs.
+func (c *group) renewLeases() {
+	for range 2 {
+		c.now += lease.DefaultConfig.RateGap
+		t := lease.Time{Boot: c.now, Raw: c.now}
+		for h, rh := range c.n {
+			for g, rg := range c.n {
+				if h == g || c.cut[h] || c.cut[g] {
+					continue
+				}
+				id := core.RequestID(c.now)
+				rh.holder.Ask(core.NodeID{Node: uint32(g)}, id, t)
+				if sup, ok := rg.grantor.Grant(core.NodeID{Node: uint32(h)}, 1, 1, t); ok {
+					rh.holder.OnGrant(core.NodeID{Node: uint32(g)}, lease.Grant{ID: id, Run: rg.grantor.Run(), Raw: t.Raw, Support: sup}, t)
+				}
+			}
+		}
+	}
 }
 
 // heartbeat ticks for a heartbeat, so a leader tells every replica its commit index.

@@ -38,10 +38,12 @@ type nodeMetas struct {
 	blocks  uint64
 	ticking bool
 	answers map[uint64]error
-	keys    map[uint64][]byte
-	groups  map[uint64]uint64
-	next    uint64
-	gone    int
+	// reads are the device's answers to the client's Reads, in order.
+	reads  []meta.ReadAnswer
+	keys   map[uint64][]byte
+	groups map[uint64]uint64
+	next   uint64
+	gone   int
 	// removing is the group whose replica the device removes at nodeMetaRemove, removed whether
 	// that ran and removeErr what RemoveMeta returned.
 	removing  uint64
@@ -136,6 +138,13 @@ func (d metaDeviceDriver) Execute(a *core.Action) {
 	pool := d.nm.l.Context().Pool
 	if d.nm.cr != nil && d.nm.cr.forward(a, 1) {
 		return
+	}
+	var ra meta.ReadAnswer
+	if a.Peer == nodeMetaPeer && meta.DecodeReadAnswer(pool, &a.Msg, &ra) == nil {
+		for i, kv := range ra.KVs {
+			ra.KVs[i] = meta.KV{Key: bytes.Clone(kv.Key), Value: bytes.Clone(kv.Value)}
+		}
+		d.nm.reads = append(d.nm.reads, ra)
 	}
 	var an meta.Answer
 	if a.Peer == nodeMetaPeer && meta.DecodeAnswer(pool, &a.Msg, &an) == nil {
@@ -369,6 +378,30 @@ func TestADeviceAnswersATxnForAGroupItDoesNotHost(t *testing.T) {
 	nm.send(1, 10)
 	if _, ok := nm.answers[1].(meta.NotLeader); !ok {
 		t.Fatalf("the device answered %v", nm.answers[1])
+	}
+}
+
+// A Read of a group the device hosts the leader of is answered from its state over the wire, and
+// one of a group it hosts no replica of NotLeader naming none.
+func TestADeviceServesReadsOfTheGroupsItLeads(t *testing.T) {
+	nm := newNodeMetas(t)
+	if err := nm.m.d.AddMeta(nm.replica()); err != nil {
+		t.Fatal(err)
+	}
+	nm.lead()
+	nm.send(1, 10)
+	pool := nm.l.Context().Pool
+	for _, group := range []uint64{nodeMetaGroup, nodeMetaGroup + 1} {
+		ev := core.Event{Kind: core.EvNetRecv, Peer: nodeMetaPeer}
+		if err := meta.EncodeRead(pool, group, 100+group, &meta.Read{Start: nm.keys[1], End: append(slices.Clone(nm.keys[1]), 0), Limit: 1}, &ev.Msg); err != nil {
+			t.Fatal(err)
+		}
+		nm.l.Inbox().Post(&ev)
+		nm.settle()
+	}
+	if len(nm.reads) != 2 || nm.reads[0].Err != nil || len(nm.reads[0].KVs) != 1 || !bytes.Equal(nm.reads[0].KVs[0].Key, nm.keys[1]) ||
+		nm.reads[1].Err != (meta.NotLeader{Group: nodeMetaGroup + 1}) {
+		t.Fatalf("the device answered %+v", nm.reads)
 	}
 }
 
