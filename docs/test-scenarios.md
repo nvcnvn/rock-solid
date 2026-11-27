@@ -9776,7 +9776,21 @@ upgrade](design.md#daemon-restart-and-upgrade)'s mount settings.
 - Another uid reads the mount (`allow_other`).
 - `testing.AllocsPerRun` of a request's path through the driver and the machine is 0.
 - A `CREATE` that opens another node's file, mode 0600 and another uid's, with `O_RDWR` answers
-  `EACCES`.
+  `EACCES`; one of mode 0640 opened by a group member, with `O_RDONLY` succeeds and with
+  `O_RDONLY|O_TRUNC` answers `EACCES`.
+- The opener check lets in a member through a supplementary group and an opener holding
+  `CAP_DAC_OVERRIDE`, and checks root without it like any uid; an opener whose `/proc` status
+  cannot be read answers `EACCES`. Root of a user namespace of its own, whose status shows the
+  capability, gets no override.
+- A fence fails the old session's reads and writes in flight with `EIO` and frees their buffers; a
+  late reply of the fenced session's chunk client answers no request of the new one; a request
+  after the fence names the new session.
+- `READ` and `WRITE` through the daemon allocate nothing and leave no pool buffer live.
+- A meta `Read` answered with a final error goes again only after the router's election wait.
+- A reply frame the kernel refuses with `EINVAL` ends `Serve` with that error.
+- A mount whose device the loop refuses is unmounted again (as root).
+- A mount whose pool has no buffer to read a request into leaves its readable device unread for
+  1 ms before reading it again.
 
 ## Inode owner's open registry
 
