@@ -10,6 +10,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/fuseproto"
 )
 
@@ -125,3 +126,22 @@ func asNobody(t *testing.T, dir string, args ...string) *exec.Cmd {
 	c.ExtraFiles = []*os.File{f}
 	return c
 }
+
+// The kernel answers EINVAL to a reply frame it cannot take, which only an encoder bug writes:
+// Serve returns it, so the mount ends. An eventfd stands in for the device, as it refuses a write
+// of other than 8 bytes with EINVAL.
+func TestAReplyTheKernelRefusesEndsServe(t *testing.T) {
+	fd, err := unix.Eventfd(0, unix.EFD_NONBLOCK|unix.EFD_CLOEXEC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = unix.Close(fd) })
+	d := New(Config{})
+	d.Attach(Device{Fd: fd})
+	d.write(make([]byte, fuseproto.OutHeaderSize))
+	ctx := core.Context{Pool: core.NewPool([][]byte{make([]byte, 4<<20)}, 0)}
+	if _, err := d.Serve(&ctx, nil); !errors.Is(err, unix.EINVAL) {
+		t.Fatalf("Serve after a refused frame: %v", err)
+	}
+}
+
