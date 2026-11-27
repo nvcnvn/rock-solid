@@ -161,9 +161,11 @@ KnownIds(d, c) == {g \in ids[d] : g.c = c /\ g.v \in Known(d, c)}
 \* its states at each line of a write sent again while held. A later Send of w
 \* merges into the [w, 0] this leaves, where taking [w, 0] would have kept two
 \* entries, so the choice may reject a trace the spec accepts, never accepts
-\* one it rejects, and hides no bug of the code.
+\* one it rejects, and hides no bug of the code. Fenced reads n's decision of
+\* its interval, which Order and Reanswer require before they read it.
 Took(n, w, fenceable) ==
-    LET S == {y \in pin[n] : y.w = w /\ ~(fenceable /\ Fenced(n, y))}
+    LET p == ChunkPG[Writes[w].c]
+        S == {y \in pin[n] : y.w = w /\ ~(fenceable /\ Decided(n, p, IvAt(n, p)) /\ Fenced(n, y))}
         H == {y \in S : y.hold # 0}
     IN IF H = {} THEN S ELSE {y \in H : \A z \in H : y.hold <= z.hold}
 
