@@ -643,7 +643,7 @@ func TestACreateWithoutExclOpensTheFileAnotherNodeCreatedFirst(t *testing.T) {
 // A CREATE that opens another node's file checks the opener's access as open(2) would, since the
 // kernel skips its own check of a file the reply says was created: another uid's O_RDWR, or
 // O_RDONLY with O_TRUNC, of a 0600 file answers EACCES, while its owner, a uid of its group on
-// a 0660 file and root open it.
+// a 0660 file and root open it; O_TRUNC asks for write access, which a 0640 file's group lacks.
 func TestACreateOpeningAnotherNodesFileChecksTheOpenersAccess(t *testing.T) {
 	h := newMount(t, Config{})
 	other := *h
@@ -660,6 +660,9 @@ func TestACreateOpeningAnotherNodesFileChecksTheOpenersAccess(t *testing.T) {
 	other.ok(other.send(fuseproto.Request{Opcode: fuseproto.OpCreate, NodeID: meta.RootInode, Name: []byte("g"), Mode: uint32(meta.ModeFile | 0o660), UID: 1000, GID: 1000}))
 	h.ok(open("g", 0o644, 1001, 1000, oRDWR))
 	h.errno(open("g", 0o644, 1001, 1001, 0), EACCES)
+	other.ok(other.send(fuseproto.Request{Opcode: fuseproto.OpCreate, NodeID: meta.RootInode, Name: []byte("r"), Mode: uint32(meta.ModeFile | 0o640), UID: 1000, GID: 1000}))
+	h.errno(open("r", 0o644, 1001, 1000, oTrunc), EACCES)
+	h.ok(open("r", 0o644, 1001, 1000, 0))
 }
 
 // A request served from answers the machine has seen before allocates nothing: lookups,
