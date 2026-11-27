@@ -4048,7 +4048,7 @@ A TLA+ specification of [Freeing space](design.md#freeing-space), `models/purge/
 **Rules the model contains**
 
 - Before writing a chunk at or past `alloc_end`, a daemon raises `alloc_end`, to any later chunk, so every sequence of raises the design's doubling steps allow is covered.
-- Unlink. If no one has the file open, one transaction deletes the inode and adds a purge entry for chunks `0 .. alloc_end`. If the owner sees it open, or is in its grace period, the inode goes on the orphan list instead. It moves to the purge list at its last close, and only after any grace period. A fenced session's opens count as closed only once its fence version is acknowledged.
+- Unlink. Removing the last link makes the inode an orphan, open or not: the unlink's transaction cannot consult the owner's registry, which is not replicated, and an open registered between its proposal and its apply would be missed. The owner frees the orphan once no one has it open, and only after any grace period, in one transaction that deletes the inode and adds a purge entry for chunks `0 .. alloc_end`. A fenced session's opens count as closed only once its fence version is acknowledged.
 - Truncate down. One transaction commits the new size, `alloc_end` lowered to the new end, and a purge entry from the new size's *byte offset* to the old `alloc_end`. The purger runs its punches: the first zeroes the rest of the block holding the new end (a merge) and the rest of that chunk, the others delete whole chunks.
 - Anything that extends the file over a range with a pending purge (a write raising `alloc_end` or starting past the size, a truncate upward) waits for that purge, and writes nothing into the gap below its own start.
 - The purger runs an inode's entry only once the file is drained: every chunk write sent under a size older than the current one has returned, and a write sends its chunk under the newest size, so one that has become an extension waits for the purge too.
@@ -4092,7 +4092,7 @@ Each row is a negative configuration in `models/purge/` that TLC must stop at it
 | `neg-raise-after-write` | `alloc_end` is raised after the chunk write instead of before | A crash after the chunk write leaves a chunk past `alloc_end`, and a later unlink's purge misses it | `NoChunkOfDeletedInode` |
 | `neg-missing-punch-fails` | A punch to a missing chunk is an error | A rerun after a purger crash fails on the chunks already deleted | `RerunSafe` |
 | `neg-no-incarnation-fence` | A crashed daemon's successor closes its files before the old incarnation is fenced | The dead process's chunk write lands after the unlinked file's purge punched that chunk | `NoChunkOfDeletedInode` |
-| `neg-unlink-open` | Unlink frees an open file at once | Another node still has it open when it is purged | `OrphanNotFreedWhileOpen` |
+| `neg-unlink-open` | Unlink frees the file at once, open or not | Another node still has it open when it is purged | `OrphanNotFreedWhileOpen` |
 | `neg-orphan-in-grace` | An orphan moves to the purge list during an owner failover's grace period | A node that has not re-registered yet still holds the file open | Same |
 | `neg-grace-by-time` | The grace period ends on time alone | It ends before a live node that holds the file open re-registered, and the orphan is freed | Same |
 | `neg-release-on-commit` | An orphan held by a fenced session is released when the fence commits, not when its version is acknowledged | The fenced holder's queued write lands after the purge | `NoChunkOfDeletedInode` |
@@ -9845,11 +9845,25 @@ upgrade](design.md#daemon-restart-and-upgrade)'s mount settings.
 
 From [Inode owner](design.md#metadata-layer-metastore) and the [purge model](#purge-model).
 
-- `open` costs one round trip and no log write; `release` deregisters.
-- An unlink of a file open on another node makes it an orphan, purged at its last close.
-- A fenced session's opens are dropped only once its fence version is acknowledged.
-- **[property]** "An orphaned inode is never freed while a live session has it open" on seeded
-  three-node runs; plants `neg-unlink-open` and `neg-release-on-commit` each fail it.
+- `open` costs one round trip and no log write: a lease read of the attributes that registers the
+  mount while they show a link and its session is live; a `CREATE` registers in a read after its
+  `Txn`; the last `release` deregisters, and an `OPEN` behind it waits for it
+  (`TestOpensAndTheLastReleaseRegisterAtTheOwner`).
+- Every unlink of a last link makes an orphan; the owner frees it at its last release, and an open
+  after the unlink does not register (`TestAnOrphanIsFreedAtItsLastRelease`,
+  `TestAnUnlinkFreesAFileOnlyOnceNoMountHasItOpen`, `TestAnUnlinkLeavesAnOrphanForTheOwner`).
+- A fenced session's opens are dropped only once a table acknowledges a version at or above the
+  first that showed it fenced (`TestAFencedSessionsOpensCloseOnlyOnceItsFenceIsAcknowledged`); a
+  storage node's device hands its server each table and proposes the frees that leaves
+  (`TestADeviceFreesAnOrphanAtItsLastClose`).
+- A new owner, by failover or transfer, frees no orphan until **Owner failover and grace period**
+  (`TestANewOwnerFreesNoOrphan`).
+- **[property]** "An orphaned inode is never freed while a live session has it open" on seeded runs
+  of three replicas and three clients, with client crashes, late fences and acknowledgments, clients
+  cut off from the leader, and leader crashes and transfers
+  (`TestAnOrphanIsNeverFreedWhileALiveSessionHasItOpen`); plants `neg-unlink-open`,
+  `neg-release-on-commit` and `neg-orphan-in-grace` (a new owner freeing right after its election)
+  each fail it (`TestPlantedRegistryBugsFreeAnOpenOrphan`).
 
 ## Owner failover and grace period
 
@@ -9860,7 +9874,8 @@ From [Inode owner](design.md#metadata-layer-metastore), the [purge model](#purge
   node with nothing open counting, or has left the table; never by time alone.
 - A session that has not re-registered within a lease is evicted, and the period ends once it is
   fenced.
-- During it, new opens wait and an unlink makes an orphan.
+- During it, new opens wait.
+- It replaces the open registry's stopgap: a new owner frees no orphan at all.
 - **[property]** Plants `purge/neg-grace-by-time`, `purge/neg-orphan-in-grace`,
   `recall/neg-grace-by-time` and `recall/neg-open-in-grace` each fail their mapped invariant on
   seeded owner failovers with a node partitioned from the new owner.
