@@ -42,9 +42,12 @@ func (m *mount) takes(ctls []core.NodeID, ev *core.Event) bool {
 
 func (m *mount) onEvent(ctx *core.Context, ev *core.Event, acts []core.Action) []core.Action {
 	if ev.Kind != core.EvTimer || ev.Timer != fuse.ReadyTimer {
-		return m.d.OnEvent(ctx, ev, acts)
+		acts = m.d.OnEvent(ctx, ev, acts)
+		m.logRefused()
+		return acts
 	}
 	acts, err := m.d.Serve(ctx, acts)
+	m.logRefused()
 	if err != nil {
 		if !errors.Is(err, fuse.ErrGone) {
 			log.Printf("mount %s: %v", m.path, err)
@@ -56,6 +59,12 @@ func (m *mount) onEvent(ctx *core.Context, ev *core.Event, acts []core.Action) [
 	return acts
 }
 
+func (m *mount) logRefused() {
+	if err := m.d.Refused(); err != nil {
+		log.Printf("mount %s: the kernel refused a reply: %v", m.path, err)
+	}
+}
+
 // take hands the daemon what the node output and its session, mounting once the daemon is ready,
 // and asks the node for the placement table while the chunk client waits for one.
 func (m *mount) take(ctx *core.Context, n *node.Node, out *node.Output, acts []core.Action) []core.Action {
@@ -65,6 +74,7 @@ func (m *mount) take(ctx *core.Context, n *node.Node, out *node.Output, acts []c
 	}
 	id, _ := n.Session(ctx)
 	acts = m.d.SetSession(ctx, id, acts)
+	m.logRefused()
 	if m.d.WantsTable() {
 		n.FetchTable(ctx, out)
 	}

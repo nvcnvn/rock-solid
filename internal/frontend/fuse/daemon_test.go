@@ -1,10 +1,12 @@
 package fuse
 
 import (
+	"errors"
 	"testing"
 
 	"golang.org/x/sys/unix"
 
+	"github.com/nvcnvn/rock-solid/internal/chunkstore"
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/fuseproto"
 	"github.com/nvcnvn/rock-solid/internal/meta"
@@ -143,5 +145,41 @@ func BenchmarkGetattrThroughTheDaemon(b *testing.B) {
 	for b.Loop() {
 		r.Unique += 2
 		k.call(&r)
+	}
+}
+
+// A placement delta the daemon cannot apply, one that fails its check or one past a gap, makes it
+// want the whole table.
+func TestADeltaTheDaemonCannotApplyMakesItWantTheWholeTable(t *testing.T) {
+	d := New(Config{Volume: 1, Pool: 1, Inc: 1})
+	var ctx core.Context
+	d.SetTable(&ctx, &chunkstore.Table{Epoch: 1}, nil, nil)
+	if d.WantsTable() {
+		t.Fatal("the daemon wants a table it holds")
+	}
+	d.SetTable(&ctx, nil, &chunkstore.Delta{Epoch: 2, CRC: 1}, nil)
+	if !d.WantsTable() {
+		t.Fatal("a delta whose CRC is wrong left the daemon content with table 1")
+	}
+	d.SetTable(&ctx, &chunkstore.Table{Epoch: 2}, nil, nil)
+	d.SetTable(&ctx, nil, &chunkstore.Delta{Epoch: 4}, nil)
+	if !d.WantsTable() {
+		t.Fatal("a delta past a gap left the daemon content with table 2")
+	}
+}
+
+// An INIT of a major version the daemon does not speak is answered EPROTO, and Serve returns why.
+func TestAnInitOfAnotherMajorEndsServeWithItsError(t *testing.T) {
+	k := newFakeKernel(t)
+	k.req = fuseproto.AppendRequest(k.req[:0], &fuseproto.Request{Opcode: fuseproto.OpInit, Unique: 2, Init: fuseproto.InitIn{Major: 8}})
+	if _, err := unix.Write(k.fd, k.req); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.d.Serve(&k.ctx, nil); !errors.Is(err, ErrMajor) {
+		t.Fatalf("Serve returned %v", err)
+	}
+	n, _ := unix.Read(k.fd, k.buf)
+	if h, _, err := fuseproto.DecodeReply(k.buf[:n]); err != nil || h.Unique != 2 || h.Error != -int32(eproto) {
+		t.Fatalf("INIT 8 answered %+v, %v", h, err)
 	}
 }

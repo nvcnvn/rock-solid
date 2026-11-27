@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"log"
 	"slices"
 	"time"
 
@@ -90,6 +89,7 @@ type Daemon struct {
 	rq      fuseproto.Request
 	acts    []core.Action
 	fetch   uint64
+	refused error
 	outs    stack[fsclient.Output]
 	routs   stack[meta.RouterOutput]
 	couts   stack[chunkstore.ClientOutput]
@@ -133,6 +133,14 @@ func (d *Daemon) Ready() bool { return d.m != nil && d.mapped }
 // WantsTable reports that the daemon holds no placement table, or its chunk client waits for a newer one.
 func (d *Daemon) WantsTable() bool { return d.table.Epoch == 0 || d.fetch > d.table.Epoch }
 
+// Refused takes the last error the device gave a reply since the last call, nil if none: the
+// kernel failed that request and the mount serves on.
+func (d *Daemon) Refused() error {
+	err := d.refused
+	d.refused = nil
+	return err
+}
+
 // Volume is the mount's volume.
 func (d *Daemon) Volume() uint32 { return d.cfg.Volume }
 
@@ -159,16 +167,17 @@ func (d *Daemon) SetSession(ctx *core.Context, session uint64, acts []core.Actio
 	return d.acts
 }
 
-// SetTable hands the chunk client placement table t, or the table delta makes of the one held.
+// SetTable hands the chunk client placement table t, or the table delta makes of the one held. A
+// delta it cannot apply, past a gap or failing its check, makes it want the whole table.
 func (d *Daemon) SetTable(ctx *core.Context, t *chunkstore.Table, delta *chunkstore.Delta, acts []core.Action) []core.Action {
 	d.acts = acts
 	switch {
 	case t != nil && t.Epoch > d.table.Epoch:
 		d.table = *t
-	case delta != nil && delta.Epoch == d.table.Epoch+1:
+	case delta != nil && delta.Epoch > d.table.Epoch:
 		next, err := d.table.Apply(delta)
 		if err != nil {
-			log.Printf("fuse: placement delta %d: %v", delta.Epoch, err)
+			d.fetch = max(d.fetch, delta.Epoch)
 			return acts
 		}
 		d.table = next
@@ -288,8 +297,7 @@ func (d *Daemon) request(ctx *core.Context, frame []byte) error {
 		var reply [128]byte
 		o, err := Negotiate(&d.rq.Init)
 		if err != nil {
-			log.Printf("fuse: %v: %d.%d", err, d.rq.Init.Major, d.rq.Init.Minor)
-			return d.dev.Write(fuseproto.AppendError(reply[:0], d.rq.Unique, eproto))
+			return errors.Join(fmt.Errorf("fuse: %w: %d.%d", err, d.rq.Init.Major, d.rq.Init.Minor), d.dev.Write(fuseproto.AppendError(reply[:0], d.rq.Unique, eproto)))
 		}
 		return d.dev.Write(fuseproto.AppendInit(reply[:0], d.rq.Unique, &o))
 	}
@@ -329,7 +337,7 @@ func (d *Daemon) feed(ctx *core.Context, f func(o *fsclient.Output)) {
 
 func (d *Daemon) write(frame []byte) {
 	if err := d.dev.Write(frame); err != nil && !errors.Is(err, ErrGone) {
-		log.Printf("fuse: a reply the kernel refused: %v", err)
+		d.refused = err
 	}
 }
 
