@@ -140,9 +140,11 @@ func TestAReplyTheKernelRefusesEndsServe(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = unix.Close(fd) })
 	d := New(Config{})
-	d.Attach(Device{Fd: fd})
-	d.write(make([]byte, fuseproto.OutHeaderSize))
 	ctx := core.Context{Pool: core.NewPool([][]byte{make([]byte, 4<<20)}, 0)}
+	if err := d.Attach(&ctx, Device{Fd: fd}); err != nil {
+		t.Fatal(err)
+	}
+	d.write(make([]byte, fuseproto.OutHeaderSize))
 	if _, err := d.Serve(&ctx, nil); !errors.Is(err, unix.EINVAL) {
 		t.Fatalf("Serve after a refused frame: %v", err)
 	}

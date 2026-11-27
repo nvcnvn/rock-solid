@@ -45,7 +45,9 @@ func newFakeKernel(t testing.TB) *fakeKernel {
 	k := &fakeKernel{t: t, fd: fds[0], d: New(Config{Volume: 1, Pool: 1, Inc: 1}), buf: make([]byte, 4096),
 		root: meta.AppendAttr(nil, &meta.Attr{Mode: meta.ModeDir | 0o755, Nlink: 2})}
 	k.ctx.Pool = core.NewPool([][]byte{make([]byte, 4<<20)}, 0)
-	k.d.Attach(Device{Fd: fds[1]})
+	if err := k.d.Attach(&k.ctx, Device{Fd: fds[1]}); err != nil {
+		t.Fatal(err)
+	}
 	k.acts = k.d.SetSession(&k.ctx, 7, k.acts[:0])
 	plans := []meta.Group{{ID: 1}, {ID: 2, Start: []byte{meta.SpaceCtl + 1}, Voters: []meta.Replica{{ID: 1, Node: 2, Disk: 1}}}}
 	k.acts = k.d.SetMembership(&k.ctx, plans, []meta.DiskAddr{{Disk: 1, At: core.NodeID{Node: 2, Loop: 1}}}, k.acts[:0])

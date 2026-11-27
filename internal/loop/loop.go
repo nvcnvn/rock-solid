@@ -372,12 +372,11 @@ func (l *Loop) QueuedOn(c ConnID) int {
 	return 0
 }
 
-// Pause stops reporting listener or peer c readable until the first pass at or after until, for a
-// failure that lasts while c stays readable, as an accept error or a pool with no buffer to read
-// into. A client is not paused: the queue cap mutes and unmutes those.
+// Pause stops reporting listener c to Accept until the first pass at or after until, for an
+// accept error that lasts while the listener stays readable.
 func (l *Loop) Pause(c ConnID, until core.Tick) {
 	cn := l.conn(c)
-	if cn == nil || !cn.listen && !cn.peer {
+	if cn == nil || !cn.listen {
 		return
 	}
 	cn.until = until
@@ -388,7 +387,7 @@ func (l *Loop) Pause(c ConnID, until core.Tick) {
 	}
 }
 
-// resume watches again each paused connection whose pause is over.
+// resume watches again each paused listener whose pause is over.
 func (l *Loop) resume() {
 	k := 0
 	for _, c := range l.paused {
@@ -423,7 +422,7 @@ type Pending struct {
 	// queued since the last flush, a connection that filled its read budget in the last pass,
 	// events the driver deferred, or a failed write reported to it after its Flush.
 	Work bool
-	// Deadline is the earliest timer or end of a connection's pause, 0 when there is none.
+	// Deadline is the earliest timer or end of a listener's pause, 0 when there is none.
 	Deadline core.Tick
 }
 

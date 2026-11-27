@@ -15,10 +15,6 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/node"
 )
 
-// poolWait is how long the mount leaves its device unread while the pool has no buffer to read a
-// request into: the pool says nothing when one frees, and the device stays readable.
-const poolWait = core.Tick(1_000)
-
 // mount is a node's FUSE mount, served on loop 0 beside the node's machine, a loop that hosts no
 // MetaStore replica: the daemon mounts once the node's session has started and its shard map
 // places every voter, and hands the daemon every session, table and membership the node takes.
@@ -56,10 +52,7 @@ func (m *mount) onEvent(ctx *core.Context, ev *core.Event, acts []core.Action) [
 	}
 	acts, err := m.d.Serve(ctx, acts)
 	m.logRefused()
-	switch {
-	case errors.Is(err, fuse.ErrShort):
-		m.drv.l.Pause(m.drv.c, ctx.Now+poolWait)
-	case err != nil:
+	if err != nil {
 		if !errors.Is(err, fuse.ErrGone) {
 			log.Printf("mount %s: %v", m.path, err)
 		}
@@ -101,26 +94,28 @@ func (m *mount) take(ctx *core.Context, n *node.Node, out *node.Output, acts []c
 		return acts
 	}
 	m.mounted = true
-	if err := m.attach(); err != nil {
+	if err := m.attach(ctx); err != nil {
 		m.err = err
 		m.stop()
 	}
 	return acts
 }
 
-// attach mounts the volume and serves its device on the loop; a device the loop cannot take is
-// unmounted again, as nobody would serve it.
-func (m *mount) attach() error {
+// attach mounts the volume and serves its device on the loop; a device the daemon has no buffer
+// for or the loop cannot take is unmounted again, as nobody would serve it.
+func (m *mount) attach(ctx *core.Context) error {
 	dev, err := fuse.Mount(m.path)
 	if err != nil {
 		return err
+	}
+	if err := m.d.Attach(ctx, dev); err != nil {
+		return errors.Join(fmt.Errorf("mount %s: %w", m.path, err), fuse.Unmount(dev, m.path))
 	}
 	c, err := m.drv.l.AddConn(dev.Fd, true)
 	if err != nil {
 		return errors.Join(fmt.Errorf("mount %s: %w", m.path, err), fuse.Unmount(dev, m.path))
 	}
 	m.drv.l.Own(c)
-	m.d.Attach(dev)
 	m.drv.c, m.drv.on = c, true
 	log.Printf("volume %d mounted at %s", m.d.Volume(), m.path)
 	return nil

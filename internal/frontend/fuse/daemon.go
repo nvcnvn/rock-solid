@@ -32,10 +32,6 @@ const batch = 64
 // ErrGone is a device whose connection the kernel ended: the mount was unmounted or aborted.
 var ErrGone = errors.New("fuse: the mount's connection is gone")
 
-// ErrShort is a pool with no buffer to read a request into: Serve read nothing, and the device
-// stays readable.
-var ErrShort = errors.New("fuse: no buffer to read a request into")
-
 // Device is a mount's /dev/fuse descriptor, non-blocking: each read takes one request, each write
 // one reply.
 type Device struct{ Fd int }
@@ -132,7 +128,7 @@ func New(cfg Config) *Daemon {
 	if err != nil {
 		panic(err)
 	}
-	return &Daemon{cfg: cfg, mc: meta.NewClient(r, cfg.Inc), txns: map[uint64]uint64{}, reads: map[uint64]*held{}, buf: core.NoBuf}
+	return &Daemon{cfg: cfg, mc: meta.NewClient(r, cfg.Inc), txns: map[uint64]uint64{}, reads: map[uint64]*held{}}
 }
 
 // Ready reports whether the daemon can serve: it holds a session and a shard map that places
@@ -155,8 +151,15 @@ func (d *Daemon) Refused() error {
 // Volume is the mount's volume.
 func (d *Daemon) Volume() uint32 { return d.cfg.Volume }
 
-// Attach makes dev the device the daemon serves.
-func (d *Daemon) Attach(dev Device) { d.dev = dev }
+// Attach makes dev the device the daemon serves, taking the buffer it reads requests into.
+func (d *Daemon) Attach(ctx *core.Context, dev Device) error {
+	b, err := ctx.Pool.Alloc(ReadBuffer)
+	if err != nil {
+		return fmt.Errorf("fuse: a buffer to read requests into: %w", err)
+	}
+	d.dev, d.buf = dev, b
+	return nil
+}
 
 // SetSession takes the node's session, starting the filesystem client on the first and a chunk
 // client for each new one: a fence starts a new session, whose incarnation is 1. The old session's
@@ -277,16 +280,9 @@ func (d *Daemon) OnEvent(ctx *core.Context, ev *core.Event, acts []core.Action) 
 }
 
 // Serve reads and serves up to batch requests from the device; ErrGone once the kernel ended the
-// connection, ErrShort while the pool has no buffer to read into.
+// connection.
 func (d *Daemon) Serve(ctx *core.Context, acts []core.Action) ([]core.Action, error) {
 	d.acts = acts
-	if d.buf == core.NoBuf {
-		b, err := ctx.Pool.Alloc(ReadBuffer)
-		if err != nil {
-			return acts, ErrShort
-		}
-		d.buf = b
-	}
 	for range batch {
 		buf := ctx.Pool.Bytes(d.buf)[:ReadBuffer]
 		n, err := d.dev.Read(buf)
