@@ -725,6 +725,7 @@ func (g *gen) run(recs []trace.Record) {
 				listed = append(listed, fmt.Sprintf("[d |-> %d, c |-> %d, v |-> %s]", g.disk(recs[i].Fields[0]), g.chunk(recs[i].Fields[1]), ver(recs[i].Fields[2])))
 			}
 			g.decide(n, r, kept, listed)
+			g.persistedUnrecorded(n, r, recs[i:])
 		case trace.OutPersisted:
 			key := [3]uint64{r.Fields[2], r.Fields[0], r.Fields[1]}
 			g.line(`k |-> "persisted", d |-> %d, p |-> %d, iv |-> %d, again |-> %s`, g.disk(r.Fields[2]), g.pg(r.Fields[0]), r.Fields[1], strings.ToUpper(strconv.FormatBool(g.lists[key])))
@@ -796,6 +797,38 @@ func (g *gen) decide(n int, r *trace.Record, kept, listed []string) {
 	}
 	g.lineAt(at, `k |-> "peer", n |-> %d, p |-> %d, iv |-> %d, j |-> {%s}, kept |-> <<%s>>, listed |-> {%s}, rep |-> {%s}`,
 		n, g.pg(r.Fields[0]), r.Fields[1], strings.Join(j, ", "), strings.Join(kept, ", "), strings.Join(listed, ", "), strings.Join(rep, ", "))
+}
+
+// persistedUnrecorded writes a persisted line for each member of decision r whose list became durable with no Persisted record, as when its node crashed before the store's answer: a later reply of its disk reports r's interval as its decision. It writes none for an interval activated later, since the primary activates only on answers it heard.
+func (g *gen) persistedUnrecorded(n int, r *trace.Record, rest []trace.Record) {
+	pg, iv := r.Fields[0], r.Fields[1]
+	if slices.ContainsFunc(rest, func(x trace.Record) bool {
+		return x.Name == trace.OutActivate && x.Fields[0] == pg && x.Fields[1] == iv
+	}) {
+		return
+	}
+	var ds []uint64
+	for d := range g.replies[[3]uint64{uint64(n), pg, iv}] {
+		ds = append(ds, d)
+	}
+	slices.Sort(ds)
+	for _, d := range ds {
+		recorded, durable := false, false
+		for k := range rest {
+			x := &rest[k]
+			switch {
+			case x.Name == trace.OutPersisted && x.Fields[0] == pg && x.Fields[1] == iv && x.Fields[2] == d:
+				recorded = true
+			case x.Name == trace.OutReply && x.Fields[0] == pg && x.Fields[2] == d && x.Fields[3] == iv:
+				durable = true
+			}
+		}
+		if durable && !recorded {
+			key := [3]uint64{d, pg, iv}
+			g.line(`k |-> "persisted", d |-> %d, p |-> %d, iv |-> %d, again |-> FALSE`, g.disk(d), g.pg(pg), iv)
+			g.lists[key] = true
+		}
+	}
 }
 
 func (g *gen) write(w *bufio.Writer, module string) {
