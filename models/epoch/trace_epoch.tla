@@ -152,6 +152,10 @@ RecoverLine(l) ==
 \* The entries of chunk c the resend table of disk d answers from. The code
 \* drops a version's entry at the decision marker that drops it, earlier than
 \* the spec's Persist, so a disk listing c is not compared (Known in epoch.tla).
+\* Nor is an entry of a write at or below the disk's watermark: a recovery that
+\* brings the source's watermark drops the disk's entries of those writes in the
+\* spec and keeps them in the code, which answers such a write stale before it
+\* reads an entry.
 KnownIds(d, c) == {g \in ids[d] : g.c = c /\ g.v \in Known(d, c)}
 
 \* The entry of write w in n's pin that an order, reanswer or stale line takes.
@@ -281,7 +285,7 @@ Line(l) ==
     \/ /\ l.k = "trim"
        /\ IF l.w \in wm[l.d] THEN UNCHANGED vars ELSE Trim(l.d, l.w)
     \/ /\ l.k = "resends"
-       /\ \A c \in Chunk : miss[l.d][c] = NoMiss => {g \in l.e : g.c = c} = KnownIds(l.d, c)
+       /\ \A c \in Chunk : miss[l.d][c] = NoMiss => {g \in l.e : g.c = c /\ g.w \notin wm[l.d]} = KnownIds(l.d, c)
        /\ UNCHANGED vars
     \/ /\ l.k = "peer"
        /\ pr[l.n][l.p].iv = l.iv
