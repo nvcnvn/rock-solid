@@ -9706,7 +9706,7 @@ and chunk devices.
   chunk write in 16, so a fence finds chunk I/O in flight; one pool allocation in 100 refused,
   which fails a chunk write the client cannot take; and one `Read` in 200 answered `ErrMalformed`,
   `ErrTooLarge`, `ErrOverloaded` or `ErrHalted`. Then 3 s without faults. Histories pass
-  close-to-open, a read such a fault overlaps counting as failed, since it may come back short;
+  close-to-open, a read such a fault overlaps may come back short;
   every system call succeeds or, overlapped by a fence, a refused allocation or a lasting `Read`
   error, fails `EIO`, after which its process goes on and writes again what did not land; no
   inode is handed out twice, no `mtime` goes backwards, every file's entry is in its directory's

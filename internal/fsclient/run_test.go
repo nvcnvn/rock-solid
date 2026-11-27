@@ -1082,13 +1082,13 @@ func (pr *runProc) failedUnder(op sim.Op) {
 	}
 }
 
-// unfaulted is the history with each read a fault overlapped marked failed, as a fault may cut
-// it short.
+// unfaulted is the history with each read a fault overlapped that succeeded asking for what it
+// got, as a fault may cut it short; every word it returned is still checked.
 func (r *fsRun) unfaulted() []sim.Op {
 	ops := slices.Clone(r.hist.Ops())
 	for i := range ops {
-		if k := ops[i].Input[0] & 0xff; (k == sim.FileRead || k == sim.FileMapRead) && r.faulted(ops[i].Invoke, ops[i].Complete) {
-			ops[i].Output[0] = uint64(EIO)
+		if k := ops[i].Input[0] & 0xff; (k == sim.FileRead || k == sim.FileMapRead) && ops[i].Output[0] == 0 && r.faulted(ops[i].Invoke, ops[i].Complete) {
+			ops[i].Input[2] = ops[i].Output[1]
 		}
 	}
 	return ops
