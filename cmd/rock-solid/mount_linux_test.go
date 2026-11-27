@@ -15,6 +15,8 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"github.com/nvcnvn/rock-solid/internal/driver/tcp"
+	"github.com/nvcnvn/rock-solid/internal/loop"
 	"github.com/nvcnvn/rock-solid/internal/meta"
 )
 
@@ -114,3 +116,41 @@ func asNobody(t *testing.T, dir string, args ...string) *exec.Cmd {
 	c.ExtraFiles = []*os.File{f}
 	return c
 }
+
+// refuseWatch is an epoll kernel that watches no descriptor, so that the loop refuses each one.
+type refuseWatch struct{ loop.Kernel }
+
+func (refuseWatch) Watch(int, uint64) error { return unix.ENOSPC }
+
+// A mount whose device the loop refuses unmounts it again, rather than leave a mount nobody
+// serves, and says why. Needs root and RS_FUSE_DIR.
+func TestAMountWhoseDeviceTheLoopRefusesLeavesNothingMounted(t *testing.T) {
+	base := os.Getenv("RS_FUSE_DIR")
+	switch {
+	case base == "":
+		t.Skip("RS_FUSE_DIR names no directory to mount under")
+	case os.Geteuid() != 0:
+		t.Skip("mounting with allow_other needs root")
+	}
+	mnt, err := os.MkdirTemp(base, "mnt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if mounted(mnt) {
+			_ = unix.Unmount(mnt, unix.MNT_DETACH)
+		}
+		_ = os.Remove(mnt)
+	})
+	k, err := loop.NewEpoll("/nonexistent/vmclock0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(k.Close)
+	m := newMount(nodeConfig{Mount: 1, MountPath: mnt}, tcp.New(tcp.Config{Self: core.NodeID{Node: 2}, Seed: 1}))
+	m.drv.l = loop.New(loop.Config{Node: 2}, refuseWatch{k}, nil, m.drv)
+	if err := m.attach(); !errors.Is(err, unix.ENOSPC) || mounted(mnt) {
+		t.Fatalf("attach: %v; %s mounted: %v", err, mnt, mounted(mnt))
+	}
+}
+

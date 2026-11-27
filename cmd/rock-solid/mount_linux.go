@@ -94,23 +94,29 @@ func (m *mount) take(ctx *core.Context, n *node.Node, out *node.Output, acts []c
 		return acts
 	}
 	m.mounted = true
-	dev, err := fuse.Mount(m.path)
-	if err != nil {
+	if err := m.attach(); err != nil {
 		m.err = err
 		m.stop()
-		return acts
+	}
+	return acts
+}
+
+// attach mounts the volume and serves its device on the loop; a device the loop cannot take is
+// unmounted again, as nobody would serve it.
+func (m *mount) attach() error {
+	dev, err := fuse.Mount(m.path)
+	if err != nil {
+		return err
 	}
 	c, err := m.drv.l.AddConn(dev.Fd, true)
 	if err != nil {
-		m.err = errors.Join(fmt.Errorf("mount %s: %w", m.path, err), fuse.Unmount(dev, m.path))
-		m.stop()
-		return acts
+		return errors.Join(fmt.Errorf("mount %s: %w", m.path, err), fuse.Unmount(dev, m.path))
 	}
 	m.drv.l.Own(c)
 	m.d.Attach(dev)
 	m.drv.c, m.drv.on = c, true
 	log.Printf("volume %d mounted at %s", m.d.Volume(), m.path)
-	return acts
+	return nil
 }
 
 // mountDriver is loop 0's TCP driver, which also reports the mount's device readable to the
