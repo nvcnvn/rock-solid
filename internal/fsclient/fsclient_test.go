@@ -85,6 +85,15 @@ func (h *mount) answerRead(rd Read) {
 	h.m.ReadDone(&h.ctx, rd.Token, r.KVs, &h.out)
 }
 
+// scanNow is what rd reads of the state as it is now.
+func (h *mount) scanNow(rd Read) []meta.KV {
+	var r meta.ScanResult
+	if err := h.s.Scan(rd.Start, rd.End, rd.Limit, &r); err != nil {
+		h.t.Fatal(err)
+	}
+	return slices.Clone(r.KVs)
+}
+
 func (h *mount) answerTxn(s TxnSend) {
 	r := h.apply(s.Txn)
 	h.m.TxnDone(&h.ctx, s.Token, &r, nil, &h.out)
@@ -723,8 +732,9 @@ func TestARequestQueuedBehindTwoCommitsRuns(t *testing.T) {
 	}
 }
 
-// An open's fetch read before a close committed the size, and answered after the commit, is
-// fetched again rather than taken: a read in the handle then sees the whole file.
+// An open's and a getattr's fetch read before a close committed the size, and answered after the
+// commit, are fetched again rather than taken: the getattr answers the whole size, and a read in
+// the handle sees the whole file.
 func TestAFetchFromBeforeTheMachinesOwnCommitIsNotTaken(t *testing.T) {
 	h := newMount(t, Config{})
 	ino, fh := h.create(meta.RootInode, "f")
@@ -732,22 +742,135 @@ func TestAFetchFromBeforeTheMachinesOwnCommitIsNotTaken(t *testing.T) {
 	h.held = true
 	flush := h.send(fuseproto.Request{Opcode: fuseproto.OpFlush, NodeID: ino, Fh: fh})
 	h.send(fuseproto.Request{Opcode: fuseproto.OpOpen, NodeID: ino})
-	if len(h.sent) != 1 || len(h.reads) != 1 {
+	ga := h.send(fuseproto.Request{Opcode: fuseproto.OpGetattr, NodeID: ino})
+	if len(h.sent) != 1 || len(h.reads) != 2 {
 		t.Fatalf("%d Txns and %d reads in flight", len(h.sent), len(h.reads))
 	}
-	var before meta.ScanResult
-	if err := h.s.Scan(h.reads[0].Start, h.reads[0].End, h.reads[0].Limit, &before); err != nil {
-		t.Fatal(err)
-	}
-	old := slices.Clone(before.KVs)
+	old := [][]meta.KV{h.scanNow(h.reads[0]), h.scanNow(h.reads[1])}
 	h.held = false
 	h.answerTxn(h.sent[0])
-	h.m.ReadDone(&h.ctx, h.reads[0].Token, old, &h.out)
+	for i, rd := range h.reads {
+		h.m.ReadDone(&h.ctx, rd.Token, old[i], &h.out)
+	}
 	h.serve()
 	h.ok(flush)
+	if _, _, a, err := fuseproto.DecodeAttrOut(h.ok(ga)); err != nil || a.Size != 5 {
+		t.Fatalf("getattr answered size %d: %v", a.Size, err)
+	}
 	if got := h.read(ino, fh, 0, 100); string(got) != "hello" {
 		t.Fatalf("read after the open gave %q", got)
 	}
+}
+
+// A getattr's fetch read before a raise or setattr of the machine's own applied, and answered
+// after it, is fetched again rather than taken: a later raise then passes its check the first time.
+func TestAGetattrFetchFromBeforeTheMachinesOwnChangeIsNotTaken(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		change func(ino, fh uint64) fuseproto.Request
+	}{
+		{"raise", func(ino, fh uint64) fuseproto.Request {
+			return fuseproto.Request{Opcode: fuseproto.OpWrite, NodeID: ino, Fh: fh, Offset: 40 * core.ChunkSize, Size: 4096, Data: make([]byte, 4096)}
+		}},
+		{"setattr", func(ino, fh uint64) fuseproto.Request {
+			return fuseproto.Request{Opcode: fuseproto.OpSetattr, NodeID: ino, Setattr: fuseproto.Setattr{Valid: fuseproto.AttrMode, Mode: 0o600}}
+		}},
+	} {
+		h := newMount(t, Config{})
+		ino, fh := h.create(meta.RootInode, "f")
+		h.ok(h.write(ino, fh, 0, []byte("hello")))
+		h.held = true
+		u := h.send(c.change(ino, fh))
+		for len(h.sent) == 0 {
+			rd := h.reads[0]
+			h.reads = h.reads[1:]
+			h.answerRead(rd)
+			h.serve()
+		}
+		ga := h.send(fuseproto.Request{Opcode: fuseproto.OpGetattr, NodeID: ino})
+		if len(h.sent) != 1 || len(h.reads) != 1 {
+			t.Fatalf("%s: %d Txns and %d reads in flight", c.name, len(h.sent), len(h.reads))
+		}
+		old := h.scanNow(h.reads[0])
+		h.held = false
+		h.answerTxn(h.sent[0])
+		h.m.ReadDone(&h.ctx, h.reads[0].Token, old, &h.out)
+		h.serve()
+		h.ok(u)
+		h.ok(ga)
+		before := len(h.txns)
+		h.ok(h.write(ino, fh, 80*core.ChunkSize, make([]byte, 4096)))
+		if n := len(h.txns) - before; n != 1 {
+			t.Fatalf("%s: a later raise sent %d Txns, want 1", c.name, n)
+		}
+	}
+}
+
+// A raise whose check failed reads the attributes again under the inode's lock; read before an
+// unlink of the machine's own applied, and answered after it, they are read once more rather than
+// taken, so the raise's next Txn passes its check.
+func TestARaisesRereadFromBeforeTheMachinesOwnUnlinkIsReadAgain(t *testing.T) {
+	h := newMount(t, Config{})
+	ino, fh := h.create(meta.RootInode, "f")
+	h.ok(h.write(ino, fh, 0, []byte("hello")))
+	b := h.attr(ino)
+	b.Ctime++
+	h.setAttr(ino, b)
+	h.held = true
+	w := h.write(ino, fh, 40*core.ChunkSize, make([]byte, 4096))
+	if len(h.sent) != 1 {
+		t.Fatalf("the write sent %d Txns", len(h.sent))
+	}
+	h.answerTxn(h.sent[0])
+	h.sent = nil
+	h.serve()
+	if len(h.reads) != 1 {
+		t.Fatalf("the failed raise sent %d reads", len(h.reads))
+	}
+	reread := h.reads[0]
+	old := h.scanNow(reread)
+	h.reads = nil
+	unlink := h.send(fuseproto.Request{Opcode: fuseproto.OpUnlink, NodeID: meta.RootInode, Name: []byte("f")})
+	for len(h.sent) == 0 {
+		rd := h.reads[0]
+		h.reads = h.reads[1:]
+		h.answerRead(rd)
+		h.serve()
+	}
+	h.held = false
+	h.answerTxn(h.sent[0])
+	h.serve()
+	h.ok(unlink)
+	before := len(h.txns)
+	h.m.ReadDone(&h.ctx, reread.Token, old, &h.out)
+	h.serve()
+	h.ok(w)
+	if n := len(h.txns) - before; n != 1 {
+		t.Fatalf("the raise sent %d more Txns, want 1", n)
+	}
+}
+
+// Two WRITEs past alloc_end: the second finds the first's raise covers it and hands the inode on,
+// so a FLUSH after both is answered.
+func TestAWriteCoveredByAnotherRaiseHandsTheInodeOn(t *testing.T) {
+	h := newMount(t, Config{})
+	ino, fh := h.create(meta.RootInode, "f")
+	h.held = true
+	w1 := h.write(ino, fh, 40*core.ChunkSize, make([]byte, 4096))
+	w2 := h.write(ino, fh, 40*core.ChunkSize+4096, make([]byte, 4096))
+	if len(h.sent) != 1 {
+		t.Fatalf("%d Txns sent", len(h.sent))
+	}
+	h.held = false
+	h.answerTxn(h.sent[0])
+	h.serve()
+	for _, c := range h.chunks {
+		h.answerChunk(c)
+	}
+	h.serve()
+	h.ok(w1)
+	h.ok(w2)
+	h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpFlush, NodeID: ino, Fh: fh}))
 }
 
 // With a case index, a CREATE whose name folds to another node's file answers EEXIST; one whose
@@ -764,6 +887,37 @@ func TestACreateThatLosesItsNameAnswersByWhatHoldsIt(t *testing.T) {
 	h.serve()
 	if len(h.reads) != 1 {
 		t.Fatalf("a create that lost its name sent %d reads", len(h.reads))
+	}
+	other.ok(other.send(fuseproto.Request{Opcode: fuseproto.OpUnlink, NodeID: meta.RootInode, Name: []byte("f")}))
+	h.held = false
+	h.answerRead(h.reads[0])
+	h.serve()
+	e := h.entry(u)
+	if e.NodeID == theirs || h.entry(h.lookup(meta.RootInode, "f")).NodeID != e.NodeID {
+		t.Fatalf("the create answered inode %x, the unlinked file's %x", e.NodeID, theirs)
+	}
+}
+
+// A CREATE that lost its name reads the other node's entry, and the file is unlinked before it
+// reads the attributes: it makes the name again under a fresh inode, not the unlinked one, whose
+// chunks may still await their purge.
+func TestACreateFindingTheFileGoneAfterItsEntryUsesAFreshInode(t *testing.T) {
+	h := newMount(t, Config{})
+	other := *h
+	other.m, other.out, other.replies = New(Config{Volume: vol, Session: 8, Mount: 1, SlotLimit: 1 << 20}), Output{}, nil
+	h.create(meta.RootInode, "warm")
+	theirs, tfh := other.create(meta.RootInode, "f")
+	other.ok(other.send(fuseproto.Request{Opcode: fuseproto.OpRelease, NodeID: theirs, Fh: tfh}))
+	h.held = true
+	u := h.send(fuseproto.Request{Opcode: fuseproto.OpCreate, NodeID: meta.RootInode, Name: []byte("f"), Mode: uint32(meta.ModeFile | 0o644)})
+	h.answerTxn(h.sent[0])
+	h.serve()
+	rd := h.reads[0]
+	h.reads = h.reads[1:]
+	h.answerRead(rd)
+	h.serve()
+	if len(h.reads) != 1 {
+		t.Fatalf("%d reads after the entry", len(h.reads))
 	}
 	other.ok(other.send(fuseproto.Request{Opcode: fuseproto.OpUnlink, NodeID: meta.RootInode, Name: []byte("f")}))
 	h.held = false

@@ -113,9 +113,9 @@ type runFile struct {
 	writer *runProc
 }
 
-// rebootsEnd is when replicas' nodes stop rebooting: one rebooted then is down a second and
+// rebootsEnd is when replicas' nodes stop rebooting: one rebooted then is down a heartbeat and
 // grants no vote for its restart wait, so a quorum votes again from runFor.
-var rebootsEnd = runFor - 1_000_000 - lease.DefaultConfig.Lease
+var rebootsEnd = runFor - sim.Heartbeat - lease.DefaultConfig.Lease
 
 // clientNode is the daemon's node; nodes 0 to 2 run the shard's replicas.
 const clientNode = 6
@@ -662,13 +662,13 @@ func (d *daemon) next() {
 // sendRoot sends the Txn that creates the volume's root once, whose failed check on a later
 // start says it is there.
 func (d *daemon) sendRoot() {
-	var tok uint64
-	var err error
-	d.routed(func(o *meta.RouterOutput) { tok, err = d.mc.Txn(d.ctx, &d.root.Txn, o) })
-	if err != nil {
-		panic(err)
-	}
-	d.txns[tok] = sentTxn{}
+	d.routed(func(o *meta.RouterOutput) {
+		tok, err := d.mc.Txn(d.ctx, &d.root.Txn, o)
+		if err != nil {
+			panic(err)
+		}
+		d.txns[tok] = sentTxn{}
+	})
 }
 
 func (d *daemon) realtime() int64 { return realtime + int64(d.ctx.Now)*1000 }
@@ -775,13 +775,13 @@ func (d *daemon) txn(m *Machine, s TxnSend) {
 			r.creates[ino] = string(s.Txn.Replay)
 		}
 	}
-	var tok uint64
-	var err error
-	d.routed(func(o *meta.RouterOutput) { tok, err = d.mc.Txn(d.ctx, s.Txn, o) })
-	if err != nil {
-		panic(fmt.Sprintf("the router refused %+v: %v", *s.Txn, err))
-	}
-	d.txns[tok] = sentTxn{m, s.Token}
+	d.routed(func(o *meta.RouterOutput) {
+		tok, err := d.mc.Txn(d.ctx, s.Txn, o)
+		if err != nil {
+			panic(fmt.Sprintf("the router refused %+v: %v", *s.Txn, err))
+		}
+		d.txns[tok] = sentTxn{m, s.Token}
+	})
 }
 
 // routed runs f on the meta client and hands each answer to the machine that sent its Txn or Read,
@@ -843,15 +843,13 @@ func (d *daemon) hold(h heldRead) {
 
 // send sends h's read to the shard leader over the meta wire.
 func (d *daemon) send(h heldRead) {
-	var tok uint64
-	var err error
 	d.routed(func(o *meta.RouterOutput) {
-		tok, err = d.mc.Read(d.ctx, &meta.Read{Start: h.rd.Start, End: h.rd.End, Limit: h.rd.Limit}, o)
+		tok, err := d.mc.Read(d.ctx, &meta.Read{Start: h.rd.Start, End: h.rd.End, Limit: h.rd.Limit}, o)
+		if err != nil {
+			panic(fmt.Sprintf("the router refused %+v: %v", h.rd, err))
+		}
+		d.reads[tok] = h
 	})
-	if err != nil {
-		panic(fmt.Sprintf("the router refused %+v: %v", h.rd, err))
-	}
-	d.reads[tok] = h
 }
 
 // reply writes a reply to the mount, or takes a setup reply and sends setup's next request.

@@ -56,8 +56,8 @@ var DefaultClock = Clock{Now: 1000, Raw: 1226}
 
 const (
 	second = core.Tick(1_000_000)
-	// heartbeat is the least time a rebooted node stays down.
-	heartbeat = second
+	// Heartbeat is the least time a rebooted node stays down.
+	Heartbeat = second
 	// rateWindow is how long a node's clocks run before its raw rate may step, so that holders have bounded it first.
 	rateWindow = 10 * second
 	maxPause   = 5 * second
@@ -567,7 +567,7 @@ func (s *Scheduler) crashRandom(id uint32, sent bool) *Node {
 func (s *Scheduler) Reboot(id uint32) {
 	n := s.crashRandom(id, false)
 	n.rebooted = true
-	n.until = s.now + heartbeat
+	n.until = s.now + Heartbeat
 	if s.set.RebootInstantly {
 		n.until = s.now
 	}
