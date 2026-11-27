@@ -1489,8 +1489,12 @@ Order(n, x) ==
 \* A write sent again that an earlier attempt took effect for is answered with
 \* that attempt's version, not ordered, when the primary would order it: after
 \* the same holds, and once that version is mapped, so a resend of a pending one
-\* waits for its outcome. A version peering dropped has left Known, so its
-\* write is ordered afresh. ResendAtOnce answers before the version is mapped.
+\* waits for its outcome. One whose version is acknowledged already is answered
+\* whatever the primary's state since: the resend held for a pending attempt is
+\* answered with that attempt's OK, though by then the primary may have adopted
+\* a table, the write been fenced or the chunk degraded. A version peering
+\* dropped has left Known, so its write is ordered afresh. ResendAtOnce answers
+\* before the version is mapped.
 \* With "lose", this answer too can be lost, while the client may send again.
 ReanswerAs(n, x, heard) ==
     LET c == Writes[x.w].c
@@ -1503,13 +1507,14 @@ ReanswerAs(n, x, heard) ==
        /\ x \in pin[n]
        /\ sends[x.w] > 1
        /\ V # {}
-       /\ Leads(n, p)
-       /\ pr[n][p].act
-       /\ ~pr[n][p].ask
-       /\ own = PrimDisk(p, k)
-       /\ ~Fenced(n, x)
-       /\ miss[own][c] = NoMiss
-       /\ ~Degraded(p, k, c)
+       /\ \/ [c |-> c, v |-> Max(V)] \in ackd
+          \/ /\ Leads(n, p)
+             /\ pr[n][p].act
+             /\ ~pr[n][p].ask
+             /\ own = PrimDisk(p, k)
+             /\ ~Fenced(n, x)
+             /\ miss[own][c] = NoMiss
+             /\ ~Degraded(p, k, c)
        /\ Max(V) \notin Gated(n, c) \/ Bug("ResendAtOnce")
        /\ pin' = [pin EXCEPT ![n] = @ \ {x}]
        /\ ackd' = ackd \cup {[c |-> c, v |-> Max(V)]}
