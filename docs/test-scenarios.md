@@ -9591,16 +9591,28 @@ and chunk devices.
   replay key; a failed final check returns `EEXIST`, `ENOENT` or `ENOTEMPTY`; a directory renamed
   over a non-directory is `ENOTDIR` and the reverse `EISDIR`, with nothing sent
   (`TestNamespaceRequestsAnswerTheirChecksErrnos`). A `create` without `O_EXCL` that loses the
-  name to another node opens that node's file, `EISDIR` for a directory
-  (`TestACreateWithoutExclOpensTheFileAnotherNodeCreatedFirst`).
+  name to another node opens that node's file, `EISDIR` for a directory, and with `O_TRUNC`
+  `EOPNOTSUPP` for a non-empty file (`TestACreateWithoutExclOpensTheFileAnotherNodeCreatedFirst`);
+  with `case_index`, one that loses only the folded name is `EEXIST`, and one whose name is
+  unlinked before it reads the file creates it again under its own inode
+  (`TestACreateThatLosesItsNameAnswersByWhatHoldsIt`).
+- A mutating `Txn` names the mount's oldest request in hand, and a request whose answer was lost,
+  resent after a later one's `Txn` applied, has one effect: an unlink answers as it first did, not
+  `ENOENT`, which setting the oldest to the request's own ID or dropping the replay key gives
+  (`TestAResendAfterALostAnswerHasOneEffect`).
 - A write past `alloc_end` raises it by 1, 2, 4, … up to 16 chunks first, committing the size
-  written so far in the same `Txn` (`TestWritesRaiseAllocEndFirstByDoublingSteps`); `close` and
+  written so far in the same `Txn` (`TestWritesRaiseAllocEndFirstByDoublingSteps`); a write
+  queued behind two flushes, the second finding nothing left to commit, still runs
+  (`TestARequestQueuedBehindTwoCommitsRuns`); `close` and
   `fsync` commit size and `mtime = max(last write's time, mtime + 1 ns)`, and a read past the size
   is clamped (`TestCloseCommitsSizeAndMtimeAndReadsAreClamped`).
 - `LOOKUP` answers current attributes and a missing name `ENOENT`
   (`TestLookupAnswersCurrentAttributesAndAMissingNameWithENOENT`); an attribute reply fetched
   before a later request for its inode is fetched again
-  (`TestAnAttributeReplyFetchedBeforeALaterRequestIsFetchedAgain`); an open after the attributes
+  (`TestAnAttributeReplyFetchedBeforeALaterRequestIsFetchedAgain`), only once, then answered with
+  an attribute timeout of 0 (`TestAStreamOfRequestsCannotStarveAGetattr`); an open's fetch read
+  before the machine's own commit is fetched again, so a read after it is not short
+  (`TestAFetchFromBeforeTheMachinesOwnCommitIsNotTaken`); an open after the attributes
   changed is answered without `keep_cache` (`TestAnOpenAfterAChangeDropsTheCache`);
   `READDIRPLUS` lists every name across calls (`TestReaddirplusListsEveryNameAcrossCalls`).
 - The first create in a slot waits for one reservation `Txn`; a `mkdir` in a fresh slot creates in
@@ -9614,15 +9626,22 @@ and chunk devices.
   unlinked after a crash, misses (`TestAWriteBeforeItsRaiseLeavesAChunkThePurgeMisses`).
 - **[property]** `TestAMountsHistoriesKeepTheirInvariantsAcrossCrashes`: one node's `sim.Mount`,
   four processes on two root-directory files as in `TestFileHistoriesKeepCloseToOpen`, against
-  three `meta.Shard` replicas over the meta wire and three `node.Device` chunk devices; partitions,
-  replicas' nodes rebooted so leaders change, and the daemon crashed, half the time within 3 ms of
-  a file's first chunk write, restarting as a new mount that may unlink and create each file
-  again. Histories pass close-to-open, every system call succeeds, no inode is handed out twice,
-  no `mtime` goes backwards, every file's entry is in its directory's slot, no directory is its
-  own ancestor, and at each daemon crash every chunk written lies below `alloc_end` or within its
-  purge entry. Until **MetaStore reads over the wire**, the run serves reads from a replica that
-  has applied every entry any replica has. The devices do not crash: a restarted primary asks the
-  control plane for a new interval, which the run does not model.
+  three `meta.Shard` replicas over the meta wire and three `node.Device` chunk devices; for 30 s
+  partitions, replicas' nodes rebooted so leaders change (until 5 s before the end, a reboot's
+  heartbeat and restart wait, so a quorum votes once faults heal), and the daemon crashed, half the
+  time within 3 ms of a file's first chunk write, restarting as a new mount that may unlink and
+  create each file again; then 3 s without faults. Histories pass close-to-open, every system call
+  succeeds, no inode is handed out twice, no `mtime` goes backwards, every file's entry is in its
+  directory's slot, no directory is its own ancestor, at each daemon crash every chunk written
+  lies below `alloc_end` or within its purge entry, and at the end no system call and no request
+  in the machines has waited more than 100 ms. Until **MetaStore reads over the wire**, the run
+  holds each read for a round trip of up to 1 ms, then serves it from a replica that has applied
+  every entry any replica has, so requests arrive during fetches and the stale-attribute rule
+  runs: over its 150 seeds `keep_cache` always set, the stale check always false, and the node's
+  own writes left out of the size it shows each fail close-to-open. The run has one node, so no
+  other node's close is ever seen; the scripted tests own that side of Tier 1. The devices do not
+  crash: a restarted primary asks the control plane for a new interval, which the run does not
+  model.
 - The plant `neg-raise-after-write` fails "a purge never misses a chunk written before a crash" on
   each of the run's first 30 seeds (`TestARaiseAfterItsChunkWriteFailsTheMountsRun`, seed 1).
 
