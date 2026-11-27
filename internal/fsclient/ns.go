@@ -77,6 +77,10 @@ func (m *Machine) create(o *op, out *Output) {
 			m.recreate(o, out)
 			return
 		}
+		if !mayOpen(&n.attr, &o.req) {
+			m.fail(o, EACCES, out)
+			return
+		}
 		if o.req.Flags&oTrunc != 0 && shown(n).Size > 0 {
 			m.fail(o, EOPNOTSUPP, out)
 			return
@@ -130,6 +134,27 @@ func (m *Machine) create(o *op, out *Output) {
 			m.handOut(o, n, o.child, true, out)
 		}
 	}
+}
+
+// mayOpen reports whether r's opener may open a file of attributes a with r's access mode, as
+// open(2) checks: a CREATE reply makes the kernel skip that check (FMODE_CREATED in fs/namei.c's
+// do_open), so a CREATE that opens a file already there checks it. Root may open any file;
+// supplementary groups are not in the request, so only the opener's own gid counts.
+func mayOpen(a *meta.Attr, r *fuseproto.Request) bool {
+	want := [4]uint64{4, 2, 6, 6}[r.Flags&3]
+	if r.Flags&oTrunc != 0 {
+		want |= 2
+	}
+	bits := a.Mode & 7
+	switch {
+	case r.UID == 0:
+		return true
+	case uint64(r.UID) == a.UID:
+		bits = a.Mode >> 6 & 7
+	case uint64(r.GID) == a.GID:
+		bits = a.Mode >> 3 & 7
+	}
+	return bits&want == want
 }
 
 // recreate sends a CREATE whose name was taken, and freed before it read the file, from step 0

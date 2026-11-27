@@ -19,6 +19,7 @@ const (
 	EPERM        fuseproto.Errno = 1
 	ENOENT       fuseproto.Errno = 2
 	EIO          fuseproto.Errno = 5
+	EACCES       fuseproto.Errno = 13
 	EEXIST       fuseproto.Errno = 17
 	EXDEV        fuseproto.Errno = 18
 	ENOTDIR      fuseproto.Errno = 20

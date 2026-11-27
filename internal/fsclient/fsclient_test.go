@@ -635,6 +635,28 @@ func TestACreateWithoutExclOpensTheFileAnotherNodeCreatedFirst(t *testing.T) {
 	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpCreate, NodeID: meta.RootInode, Name: []byte("d"), Mode: uint32(meta.ModeFile | 0o644)}), EISDIR)
 }
 
+// A CREATE that opens another node's file checks the opener's access as open(2) would, since the
+// kernel skips its own check of a file the reply says was created: another uid's O_RDWR, or
+// O_RDONLY with O_TRUNC, of a 0600 file answers EACCES, while its owner, a uid of its group on
+// a 0660 file and root open it.
+func TestACreateOpeningAnotherNodesFileChecksTheOpenersAccess(t *testing.T) {
+	h := newMount(t, Config{})
+	other := *h
+	other.m, other.out, other.replies = New(Config{Volume: vol, Session: 8, Mount: 1, SlotLimit: 1 << 20}), Output{}, nil
+	open := func(name string, mode, uid, gid, flags uint32) uint64 {
+		return h.send(fuseproto.Request{Opcode: fuseproto.OpCreate, NodeID: meta.RootInode, Name: []byte(name), Mode: uint32(meta.ModeFile) | mode, UID: uid, GID: gid, Flags: flags})
+	}
+	const oRDWR = 2
+	other.ok(other.send(fuseproto.Request{Opcode: fuseproto.OpCreate, NodeID: meta.RootInode, Name: []byte("p"), Mode: uint32(meta.ModeFile | 0o600), UID: 1000, GID: 1000}))
+	h.errno(open("p", 0o644, 1001, 1001, oRDWR), EACCES)
+	h.errno(open("p", 0o644, 1001, 1000, oTrunc), EACCES)
+	h.ok(open("p", 0o644, 1000, 1000, oRDWR))
+	h.ok(open("p", 0o644, 0, 0, oRDWR))
+	other.ok(other.send(fuseproto.Request{Opcode: fuseproto.OpCreate, NodeID: meta.RootInode, Name: []byte("g"), Mode: uint32(meta.ModeFile | 0o660), UID: 1000, GID: 1000}))
+	h.ok(open("g", 0o644, 1001, 1000, oRDWR))
+	h.errno(open("g", 0o644, 1001, 1001, 0), EACCES)
+}
+
 // A request served from answers the machine has seen before allocates nothing: lookups,
 // attributes, an open, a write within alloc_end, its commit at flush, a read and a release.
 func TestTheRequestPathAllocatesNothing(t *testing.T) {
