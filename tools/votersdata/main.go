@@ -13,6 +13,7 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"math/bits"
 	"os"
 	"slices"
@@ -114,9 +115,15 @@ type key struct{ a, b int }
 
 func (k key) less(o key) bool { return k.a < o.a || k.a == o.a && k.b < o.b }
 
+// line is a line of the data, id the replica it is of, 0 for a stutter, and lead, lg and c a
+// replicate line's leader, log and commit.
 type line struct {
-	k key
-	s string
+	k    key
+	s    string
+	id   int
+	lead uint64
+	lg   []int
+	c    int
 }
 
 // sent is whether a replica leads, in which spec term, and to which members of the configuration
@@ -260,13 +267,14 @@ func (g *gen) next() key { return key{len(g.lines) - g.placed, 0} }
 // line writes a line of replica id at the end.
 func (g *gen) line(id int, format string, args ...any) {
 	g.stutter(format, args...)
+	g.lines[len(g.lines)-1].id = id
 	g.reps[id-1].lastLine = g.lines[len(g.lines)-1].k
 }
 
 // stutter writes a line no spec state differs at, which a line placed before it or a halt that
 // takes the place of an earlier apply passes.
 func (g *gen) stutter(format string, args ...any) {
-	g.lines = append(g.lines, line{g.next(), fmt.Sprintf(format, args...)})
+	g.lines = append(g.lines, line{k: g.next(), s: fmt.Sprintf(format, args...)})
 }
 
 // note records whether replica id leads, its term and its applied configuration's members, from
@@ -288,7 +296,8 @@ func (g *gen) note(id int, at key) {
 // replicate writes follower id's line for an append from lead in code term t that left it holding
 // lg. An append is the spec's step when its leader sends it: one that arrives once its leader
 // stopped leading the term, or applied a configuration without the follower, is placed before
-// the line where that happened, unless a line of the follower's is later.
+// the line where that happened, unless a line of the follower's is later that the append's
+// earlier place could fail (passes).
 func (g *gen) replicate(id int, lead, t uint64, lg []int, c int) {
 	s := fmt.Sprintf(`[k |-> "replicate", i |-> %d, j |-> %d, lg |-> %s, c |-> %d]`, lead, id, seq(lg), c)
 	r, l := g.reps[id-1], g.reps[lead-1]
@@ -296,19 +305,40 @@ func (g *gen) replicate(id int, lead, t uint64, lg []int, c int) {
 	if n := len(l.hist); n == 0 || !sends(l.hist[n-1]) {
 		for i := n - 2; i >= 0; i-- {
 			end := l.hist[i+1].at
-			if end.b != 0 || !r.lastLine.less(end) {
+			if end.b != 0 || !r.lastLine.less(end) && !g.passes(id, end, lead, lg, c) {
 				break
 			}
 			if sends(l.hist[i]) {
 				g.placed++
 				k := key{end.a, g.placed - 1<<40}
-				g.lines = append(g.lines, line{k, s})
-				r.lastLine = k
+				g.lines = append(g.lines, line{k, s, id, lead, lg, c})
+				if r.lastLine.less(k) {
+					r.lastLine = k
+				}
 				return
 			}
 		}
 	}
 	g.line(id, "%s", s)
+	n := &g.lines[len(g.lines)-1]
+	n.lead, n.lg, n.c = lead, lg, c
+}
+
+// passes reports whether every line of follower id from end on is an apply, or a replicate of
+// lead's whose log is a prefix of lg and whose commit is at most c: lines an append from lead
+// leaving the follower lg and c, taken before end, still holds, since the follower's later
+// appends from lead move none of it and its applies are checked as at most the spec's.
+func (g *gen) passes(id int, end key, lead uint64, lg []int, c int) bool {
+	for _, l := range g.lines {
+		if l.id != id || l.k.less(end) {
+			continue
+		}
+		if !strings.HasPrefix(l.s, `[k |-> "apply"`) &&
+			(l.lead != lead || len(l.lg) > len(lg) || !slices.Equal(l.lg, lg[:len(l.lg)]) || l.c > c) {
+			return false
+		}
+	}
+	return true
 }
 
 // elect writes replica id's line s for its win of spec term t. etcd-raft wins on the last vote's
@@ -327,7 +357,7 @@ func (g *gen) elect(id int, s string, t int) {
 	} else {
 		g.placed++
 		k := key{first.at.a, g.placed - 1<<40}
-		g.lines = append(g.lines, line{k, s})
+		g.lines = append(g.lines, line{k: k, s: s, id: id})
 		r.lastLine = k
 	}
 	g.wins = append(g.wins, win{t, r.lastLine})
@@ -569,7 +599,6 @@ func main() {
 		fatal("%v", err)
 	}
 	var recs []trace.Record
-	nodes := 0
 	sc := bufio.NewScanner(file)
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	for sc.Scan() {
@@ -578,10 +607,20 @@ func main() {
 			fatal("%v", err)
 		}
 		recs = append(recs, rec)
-		nodes = max(nodes, int(rec.Node)+1)
 	}
 	if err := sc.Err(); err != nil {
 		fatal("%v", err)
+	}
+	w := bufio.NewWriter(os.Stdout)
+	defer w.Flush()
+	write(w, *module, recs)
+}
+
+// write writes the data module of the trace's records recs.
+func write(w io.Writer, module string, recs []trace.Record) {
+	nodes := 0
+	for _, rec := range recs {
+		nodes = max(nodes, int(rec.Node)+1)
 	}
 	g := &gen{chosen: map[uint64]entry{}, failed: map[uint64]bool{}, leaders: map[uint64]uint64{}, boot: conf{in: 0b1110}, plan: 0b1110}
 	var failed []uint64
@@ -619,9 +658,7 @@ func main() {
 	if len(g.lines) == 0 {
 		fatal("the trace has no Raft step")
 	}
-	w := bufio.NewWriter(os.Stdout)
-	defer w.Flush()
-	fmt.Fprintf(w, "---- MODULE %s ----\nEXTENDS Integers\n", *module)
+	fmt.Fprintf(w, "---- MODULE %s ----\nEXTENDS Integers\n", module)
 	fmt.Fprintf(w, "TReplicas == 1..%d\nTBaseVoters == %s\nTPlan == %s\n", nodes, set(g.boot.in), set(g.plan))
 	fmt.Fprintf(w, "TMaxTerm == %d\nTMaxCrashes == %d\nTMaxHalts == %d\nTMaxDeaths == %d\n", len(g.elected), g.crashes, g.halts, g.deaths)
 	slices.SortStableFunc(g.lines, func(x, y line) int {
