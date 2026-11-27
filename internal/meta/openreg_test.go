@@ -86,7 +86,7 @@ func (o *owner) step(f func(ctx *core.Context, out *Output)) {
 	}
 }
 
-func (o *owner) msg(kind byte, encode func(pool core.BufPool, m *core.Msg) error) core.Event {
+func (o *owner) msg(encode func(pool core.BufPool, m *core.Msg) error) core.Event {
 	ev := core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: 3}}
 	if err := encode(o.c.n[o.l].pool, &ev.Msg); err != nil {
 		o.t.Fatal(err)
@@ -97,7 +97,7 @@ func (o *owner) msg(kind byte, encode func(pool core.BufPool, m *core.Msg) error
 // reg sends session's open or release of the file from mount 1 and returns the links it was answered.
 func (o *owner) reg(reg byte, session uint64) uint64 {
 	rd := Read{Start: o.attrKey(regFile), End: append(o.attrKey(regFile), 0), Limit: 1, Reg: reg, Session: session, Mount: 1}
-	ev := o.msg(KindRead, func(pool core.BufPool, m *core.Msg) error { return EncodeRead(pool, o.c.n[o.l].s.group, 7, &rd, m) })
+	ev := o.msg(func(pool core.BufPool, m *core.Msg) error { return EncodeRead(pool, o.c.n[o.l].s.group, 7, &rd, m) })
 	var acts []core.Action
 	o.step(func(ctx *core.Context, out *Output) { acts = o.sv.ServeRead(ctx, &ev, o.c.n[o.l].s, nil) })
 	var ra ReadAnswer
@@ -117,7 +117,9 @@ func (o *owner) unlink() {
 	if err := o.fs.Unlink(RootInode, []byte("f"), regFile, &a, true, nil, 5); err != nil {
 		o.t.Fatal(err)
 	}
-	ev := o.msg(KindTxn, func(pool core.BufPool, m *core.Msg) error { return EncodeTxn(pool, o.c.n[o.l].s.group, 8, &o.fs.Txn, m) })
+	ev := o.msg(func(pool core.BufPool, m *core.Msg) error {
+		return EncodeTxn(pool, o.c.n[o.l].s.group, 8, &o.fs.Txn, m)
+	})
 	o.step(func(ctx *core.Context, out *Output) { o.sv.Serve(ctx, &ev, o.c.n[o.l].s, out, nil) })
 	if ans := o.c.answer(o.l, ServerToken|1); ans.Err != nil || ans.Result.FailedCheck >= 0 {
 		o.t.Fatalf("the unlink was answered %+v", ans)
