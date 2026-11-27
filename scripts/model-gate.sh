@@ -68,7 +68,8 @@ while IFS=$'\t' read -r rule plant test; do
 		continue
 	fi
 	pkg=${plant%%.*}
-	file=$(grep -r -l -E "^func $test\(" internal --include='*_test.go' | head -1 || true)
+	file=$( { grep -r -l -E "^func $test\(" "internal/$pkg" --include='*_test.go' || true
+		grep -r -l -E "^func $test\(" internal --include='*_test.go' || true; } | head -1)
 	[ -n "$file" ] || fail "$rule: no test $test"
 	for p in $(echo "${plant#*.}" | tr , ' '); do
 		grep -r -q -w "$p" "internal/$pkg" --include='*.go' || fail "$rule: internal/$pkg holds no plant $p"
