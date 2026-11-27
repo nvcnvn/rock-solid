@@ -142,6 +142,26 @@ func (c *Client) Epoch() uint64 { return c.table.Epoch }
 // Pending is the parts of requests with no final answer.
 func (c *Client) Pending() int { return len(c.writes) + len(c.queued) + len(c.reads) }
 
+// LastID is the highest request ID the client has taken, without the read bit: a client that
+// replaces it on the same connections takes it as its IDBase, so no answer to this one matches
+// a request of its own.
+func (c *Client) LastID() core.RequestID {
+	return c.cfg.IDBase + core.RequestID(max(c.next, c.nextRead))
+}
+
+// Abandon completes every part with no final answer StatusMissing, frees its buffer and forgets
+// it, as for a fenced session, whose writes can no longer land. The parts' sends must have been
+// executed, as the actions of an earlier output are.
+func (c *Client) Abandon(ctx *core.Context, out *ClientOutput) {
+	for _, ops := range [][]clientOp{c.writes, c.queued, c.reads} {
+		for _, op := range ops {
+			out.Done = append(out.Done, Completion{Token: op.token, Off: op.file, Len: op.n, Status: StatusMissing, Buf: core.NoBuf})
+			freeBuf(ctx, op.buf)
+		}
+	}
+	c.writes, c.queued, c.reads = c.writes[:0], c.queued[:0], c.reads[:0]
+}
+
 // SetTable adopts t if it is newer than the client's table, sending at once what waited for it, what
 // has not gone yet and what went to a primary the table no longer names.
 func (c *Client) SetTable(ctx *core.Context, t Table, out *ClientOutput) {

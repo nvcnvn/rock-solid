@@ -148,7 +148,10 @@ func (d *Daemon) Volume() uint32 { return d.cfg.Volume }
 func (d *Daemon) Attach(dev Device) { d.dev = dev }
 
 // SetSession takes the node's session, starting the filesystem client on the first and a chunk
-// client for each new one: a fence starts a new session, whose incarnation is 1.
+// client for each new one: a fence starts a new session, whose incarnation is 1. The old session's
+// chunk I/O in flight fails with EIO, and the new client numbers its requests above the old one's,
+// whose late answers arrive on the same connections. It comes first in a pass, before anything
+// that could make the old client send.
 func (d *Daemon) SetSession(ctx *core.Context, session uint64, acts []core.Action) []core.Action {
 	if session == 0 || session == d.session {
 		return acts
@@ -158,11 +161,20 @@ func (d *Daemon) SetSession(ctx *core.Context, session uint64, acts []core.Actio
 		// The volume's one data group spans every slot.
 		d.m = fsclient.New(fsclient.Config{Volume: d.cfg.Volume, Pool: d.cfg.Pool, Session: session, Mount: 1, SlotLimit: 1<<32 - 1})
 	}
-	d.cl = chunkstore.NewClient(chunkstore.ClientConfig{Session: session, Incarnation: 1})
+	d.m.SetSession(session)
+	old := d.cl
+	var base core.RequestID
+	if old != nil {
+		base = old.LastID()
+	}
+	d.cl = chunkstore.NewClient(chunkstore.ClientConfig{Session: session, Incarnation: 1, IDBase: base})
 	d.setAddrs()
 	if d.table.Epoch != 0 {
 		t := d.table
 		d.chunked(ctx, func(o *chunkstore.ClientOutput) { d.cl.SetTable(ctx, t, o) })
+	}
+	if old != nil {
+		d.chunked(ctx, func(o *chunkstore.ClientOutput) { old.Abandon(ctx, o) })
 	}
 	return d.acts
 }

@@ -994,3 +994,14 @@ func TestAResendAfterALostAnswerHasOneEffect(t *testing.T) {
 	h.ok(ub)
 	h.ok(ua)
 }
+
+// After a fence the replay keys of later requests name the new session.
+func TestARequestAfterAFenceNamesTheNewSession(t *testing.T) {
+	h := newMount(t, Config{})
+	h.m.SetSession(9)
+	h.mkdir(meta.RootInode, "d")
+	var k meta.Key
+	if tx := h.txns[len(h.txns)-1]; meta.DecodeKey(tx.Replay, &k) != nil || k.Session != 9 {
+		t.Fatalf("the mkdir's replay key %x names session %d, want 9", tx.Replay, k.Session)
+	}
+}

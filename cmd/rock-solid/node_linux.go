@@ -203,6 +203,9 @@ func (m *nodeMachine) OnEvent(ctx *core.Context, ev *core.Event, acts []core.Act
 		m.n.Start(ctx, &m.out)
 	}
 	m.p.loops[0].mail.run(ctx)
+	if m.mnt != nil {
+		acts = m.mnt.session(ctx, m.n, acts)
+	}
 	switch {
 	case wake(ev):
 	case m.mnt != nil && m.mnt.takes(m.cfg.Ctls, ev):

@@ -65,15 +65,23 @@ func (m *mount) logRefused() {
 	}
 }
 
+// session hands the daemon the node's session, first in a pass, since a new one fails what the old
+// one's chunk client holds and frees its buffers, which a send of this pass may still name.
+func (m *mount) session(ctx *core.Context, n *node.Node, acts []core.Action) []core.Action {
+	id, _ := n.Session(ctx)
+	acts = m.d.SetSession(ctx, id, acts)
+	m.logRefused()
+	return acts
+}
+
 // take hands the daemon what the node output and its session, mounting once the daemon is ready,
 // and asks the node for the placement table while the chunk client waits for one.
 func (m *mount) take(ctx *core.Context, n *node.Node, out *node.Output, acts []core.Action) []core.Action {
+	acts = m.session(ctx, n, acts)
 	acts = m.d.SetTable(ctx, out.Table, out.Delta, acts)
 	if out.Member {
 		acts = m.d.SetMembership(ctx, out.Plans, out.Disks, acts)
 	}
-	id, _ := n.Session(ctx)
-	acts = m.d.SetSession(ctx, id, acts)
 	m.logRefused()
 	if m.d.WantsTable() {
 		n.FetchTable(ctx, out)

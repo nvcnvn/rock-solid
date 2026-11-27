@@ -215,6 +215,9 @@ func New(cfg Config) *Machine {
 	return m
 }
 
+// SetSession makes session the one the replay keys of later requests name, as after a fence.
+func (m *Machine) SetSession(session uint64) { m.cfg.Session = session }
+
 // Pending is the requests in hand.
 func (m *Machine) Pending() int { return len(m.ops) }
 
