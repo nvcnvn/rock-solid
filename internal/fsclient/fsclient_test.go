@@ -8,6 +8,8 @@ import (
 	"slices"
 	"testing"
 
+	"go.etcd.io/raft/v3"
+
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
 	"github.com/nvcnvn/rock-solid/internal/core"
 	"github.com/nvcnvn/rock-solid/internal/fuseproto"
@@ -790,4 +792,43 @@ func TestACreateThatLosesItsNameAnswersByWhatHoldsIt(t *testing.T) {
 	if e.NodeID == theirs || h.entry(h.lookup(meta.RootInode, "f")).NodeID != e.NodeID {
 		t.Fatalf("the create answered inode %x, the unlinked file's %x", e.NodeID, theirs)
 	}
+}
+
+// A mutating request's replay key carries the mount's oldest request in hand, so a lower request
+// whose answer was lost keeps its record past a later one's Txn: its resend, an unlink applied
+// once, answers as the first did rather than ENOENT.
+func TestAResendAfterALostAnswerHasOneEffect(t *testing.T) {
+	h := newMount(t, Config{})
+	h.create(meta.RootInode, "a")
+	h.create(meta.RootInode, "b")
+	h.held = true
+	unlink := func(name string) (uint64, TxnSend) {
+		u := h.send(fuseproto.Request{Opcode: fuseproto.OpUnlink, NodeID: meta.RootInode, Name: []byte(name)})
+		for len(h.reads) > 0 {
+			rd := h.reads[0]
+			h.reads = h.reads[1:]
+			h.answerRead(rd)
+			h.serve()
+		}
+		if len(h.sent) != 1 {
+			t.Fatalf("unlink of %s sent %d Txns", name, len(h.sent))
+		}
+		s := h.sent[0]
+		h.sent = nil
+		return u, s
+	}
+	ua, sa := unlink("a")
+	ub, sb := unlink("b")
+	if sb.Txn.Oldest != ua {
+		t.Fatalf("the later unlink's Txn names oldest %d, want %d", sb.Txn.Oldest, ua)
+	}
+	if r := h.apply(sa.Txn); r.FailedCheck != -1 {
+		t.Fatal(r)
+	}
+	h.held = false
+	h.answerTxn(sb)
+	h.m.TxnDone(&h.ctx, sa.Token, nil, raft.ErrProposalDropped, &h.out)
+	h.serve()
+	h.ok(ub)
+	h.ok(ua)
 }
