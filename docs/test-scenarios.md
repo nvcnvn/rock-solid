@@ -9651,8 +9651,9 @@ and chunk devices.
   `TestAnOpenAfterAChangeDropsTheCache`, `TestAnAttributeReplyFetchedBeforeALaterRequestIsFetchedAgain`
   and `TestCloseCommitsSizeAndMtimeAndReadsAreClamped`. A second mount in the run, which would catch
   them, is owed by [Multi-node mounts](#multi-node-mounts). The scripted tests also own the rule
-  against attributes fetched before the machine's own change, since a fetch's answer and a later
-  `Txn`'s come from the leader in order on one connection. The devices do not crash: a restarted primary asks the
+  against attributes fetched before the machine's own change: a fetch's answer and a later
+  `Txn`'s come in order from one leader on one connection, so only a leader change between them
+  could bring the fetch back after the change. The devices do not crash: a restarted primary asks the
   control plane for a new interval, which the run does not model.
 - The plant `neg-raise-after-write` fails "a purge never misses a chunk written before a crash" on
   each of the run's first 30 seeds (`TestARaiseAfterItsChunkWriteFailsTheMountsRun`, seed 1).
