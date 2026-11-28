@@ -1,4 +1,4 @@
-// Package leasetest renews a test loop's node-pair leases with its peers' loops over the network.
+// Package leasetest renews a test loop's leases with its peers' loops over the network.
 package leasetest
 
 import (
@@ -22,7 +22,7 @@ const (
 
 var le = binary.LittleEndian
 
-// Pair is one loop's side of its node-pair leases: it asks each peer a request is due from, grants
+// Pair is one loop's side of its loop-pair leases: it asks each peer a request is due from, grants
 // each ask its grantor may, and heartbeats each holder it grants to once a heartbeat is due.
 type Pair struct {
 	Holder  *lease.Holder

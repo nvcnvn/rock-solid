@@ -1,4 +1,4 @@
-// Package lease is the arithmetic of node-pair leases: a holder counting each grantor's lease on both its clocks within a margin it bounds from that grantor's raw clock, and a grantor keeping each grant until both its clocks show the whole lease.
+// Package lease is the arithmetic of loop-pair leases: a holder counting each grantor's lease on both its clocks within a margin it bounds from that grantor's raw clock, and a grantor keeping each grant until both its clocks show the whole lease.
 package lease
 
 import (

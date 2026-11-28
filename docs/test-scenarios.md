@@ -3816,7 +3816,7 @@ under fairness, as `heavy-peering` does, on the restart plan alone, and those fo
 - Three rules have no check. A primary asks for the next interval only once nothing of the PG waits:
   removing that leaves every `ci-faults` property passing, since a version a request came too soon
   for is settled by peering like any other; what the rule saves is refusing clients whose write
-  would have completed, which no property states. A node asks for no node-pair lease during its
+  would have completed, which no property states. A node asks for no loop-pair lease during its
   restart wait: removing that leaves `ci-leases` at the same state count. A failure of a version
   the primary already answered changes nothing at the primary: removing that refuses later clients
   needlessly, which every `ci-faults` property allows.
@@ -4840,7 +4840,7 @@ crashes, halts and deaths taken, as bounds) and one line per Raft step. `models/
 with `voters.tla` unchanged by it, takes each line as the epoch model's check does, with `TypeOK`,
 `AtMostOneLeader`, `CommittedNeverLost`, `CommittedAgree`, `ReportsHold`, `VotersCaughtUp`,
 `DeletesOnlyRemoved` and `LearnsOnlyRemoved` on every state; the lease invariants are left out,
-since no line reads a lease and a leader's count of a peer that ends and comes back on the node-pair
+since no line reads a lease and a leader's count of a peer that ends and comes back on the loop-pair
 lease is no line, so the spec's count runs ahead of the code's. `voters.tla` has no command entries
 and no failed-election terms but a halted leader's failed hand-off, so `votersdata` takes a code
 index as the entries up to it that are not commands, past the boot snapshot at index 1, and a code
@@ -4858,7 +4858,7 @@ placement below.
 | `RaftState` moving the applied index | `apply` | `Apply`, or a stutter while the spec's is as high | |
 | `RaftState` flagging the removal | `removed`, `notice` | `Apply`, `Notice` | Learned by applying when the configuration the replica applied held it and the one it knows committed does not (discrepancy 1), otherwise a notice from the peer whose message the pass took; either is a stutter once the spec's replica learned its removal, as its commit can run ahead (discrepancies 12 and 23) |
 | A halted leader's `RaftState` stepping down to a term no replica led | `handofffails` | `HandOffFails` | Its target's failed election raised the term; the line checks it (discrepancy 18) |
-| A leader's `RaftSupport` counting a voter of its applied configuration after a pass that took that voter's answer | `fortify`, then a `lapse` of each replica the code's leader has no support from | `Fortify`, or a stutter where the spec's leader cannot fortify, then `Lapse` or a stutter | `Fortify` has every voter of the term support the leader at once; the lapses leave the spec's supporters those of the code. A count of a learner, or one back on the node-pair lease with no answer, is no line (discrepancy 17); a test's halt that takes an earlier apply's place goes before it (discrepancy 19). The leader's count itself is not checked: a count that shrinks is no line, one that grows is checked as within the spec's only where `Fortify` is taken, and the lapses then strip the spec's count to the code's supporters, so a leader that counts a supporter it never had passes. The simulator's invariants that no two replicas serve lease reads at overlapping times and that a lease read sees every applied entry check it, and the epoch model checks the lease rules |
+| A leader's `RaftSupport` counting a voter of its applied configuration after a pass that took that voter's answer | `fortify`, then a `lapse` of each replica the code's leader has no support from | `Fortify`, or a stutter where the spec's leader cannot fortify, then `Lapse` or a stutter | `Fortify` has every voter of the term support the leader at once; the lapses leave the spec's supporters those of the code. A count of a learner, or one back on the loop-pair lease with no answer, is no line (discrepancy 17); a test's halt that takes an earlier apply's place goes before it (discrepancy 19). The leader's count itself is not checked: a count that shrinks is no line, one that grows is checked as within the spec's only where `Fortify` is taken, and the lapses then strip the spec's count to the code's supporters, so a leader that counts a supporter it never had passes. The simulator's invariants that no two replicas serve lease reads at overlapping times and that a lease read sees every applied entry check it, and the epoch model checks the lease rules |
 | A follower's `RaftSupport` ending its support | `askleader` after a pass that took the leader's node's answer; `lapse` for an end in the support's term, a forced hand-off's vote, or a vote the support lets through in a term no replica led; no line for any other end | `AskLeader`, `Lapse`, or a stutter where the spec's follower supports no such leader | The record says why the support ended: in its term, as the grant lapsed or the leader or its node showed it no longer leads; or on a term move, by a vote the support lets through (a transfer target's request, the leader's own, a `MsgTimeoutNow`), in a forced hand-off's term, or by anything else. The code's leader stops counting before its follower stops supporting, where `Lapse` ends both at once. A support a term move ended stays the spec's until that term's `Run` or `Replicate` ends it, so `Run`'s rule that a supporter votes only for its leader or the target it hands off to is checked: a follower that votes while it supports a leader is refused at the election (the `disloyal` plant). A forced hand-off is an `Elect` with no leader handing off (discrepancy 9), and an election no replica won has no spec step (discrepancy 20), so their votes end the support with a `lapse` |
 | `RaftState` flagging a halt | `halt` | `Halt` | A test's `Shard.Halt`, with nothing left to apply or past a command, which moves no spec index, takes the place of the replica's last `apply` line, when that apply is at the halt's index and no hand-off and no line of the replica's other than one `crash` and the `restart` after it comes between; such a `restart` is then a halted replica's (discrepancies 11, 15, 21 and 30) |
 | `RaftState` flagging a deletion | `delete` | `Delete` | |
@@ -4944,7 +4944,7 @@ The actions no trace took:
 | 14 | A replica outside the base voters that applied nothing had the base configuration in the spec, which holds every base voter, where the code's has none, so `notice-any-index` was rejected by the membership guard rather than `NoticeIndex` | spec | `AppliedConf` is empty for it, and `NoticeIndex` refuses its answer, index 0 below the bootstrap entry the spec leaves out. Every `ci` configuration reached the same states, and every negative still fails |
 | 15 | A follower's `term` line, and a leader's `commit` or `apply` line of a command, which move no spec state, held back an append placed at its send (seed 31) or a test's halt (seeds 12 and 20) | compression | Such lines are written as stutters, which hold back neither, and a halt takes the place of the last apply that moved a spec index |
 | 16 | `Replicate` committed at the leader as the follower took the append, and the leader's hard state took that commit: a leader that crashed before the answer came back restarted in the spec past a swap it never committed, and `CampaignApplied` refused the election the code made (seed 14) | spec | The leader commits in `Commit`, the answer's own step. `Replicate` then `Commit` is the old step, so the protocol is unchanged: every `ci` configuration passes at up to 1.5 times the states, and every negative still fails |
-| 17 | A leader's count of fortified peers grows on a learner's answer, and comes back on the node-pair lease with no answer at all: neither is a `Fortify`, which reaches only voters and only when asked | logging | A `fortify` line is written for an answer the pass took, of a voter of the configuration the leader applied |
+| 17 | A leader's count of fortified peers grows on a learner's answer, and comes back on the loop-pair lease with no answer at all: neither is a `Fortify`, which reaches only voters and only when asked | logging | A `fortify` line is written for an answer the pass took, of a voter of the configuration the leader applied |
 | 18 | A halted leader steps down on the term its hand-off's target failed an election in, a `term` stutter, so the spec kept it leading and refused a follower's `AskLeader` on its node's answer that it no longer leads (the `halted-silent` baseline) | compression | A `handofffails` line, the failed term counted among the spec's terms |
 | 19 | A test's halt that takes the place of an earlier apply came before the leader's `fortify` on an answer it took before the halt, and the halted leader cannot fortify (seeds 12, 20 and 28) | compression | A `fortify` line is a stutter where the spec's `Fortify` is not enabled, and checked only where it is |
 | 20 | Every end of a follower's support was a `lapse`, so `Run`'s rule that a supporter votes only for its leader or the target it hands off to could never fail, and the `disloyal` plant passed. Lapsing only an end in the support's term refused seed 12: a halted leader's hand-off whose target won no election, the leader stepping down only on the next term, left its voters supporting it in the spec, which has no failed election | compression | `RaftSupport` says why a support ended; a vote the support lets through, in a term no replica led, is a `lapse` |
@@ -5050,7 +5050,7 @@ k.n is version (interval k, counter n).
 | Read reply | Version, and as data the blocks read; or a refusal (wrong interval, chunk on the missing list, unfound) |
 | Lease request, holder to grantor | The holder's table epoch; the grantor grants only if it is at least its own |
 | Grant | Support epoch; the grantor's run ID and `CLOCK_MONOTONIC_RAW` reading `g`; no table epoch, since the request reported the holder's ([Epoch change model](#epoch-change-model)); or a refusal with the grantor's table epoch |
-| Heartbeat between a node pair | The sender's table epoch; as a grantor, its run ID and `CLOCK_MONOTONIC_RAW`, on every heartbeat |
+| Heartbeat between a loop pair | The sender's table epoch; as a grantor, its run ID and `CLOCK_MONOTONIC_RAW`, on every heartbeat |
 | Heartbeat to the authority | Activation reports (PG fields); recovered reports (PG fields), once every member of the interval but a leaving one is up and lists nothing, on each heartbeat until a table records the interval recovered or starts another; each member's acknowledgment latency; per disk its log ID, fill, oldest unfinished I/O age and whether its log has failed |
 | `member_timeout` report, primary to authority | PG fields, member disk |
 | Direct probe, authority to a disk's owner loop | Disk ID |
@@ -6884,7 +6884,7 @@ place of replaying the disk log.
 
 **Simulator runs.** `TestRaftRunsReplayFromTheirSeed`, 20 seeds in `go test`, 2,000 per commit in
 `scripts/seeds.sh` (15 s at `JOBS=2`), 10,000 once in 150 s. One group of three shards on the
-simulated network and on node-pair leases, with 1-in-100 drops, 1-in-50 duplicates, up to 200 µs
+simulated network and on loop-pair leases, with 1-in-100 drops, 1-in-50 duplicates, up to 200 µs
 of jitter, partitions cut and healed, and the faults of [Leader leases](#leader-leases)
 (the leader cut off past its followers' grants, leadership transfers, pauses of up to 5 s, slewed and drifting clocks, links held); each round flushes as an fsync on its node's simulated
 disk, so a crash loses the rounds in flight. Leaders propose a numbered value per tick, every third
@@ -6918,7 +6918,7 @@ reading the committed entry; the budget belongs to [Raft cost per group](#raft-c
 
 ## Leader leases
 
-Trace tests (`internal/raftshard`, `lease_test.go`) for fortification on the per-node-pair leases,
+Trace tests (`internal/raftshard`, `lease_test.go`) for fortification on the loop-pair leases,
 on the [Raft shard](#raft-shard)'s hand-driven network. Each replica's node has its own
 `lease.Holder` and `lease.Grantor`, which the test renews by hand: a lease takes two grants
 `rate_gap` apart, so the holder has a rate bound. Lease time follows the two-clock rule: the
@@ -6979,7 +6979,7 @@ at the end, 2.96 s after the ask named.
 in a buffer or of an unknown kind is dropped as undecodable, and one it accepts encodes and decodes
 back to itself.
 
-**Simulator runs.** `TestRaftRunsReplayFromTheirSeed` (Raft shard) runs the group on node-pair
+**Simulator runs.** `TestRaftRunsReplayFromTheirSeed` (Raft shard) runs the group on loop-pair
 leases: every node asks every other for a lease when its holder is due, grants as its grantor
 allows, heartbeats the holders it grants once a second and handles `Resumed` on both, through
 frames of its own on the simulated network. Its faults cover the MetaStore faults below that a
@@ -7080,7 +7080,7 @@ a snapshot taken at the leader's applied index in for the point-in-time view the
 | D reconnected | D's first append is refused, its log empty, so A sends a snapshot; D restores it (`Output.Snapshot`), then takes the log. One `ConfChangeV2`, remove 3 and add 4, commits on A and B, and A, B and D end in voters 1, 2, 4 out of the joint configuration |
 | B cut off once D was added, D caught up | Nothing commits on A and D, and D stays a learner, never promoted to make a quorum. Once B returns the swap commits |
 | The plan drops the leader A | A transfers leadership to B, which adds D and swaps it for A |
-| The plan drops A, B down, A holding a node-pair lease from C only | A transfers to C, never to B |
+| The plan drops A, B down, A holding a loop-pair lease from C only | A transfers to C, never to B |
 | The plan drops A, B up, C up and leased to A but five proposals behind | A does not transfer to C |
 | The plan names three new replicas and none of the voters | The leader swaps new replicas in for the other two voters first, then transfers to one; the group ends on the three |
 | A, the leader, cut off while B leads, and the plan swaps D in for A | A still leads its old term; once reconnected, its messages draw the removal notice and A reports `Removed` |
@@ -7160,7 +7160,7 @@ second after the swap in the rest. Two faults are drawn independently, each in h
 
 The run stands in for the control plane: once every voter of the plan applied its configuration,
 the node of the replaced replica, if that replica learned its removal, deletes it, renews its
-grants still and answers an ask about it that it is gone. Every node renews its node-pair leases
+grants still and answers an ask about it that it is gone. Every node renews its loop-pair leases
 while it runs, whatever its replicas do, as a node does in production. A seed passes once the
 replaced replica reported itself removed and the new one applied a value proposed after the swap,
 and replays to the same trace and history. After every step it checks the Raft runs' properties
@@ -7260,11 +7260,11 @@ replacement as a voter instead stalls them past 100 ms within 20 seeds
 ## Raft cost per group
 
 `internal/raftshard`, `cost_test.go`. Three nodes run 1,000 groups each through `Shard` and
-`Storage`, every shard of a node sharing its buffer pool, node-pair leases and output, as the
+`Storage`, every shard of a node sharing its buffer pool, loop-pair leases and output, as the
 shards of one loop do: 128 B proposals to random groups at 60,000 proposals/s in 1 ms passes, a
 10 ms tick, a 100 ms heartbeat, synchronous `Ready`, flushes and network that take no time, and
 every storage compacted to its applied index once a second, more often than checkpoints would.
-The node-pair leases are never granted, so no group fortifies and no fortification message is
+The loop-pair leases are never granted, so no group fortifies and no fortification message is
 counted. `TestCostPerGroup` fails `go test` past any bar, in about 0.2 s. `BenchmarkCostPerGroup`
 reports every row but the written idle group, `load` a pass and `idle` a tick with no proposals,
 and runs nightly; a tracked figure 20% worse than measured is a bug. The benchmark is exempt from
@@ -7287,13 +7287,13 @@ Quiesced groups (0.07% of a core in the multi-raft spike) are phase 13.
 
 `tools/maelstrom` runs one replica of a single Raft group as a [Maelstrom](https://github.com/jepsen-io/maelstrom) node, and `scripts/maelstrom.sh` runs it under Maelstrom's `lin-kv` workload (`read`, `write`, `cas`) with network partitions, checked linearizable by Maelstrom's checker: the [done-when checkpoint](design.md#learning-project). The adapter is test code off the data path, in ordinary Go: a goroutine reads stdin, and one loop hands each message, or the shard's timer firing, to the node and writes what it sends to stdout.
 
-- **Adapter.** Every node boots the same group, with each Maelstrom node a voter whose replica ID is its place in `node_ids` plus one. A Raft message travels as a Maelstrom message carrying the shard's inline bytes and pool buffer, and the shard runs unchanged behind `OnEvent`, `Propose`, `ReadIndex` and `Durable`. The storage is the process's memory, and each round is reported durable as soon as the shard takes it, since `lin-kv` never crashes a node. The state machine is the harness's own map from key to value, applied from committed entries; `Txn` is the [Shard state machine](#shard-state-machine)'s. The group never compacts or reconfigures, so a snapshot or a removal stops the node. No node-pair lease is ever renewed, so no leader is fortified, and each node's grantor holds its restart wait: no vote is granted in a node's first 4 s.
+- **Adapter.** Every node boots the same group, with each Maelstrom node a voter whose replica ID is its place in `node_ids` plus one. A Raft message travels as a Maelstrom message carrying the shard's inline bytes and pool buffer, and the shard runs unchanged behind `OnEvent`, `Propose`, `ReadIndex` and `Durable`. The storage is the process's memory, and each round is reported durable as soon as the shard takes it, since `lin-kv` never crashes a node. The state machine is the harness's own map from key to value, applied from committed entries; `Txn` is the [Shard state machine](#shard-state-machine)'s. The group never compacts or reconfigures, so a snapshot or a removal stops the node. No loop-pair lease is ever renewed, so no leader is fortified, and each node's grantor holds its restart wait: no vote is granted in a node's first 4 s.
 - **Writes.** A `write` or `cas` is a log entry naming the node that proposed it and its ID there. Every node applies it, and the proposer answers its client once it applies. A follower resends a client's `write` or `cas` to the leader `Shard.Leader` names, as the daemon resends a `Txn` on [`NotLeader`](design.md#metadata-layer-metastore), and relays the answer; the node it resent to proposes it or answers 11, never resending it again. Without the resend, two writes in three fail on 3 nodes, and a 30 s run acknowledged about 40 writes, too few for the planted bug to fail reliably.
 - **Error codes.**
   - A `cas` or `read` on an absent key returns error 20 (key does not exist), and a `cas` whose `from` does not match returns 22 (precondition failed).
   - Error 11 (temporarily unavailable, a definite error) is returned only for an op that was never proposed: by a node that names no leader, names itself but cannot propose (as while a leadership transfer runs), or was resent the op and no longer leads.
   - An op proposed and then orphaned by a leader change gets no reply, which Maelstrom's client records as indefinite when it times out.
-- **Reads.** Every read goes through ReadIndex, on any node: etcd-raft passes a follower's ReadIndex to its leader, and the node answers once it has applied up to the index a quorum confirmed. A read that is never confirmed, on a node with no leader or a leader cut off from its quorum, gets no reply, which Maelstrom records as a failed read since a read changes nothing. The harness makes no lease reads, as it carries no node-pair lease traffic; the [Leader leases](#leader-leases) tests cover them.
+- **Reads.** Every read goes through ReadIndex, on any node: etcd-raft passes a follower's ReadIndex to its leader, and the node answers once it has applied up to the index a quorum confirmed. A read that is never confirmed, on a node with no leader or a leader cut off from its quorum, gets no reply, which Maelstrom records as a failed read since a read changes nothing. The harness makes no lease reads, as it carries no loop-pair lease traffic; the [Leader leases](#leader-leases) tests cover them.
 - **Unit tests.** `TestLinKV` routes messages between three nodes in memory: a write before any leader returns 11; on the leader, a `cas` on an absent key returns 20, a write succeeds, a `cas` from the wrong value returns 22 and one from the right value succeeds; on a follower, a `cas` resent to the leader succeeds, a read returns its value and a `cas` from the old value returns 22; a read of an absent key returns 20. `TestOrphanedWrite` cuts the leader off, sends it a write and a read, elects a new leader that takes a write to the same key, heals the cut, and checks that the old leader serves the new value and never answers either request. `TestAReadWaitsUntilItsIndexApplies` hands a node a confirmed read whose index is past what it applied, and checks that it answers only once that index applies. `TestLeaderNamesTheElectedReplica` (`internal/raftshard`) checks that no replica names a leader before an election, and every replica names the elected one after it.
   Maelstrom does not see what these tests check: on 3 nodes, a read answered as soon as its index is confirmed, or with no value, and a write acknowledged before it commits all passed its checker.
 - **Pass criterion.** `scripts/maelstrom.sh` downloads Maelstrom v0.2.4 once into `~/.cache/rock-solid/maelstrom` (`$XDG_CACHE_HOME` when set), its archive and jar checked against their pinned hashes, the jar on every run ([tech-debts.md](tech-debts.md#version-pin-maelstrom-v024)), builds the adapter into a temporary directory, and runs `lin-kv` with `--nemesis partition --nemesis-interval 5 --rate 100 --concurrency 2n --time-limit 30` (`TIME_LIMIT` overrides) and a 2 GB Java heap: on 3 nodes and then on 5, each of which must have the workload valid and no checker invalid. Without gnuplot, Maelstrom's latency graphs fail and its overall verdict is unknown, so the script reads each run's `results.edn` ([tech-debts.md](tech-debts.md#workaround-maelstrom-runs-judged-by-their-resultsedn)). Each invocation empties the cache's `store/` and leaves its own runs there. The script takes about 1 minute 45 seconds and needs Java 17 or later. The `maelstrom` workflow runs it in CI on Temurin 17, with the extracted release cached by version, on every push and pull request that changes `internal/raftshard`, `internal/lease`, `internal/core`, `third_party/raft`, `tools/maelstrom`, the script, `go.mod`, `go.sum` or the workflow.
@@ -7613,7 +7613,7 @@ On the round driver's store rig, a `meta.RoundShard` on the device loop and one 
 
 ## MetaStore replicas on a device loop
 
-On a device loop over a simulated disk, a `node.Device` hosting MetaStore replicas, each the single voter of its group, their `Txn`s sent over the wire by a client; and three such devices on three nodes, hosting the voters of one group that boots with all three, their messages crossing between the loops and each device taking its membership every second.
+On a device loop over a simulated disk, a `node.Device` hosting MetaStore replicas, each the single voter of its group unless a scenario names other members, their `Txn`s sent over the wire by a client; and three such devices on three nodes, hosting the voters of one group that boots with all three, their messages crossing between the loops and each device taking its membership every second.
 
 - **Txns, checkpoints and restart.** The replica takes 1,200 `Txn`s of 900 bytes, more than the server holds unanswered at once, 20 at a time: every one is answered as applied, checkpoints end through the store's mail and the replica's replies, and a second replica of the group is refused (`ErrHosted`). A restart restores it from the disk's record with every `Txn` answered, and it leads and takes another. Without the mail sent, the replies taken, the restart naming the replica, or the server's count dropped on an answer, it fails (`TestADeviceHostsAMetaStoreReplicaAcrossARestart`).
 - **The disk's record.** After a crash, a replica that answered `Txn`s comes back holding every one, restored from the disk's manifest under the settings of its group, while another group's settings host nothing; a disk holding a replica the device has no settings for leaves the device failed, and an ask about the replica before the store serves is not answered Gone (`TestARestartRestoresTheReplicasItsDiskHolds`). Crashed at every step from its add to its start, a new replica is restored whenever it had started; a crash before a segment header named a manifest naming it loses it, and the device answers an ask about it Gone (`TestANewReplicaStartsOnlyOnceARestartWouldRestoreIt`). A store's restart hands its `Replicas` the replica its manifest names, and with no `Replicas` stops (`TestARestartHandsReplicasTheReplicasItsManifestNames`); an ordinary round after `Log.NameNewest` opens a segment, whose header names the newest manifest, while the checkpoint's lane still appends (`TestARoundAfterNameNewestNamesTheNewestManifest`); a manifest edit names the replica of an index its base holds (`TestAManifestEditKeepsAnIndexsReplica`); a manifest of the kind before indexes named their replica does not decode (`TestManifestRoundTrip`).
@@ -7624,7 +7624,8 @@ On a device loop over a simulated disk, a `node.Device` hosting MetaStore replic
 - **A grown volume.** A disk reopened as twice its size reports the size its log was formatted with and restores its replica under the blob bound its log keeps from its format: it holds every `Txn` it answered, leads, and takes 100 `Txn`s at once, gathered into a round past that bound; restored under the bound of a log of the disk's new size, it answered them dropped, and reporting the configured size, it reported twice the log's (`TestADeviceRestoresItsReplicasOnAGrownVolume`).
 - **A failed round.** Once the disk fails its writes, every `Txn` the replica held is answered `ErrProposalDropped` or, arriving after, `NotLeader`, and the next is refused `NotLeader` (`TestAReplicaWhoseRoundFailsAnswersTheTxnsItHolds`). A server at its bound for the group of a replica stopped so refuses its next `Txn` `NotLeader`, not `ErrOverloaded` (`TestAServerRefusesATxnForAFailedReplicaNotLeader`).
 - **Dropped at once.** A leader transferring its leadership, a voter having asked for it, drops each `Txn` proposed to it within the call that proposes it: the server answers it `ErrProposalDropped` and holds it no more, so a server bounded at one `Txn` drops the next too rather than refusing it overloaded (`TestAServerAnswersATxnItsLeaderDropsMidTransfer`).
-- **Three voters on storage nodes.** The group's leader holds its leader lease and serves reads, since each device's replicas share its loop's node-pair leases with its chunk replica, which renews them with every loop hosting a member of their configuration; with leases of their own, which nothing renews, every read is refused `NotLeader` naming none (`TestAGroupOfThreeVotersOnStorageNodesServesReads`).
+- **Three voters on storage nodes.** The group's leader holds its leader lease and serves reads, since each device's replicas share its loop's leases with its chunk replica, which renews them with every loop hosting a member of their configuration; with leases of their own, which nothing renews, every read is refused `NotLeader` naming none (`TestAGroupOfThreeVotersOnStorageNodesServesReads`).
+- **The loops asked for leases.** A device hosting a replica of a joint configuration with a learner, and a replica of another group, has its chunk replica ask for a lease every loop hosting another member of either, the outgoing voter and the learner among them; once the second replica is deleted, it asks none of the loops only that replica named. With the asked set only ever growing, or taken from the voters alone, it fails (`TestADeviceAsksLeasesOfTheLoopsItsReplicasNameOnly`).
 - **A halted voter.** A follower whose leader's appends reach it with a format byte no release decodes halts at the first such committed entry while the leader applies it, and its device's report names it with the entry's index and since the first report that found it halted, the same in the next report; the leader's device reports no halt, and without the halts in the report the test fails (`TestADevicesReportNamesItsHaltedReplica`). The node's heartbeat carries each halt its devices reported, aged since then, until a report leaves it out (`TestTheHeartbeatReportsTheHaltedReplicasADeviceReported`); the control-plane leader replaces a voter halted for `refill_after` (Control-plane membership).
 - **The server's bound.** With a replica's round in flight, a server holding at most two `Txn`s of a group refuses the third with `meta.ErrOverloaded` over the wire; without the bound it refuses none (`TestTheServerBoundsTheTxnsAReplicaGathers`). The wire carries `ErrOverloaded` as itself, not as a dropped proposal (`TestTxnsAndAnswersCrossTheWireWhole`).
 
@@ -9700,7 +9701,7 @@ and chunk devices.
   on a client-only node and one beside a MetaStore replica on a storage node, each a `sim.Mount` of its own with four processes on the same two root-directory files as in
   `TestFileHistoriesKeepCloseToOpen`, one writer of a file at a time across both, served by the
   `fsclient.Mount` the FUSE frontend ships, against three `meta.Shard` replicas, which serve
-  their `Txn`s and lease reads over the meta wire and renew node-pair leases with each other, and
+  their `Txn`s and lease reads over the meta wire and renew loop-pair leases with each other, and
   three `node.Device` chunk devices holding both nodes' sessions live. For 30 s: partitions,
   replicas' nodes rebooted so leaders change and replicas' or daemons' nodes paused up to 2 s
   (each until 5 s before the end, a reboot's heartbeat and restart wait, so a quorum votes once
@@ -9800,7 +9801,7 @@ From [The router on the wire](design.md#metadata-layer-metastore).
   it hosts no replica of `NotLeader` naming none (`TestADeviceServesReadsOfTheGroupsItLeads`).
 - Serving a point read at a leader allocates nothing (`BenchmarkServeRead`: 0 allocs).
 - **[property]** `TestReadsSeeEveryTxnAcknowledgedBeforeThem`: three `meta.Shard` replicas, each
-  behind a `meta.Server` and renewing node-pair leases with the others, and two clients, each
+  behind a `meta.Server` and renewing loop-pair leases with the others, and two clients, each
   putting its own keys with rising values and reading every key through a `meta.Client`; replicas'
   nodes rebooted, and the leader cut off from the other replicas and from one client while the other
   client still reaches it. Every read's answer holds every `Txn` acknowledged, by either client,

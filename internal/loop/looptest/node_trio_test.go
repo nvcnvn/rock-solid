@@ -236,7 +236,7 @@ func (tr *metaTrio) post(i int, encode func(pool core.BufPool, msg *core.Msg) er
 }
 
 // A group whose three voters are on three storage nodes' disks serves reads: each device's
-// replicas share their loop's node-pair leases with its chunk replica, which renews them with every
+// replicas share their loop's leases with its chunk replica, which renews them with every
 // loop hosting a peer of theirs, so the leader is fortified and holds its leader lease.
 func TestAGroupOfThreeVotersOnStorageNodesServesReads(t *testing.T) {
 	tr := newMetaTrio(t)
@@ -254,8 +254,7 @@ func TestAGroupOfThreeVotersOnStorageNodesServesReads(t *testing.T) {
 }
 
 // A voter on a storage node halted at a committed entry it cannot decode is in its device's
-// report, with the entry's index and since when, which the node's heartbeat carries to the
-// control-plane leader, which replaces it.
+// report, with the entry's index and since when, the same in the next report.
 func TestADevicesReportNamesItsHaltedReplica(t *testing.T) {
 	tr := newMetaTrio(t)
 	l := tr.leader()

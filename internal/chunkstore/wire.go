@@ -173,7 +173,7 @@ type Response struct {
 	Fill     uint64
 }
 
-// LeaseRequest asks a grantor for a node-pair lease, reporting the holder's table epoch.
+// LeaseRequest asks a grantor for a loop-pair lease, reporting the holder's table epoch.
 type LeaseRequest struct {
 	ID    core.RequestID
 	Epoch uint64
@@ -189,7 +189,7 @@ type Grant struct {
 	Raw     core.Tick
 }
 
-// Heartbeat between a node pair carries the sender's table epoch and, as a grantor, its run ID and CLOCK_MONOTONIC_RAW reading.
+// Heartbeat between a loop pair carries the sender's table epoch and, as a grantor, its run ID and CLOCK_MONOTONIC_RAW reading.
 type Heartbeat struct {
 	ID    core.RequestID
 	Epoch uint64
@@ -529,7 +529,7 @@ func AppendHeartbeat(dst []byte, h *Heartbeat) []byte {
 	return le.AppendUint64(dst, uint64(h.Raw))
 }
 
-// DecodeHeartbeat decodes a node-pair heartbeat frame.
+// DecodeHeartbeat decodes a loop-pair heartbeat frame.
 func DecodeHeartbeat(b []byte, data int, h *Heartbeat) error {
 	r, err := open(b, data, KindHeartbeat)
 	h.ID = r.id

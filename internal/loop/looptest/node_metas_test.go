@@ -65,6 +65,8 @@ type nodeMetas struct {
 	// replicas it reported then.
 	taking   node.Output
 	reported []meta.ReplicaReport
+	// asked are the loops the device's chunk replica asked for a lease since its last take.
+	asked []core.NodeID
 }
 
 const nodeMetaGroup = 10
@@ -93,6 +95,7 @@ func (m *metaDevice) OnEvent(ctx *core.Context, ev *core.Event, out []core.Actio
 		m.out.Reset()
 		m.d.Take(ctx, &m.nm.taking, &m.out)
 		m.nm.reported = slices.Clone(m.out.Metas)
+		m.nm.asked = nil
 		return m.done(out)
 	}
 	if ev.Kind == core.EvTimer && ev.Timer == nodeMetaRemove {
@@ -153,6 +156,10 @@ func (d metaDeviceDriver) Execute(a *core.Action) {
 			d.nm.cr.answered(an.Token)
 		}
 	}
+	var lr chunkstore.LeaseRequest
+	if chunkstore.DecodeLeaseRequest(a.Msg.Inline(), 0, &lr) == nil && !slices.Contains(d.nm.asked, a.Peer) {
+		d.nm.asked = append(d.nm.asked, a.Peer)
+	}
 	if in := a.Msg.Inline(); a.Peer == nodeMetaAsker && len(in) > 9 && in[9] == raftKindGone {
 		d.nm.gone++
 	}
@@ -198,8 +205,12 @@ func metaTemplate() meta.RoundConfig {
 
 // bootAt is the storage of a group's one voter whose configuration is at index.
 func bootAt(t *testing.T, index uint64) *raftshard.Storage {
+	return bootOf(t, index, raftpb.ConfState{Voters: []uint64{1}})
+}
+
+// bootOf is the storage of a group's voter whose configuration cs is at index.
+func bootOf(t *testing.T, index uint64, cs raftpb.ConfState) *raftshard.Storage {
 	storage := raftshard.NewStorage()
-	cs := raftpb.ConfState{Voters: []uint64{1}}
 	if err := storage.ApplySnapshot(raftpb.Snapshot{Metadata: raftpb.SnapshotMetadata{Index: index, Term: 1, ConfState: cs}}); err != nil {
 		t.Fatal(err)
 	}
@@ -1226,5 +1237,49 @@ func TestADeleteRemovesItsReplicaForGood(t *testing.T) {
 	nm.take(nm.placed(planOf(nodeMetaGroup, 1, 3)))
 	if a := nm.m.d.Meta(nodeMetaGroup); a == nil || a.ReplicaID() != 3 {
 		t.Fatalf("a plan placing a new replica of the group hosted %v", a)
+	}
+}
+
+// A device's chunk replica asks for leases every loop hosting a member of a running replica's
+// configuration, outgoing voters and learners among them, and stops asking a loop once the
+// replica naming it is deleted. Each member of the replicas here runs on the loop of its ID.
+func TestADeviceAsksLeasesOfTheLoopsItsReplicasNameOnly(t *testing.T) {
+	nm := newNodeMetas(t)
+	groups := map[uint64]raftpb.ConfState{
+		nodeMetaGroup:     {Voters: []uint64{1, 2}, VotersOutgoing: []uint64{1, 3}, Learners: []uint64{4}},
+		nodeMetaGroup + 1: {Voters: []uint64{1, 5}},
+	}
+	for _, g := range []uint64{nodeMetaGroup, nodeMetaGroup + 1} {
+		cfg := nm.replicaOf(g)
+		cfg.Shard.Raft.Storage = bootOf(t, 1, groups[g])
+		cfg.Shard.Raft.Peers = nil
+		for id := uint64(1); id <= 5; id++ {
+			cfg.Shard.Raft.Peers = append(cfg.Shard.Raft.Peers, raftshard.Peer{ID: id, Node: core.NodeID{Node: nm.node, Loop: uint32(id)}})
+		}
+		if err := nm.m.d.AddMeta(cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	nm.settle()
+	asked := func(o node.Output) []uint32 {
+		nm.taking = o
+		nm.l.Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: nodeMetaTake})
+		end := nm.s.Time() + 6_000_000
+		for nm.s.Time() < end && nm.s.Step() {
+		}
+		var loops []uint32
+		for _, at := range nm.asked {
+			loops = append(loops, at.Loop)
+		}
+		slices.Sort(loops)
+		return loops
+	}
+	if got := asked(nm.placed()); !slices.Equal(got, []uint32{2, 3, 4, 5}) {
+		t.Fatalf("the device asked leases of loops %v", got)
+	}
+	o := nm.placed()
+	o.Deletes = []meta.ReplicaRef{{Group: nodeMetaGroup + 1, ID: 1}}
+	if got := asked(o); !slices.Equal(got, []uint32{2, 3, 4}) {
+		t.Fatalf("after the delete the device asked leases of loops %v", got)
 	}
 }

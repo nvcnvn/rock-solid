@@ -38,7 +38,7 @@ type ReplicaConfig struct {
 	Seed  uint64
 	Start lease.Time
 	Lease lease.Config
-	// Holder and Grantor are its loop's node-pair leases, which the other shards on the loop read and the replica renews, or nil for leases of its own.
+	// Holder and Grantor are its loop's leases, which the other shards on the loop read and the replica renews, or nil for leases of its own.
 	Holder  *lease.Holder
 	Grantor *lease.Grantor
 	// Log is the log ID of the disk's store, which its heartbeats and probe answers carry.

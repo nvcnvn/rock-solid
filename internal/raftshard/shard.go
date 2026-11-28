@@ -1,4 +1,4 @@
-// Package raftshard is one replica of a Raft group: etcd-raft's RawNode driven by events, ticked from ctx.Now, its messages framed for the network, each Ready that must be durable a round the driver flushes before the messages that depend on it leave, and its leader's lease fortified on the node-pair leases.
+// Package raftshard is one replica of a Raft group: etcd-raft's RawNode driven by events, ticked from ctx.Now, its messages framed for the network, each Ready that must be durable a round the driver flushes before the messages that depend on it leave, and its leader's lease fortified on the loop-pair leases.
 package raftshard
 
 import (
@@ -56,7 +56,7 @@ type Config struct {
 	// Seed seeds the replica's election timeouts.
 	Seed  uint64
 	Timer core.TimerID
-	// Holder and Grantor are the node-pair leases of the replica's loop, which the loop renews and every shard on it reads: Holder those taken from its peers' loops, Grantor those it gives them.
+	// Holder and Grantor are the leases of the replica's loop, which the loop renews and every shard on it reads: Holder those taken from its peers' loops, Grantor those it gives them.
 	Holder  *lease.Holder
 	Grantor *lease.Grantor
 }
@@ -367,7 +367,7 @@ func (s *Shard) Halt() { s.halted, s.timeoutTerm, s.timeoutFrom = true, 0, 0 }
 // Flushing reports whether a round is in flight, so the next Ready waits for its Durable.
 func (s *Shard) Flushing() bool { return s.round != 0 }
 
-// LeaseRead reports whether this replica may serve a read now from the entries it handed over to apply, with no round trip: it leads, has not halted, no MsgTimeoutNow left in its term, an entry of its term has committed, and each half of its configuration has a quorum of voters, itself included, whose fortification of its term runs on the node-pair leases.
+// LeaseRead reports whether this replica may serve a read now from the entries it handed over to apply, with no round trip: it leads, has not halted, no MsgTimeoutNow left in its term, an entry of its term has committed, and each half of its configuration has a quorum of voters, itself included, whose fortification of its term runs on the loop-pair leases.
 func (s *Shard) LeaseRead(ctx *core.Context) bool {
 	st := s.rn.BasicStatus()
 	if s.plant.followerReads && st.RaftState == raft.StateFollower && !s.removed {
@@ -403,7 +403,7 @@ func (s *Shard) fortifies(i int, term uint64, t lease.Time) bool {
 	return f.term == term && s.cfg.Holder.Supported(s.cfg.Peers[i].Node, f.run, f.support, t)
 }
 
-// fortify has a leader ask, once a heartbeat, every peer it holds a node-pair lease from whose fortification of its term does not run now, so a down node is not asked; a follower whose grant to its leader's node lapsed stops supporting it and campaigns raft_lapse_campaign later, and one that heard nothing from the leader it supports for an election timeout asks the leader's node whether it still holds the leader.
+// fortify has a leader ask, once a heartbeat, every peer it holds a loop-pair lease from whose fortification of its term does not run now, so a down node is not asked; a follower whose grant to its leader's node lapsed stops supporting it and campaigns raft_lapse_campaign later, and one that heard nothing from the leader it supports for an election timeout asks the leader's node whether it still holds the leader.
 func (s *Shard) fortify(ctx *core.Context, out *Output) {
 	st := s.rn.BasicStatus()
 	t := lease.Now(ctx)
@@ -989,7 +989,7 @@ func (s *Shard) proposeAhead(learner uint64) {
 	_ = s.rn.ProposeConfChange(raftpb.ConfChangeV2{})
 }
 
-// target is a planned voter to hand leadership to, or 0: one this leader holds a node-pair lease
+// target is a planned voter to hand leadership to, or 0: one this leader holds a loop-pair lease
 // from, so its node runs, being sent appends and caught up as a learner must be. etcd-raft drops
 // proposals while a transfer waits for its target to reach the leader's last index, so a down or
 // lagging target would stall them; a caught-up one makes that wait about a round trip. A leader
