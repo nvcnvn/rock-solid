@@ -2,6 +2,7 @@ package fsclient
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/binary"
 	"fmt"
 	"maps"
@@ -433,11 +434,7 @@ func (r *fsRun) tend() {
 	for i, dv := range r.devs {
 		ds[i] = meta.DiskAddr{Disk: uint32(i) + 1, Log: dv.log, At: devAt(i), Blocks: runBlocks, Reserve: dv.reserve}
 	}
-	var live []uint64
-	for _, d := range r.ds {
-		live = append(live, d.session)
-	}
-	slices.Sort(live)
+	live := r.sessions().Live
 	for i, dv := range r.devs {
 		n := r.s.Node(devAt(i).Node)
 		if !n.Up() || !dv.opened || dv.session == r.session {
@@ -452,23 +449,44 @@ func (r *fsRun) tend() {
 			return dv.finish(acts)
 		})
 	}
-	r.ack(live)
+	r.ack()
 }
 
-// ack hands each up replica's server, as a storage node does, the session table every device
-// holds, acknowledged, once each daemon took its session: the opens of the sessions it fenced close.
-func (r *fsRun) ack(live []uint64) {
+// sessions is the session table: each daemon's session live, on its node.
+func (r *fsRun) sessions() chunkstore.SessionTable {
+	t := chunkstore.SessionTable{Version: r.session, Next: r.session + 1}
+	ds := slices.Clone(r.ds[:])
+	slices.SortFunc(ds, func(a, b *daemon) int { return cmp.Compare(a.session, b.session) })
+	for _, d := range ds {
+		t.Live, t.Nodes = append(t.Live, d.session), append(t.Nodes, clientAt[d.k])
+	}
+	return t
+}
+
+// acked is the session table every device holds, acknowledged, once each daemon took its session.
+func (r *fsRun) acked() (chunkstore.SessionTable, bool) {
 	for _, d := range r.ds {
-		if d.takeAt != 0 {
-			return
+		if d == nil || d.takeAt != 0 {
+			return chunkstore.SessionTable{}, false
 		}
 	}
 	for _, dv := range r.devs {
 		if dv.session != r.session {
-			return
+			return chunkstore.SessionTable{}, false
 		}
 	}
-	t := chunkstore.SessionTable{Version: r.session, Acked: r.session, Next: r.session + 1, Live: live}
+	t := r.sessions()
+	t.Acked = t.Version
+	return t, true
+}
+
+// ack hands each up replica's server, as a storage node does, the acknowledged session table: the
+// opens of the sessions it fenced close.
+func (r *fsRun) ack() {
+	t, ok := r.acked()
+	if !ok {
+		return
+	}
 	for _, m := range r.reps {
 		if n := r.s.Node(uint32(m.i)); n.Up() && m.s != nil && m.sess != r.session {
 			m.sess = r.session
@@ -709,10 +727,24 @@ func (r *fsRun) answerErr(ctx *core.Context, ev *core.Event, acts []core.Action)
 	return append(acts, a)
 }
 
+// finish replies the answers, answers the server's ask for a session table once the table is
+// acknowledged, proposes the frees, and fences each session the server asks to evict.
 func (m *metaRep) finish(ctx *core.Context, acts []core.Action) []core.Action {
 	acts = m.sv.Reply(ctx, m.out.Answers, acts)
 	m.out.Answers = m.out.Answers[:0]
+	if ask := m.sv.FetchSessions(); ask != 0 {
+		if t, ok := m.r.acked(); ok {
+			m.sv.SetSessions(&t, ask)
+		}
+	}
 	acts = m.sv.Free(ctx, m.s, &m.out, acts)
+	for _, id := range m.sv.Evictions(nil) {
+		for _, d := range m.r.ds {
+			if d.session == id && d.n.Up() {
+				m.r.fence(d)
+			}
+		}
+	}
 	acts = m.sv.Reply(ctx, m.out.Answers, acts)
 	acts = append(acts, m.out.Raft.Actions...)
 	if f := m.out.Raft.Flush; f != 0 {
@@ -1585,14 +1617,14 @@ func TestPlantedMountBugsFailTheMountsRun(t *testing.T) {
 	}{
 		{plants{noIDBase: true}, 1, invIDs},
 		{plants{noAbandon: true}, 1, invLive},
-		{plants{dropRefused: true}, 2, invLive},
+		{plants{dropRefused: true}, 3, invLive},
 		{plants{retryLasting: true}, 1, invReadErr},
-		{plants{entryCached: true}, 1, invCloseToOpen},
+		{plants{entryCached: true}, 2, invCloseToOpen},
 		{plants{staleKept: true}, 25, invCloseToOpen},
 		{plants{lastingMissing: true}, 1, invErrno},
 		{plants{noRegister: true}, 1, invOrphanOpen},
-		{plants{openUnheld: true}, 32, invOrphanOpen},
-		{plants{handOutStale: true}, 7, invOrphanOpen},
+		{plants{openUnheld: true}, 5, invOrphanOpen},
+		{plants{handOutStale: true}, 3, invOrphanOpen},
 		{plants{fencedServed: true}, 2, invErrno},
 	} {
 		r := newFSRun(t, c.seed, c.p)

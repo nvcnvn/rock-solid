@@ -164,3 +164,17 @@ func TestAMountNobodyServesLeavesNothingMounted(t *testing.T) {
 		}
 	}
 }
+
+// A new owner's ask to re-register comes from a storage node's replica to loop 0 of the session's
+// node, where the mount runs beside the node's machine, and goes to the mount, not the machine.
+func TestANewOwnersAskToReregisterGoesToTheMount(t *testing.T) {
+	m := newMount(nodeConfig{Mount: 1}, tcp.New(tcp.Config{Self: core.NodeID{Node: 2}, Seed: 1}))
+	pool := core.NewPool([][]byte{make([]byte, 1<<16)}, 0)
+	ev := core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: 3, Loop: 1}}
+	if err := meta.EncodeReclaim(pool, 5, 7, 2, &ev.Msg); err != nil {
+		t.Fatal(err)
+	}
+	if !m.takes([]core.NodeID{{Node: 1}}, &ev) {
+		t.Fatal("the node's machine takes a new owner's ask to re-register")
+	}
+}

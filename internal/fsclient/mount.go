@@ -44,6 +44,7 @@ type Mount struct {
 	table   chunkstore.Table
 	disks   []meta.DiskAddr
 	mapped  bool
+	smap    meta.ShardMap
 	txns    map[uint64]uint64
 	reads   map[uint64]*sentRead
 	free    []*sentRead
@@ -54,12 +55,27 @@ type Mount struct {
 	outs    stack[Output]
 	routs   stack[meta.RouterOutput]
 	couts   stack[chunkstore.ClientOutput]
+
+	// reclaims are the re-registrations new owners asked for, and key and end a re-registration's bounds.
+	reclaims []reclaim
+	key, end []byte
 }
 
-// sentRead is a Read in flight, kept by the mount since the router keeps a pointer to it.
+// sentRead is a Read in flight, kept by the mount since the router keeps a pointer to it: the
+// machine's under its token, or a step of group's re-registration.
 type sentRead struct {
-	token uint64
-	rd    meta.Read
+	token, group uint64
+	rd           meta.Read
+}
+
+// reclaim is a new owner's ask that the mount re-register its opens of group: the newest term
+// asked, whether an ask came since the re-registration in flight started and the term it started
+// for, the inodes it has yet to re-register, and whether a step of it is in flight. An owner asks
+// until it hears the end, which counts only for the term the re-registration started for.
+type reclaim struct {
+	group, term, at uint64
+	asked, busy     bool
+	inos            []uint64
 }
 
 // stack hands each nested call an output of its own, as answers handed out inline call back in.
@@ -104,7 +120,7 @@ func (g *Mount) SetSession(ctx *core.Context, session uint64, out *MountOutput) 
 	if session == 0 || session == g.session {
 		return
 	}
-	g.out, g.session = out, session
+	g.out, g.session, g.reclaims = out, session, g.reclaims[:0]
 	if g.m == nil {
 		cfg := g.cfg
 		cfg.Session = session
@@ -180,7 +196,7 @@ func (g *Mount) SetMembership(ctx *core.Context, plans []meta.Group, disks []met
 			panic(fmt.Sprintf("fsclient: shard map: %v", err))
 		}
 	})
-	g.mapped = true
+	g.smap, g.mapped = smap, true
 }
 
 func (g *Mount) setAddrs() {
@@ -192,10 +208,20 @@ func (g *Mount) setAddrs() {
 	}
 }
 
-// OnEvent takes a meta answer, a chunk reply, either client's timer or a lost peer.
+// OnEvent takes a meta answer, a new owner's ask to re-register, a chunk reply, either client's
+// timer or a lost peer.
 func (g *Mount) OnEvent(ctx *core.Context, ev *core.Event, out *MountOutput) {
 	g.out = out
+	_, kind, _, _ := meta.Peek(&ev.Msg)
 	switch {
+	case ev.Kind == core.EvNetRecv && ev.Msg.Group() && kind == meta.KindReclaim:
+		group, session, term, err := meta.DecodeReclaim(ctx.Pool, &ev.Msg)
+		if ev.Msg.Buf != core.NoBuf {
+			ctx.Pool.Free(ev.Msg.Buf)
+		}
+		if err == nil && session == g.session && g.mapped {
+			g.reclaim(ctx, group, term)
+		}
 	case ev.Kind == core.EvNetRecv && ev.Msg.Group(), ev.Kind == core.EvTimer && ev.Timer == MountTimer:
 		g.routed(ctx, func(o *meta.RouterOutput) { g.mc.OnEvent(ctx, ev, o) })
 	case ev.Kind == core.EvNetRecv && g.cl != nil, ev.Kind == core.EvTimer && ev.Timer == chunkstore.ClientTimer && g.cl != nil:
@@ -336,7 +362,7 @@ func (g *Mount) read(ctx *core.Context, rd Read) {
 	} else {
 		h = new(sentRead)
 	}
-	h.token = rd.Token
+	h.token, h.group = rd.Token, 0
 	h.rd = meta.Read{Start: append(h.rd.Start[:0], rd.Start...), End: append(h.rd.End[:0], rd.End...), Limit: rd.Limit, Reg: rd.Reg, Session: rd.Session, Mount: rd.Mount}
 	if rd.End == nil {
 		h.rd.End = nil
@@ -359,6 +385,88 @@ func (g *Mount) send(ctx *core.Context, h *sentRead, later bool) {
 		}
 		g.reads[tok] = h
 	})
+}
+
+// reclaim takes owner term's ask that the mount re-register its opens of group, starting the
+// re-registration unless one is in flight.
+func (g *Mount) reclaim(ctx *core.Context, group, term uint64) {
+	i := slices.IndexFunc(g.reclaims, func(r reclaim) bool { return r.group == group })
+	if i < 0 {
+		i = len(g.reclaims)
+		g.reclaims = append(g.reclaims, reclaim{group: group})
+	}
+	r := &g.reclaims[i]
+	r.term, r.asked = max(r.term, term), true
+	if !r.busy {
+		g.restart(ctx, r)
+	}
+}
+
+// restart starts r over for its newest term, from the inodes the mount has open in its group.
+func (g *Mount) restart(ctx *core.Context, r *reclaim) {
+	r.asked, r.at = false, r.term
+	r.inos = slices.DeleteFunc(g.m.Reclaim(r.inos[:0]), func(ino uint64) bool {
+		g.key = g.m.key(g.key[:0], ino, meta.InodeAttr, nil)
+		g.end = append(append(g.end[:0], g.key...), 0)
+		id, err := g.smap.RouteScan(g.key, g.end)
+		return err != nil || id != r.group
+	})
+	g.step(ctx, r)
+}
+
+// step sends r's next step: the re-registration of an inode, or the end of them under r's term,
+// to the start of r's group.
+func (g *Mount) step(ctx *core.Context, r *reclaim) {
+	rd := meta.Read{Limit: 1, Session: g.session, Mount: g.cfg.Mount}
+	if n := len(r.inos); n > 0 {
+		g.key = g.m.key(g.key[:0], r.inos[n-1], meta.InodeAttr, nil)
+		r.inos = r.inos[:n-1]
+		rd.Reg = meta.RegReopen
+	} else if k := slices.IndexFunc(g.smap.Groups, func(gr meta.Group) bool { return gr.ID == r.group }); k >= 0 {
+		g.key = append(g.key[:0], g.smap.Groups[k].Start...)
+		rd.Reg, rd.Term = meta.RegReclaimed, r.at
+	} else {
+		g.drop(r)
+		return
+	}
+	g.end = append(append(g.end[:0], g.key...), 0)
+	rd.Start, rd.End = g.key, g.end
+	var h *sentRead
+	if n := len(g.free); n > 0 {
+		h, g.free = g.free[n-1], g.free[:n-1]
+	} else {
+		h = new(sentRead)
+	}
+	h.token, h.group = 0, r.group
+	h.rd = meta.Read{Start: append(h.rd.Start[:0], rd.Start...), End: append(h.rd.End[:0], rd.End...), Limit: rd.Limit, Reg: rd.Reg, Session: rd.Session, Mount: rd.Mount, Term: rd.Term}
+	r.busy = true
+	g.send(ctx, h, false)
+}
+
+// reclaimed takes the answer to a step of group's re-registration: one that failed for good ends
+// it, as for a fenced session, which has no opens to re-register; otherwise the next step follows,
+// or after the end the re-registration starts over if asked again meanwhile.
+func (g *Mount) reclaimed(ctx *core.Context, group uint64, reg byte, err error) {
+	i := slices.IndexFunc(g.reclaims, func(r reclaim) bool { return r.group == group })
+	if i < 0 {
+		return
+	}
+	r := &g.reclaims[i]
+	r.busy = false
+	switch {
+	case err != nil:
+		g.drop(r)
+	case reg == meta.RegReopen:
+		g.step(ctx, r)
+	case r.asked:
+		g.restart(ctx, r)
+	default:
+		g.drop(r)
+	}
+}
+
+func (g *Mount) drop(r *reclaim) {
+	g.reclaims = slices.DeleteFunc(g.reclaims, func(q reclaim) bool { return q.group == r.group })
 }
 
 // lasting reports a Read error that asking again gets again.
@@ -388,6 +496,12 @@ func (g *Mount) routed(ctx *core.Context, f func(o *meta.RouterOutput)) {
 		}
 		tok := h.token
 		g.free = append(g.free, h)
+		if h.group != 0 {
+			if h.rd.Session == g.session {
+				g.reclaimed(ctx, h.group, h.rd.Reg, a.Err)
+			}
+			continue
+		}
 		if a.Err != nil && g.plant.lastingMissing {
 			g.feed(ctx, func(out *Output) { g.m.ReadDone(ctx, tok, nil, out) })
 			continue

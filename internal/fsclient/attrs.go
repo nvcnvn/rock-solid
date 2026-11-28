@@ -1,6 +1,8 @@
 package fsclient
 
 import (
+	"slices"
+
 	"github.com/nvcnvn/rock-solid/internal/fuseproto"
 	"github.com/nvcnvn/rock-solid/internal/meta"
 )
@@ -28,6 +30,22 @@ func (m *Machine) reg(reg byte, session uint64, out *Output) {
 	}
 	rd := &out.Reads[len(out.Reads)-1]
 	rd.Reg, rd.Session, rd.Mount = reg, session, m.cfg.Mount
+}
+
+// Reclaim appends to dst each inode the mount has open under its session, which a new owner's
+// re-registration names, and makes each open and CREATE in flight register again once answered,
+// since an owner that has since failed may have answered it.
+func (m *Machine) Reclaim(dst []uint64) []uint64 {
+	for _, o := range m.ops {
+		ino := o.req.NodeID
+		if o.req.Opcode == fuseproto.OpCreate {
+			ino = o.child
+		}
+		if n := m.nodes[ino]; n != nil && (o.req.Opcode == fuseproto.OpOpen || o.req.Opcode == fuseproto.OpCreate) {
+			m.change(n)
+		}
+	}
+	return append(dst, m.held...)
 }
 
 // opens is n's handles opened under the mount's session; those of a session it has left fail, and
@@ -85,6 +103,11 @@ func (m *Machine) release(o *op, out *Output) {
 		return
 	}
 	n.opens--
+	if n.opens == 0 {
+		i := slices.Index(m.held, h.ino)
+		m.held[i] = m.held[len(m.held)-1]
+		m.held = m.held[:len(m.held)-1]
+	}
 	if !last {
 		m.empty(o, out)
 		return
@@ -249,7 +272,9 @@ func (m *Machine) handOut(o *op, n *node, ino uint64, create bool, out *Output) 
 		flags = fuseproto.OpenKeepCache
 	}
 	n.opened = n.attr
-	n.opens++
+	if n.opens++; n.opens == 1 {
+		m.held = append(m.held, ino)
+	}
 	fh := m.handle(ino)
 	if create {
 		n.lookups++

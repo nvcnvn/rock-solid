@@ -99,6 +99,10 @@ func (m *Machine) create(o *op, out *Output) {
 		}
 		m.handOut(o, n, o.child, true, out)
 	case createRegistered:
+		if m.older(o, o.child) {
+			m.opening(o, o.child, out)
+			return
+		}
 		var a meta.Attr
 		if !o.got[0].ok || meta.DecodeAttr(o.got[0].v, &a) != nil || a.Nlink == 0 && m.opens(m.node(o.child)) == 0 {
 			m.fail(o, ENOENT, out)
@@ -153,8 +157,7 @@ func (m *Machine) create(o *op, out *Output) {
 			out.Replies = fuseproto.AppendEntry(out.Replies, o.req.Unique, &e)
 			m.end(o, out)
 		} else {
-			m.get(o, 0, o.child, meta.InodeAttr, nil, out)
-			m.reg(meta.RegOpen, o.mreq.Session, out)
+			m.opening(o, o.child, out)
 			o.step = createRegistered
 		}
 	}

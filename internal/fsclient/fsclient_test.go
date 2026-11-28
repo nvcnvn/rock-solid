@@ -443,6 +443,59 @@ func TestAReleaseBehindAnOpenWaitsForItsRegistration(t *testing.T) {
 	}
 }
 
+// A new owner's re-registration names each file the mount has open under its session, and an open
+// or CREATE whose registration is in flight registers again once answered, since the owner that
+// answered it may have failed: its handle comes only from the second answer. A fence leaves no
+// file to name.
+func TestAReclaimNamesTheOpenFilesAndARegistrationInFlightGoesAgain(t *testing.T) {
+	h := newMount(t, Config{})
+	f, _ := h.create(meta.RootInode, "f")
+	g, gh := h.create(meta.RootInode, "g")
+	h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpRelease, NodeID: g, Fh: gh}))
+	h.wantRegs(meta.RegOpen, meta.RegOpen, meta.RegRelease)
+	if got := h.m.Reclaim(nil); !slices.Equal(got, []uint64{f}) {
+		t.Fatalf("a reclaim names %v, want %v", got, []uint64{f})
+	}
+	h.held = true
+	open := h.send(fuseproto.Request{Opcode: fuseproto.OpOpen, NodeID: g})
+	create := h.send(fuseproto.Request{Opcode: fuseproto.OpCreate, NodeID: meta.RootInode, Name: []byte("n"), Mode: uint32(meta.ModeFile | 0o644)})
+	var regs []Read
+	for len(regs) < 2 {
+		reads, sent := h.reads, h.sent
+		h.reads, h.sent = nil, nil
+		for _, rd := range reads {
+			if rd.Reg != meta.RegNone {
+				regs = append(regs, rd)
+			} else {
+				h.answerRead(rd)
+			}
+		}
+		for _, s := range sent {
+			h.answerTxn(s)
+		}
+		h.serve()
+	}
+	h.wantRegs(meta.RegOpen, meta.RegOpen)
+	if got := h.m.Reclaim(nil); !slices.Equal(got, []uint64{f}) {
+		t.Fatalf("with two registrations in flight a reclaim names %v, want %v", got, []uint64{f})
+	}
+	h.held = false
+	for _, rd := range regs {
+		h.answerRead(rd)
+	}
+	h.serve()
+	h.ok(open)
+	n := h.entry(create).NodeID
+	h.wantRegs(meta.RegOpen, meta.RegOpen)
+	if got := h.m.Reclaim(nil); !slices.Equal(got, []uint64{f, g, n}) {
+		t.Fatalf("a reclaim names %v, want %v", got, []uint64{f, g, n})
+	}
+	h.m.SetSession(8)
+	if got := h.m.Reclaim(nil); len(got) != 0 {
+		t.Fatalf("after a fence a reclaim names %v", got)
+	}
+}
+
 // A handle opened under a session the mount has left fails EIO, and its release deregisters
 // nothing, as the owner closes its open once that session's fence is acknowledged; an open under
 // the new session registers under it.

@@ -1,6 +1,7 @@
 package fuse
 
 import (
+	"bytes"
 	"errors"
 	"slices"
 	"testing"
@@ -259,5 +260,52 @@ func TestAReadAnsweredWithAnErrorThatLastsAnswersEIO(t *testing.T) {
 		if h, _, err := fuseproto.DecodeReply(k.buf[:n]); err != nil || h.Unique != 2 || h.Error != -int32(fuseproto.EIO) {
 			t.Fatalf("after %v the kernel got %+v, %v", e, h, err)
 		}
+	}
+}
+
+// A new owner's ask to re-register, sent to loop 0 of the session's node where the daemon runs,
+// re-registers each file the mount has open in the owner's group, then ends with the owner's
+// term at the group's start; an ask for another session asks nothing.
+func TestTheDaemonReregistersItsOpensWhenANewOwnerAsks(t *testing.T) {
+	k := newFakeKernel(t)
+	if h, _ := k.call(&fuseproto.Request{Opcode: fuseproto.OpOpen, Unique: 2, NodeID: meta.RootInode}); h.Error != 0 {
+		t.Fatalf("OPEN answered %+v", h)
+	}
+	ask := func(session uint64) []core.Action {
+		k.ev = core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: 2, Loop: 1}}
+		if err := meta.EncodeReclaim(k.ctx.Pool, 2, session, 5, &k.ev.Msg); err != nil {
+			t.Fatal(err)
+		}
+		return k.d.OnEvent(&k.ctx, &k.ev, nil)
+	}
+	if acts := ask(8); len(acts) != 0 {
+		t.Fatalf("an ask for another session asked for %+v", acts)
+	}
+	attr, err := meta.AppendKey(nil, &meta.Key{Space: meta.SpaceFS, Volume: 1, Inode: meta.RootInode, Tag: meta.InodeAttr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []meta.Read{
+		{Start: attr, Reg: meta.RegReopen, Session: 7},
+		{Start: []byte{meta.SpaceCtl + 1}, Reg: meta.RegReclaimed, Session: 7, Term: 5},
+	}
+	acts := ask(7)
+	for _, w := range want {
+		if len(acts) != 1 || acts[0].Kind != core.ActNetSend || acts[0].Peer != (core.NodeID{Node: 2, Loop: 1}) {
+			t.Fatalf("want %+v, the daemon asked for %+v", w, acts)
+		}
+		_, _, token, _ := meta.Peek(&acts[0].Msg)
+		if err := meta.DecodeRead(k.ctx.Pool, &acts[0].Msg, &k.rd); err != nil || !bytes.Equal(k.rd.Start, w.Start) || k.rd.Reg != w.Reg || k.rd.Session != w.Session || k.rd.Term != w.Term {
+			t.Fatalf("the daemon sent %+v, want %+v: %v", k.rd, w, err)
+		}
+		k.ans = meta.ReadAnswer{Token: token}
+		k.ev = core.Event{Kind: core.EvNetRecv, Peer: acts[0].Peer}
+		if err := meta.EncodeReadAnswer(k.ctx.Pool, 2, &k.ans, &k.ev.Msg); err != nil {
+			t.Fatal(err)
+		}
+		acts = k.d.OnEvent(&k.ctx, &k.ev, nil)
+	}
+	if len(acts) != 0 {
+		t.Fatalf("after the end the daemon asked for %+v", acts)
 	}
 }

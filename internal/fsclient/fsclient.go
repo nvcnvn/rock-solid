@@ -150,7 +150,9 @@ type Machine struct {
 	nodes   map[uint64]*node
 	handles map[uint64]*handle
 	freeFh  []*handle
-	nextFh  uint64
+	// held is the inodes with handles under the session, which a new owner's re-registration names.
+	held   []uint64
+	nextFh uint64
 	// ops are the requests in hand, the oldest first.
 	ops     []*op
 	free    []*op
@@ -259,7 +261,7 @@ func New(cfg Config) *Machine {
 }
 
 // SetSession makes session the one the replay keys of later requests name, as after a fence.
-func (m *Machine) SetSession(session uint64) { m.cfg.Session = session }
+func (m *Machine) SetSession(session uint64) { m.cfg.Session, m.held = session, m.held[:0] }
 
 // Pending is the requests in hand.
 func (m *Machine) Pending() int { return len(m.ops) }
