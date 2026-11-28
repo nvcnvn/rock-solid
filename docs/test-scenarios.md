@@ -9881,10 +9881,7 @@ From [Inode owner](design.md#metadata-layer-metastore), the [purge model](#purge
   client-only node 5, with mounts on node 2 and node 5. Four files written and closed on one mount
   read byte-exact on the other; then three recorded processes per mount while the data group's
   leader is paused until another voter leads, then the leader, or node 3 if node 2 leads, is
-  killed and started again; both histories pass close-to-open. It skips unless `RS_THREE_VOTERS`
-  is set until [MetaStore replicas' halts and leases on a storage
-  node](build-checklist.md#phase-4-embedded-metastore) lands: until then a group of three voters on
-  storage nodes refuses every read.
+  killed and started again; both histories pass close-to-open.
 
 ## Rest of the namespace
 
