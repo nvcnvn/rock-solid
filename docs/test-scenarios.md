@@ -9714,21 +9714,22 @@ and chunk devices.
   one pool allocation in 100 refused, which fails a chunk write the client cannot take; and one
   `Read` in 200 answered `ErrMalformed`, `ErrTooLarge`, `ErrOverloaded` or `ErrHalted`. Then 3 s
   without faults. Histories of both nodes pass one close-to-open check, a read such a fault
-  overlaps may come back short; every system call succeeds or, overlapped by a fence, a refused
-  allocation or a lasting `Read` error on its node, fails `EIO`, after which its process goes on
-  and writes again what did not land; on the second node an open of a name between the first's
-  setup sending its unlink and its create's reply, a gap a crash may leave open, may fail
-  `ENOENT`, as may any call on a file that setup unlinked, since until the
-  [inode owner's open registry](#inode-owners-open-registry) counts that node's opens the unlink
-  frees the file under them; no inode is handed out twice, no `mtime` goes backwards,
+  overlaps, or one in a handle opened before its daemon's last new session, may come back short;
+  every system call succeeds or, overlapped by a fence, a refused allocation or a lasting `Read`
+  error on its node, fails `EIO`, after which its process goes on and writes again what did not
+  land, and a call in a handle opened before its daemon took a new session fails `EIO` and its
+  process closes the file; on the second node an open of a name between the first's setup sending
+  its unlink and its create's reply, a gap a crash may leave open, may fail `ENOENT`; no orphan is
+  freed while a process holds it through a handle of its daemon's session
+  ([inode owner's open registry](#inode-owners-open-registry)); no inode is handed out twice, no `mtime` goes backwards,
   every file's entry is in its directory's slot, no directory is its own ancestor, at each daemon
   crash every chunk written lies below `alloc_end` or within its purge entry, a `Read` answered
   with an error that lasts fails its request and one answered with any other stays in hand to go
   again, a fenced session's chunk client numbers its requests above every ID the old one took,
   and at the end no system call and no request in either machine has waited more than 100 ms.
-  Over its first 10 seeds, 355 daemon crashes, node 2's reboots among them, 356 fences find chunk
-  I/O in flight, the devices refuse a fenced session's live client 364 writes, of which it sends
-  129 again, 161 `Read`s fail and 196 go again. The quiet time steps past the scheduler's own
+  Over its first 10 seeds, 375 daemon crashes, node 2's reboots among them, 324 fences find chunk
+  I/O in flight, the devices refuse a fenced session's live client 316 writes, of which it sends
+  109 again, 189 `Read`s fail and 173 go again. The quiet time steps past the scheduler's own
   partitions, since a connection one breaks holds a read for an election
   timeout. Each daemon holds each read's send up to 1 ms, so requests arrive during fetches and
   the stale-attribute check fires, and one `Read` answer in 4 up to 5 ms, with everything its
@@ -9846,9 +9847,19 @@ upgrade](design.md#daemon-restart-and-upgrade)'s mount settings.
 From [Inode owner](design.md#metadata-layer-metastore) and the [purge model](#purge-model).
 
 - `open` costs one round trip and no log write: a lease read of the attributes that registers the
-  mount while they show a link and its session is live; a `CREATE` registers in a read after its
-  `Txn`; the last `release` deregisters, and an `OPEN` behind it waits for it
-  (`TestOpensAndTheLastReleaseRegisterAtTheOwner`).
+  mount while they show a link; a `CREATE` registers in a read after its `Txn`; the last `release`
+  deregisters, and an `OPEN` behind it waits for it (`TestOpensAndTheLastReleaseRegisterAtTheOwner`),
+  as a last `release` behind an `OPEN` waits for the open's answer and, no longer the last,
+  deregisters nothing (`TestAReleaseBehindAnOpenWaitsForItsRegistration`).
+- The owner answers an open from a session its table shows fenced `ErrFenced`, with no attributes,
+  and registers nothing (`TestAnOpenFromAFencedSessionIsRefused`); a handle opened under a session
+  the mount has replaced fails `READ`, `WRITE`, `FLUSH` and `FSYNC` with `EIO`, its release
+  deregisters nothing, and an open under the new session registers under it
+  (`TestAHandleOfAFencedSessionFails`).
+- A `CREATE` whose file another node unlinks between its `Txn` and its registration answers
+  `ENOENT`, as an orphan takes no open (`TestACreateWhoseFileIsUnlinkedBeforeItRegistersFails`).
+- Open and release at a leader allocate nothing and cost the same beside 100,000 other opens
+  (`BenchmarkServeOpenRelease`).
 - Every unlink of a last link makes an orphan; the owner frees it at its last release, and an open
   after the unlink does not register (`TestAnOrphanIsFreedAtItsLastRelease`,
   `TestAnUnlinkFreesAFileOnlyOnceNoMountHasItOpen`, `TestAnUnlinkLeavesAnOrphanForTheOwner`).
@@ -9857,13 +9868,21 @@ From [Inode owner](design.md#metadata-layer-metastore) and the [purge model](#pu
   storage node's device hands its server each table and proposes the frees that leaves
   (`TestADeviceFreesAnOrphanAtItsLastClose`).
 - A new owner, by failover or transfer, frees no orphan until **Owner failover and grace period**
-  (`TestANewOwnerFreesNoOrphan`).
+  (`TestANewOwnerFreesNoOrphan`). A free refused at its proposal is tried again
+  (`TestAFreeRefusedIsTriedAgain`), and one a leader change drops is answered dropped once the
+  replica applies the next leader's entries, so the orphan is looked at again
+  (`TestAFreeDroppedAtALeaderChangeIsAnswered`).
 - **[property]** "An orphaned inode is never freed while a live session has it open" on seeded runs
   of three replicas and three clients, with client crashes, late fences and acknowledgments, clients
   cut off from the leader, and leader crashes and transfers
-  (`TestAnOrphanIsNeverFreedWhileALiveSessionHasItOpen`); plants `neg-unlink-open`,
-  `neg-release-on-commit` and `neg-orphan-in-grace` (a new owner freeing right after its election)
-  each fail it (`TestPlantedRegistryBugsFreeAnOpenOrphan`).
+  (`TestAnOrphanIsNeverFreedWhileALiveSessionHasItOpen`). Each seed frees orphans only until its
+  first leader move, after which the run checks only that nothing is freed. Plants
+  `neg-unlink-open`, `neg-release-on-commit` and `neg-orphan-in-grace` (a new owner freeing right
+  after its election) fail it on seeds 1, 2 and 3 (`TestPlantedRegistryBugsFreeAnOpenOrphan`).
+- **[property]** The mount's seeded run (`TestAMountsHistoriesKeepTheirInvariantsAcrossCrashes`,
+  [Multi-node mounts](#multi-node-mounts)) checks the same invariant against its processes'
+  handles; every unlink there comes at a daemon's restart, after a leader change, so it frees no
+  orphan until **Owner failover and grace period**.
 
 ## Owner failover and grace period
 
