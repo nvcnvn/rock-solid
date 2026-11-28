@@ -338,10 +338,11 @@ sequenceDiagram
     participant W as Cleaner worker
     participant O as Owner loop and chunk index
     participant C as Client
-    W->>W: read chunk 7 block 3 at LBA 100, verify CRC32C
+    O->>W: chunk 7 block 3, read from LBA 100
+    W->>W: verify its CRC32C, sort by chunk
     C->>O: write chunk 7 block 3
     O->>O: live map now says block 3 is at LBA 900
-    W->>O: hand over verified block 3, copied from LBA 100
+    W->>O: verified block 3, copied from LBA 100
     O->>O: append copy entry: block 3 from LBA 100 to LBA 5000
     O->>O: copy record durable; map points at 900, not 100, so skip the move
     Note over O: the client's write wins and the copy at 5000 is dead at once
