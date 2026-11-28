@@ -68,6 +68,18 @@ func (r *Replica) diskState(ctx *core.Context) DiskState {
 	return DiskState{Log: r.cfg.Log, Fill: fill, Oldest: r.st.Oldest(ctx.Now), Failed: r.st.Err() != nil, Pools: pools}
 }
 
+// DiskState is what the replica's next heartbeat would report of its disk.
+func (r *Replica) DiskState(ctx *core.Context) DiskState { return r.diskState(ctx) }
+
+// Reported is the replica's last heartbeat, which the next one overwrites.
+func (r *Replica) Reported() *Report { return &r.rep }
+
+// Run is the run ID the replica's loop grants its leases under.
+func (r *Replica) Run() uint64 { return r.grantor.Run() }
+
+// Disk is the disk the replica runs as.
+func (r *Replica) Disk() uint32 { return r.cfg.Disk }
+
 // leadStates appends what the replica reports of each PG it leads.
 func (r *Replica) leadStates(dst []LeadState) []LeadState {
 	for i := range r.leads {

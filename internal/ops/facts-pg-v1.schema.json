@@ -1,0 +1,82 @@
+{
+  "$id": "rock-solid.io/facts-pg/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "members": {
+      "items": {
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "disk": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "interval": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "lacking": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "pg": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "pool": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "role": {
+            "type": "string",
+            "x-rock-solid-name": false
+          },
+          "unfound": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "node": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "pg": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "pool": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "schema": {
+      "type": "string",
+      "x-rock-solid-name": false
+    },
+    "unfound": {
+      "items": {
+        "properties": {
+          "index": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "inode": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "volume": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "type": "object"
+}

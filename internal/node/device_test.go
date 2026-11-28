@@ -21,7 +21,7 @@ const devBlocks = 1 << 18
 // devRun drives one Device on a simulated disk as its loop would, running disk actions one at a
 // time.
 type devRun struct {
-	t      *testing.T
+	t      testing.TB
 	disk   *sim.Disk
 	ctx    core.Context
 	d      *Device
@@ -33,7 +33,7 @@ type devRun struct {
 	pages  looptest.Pages
 }
 
-func newDevRun(t *testing.T, disk *sim.Disk) *devRun {
+func newDevRun(t testing.TB, disk *sim.Disk) *devRun {
 	return &devRun{t: t, disk: disk, ctx: core.Context{Now: 1, Raw: 1, Pool: sim.NewPool(16<<20, 0)}}
 }
 

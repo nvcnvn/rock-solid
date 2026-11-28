@@ -358,6 +358,21 @@ func (s *Shard) Node(id uint64) (core.NodeID, bool) {
 	return core.NodeID{}, false
 }
 
+// Status is the replica's term, the leader it supports, its commit and applied index and its role.
+func (s *Shard) Status() raft.BasicStatus { return s.rn.BasicStatus() }
+
+// Matches calls visit with each follower's match index while the replica leads, in ID order.
+func (s *Shard) Matches(visit func(id, match uint64)) {
+	if s.rn.BasicStatus().RaftState != raft.StateLeader {
+		return
+	}
+	s.rn.WithProgress(func(id uint64, _ raft.ProgressType, pr tracker.Progress) {
+		if id != s.cfg.ID {
+			visit(id, pr.Match)
+		}
+	})
+}
+
 // Term is the replica's current term, which every entry it appends while it leads carries.
 func (s *Shard) Term() uint64 { return s.rn.BasicStatus().Term }
 
