@@ -92,6 +92,8 @@ type gen struct {
 	diskIDs map[uint64]uint64
 	fmts    int
 	// primary is each PG's newest activated node; ownOpen a node's versions it ordered and has not logged, memberOpen those a member has not.
+	// A version a primary drops right after OutOrder stays in ownOpen and becomes a mayfail at a later crash. That path needs a lead
+	// that is asking or has left the interval, which Order's guards refuse first, so it loosens no passing trace.
 	primary    map[uint64]int
 	ownOpen    map[int][][2]uint64
 	memberOpen map[int][][2]uint64
@@ -406,6 +408,11 @@ func disks(ms []member) []uint64 {
 }
 
 // classify appends the spec's table changes for one committed table: its folds, then its membership changes.
+// A fold is a line of its own since the spec's Fold is a table that starts no interval, which a membership change always does.
+// A reorder of a PG with at most one mark changed is one Edit, as the placement's Next makes it. Any other table of several of a
+// PG's changes is one Refill, which keeps members, marks and leaving members as they were: the harness's final ask on a PG with a
+// leaving member maps there since Edit needs x.lv = 0, a table of several marks since Edit allows one, and a leaving disk's return
+// that marks it up and takes a missing member's place in one interval, where the spec's mark and Stay start two.
 func (g *gen) classify(epoch uint64, changed []uint64, next map[uint64]*entry) {
 	for _, f := range changed {
 		old, e := g.entries[f], next[f]

@@ -642,7 +642,13 @@ NoFencedWriteApplied == ~hist.fencedApplied
 
 \* No lock reaches a new holder before the old holder's writes are ordered: every completed
 \* write of an older lock generation completed before, and is ordered before, every
-\* completed write of a newer one.
+\* completed write of a newer one. It is an order, not "no lock is granted while a primary
+\* would still accept the fenced holder's writes", which is stronger than the design gives:
+\* when every live member of the old holder's interval is cut off from the control plane,
+\* all are marked down and the lock moves, while those members can still complete the old
+\* holder's queued write among themselves. That write is ordered before the next holder's,
+\* since the next interval activates only once a member of the old one has adopted it, so
+\* peering finds the write.
 LockOrder == ~hist.misordered
 
 \* At most one client holds the lock and may act on it.

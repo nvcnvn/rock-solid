@@ -16,6 +16,7 @@ The rules in [CLAUDE.md](../../../CLAUDE.md) ("Documents", "Tech debt") apply. T
 | Workaround, version pin, pre-release dependency | `docs/tech-debts.md` entry, in the same change as the code |
 | Experiment results | The spike's README, then a `design.md` appendix (see the `spike` skill) |
 | A buildable piece of phases 1 to 6, and what its tests must show | `docs/build-checklist.md`: the item's scope, needs, review condition and test plan by test name |
+| A contract: what must hold, in plain words | The `design.md` section that owns it; the checklist item's test plan names the tests that show it |
 | Why a trace-mapping rule maps as it does | A comment beside its function in `tools/tracedata` or `tools/votersdata`, not a doc |
 | A term a reader new to storage would not know | `docs/glossary.md`: what it means, why systems need it, and a link to the `design.md` section that owns its details |
 
