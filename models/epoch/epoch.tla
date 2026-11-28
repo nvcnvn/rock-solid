@@ -225,11 +225,12 @@ GrantLive(g, h) ==
 GrantKnown(g, h) == GrantLive(g, h) /\ ~gr[g][h].fg
 
 \* Whether the holder needs the grantor's lease: it leads a PG the grantor is
-\* a live member of, or, in a plan that checks the Raft group alone, it leads
-\* the group.
+\* a live member of, or, in a plan that checks the Raft group alone, every
+\* member asks every other, leader or not, as a loop asks every loop hosting a
+\* member of its replicas' groups.
 Needs(h, g) ==
     /\ h # g
-    /\ IF Raft THEN rlead[h]
+    /\ IF Raft THEN TRUE
        ELSE \E p \in PG : Leads(h, p) /\ g \in {dnode[d] : d \in UpIn(p, IvAt(h, p))}
 
 -----------------------------------------------------------------------------
