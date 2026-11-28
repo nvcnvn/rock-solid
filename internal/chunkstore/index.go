@@ -424,6 +424,25 @@ func (x *Index) recovered(e *disklog.Entry) {
 	x.putChunk(e.Pool, e.Chunk, ch)
 }
 
+// recoveryDropped takes back chunk c's recovery to version, if its last was, once the store drops
+// that version: replay applied the recovered entry before the decision that dropped the recovery's
+// held writes, so their blocks never mapped, and the disk holds the chunk whole at no version the
+// recovery reached or the blocks it replaced.
+func (x *Index) recoveryDropped(pool core.PoolID, c core.ChunkID, version uint64) {
+	ch, ok := x.Chunk(pool, c)
+	if !ok || ch.Recovered != version {
+		return
+	}
+	ch.Recovered = 0
+	if ch.Whole == version {
+		ch.Whole = 0
+	}
+	if ch.Version == version {
+		ch.Version = 0
+	}
+	x.putChunk(pool, c, ch)
+}
+
 func (x *Index) decisionKey(pool core.PoolID, pg, pgs uint32) []byte {
 	x.key = binary.BigEndian.AppendUint32(x.key[:0], uint32(DecisionPool))
 	x.key = binary.BigEndian.AppendUint32(x.key, uint32(pool))

@@ -1317,6 +1317,7 @@ func (s *Store) settle(ctx *core.Context, c core.ChunkID, keep uint64, commit bo
 		default:
 			o.dropped = true
 			cs.version, cs.epoch = min(cs.version, o.prevVer), min(cs.epoch, o.prevEpoch)
+			s.ix.recoveryDropped(s.cfg.Pool, c, o.version)
 		}
 	}
 	s.mapResolved(ctx, ci, out)
@@ -2178,6 +2179,7 @@ func (s *Store) settleHeld(d *disklog.Entry) {
 				s.mapItem(&run[k])
 			} else {
 				s.dropSlot(&run[k])
+				s.ix.recoveryDropped(d.Pool, c, run[k].entry.Version)
 			}
 		}
 	}

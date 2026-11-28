@@ -163,6 +163,30 @@ func TestARecoveryWriteReplacesAMembersChunk(t *testing.T) {
 	}
 }
 
+// A recovery write that replay held and a later decision dropped, by a marker during replay or by
+// that decision live, leaves the member holding the chunk whole at no version: peering hears
+// neither the recovery's version nor the one its blocks would have replaced.
+func TestADroppedRecoveryLeavesTheChunkWholeAtNoVersion(t *testing.T) {
+	for _, marker := range []bool{false, true} {
+		h := newRecoveryHarness(t)
+		h.sync(h.memberWrite(chunkC, 0, 4, MakeVersion(3, 1), 1))
+		h.changed = true
+		h.sync(h.persist(0, 1, 4, []ChunkVersion{{Chunk: chunkC, Version: MakeVersion(3, 2)}}))
+		h.sync(h.memberWrite(chunkC, 0, 1, MakeVersion(4, 1), 5))
+		h.sync(h.recoverWrite(Request{Chunk: chunkC, HasVer: true, Ver: MakeVersion(4, 1), Interval: 4, Buf: recoveryBuf(h, map[uint16]byte{0: 2, 1: 2, 2: 2, 3: 2})}))
+		restart(h)
+		h.changed = true
+		h.sync(h.persist(0, 1, 6, []ChunkVersion{{Chunk: chunkC, Version: MakeVersion(6, 5)}}))
+		if marker {
+			restart(h)
+		}
+		got, _ := h.peerState(0, 1)
+		if len(got) != 1 || got[0].Whole != 0 || got[0].Logged != 0 || !got[0].Listed {
+			t.Fatalf("marker %v: peering hears %+v", marker, got)
+		}
+	}
+}
+
 // A primary's recovery write leaves out every block a gated write of its interval ordered before it
 // covers, writing or punching only the rest, at that write's version, and hands the members that
 // remainder; a whole-chunk punch of the interval leaves it nothing to carry, and one ordered before

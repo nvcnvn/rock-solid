@@ -172,6 +172,15 @@ func (m *storeModel) settleHeld(d disklog.Entry) {
 			}
 			if h.entry.Version <= top {
 				m.mapEntry(h.entry, h.payload)
+			} else if ch := m.chunks[c]; ch.Recovered == h.entry.Version {
+				ch.Recovered = 0
+				if ch.Whole == h.entry.Version {
+					ch.Whole = 0
+				}
+				if ch.Version == h.entry.Version {
+					ch.Version = 0
+				}
+				m.chunks[c] = ch
 			}
 			return true
 		})
