@@ -388,6 +388,10 @@ func (g *Mount) routed(ctx *core.Context, f func(o *meta.RouterOutput)) {
 		}
 		tok := h.token
 		g.free = append(g.free, h)
+		if a.Err != nil && g.plant.lastingMissing {
+			g.feed(ctx, func(out *Output) { g.m.ReadDone(ctx, tok, nil, out) })
+			continue
+		}
 		if a.Err != nil {
 			g.feed(ctx, func(out *Output) { g.m.ReadFailed(ctx, tok, out) })
 			continue

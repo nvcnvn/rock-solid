@@ -9713,8 +9713,9 @@ and chunk devices.
   without faults. Histories of both nodes pass one close-to-open check, a read such a fault
   overlaps may come back short; every system call succeeds or, overlapped by a fence, a refused
   allocation or a lasting `Read` error on its node, fails `EIO`, after which its process goes on
-  and writes again what did not land; on the second node an open overlapping the first's setup
-  may fail `ENOENT`, and any call on a file that setup unlinked may fail, since until the
+  and writes again what did not land; on the second node an open of a name between the first's
+  setup sending its unlink and its create's reply, a gap a crash may leave open, may fail
+  `ENOENT`, as may any call on a file that setup unlinked, since until the
   [inode owner's open registry](#inode-owners-open-registry) counts that node's opens the unlink
   frees the file under them; no inode is handed out twice, no `mtime` goes backwards,
   every file's entry is in its directory's slot, no directory is its own ancestor, at each daemon
@@ -9722,19 +9723,15 @@ and chunk devices.
   with an error that lasts fails its request and one answered with any other stays in hand to go
   again, a fenced session's chunk client numbers its requests above every ID the old one took,
   and at the end no system call and no request in either machine has waited more than 100 ms.
-  Over its first 10 seeds, 341 daemon crashes, 356 fences find chunk I/O in flight, the devices
-  refuse a fenced session's live client 364 writes, of which it sends 129 again, 161 `Read`s fail
-  and 196 go again. The quiet time steps past the
-  scheduler's own partitions, since a connection one breaks holds a read for an election
+  Over its first 10 seeds, 355 daemon crashes, node 2's reboots among them, 356 fences find chunk
+  I/O in flight, the devices refuse a fenced session's live client 364 writes, of which it sends
+  129 again, 161 `Read`s fail and 196 go again. The quiet time steps past the scheduler's own
+  partitions, since a connection one breaks holds a read for an election
   timeout. Each daemon holds each read's send up to 1 ms, so requests arrive during fetches and
   the stale-attribute check fires, and one `Read` answer in 4 up to 5 ms, with everything its
   connection brings after it, so a fetch answered before another node's commit may come in after a
-  later `LOOKUP`. A regular file's entry cached for the attribute timeout (`entryCached`) fails
-  close-to-open on 29 of the first 30 seeds (seed 1), and on none of them with the second node's
-  mount taken out: an open on one node then skips the `LOOKUP` that brings the other's close. The
-  stale check always false (`staleKept`) fails it on 2 of the 30 (seeds 17 and 24): an attribute
-  reply fetched before another node's commit answers a `LOOKUP` sent after it. Still,
-  `keep_cache` always set and the node's own writes left out of the size it shows each pass the
+  later `LOOKUP`; without that hold the stale check always false fails none of the first 30 seeds.
+  Still, `keep_cache` always set and the node's own writes left out of the size it shows each pass the
   first 30 seeds with both mounts. An open's `LOOKUP` that brings another node's new size or
   `mtime` drops every page, and a page a read in flight holds locked is dropped as it unlocks, so
   the pages an open could keep are already current; and close-to-open checks only reads after a
@@ -9754,8 +9751,15 @@ and chunk devices.
   never abandoned (`noAbandon`, 22 of 30, seed 1) and the chunks of a call the client refused never
   completed (`dropRefused`, 12 of 30, seed 2) leave a request waiting past 100 ms; a `Read`
   answered with an error that lasts sent again (`retryLasting`) fails the `Read` rule on 29 of 30
-  (seed 1); a regular file's entry cached (`entryCached`) fails close-to-open on 29 of 30 (seed 1);
-  and the stale check always false (`staleKept`) fails it on 2 of 30 (seed 17).
+  (seed 1); a regular file's entry cached for the attribute timeout (`entryCached`) fails
+  close-to-open on 29 of 30 (seed 1), and on none with the second node's mount taken out, as an
+  open on one node then skips the `LOOKUP` that brings the other's close; the stale check always
+  false (`staleKept`) fails it on 2 of 30 (seeds 17 and 24, the test's seed 17), and only with both
+  its rules gone: with only the rule against a fetch before a later request gone it fails 1 of 30
+  (seed 29), and with only the rule against a fetch before the machine's own change gone none; and
+  on the second mount, a `Read` answered with an error that lasts taken as finding no key
+  (`lastingMissing`) fails "every system call succeeds" on 25 of 30 (seed 11, which an excuse of
+  every `ENOENT` open while the first node's setup may run would pass).
 - One router output carrying both a read's answer and a `Txn`'s hands out both, though the read's
   answer, an `UNLINK`'s entry found, moves the `UNLINK` on to a call whose own pass through the
   router takes an output of its own (`TestOneRouterOutputHandsOutAReadsAnswerAndATxns`).
@@ -9865,9 +9869,9 @@ From [Inode owner](design.md#metadata-layer-metastore), the [purge model](#purge
   storage node beside a MetaStore replica, each routing to the shard leader on another node and
   following `NotLeader`, under replica failovers, partitions and paused nodes; both mounts'
   histories pass one close-to-open check. A regular file's entry cached for the attribute timeout
-  fails it on 29 of the first 30 seeds and on none with one mount, and the stale check always
-  false on 2 of 30. `keep_cache` always set and the node's own writes left out of the size it
-  shows still pass it; their scripted tests catch them.
+  and the stale check always false fail it, as the [Filesystem client](#filesystem-client)'s
+  plants count; `keep_cache` always set and the node's own writes left out of the size it shows
+  still pass it, and their scripted tests catch them.
 - Through the kernel, `TestAMountOnEachOfTwoNodesKeepsCloseToOpenAcrossAPauseAndAKill` in
   `cmd/rock-solid`, run by `scripts/fuse-review.sh`: four node processes over TCP, storage nodes 2,
   3 and 4 with one device each and the data group's three voters, so a failover is possible, and

@@ -127,8 +127,11 @@ type plants struct {
 	noIDBase, noAbandon, dropRefused, retryLasting bool
 	// entryCached gives a regular file's entry the attribute timeout.
 	entryCached bool
-	// staleKept writes attributes fetched before a later request for the inode as fetched.
+	// staleKept drops the whole stale check: attributes fetched before the machine's own change,
+	// or before a later request for the inode, are written as fetched.
 	staleKept bool
+	// lastingMissing takes a Read answered with an error that lasts as finding no key.
+	lastingMissing bool
 }
 
 // Machine serves one mount. Each request names its inodes by FUSE node ID, which is the inode ID.
