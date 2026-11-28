@@ -1289,6 +1289,72 @@ Recover(n, p, c, d) ==
     /\ miss[d][c] # NoMiss
     /\ \E m \in UpIn(p, IvAt(n, p)) : RecoverFrom(n, p, c, d, m, pv[n][c])
 
+\* A primary's copy of a recovery write onto its own disk is a gated write of
+\* that disk, landing once its records are durable, and the primary may have
+\* left the interval x.k it ordered the copy in by then, the copy still gated.
+\* The two steps below are what such a copy does to a chunk the disk still
+\* lists; one that lands to a later version before the next decision reads
+\* nothing that decision reads. They change no rule of Recover, which takes the
+\* copy at once, so only traces and plans that set "late" take them.
+\* OwnCopy is x, the primary's activated decision of its current run it ordered
+\* the copy under, onto its disk as x.k's primary.
+OwnCopy(n, c, x) ==
+    /\ "late" \in plan.f
+    /\ Running(n)
+    /\ x \in dec
+    /\ x.n = n /\ x.r = run[n] /\ c \in ChunksOf(x.p)
+    /\ [p |-> x.p, k |-> x.k, r |-> x.r] \in act
+    /\ ddisk[n] = PrimDisk(x.p, x.k)
+    /\ miss[ddisk[n]][c] # NoMiss
+
+\* A copy to version 0, of a chunk x kept nothing of, landing after the primary
+\* took its disk's reply for a later interval still punches the chunk: the disk
+\* keeps only the versions of x.k and later, the copy's own writes and those
+\* over it, and its listing stays, the later decision having read the reply.
+\* Unlike Recover to a kept 0, it sets no rcv: every version it leaves is of
+\* x.k or later, which the decisions after rcv's cut drop as they would.
+RecoverLate(n, c, x) ==
+    LET d == ddisk[n]
+    IN /\ OwnCopy(n, c, x)
+       /\ x.kept[c] = 0
+       /\ IvAt(n, x.p) > x.k
+       /\ dlog' = [dlog EXCEPT ![d][c] = {v \in @ : IvOfV(v) >= x.k}]
+       /\ ids' = [ids EXCEPT ![d] = {g \in @ : g.c # c \/ g.v \in dlog'[d][c]}]
+       /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, rcv, miss, persIv, drp, rdrp,
+                      ldrp, imf, mrecv, gat, failed, wm, priVars, dataVars, leaseVars, clockVars, raftVars>>
+
+\* Whether the primary's next activated decision of its run after x keeps
+\* its copy to v, as Store.Settle keeps a gated version the spec's Unkept leaves.
+CopyKept(n, c, x, v) ==
+    LET Y == {y \in dec : y.n = n /\ y.p = x.p /\ y.r = run[n] /\ y.k > x.k /\ [p |-> x.p, k |-> y.k, r |-> y.r] \in act}
+        y == CHOOSE y \in Y : \A z \in Y : y.k <= z.k
+    IN Y # {} /\ v \notin Unkept({v}, y.kept[c])
+
+\* A copy to version v, read from s, that CopyKept maps at that decision's
+\* activation as RecoverFrom writes it, over the disk's versions of x.k and
+\* later, and the disk stays listed, the decision's listing being of a later
+\* interval than the copy. A copy the decision drops stays gated and goes.
+RecoverOver(n, c, x, v, s) ==
+    LET d == ddisk[n]
+        p == x.p
+        W == wm[d] \cup {i \in wm[s] : ChunkPG[Writes[i].c] = p}
+        E == {g \in ids[s] : g.c = c /\ g.v <= v /\ g.v \in Held(s, c)}
+    IN /\ OwnCopy(n, c, x)
+       /\ v = x.kept[c] \/ (IvOfV(v) = x.k /\ \E r \in vers : r.c = c /\ r.v = v)
+       /\ IF x.kept[c] = 0 THEN s = d ELSE s \in UpIn(p, x.k)
+       /\ CopyKept(n, c, x, v)
+       /\ dlog' = [dlog EXCEPT ![d][c] = {u \in dlog[s][c] \ Uncopied(s, c) : u <= v}
+                                        \cup {u \in @ : IvOfV(u) >= x.k}]
+       /\ wm' = [wm EXCEPT ![d] = W]
+       /\ ids' = [ids EXCEPT ![d] = {g \in {u \in @ : u.c # c \/ u.v \in dlog'[d][c]} \cup E : g.w \notin W}]
+       /\ rcv' = [rcv EXCEPT ![d][c] = [v |-> v, k |-> x.k,
+                                        cut |-> IF s # d \/ \A u \in dlog'[d][c] : IvOfV(u) >= x.k THEN x.k ELSE @.cut]]
+       /\ drp' = [drp EXCEPT ![d] = {g \in @ : g.c # c}]
+       /\ rdrp' = [rdrp EXCEPT ![d] = {g \in @ : g.c # c}]
+       /\ ldrp' = [ldrp EXCEPT ![d] = {g \in @ : g.c # c}]
+       /\ UNCHANGED <<ctlVars, ep, dnode, ddisk, dhost, fmts, stale, run, rsIv, miss, persIv, imf, mrecv, gat,
+                      failed, priVars, dataVars, leaseVars, clockVars, raftVars>>
+
 \* A primary that activated reports, on its next heartbeat, that every member
 \* of its interval but a leaving one is up and lists nothing. The model sends
 \* the report only while a member leaves, the one time the leader reads it.
@@ -2355,6 +2421,8 @@ Protocol ==
                                  \/ ReportRecovered(n, p)
     \/ \E d \in Disk : Persist(d)
     \/ \E n \in Node, p \in PG, c \in Chunk, d \in Disk : Recover(n, p, c, d)
+    \/ \E n \in Node, c \in Chunk, x \in dec :
+         RecoverLate(n, c, x) \/ \E v \in {x.kept[c]} \cup {r.v : r \in vers}, s \in Disk : RecoverOver(n, c, x, v, s)
     \/ \E i \in 1..Len(Writes) : Send(i)
     \/ \E n \in Node : \E x \in pin[n] : Order(n, x) \/ Reanswer(n, x) \/ Stale(n, x) \/ Refuse(n, x)
     \/ \E m \in rm : Deliver(m) \/ PastRefuses(m)
@@ -2807,6 +2875,7 @@ Tab(p, mem, marks, lv) == [k |-> "refill", p |-> p, mem |-> mem, marks |-> marks
 ML(p, to) == [k |-> "minlive", p |-> p, to |-> to]
 Ed(p, mem, marks) == [k |-> "edit", p |-> p, mem |-> mem, marks |-> marks]
 Plan(m, w, f) == [free |-> FALSE, m |-> m, w |-> w, f |-> f, t |-> 600, k |-> 1, s |-> Spare]
+WithFlags(S, f) == {[x EXCEPT !.f = @ \cup f] : x \in S}
 
 \* The membership faults of test-scenarios.md "Epoch change model" on 3 nodes,
 \* each with the writes whose rules it tests.
@@ -2904,7 +2973,7 @@ RefillPrimary == Plan(<<Mark(2, "down"), AddM(2, 2, 1), Mark(2, "up"), RemoveM(2
 RefillReturn == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"),
                        Tab(2, <<1, 3, 2>>, <<"up", "up", "down">>, {2}), RemoveM(2)>>, Partial2, {})
 RefillLost == Plan(<<Mark(3, "down"), AddM(2, 3, 1), LostM(3), DropM(2)>>, Partial2, {})
-RefillPrimaryPlans == {OneWrite(RefillPrimary)}
+RefillPrimaryPlans == WithFlags({OneWrite(RefillPrimary)}, {"late"})
 RefillBackPlans == {RefillReturn, RefillLost}
 \* ci-refills-two, on 4 nodes: both members refilled, one after the other or in
 \* one table; and the first declared lost, leaving by the table that refills the
@@ -3072,9 +3141,9 @@ RestartPlansStill == RestartPlans \ RestartPlansMoved
 \* under a version of its interval that disk 3 lacks, restarts and becomes
 \* primary, whose peering drops that version and the copy with it.
 DroppedRecoveryPlans ==
-    {[DownBackMoved EXCEPT !.f = {"restart", "aimed"},
-                           !.w = <<[c |-> 1, blk |-> 1, whole |-> TRUE, inc |-> 0, re |-> 0, after |-> 0],
-                                   [c |-> 1, blk |-> 1, whole |-> TRUE, inc |-> 0, re |-> 0, after |-> 1]>>]}
+    WithFlags({[DownBackMoved EXCEPT !.f = {"restart", "aimed"},
+                                     !.w = <<[c |-> 1, blk |-> 1, whole |-> TRUE, inc |-> 0, re |-> 0, after |-> 0],
+                                             [c |-> 1, blk |-> 1, whole |-> TRUE, inc |-> 0, re |-> 0, after |-> 1]>>]}, {"late"})
 \* The liveness variant that breaks renewals runs the restart plan alone.
 RestartedPlans == {Restarted}
 \* ci-gates-left: PG 2's replica 3 moved to node 1 and marked down in one table,
@@ -3124,7 +3193,7 @@ MoveCleanPlans == {MoveReplica, MovePrimary, MoveLeavingDown, MoveMaint}
 MoveFaultPlans == {MoveRestart, MoveRefill}
 \* ci-stays splits the stays off, each config under the 300 s budget.
 StayForPrimaryPlans == {StayForPrimary}
-StayAsPrimaryPlans == {StayAsPrimary}
+StayAsPrimaryPlans == WithFlags({StayAsPrimary}, {"late"})
 StayNewPlans == {StayForNew}
 \* A leaving member down and back, then taking the place of a primary that went
 \* down: W, kept at the first of those intervals on the primary alone and

@@ -31,7 +31,7 @@ TCnt(v) == v % TBase
 \* restart: a refusal of a version of its interval by a store that serves, an
 \* mfail line, has no step. That no step, not UnchangedIntervalAccepts, which
 \* a budget for "mfail" leaves silent on refusals, is what rejects one.
-TPlanSet == {[free |-> FALSE, m |-> TPlan, w |-> TWrites, f |-> {"restart", "format", "ownfail", "lateask", "mfail", "lose", "trim", "past"},
+TPlanSet == {[free |-> FALSE, m |-> TPlan, w |-> TWrites, f |-> {"restart", "format", "ownfail", "lateask", "mfail", "lose", "trim", "past", "late"},
               t |-> 0, k |-> 100000, s |-> 100000]}
 TMaint == [p \in TPG |-> FALSE]
 TRates == [n \in TNode |-> {1000}]
@@ -120,8 +120,8 @@ OwnRecovery(l) ==
         /\ IF x.kept[l.c] = 0 THEN l.s = 0 ELSE l.s \in UpIn(x.p, l.iv)
 
 \* A primary's gated recovery write settled by a later interval's peering of the
-\* same primary, which listed the chunk again: its entry stays, and Recover did not
-\* happen for it.
+\* same primary: Recover did not happen for it, and onto a disk that peering left
+\* unlisted the copy changes nothing.
 RecoveryOver(l) ==
     /\ OwnRecovery(l)
     /\ l.l = l.n
@@ -138,12 +138,15 @@ RecoveryOrdered(l) ==
 \* A primary's record of its own copy of a recovery write that landed after it
 \* took its own reply for a later interval and before that interval activated:
 \* the decision, made or to come, reads the reply and lists the chunk again, so
-\* the line is a stutter once the primary left the interval.
+\* the line leaves the listing as it is once the primary left the interval.
 RecoveredLate(l) ==
     /\ RecoveryOrdered(l)
     /\ OwnRecovery(l)
     /\ IvAt(l.n, ChunkPG[l.c]) > l.iv
     /\ miss[ddisk[l.n]][l.c] # NoMiss
+
+\* The decision of l's interval its own copy was ordered under.
+OwnDec(l) == {x \in dec : x.n = l.n /\ x.p = ChunkPG[l.c] /\ x.k = l.iv}
 
 \* A crash loses a suffix of a disk's log in LSN order, and a primary submits its
 \* own records in the order it orders them, so the mayfail lines, newest first,
@@ -246,7 +249,9 @@ Line(l) ==
     \/ /\ l.k = "recovered"
        /\ RecoveryOrdered(l)
        /\ IF RecoveryOver(l)
-          THEN UNCHANGED vars
+          THEN IF miss[ddisk[l.n]][l.c] # NoMiss /\ \E x \in OwnDec(l) : CopyKept(l.n, l.c, x, l.v)
+               THEN \E x \in OwnDec(l) : RecoverOver(l.n, l.c, x, l.v, IF l.s = 0 THEN ddisk[l.n] ELSE l.s)
+               ELSE UNCHANGED vars
           ELSE IF miss[ddisk[l.n]][l.c] = NoMiss
           THEN /\ OwnRecovery(l)
                /\ \E d \in Disk : miss[d][l.c] # NoMiss \/ [c |-> l.c, v |-> l.v] \in healed
@@ -257,7 +262,7 @@ Line(l) ==
                /\ RecoverLine(l)
     \/ /\ l.k = "recoveredlate"
        /\ RecoveredLate(l)
-       /\ UNCHANGED vars
+       /\ IF l.v = 0 THEN \E x \in OwnDec(l) : RecoverLate(l.n, l.c, x) ELSE UNCHANGED vars
     \/ /\ l.k = "mayrecover"
        /\ RecoveryOrdered(l)
        /\ \/ UNCHANGED vars
