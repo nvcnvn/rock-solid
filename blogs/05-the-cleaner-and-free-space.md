@@ -13,9 +13,9 @@ The **How it works** part after it has the mechanisms and edge cases.
 
 ## Words you need
 
-- **Log, segment, record.** The disk is cut into fixed-size *segments* (64 MiB on disks of
-  256 GiB and up). Writes are appended as *records*: a few header blocks describing what follows,
-  then the data blocks. A segment is filled front to back once, then later freed and reused as a
+- **Log, segment, record.** The disk is cut into fixed-size *segments*, thousands per disk.
+  Writes are appended as *records*: a few header blocks describing what follows, with a checksum
+  per data block, then the data blocks. A segment is filled front to back once, then later freed and reused as a
   whole. See [On-disk structures](../docs/glossary.md#on-disk-structures).
 - **Live, dead, cleaner, victim.** A block is *live* while something can still read it, *dead*
   once nothing will. The *cleaner* picks a mostly-dead segment (the *victim*), copies its live
@@ -24,11 +24,10 @@ The **How it works** part after it has the mechanisms and edge cases.
   wrote. A WA of 7 means every 4 KiB you write costs 28 KiB of writes. The SSD's own internal
   garbage collection multiplies this again.
 - **Fill.** The share of the disk holding live data.
-- **Stream, lane.** A stream is a kind of data the log keeps in segments of its own. The design
-  has three: *hot* (new writes), *cold* (the cleaner's copies) and *metadata* (sorted runs and
-  manifests). A stream fills its segments in *lanes*, each a chain of segments with one open at a
-  time; each stream has a shared lane, plus lanes of their own for each merge worker, the cleaner's
-  copies and whole-chunk writes.
+- **Stream, lane.** A stream is a kind of data the log keeps in segments of its own: *hot* (new
+  writes), *cold* (the cleaner's copies) and *metadata* (sorted runs and manifests). A stream fills
+  its segments in *lanes*, each a chain of segments with one open at a time
+  ([post 04](04-one-log-per-disk.md#three-streams)).
 - **Segment usage table.** A small table, saved with every checkpoint, of which segments are in
   use and how many live blocks each holds.
 - **TRIM, discard.** Telling an SSD that blocks no longer hold data, so it can erase them ahead of
@@ -39,33 +38,19 @@ The **How it works** part after it has the mechanisms and edge cases.
 - **Chunk, placement group.** Files and block volumes are cut into 4 MiB *chunks*. Each chunk
   belongs to a *placement group*, a small set of disks on different nodes that hold its copies
   ([post 02](02-chunks-and-placement.md)).
-- **LSN, memtable, sorted run, compaction, checkpoint, manifest.** An LSN (log sequence number)
-  orders records. Indexes keep recent changes in an in-memory *memtable*; a *checkpoint* writes
-  memtables out as immutable *sorted runs* and then a *manifest* saying where the runs are and
-  where replay starts after a crash. *Compaction* merges runs into fewer, larger ones
-  ([post 04](04-one-log-per-disk.md), [post 06](06-the-lsm-tree.md)).
+- **LSN, sorted run, compaction, checkpoint, manifest.** An LSN (log sequence number) orders
+  records. A *checkpoint* writes the indexes' recent changes out as immutable *sorted runs*, then a
+  *manifest* saying where the runs are and where replay starts after a crash; *compaction* merges
+  runs into fewer, larger ones ([post 04](04-one-log-per-disk.md), [post 06](06-the-lsm-tree.md)).
 
 ## A short recap of the log
 
-> **In plain words.** Each disk is one long notebook that you only ever write at the end of.
-> Many writers hand their pages to one owner, who writes a batch at the end and makes it durable
-> with one flush. Nothing is ever corrected in place: a newer version is simply written further
-> on, and an index remembers where the newest version of everything is.
-
-[Post 04](04-one-log-per-disk.md) covers the log in depth. This post needs only its shape:
-
-```text
-disk = segment 0      superblock
-       segment 1..n   [segment header][record][record][record] ...   one stream per segment
-
-record = [header blocks: what follows, a CRC per data block]  <- dead to the cleaner
-         [data blocks]                                         <- live until overwritten
-```
-
-The disk's *owner*, one event loop, also owns the disk's chunk index, which maps each chunk's
-blocks to their place in the log. The metadata store (MetaStore), which runs on Raft, puts its
-replicas' Raft entries in the same records. So the log holds chunk blocks, Raft entries, sorted
-runs and manifests, and each dies in its own way.
+Each disk is one long notebook that you only ever write at the end of
+([post 04](04-one-log-per-disk.md)): a newer version is written further on, and an index remembers
+where the newest version of everything is. The disk's *owner*, one event loop, owns the disk's
+chunk index, which maps each chunk's blocks to their place in the log, and the metadata store
+(MetaStore) puts its Raft entries in the same records. So the log holds
+chunk blocks, Raft entries, sorted runs and manifests, and each dies in its own way.
 
 ## The problem: an append-only disk fills with garbage
 
@@ -112,10 +97,8 @@ Without a cleaner, the log reaches the end of the disk and stops, however much o
 | Manifest, its pieces, the runs it names, every record after its replay points | a segment header naming a newer manifest is durable |
 | Record header block | always, for the cleaner: it writes fresh headers for what it moves |
 
-Two details matter. The cleaner never copies a manifest piece: a segment holding one waits for
-the next manifest snapshot, which a checkpoint writes early when the cleaner asks for that
-segment. And records after the newest manifest's replay points stay live, because recovery
-replays them from the log after a crash.
+Records after the newest manifest's replay points stay live because recovery replays them from
+the log after a crash.
 
 For chunk blocks, the chunk index counts per record how many blocks its maps still refer to (a
 block the live map and a frozen map share counts twice); a record is dead to the cleaner once its
@@ -141,9 +124,6 @@ victim segment: [L L . L L L . L L L]   8 live, 2 dead (80% live)
   user writes 2 blocks into that room:
       blocks written = 2 (user) + 8 (copies) = 10
       WA = 10 / 2 = 5      in general: WA = 1 / (1 - live share of victims)
-
-same thing at full size: a 64 MiB victim, 80% live
-  copy 51.2 MiB to make room for 12.8 MiB of user data: WA 5
 ```
 
 ### Why it explodes near full
@@ -179,18 +159,14 @@ fill  design: cost-benefit, 2 streams, headers (simulated)        model   design
 ```
 
 Going from 90% to 95% full more than doubles the cost. At 95%, 94% of everything the disk writes
-would be cleaning, and the cleaner would spend about 20 µs of CPU per user 4K write (cleaner
-spike, C7, an order of magnitude on a shared machine). That is why a pool's
-[`write_limit`](../docs/design.md#volume-size-and-capacity) defaults to 90%: a write that adds data
-is refused once any disk holding one of its placement group's members reaches that, counting its
-live blocks plus its share of the space grants outstanding on the pool (below), and the pool warns
-10 points earlier. The limit is checked per disk, because one full disk stalls every
-placement group on it. Three kinds of write still pass. A flush of buffered file data under a
-*space grant* passes, because the daemon promised it room when it acknowledged the write. An
-overwrite passes if it only replaces blocks the chunk already holds live, written since its last
-snapshot and kept as copies: in a log it writes new blocks but kills as many old ones, so it adds
-no live data. And a punch passes, because it frees space. So a filesystem's journal and a
-database's preallocated files keep working on a full pool.
+would be cleaning, and the cleaner would spend about 20 µs of CPU per user 4K write, by the
+[cleaner spike](../spikes/cleaner-wa/)'s estimate. That is why a pool's
+[write limit](../docs/design.md#volume-size-and-capacity) is 90% by default: a write that adds data
+is refused once any disk holding one of its placement group's members reaches it, counting its
+live blocks plus the space already promised to buffered writes. The limit is checked per disk,
+because one full disk stalls every placement group on it, and the writes that add no live data
+still pass, so a filesystem's journal and a database's preallocated files keep working on a full
+pool ([post 02](02-chunks-and-placement.md#volume-size-and-capacity)).
 
 Skewed workloads do better: with Zipf-distributed overwrites, cost-benefit cleaning reaches 9.3 at
 95% rather than 17.3. Snapshots lower WA slightly at the same fill (pinned data is perfectly cold:
@@ -206,26 +182,22 @@ Skewed workloads do better: with Zipf-distributed overwrites, cost-benefit clean
 **How it works.** Header blocks are dead to the cleaner from the moment they are written: when
 the cleaner moves blocks, it writes new headers for them. The spike modeled this as an effective
 fill of `u / (1 − h)`, where `h` is the header share of written blocks, and reproduced the greedy
-results within 3%. The effect is large. At 95% full, the headers of 64 KiB records with 32-byte
-entries raise WA from 11.4 to 17.3. At 90% full, queue-depth-1 4K writes, one header block per
+results within 3%. The effect is large. At 95% full, the headers of 64 KiB records raise WA from
+11.4 to 17.3. At 90% full, queue-depth-1 4K writes, one header block per
 data block, double it: 10.98 against 5.64. So the header encoding is part of the format and must
 stay compact.
 
 ## The options
 
-> **In plain words.** There are three broad answers to "how do I get space back". Do not append
-> at all: write in place, so nothing needs cleaning. Append, and clean the simplest way: always
-> take the emptiest segment. Or append, and clean cleverly: prefer old segments, and keep data
-> that will die together in the same segments, so whole segments empty on their own and the
+> **In plain words.** Once you append, there are two broad ways to get space back. Clean the
+> simplest way: always take the emptiest segment. Or clean cleverly: prefer old segments, and keep
+> data that will die together in the same segments, so whole segments empty on their own and the
 > cleaner copies less.
 
-- **Write in place with a journal** (Vitastor, BlueStore's deferred writes). A small write is
-  journaled, acknowledged and copied into place later, so there is no cleaner. But big writes must
-  skip the journal or media bandwidth doubles, and snapshots need a per-chunk extent map with
-  reference counts, which the design calls BlueStore's most complex part.
-- **An embedded key-value engine for metadata** (redb, fjall, Pebble). It reclaims its own space,
-  but flushes files through the kernel itself: it cannot run on a drive SPDK owns, the simulator
-  cannot crash it, and its flushes come on top of the chunk log's.
+Not appending at all, with a journal and data written in place as Vitastor and BlueStore's
+deferred writes do, or an embedded key-value engine that reclaims its own space, are weighed in
+[post 04](04-one-log-per-disk.md#the-options). Here the question is how to clean a log:
+
 - **A log with a greedy cleaner.** Always take the emptiest segment. It ignores age, so on skewed
   workloads it can clean a young segment whose data would soon have died anyway.
 - **A log with a cost-benefit cleaner and two streams** (the original log-structured file system,
@@ -236,8 +208,6 @@ stay compact.
 
 | Approach | Used by | Gets right | Costs |
 | --- | --- | --- | --- |
-| Journal plus in-place data | Vitastor, BlueStore deferred writes | No cleaner | Small writes written twice; reference-counted extent maps for snapshots |
-| Embedded KV engine for metadata | redb, fjall, Pebble | Mature, ready-made | Own flushes; no SPDK; simulator cannot crash it; fjall 179 MB for 4.9 MB live |
 | Log, greedy cleaner | The classic baseline | Lowest WA on uniform overwrites | Cost-benefit writes 36 to 45% less on strongly skewed overwrites |
 | **Log, cost-benefit, two streams, two guards** | LFS; **rock-solid** | 36 to 45% less WA than greedy on strongly skewed overwrites | 3 to 14% more WA than greedy on uniform overwrites |
 | Log, more temperature streams | F2FS, SepBIT | Up to −30% WA on hot/cold | Up to +63% WA on uniform |
@@ -266,8 +236,7 @@ setting, not the design's full free pool), the segment *count* at 95% full gave:
 | 4,096 | 0.20% | 17.3 |
 | 16,384 | 0.05% | 16.7 |
 
-So a segment is 64 MiB on disks of 256 GiB and up, and smaller on smaller disks, so that every disk
-has at least 4,096 of them.
+So a segment's size follows the disk's, so that every disk has at least 4,096 of them.
 
 ### Picking victims: cost-benefit with two guards
 
@@ -290,8 +259,8 @@ guards keep it from livelocking:
   exactly what they freed.
 - **Age cap.** Age counts up to one disk capacity of writes at most, so old, nearly full segments,
   such as snapshot data, stop looking attractive forever. Even with the net-gain guard on, uncapped
-  age livelocked in the cleaner spike: 1,000 cleaning passes without gaining a free segment. The
-  cap fixed it and never raised WA.
+  age livelocked in the cleaner spike: it cleaned on and on without gaining a free segment. The cap
+  fixed it and never raised WA.
 
 The cleaner copies a victim's live contents *grouped by chunk*, which keeps a chunk's blocks that
 die together side by side and wrote 6 to 7% less than copying in log order under hot/cold
@@ -312,61 +281,40 @@ ever named by two index roots at once ([post 06](06-the-lsm-tree.md)).
 > data into three separate open segments: fresh writes, the cleaner's copies of old data, and
 > index files. Each kind tends to die with its neighbours.
 
-**How it works.** Each stream has its own open segment, and each round of group commit writes one
-record to one stream:
-
-```text
-hot stream       new chunk writes + the Raft entries of the same round
-                 [seg 41: new data, dies at the next overwrite      ] ...
-cold stream      blocks the cleaner moves + erasure-coded shards
-                 [seg 17: data that already survived one cleaning   ] ...
-metadata stream  lane 0: flushed runs, manifests; lane w: merge worker w's output
-                 [seg 63: runs, written whole, die whole            ] ...
-```
+**How it works.** [Post 04](04-one-log-per-disk.md#three-streams) describes the streams and their
+lanes: *hot* for new chunk writes and the Raft entries of the same round, *cold* for the cleaner's
+copies and erasure-coded pieces, *metadata* for sorted runs and manifests. Here is what they buy the
+cleaner.
 
 The metadata stream earns its place. Sorted runs are written whole and die whole when a
 compaction or a newer manifest replaces them, so their segments empty without copies. Mixed in
 with the cleaner's copies, runs raised block-volume WA by 25 to 54% at 80 to 90% full, and from 17
 to 50 at 95%; in a stream of their own, by 3 to 15% at 80 to 90% full
-([cleaner streams spike](../docs/design.md#appendix-cleaner-streams-spike)).
-
-Within the metadata stream, each merge worker writes its output to a *lane* of its own, a chain of
-segments separate from the one flushed runs and manifests share. Merges install their output in
-steps (below and [post 06](06-the-lsm-tree.md)), so a merge's consumed input pieces die together and
-free whole segments: mixed into the shared segment, they left 30 to 57 segments stranded instead of
-8 to 10. When a merge ends, its worker's open segment stays open and the next merge continues it,
-so no unused tail is left behind pieces the cleaner cannot move; one segment per merge boundary then
-holds the end of one merge and the start of the next. Recovery reads the log lane by lane, because
-LSNs rise only along a lane, not along a stream ([post 04](04-one-log-per-disk.md)).
-
-Raft entries stay in the hot stream even though a stream of their own saved 6%: a round writes one
-record to one stream, so a Raft stream would split a commit's chunk write and its Raft entries into
-two rounds and two flushes.
+([cleaner streams spike](../docs/design.md#appendix-cleaner-streams-spike)). Within it, each merge
+worker writes to a lane of its own, and merges install their output in steps
+([post 06](06-the-lsm-tree.md)), so a merge's consumed input pieces die together and free whole
+segments: mixed into the shared segment, they left 30 to 57 segments stranded instead of 8 to 10.
+A worker's next merge continues its open segment, so no unused tail is left behind pieces the
+cleaner cannot move.
 
 More streams by temperature are not worth it yet: age classes for the cleaner's copies helped
 hot/cold overwrites but hurt uniform ones (see the options table), and with headers counted,
-perfect hot/cold separation is only 1.1 to 1.6× below two streams. A hot 4K commit can also wait
-behind a cold 1 MiB record, since rounds take the streams in turn, and a second round in flight
-does not help on a consumer drive, whose flush waits for every byte in its cache; that
-group-commit question is in [post 04](04-one-log-per-disk.md) and the
-[stream overlap spike](../docs/design.md#appendix-stream-overlap-spike).
+perfect hot/cold separation is only 1.1 to 1.6× below two streams.
 
 **Chunk slots: data that dies alone.** One kind of data defeats streams: whole 4 MiB chunks of
-large files, deleted at random. A 64 MiB segment holds 16 of them, and random deletes leave it
-partly live, so they clean like small writes: 4.9 at 90% and 9.0 at 95% full. The fix is a *chunk
-slot*: a slot segment holds as many slots of exactly one chunk's data as fit, 16 in a 64 MiB
-segment; a slot frees
-once the record that rewrote or deleted its chunk is durable, and the segment is freed with its
-last slot. Whole chunks then cost a WA of about 1 at any fill, so a pool of large files, such as
+large files, deleted at random. Random deletes leave their segments partly live, so they clean
+like small writes: 4.9 at 90% and 9.0 at 95% full. So a chunk written whole goes to a *chunk slot*
+of its own ([post 04](04-one-log-per-disk.md#chunk-slots-for-whole-chunk-writes)), which frees once
+the record that rewrote or deleted its chunk is durable; a slot segment is freed with its last
+slot. Whole chunks then cost a WA of about 1 at any fill, so a pool of large files, such as
 backups, can raise its write limit.
 
 ### The cleaner runs beside the writer, not on it
 
-> **In plain words.** Copying is real work: reading blocks, checking their checksums, writing them
-> again. If the same thread that serves your writes also did the copying, your writes would wait
-> behind it. So a helper thread does the copying and sends a short note to the owner for each
-> move: "chunk 7 blocks 0 to 3 used to be at A, now also at B". The owner updates its index only
-> if the blocks are still at A. If you overwrote them in the meantime, your write wins and the
+> **In plain words.** Copying is real work. If the thread that serves your writes also checked
+> every copied block, your writes would wait behind it, so a helper thread does that part. Each
+> move then says "chunk 7 blocks 0 to 3 used to be at A, now also at B", and the owner updates its
+> index only if the blocks are still at A. If you overwrote them meanwhile, your write wins and the
 > copy is simply garbage.
 
 **How it works.** The expensive part of cleaning, checking every copied block, runs on a worker
@@ -393,9 +341,9 @@ sequenceDiagram
     W->>W: read chunk 7 block 3 at LBA 100, verify CRC32C
     C->>O: write chunk 7 block 3
     O->>O: live map now says block 3 is at LBA 900
-    W->>W: append copy entry: block 3 from LBA 100 to LBA 5000
-    W->>O: move block 3 from 100 to 5000
-    O->>O: map points at 900, not 100, so skip the move
+    W->>O: hand over verified block 3, copied from LBA 100
+    O->>O: append copy entry: block 3 from LBA 100 to LBA 5000
+    O->>O: copy record durable; map points at 900, not 100, so skip the move
     Note over O: the client's write wins and the copy at 5000 is dead at once
 ```
 
@@ -405,7 +353,7 @@ A whole pass, from victim to free segment, looks like this:
 flowchart TD
     A["Live blocks and age per segment"] --> B
     B["Pick victims by cost-benefit<br/>net-gain guard, age cap"]
-        B --> C["Owner reads live blocks;<br/>worker verifies CRC32C, groups by chunk"]
+    B --> C["Owner reads live blocks;<br/>worker verifies CRC32C, groups by chunk"]
     C --> D["Owner appends copy entries to the cold stream;<br/>live runs are marked for a rewrite"]
     D --> E["Copy record durable"]
     E --> F{"Map still points<br/>at the source?"}
@@ -428,7 +376,7 @@ BlobDB moves values only in compactions, which here would rewrite the whole inde
 The [parallel cleaner spike](../spikes/parallel-cleaner/) measured why the worker matters. Inline,
 cleaning cost the writing thread 5.9 to 11 µs per write at 90 to 95% full and gave its writes a
 p99 of 250 to 540 µs; with a worker, 1.6 to 1.8 µs and about 6 µs. The price is 7 to 30% more total
-CPU, so a disk gets one worker, and a second once free segments fall to 14.
+CPU, so a disk gets one worker, and a second only once free segments start to run low (below).
 
 ### The segment usage table
 
@@ -437,34 +385,25 @@ CPU, so a disk gets one worker, and a second once free segments fall to 14.
 > damaged would look empty and be overwritten. So the log keeps a small ledger, one line per
 > segment in use, and saves it with every checkpoint.
 
-**How it works.** Each manifest carries the table as of its base LSN: one row per segment that is
-not free:
-
-```text
-one row, 17 bytes
-+-----------+-------+-------------+--------------------+
-| segment   | state | live blocks | newest record LSN  |
-| 4 bytes   | 1     | 4 bytes     | 8 bytes            |
-+-----------+-------+-------------+--------------------+
-state: used, slot (with a bitmap of its slots) or quarantined; a segment with no row is free
-```
-
-A manifest edit carries only the rows that changed since the manifest before it, a freed segment as
-a row in state free, and a full snapshot of the table is written from time to time. The live count is
-every data block of a durable record (header blocks are dead to the cleaner), lowered by the index
-owners as data dies. The counts a manifest holds are only advice: at every open they are set again
-from the index, since counts carried across a crash drift as replay applies records again. The table
-is small: under 136 KiB below 256 GiB, 272 KiB per TiB above.
+**How it works.** Each manifest carries the table as of the point its replay starts from: one row
+per segment that is not free, giving its state (used, a slot segment with a bitmap of its slots, or
+quarantined), its live block count and its newest record's LSN. A segment with no row is free. A
+manifest edit carries only the rows that changed since the manifest before it, and a full copy of
+the table is written from time to time ([post 04](04-one-log-per-disk.md#checkpoints-and-manifests)).
+The live count is every data block of a durable record, lowered by the index owners as data dies.
+The counts a manifest holds are only advice: at every open they are set again from the index, since
+counts carried across a crash drift as replay applies records again.
 
 A segment is free because the table says so, never because its header is unreadable, as in F2FS
 and LFS. A segment whose header is damaged but which holds records of this log is *quarantined*:
 never reused, reported for repair from a replica, and kept quarantined by every later table.
 
-A segment the cleaner frees keeps its old header until it is
-reused, so a header alone cannot say whether a segment was opened after the manifest or freed
-before it. Every manifest therefore records `NextSeq`, the sequence number the next segment opened
-after its base LSN will take. At recovery, a header at `NextSeq` or above is a segment opened since
-the manifest, so it is used whatever the table says; below it, the table decides, and a segment the
+A segment the cleaner frees keeps its old header until it is reused, so a header alone cannot say
+whether a segment was opened after the manifest or freed before it. Every manifest therefore
+records the open sequence number the next segment will take (each segment header carries the number
+it was opened under, [post 04](04-one-log-per-disk.md#the-layout-superblock-segments-records)). At
+recovery, a header at or past that number belongs to a segment opened since the manifest, so the
+segment is used whatever the table says; below it, the table decides, and a segment the
 table leaves out is free with a stale header. That makes a freed segment reusable at once, with no
 waiting state like F2FS's *prefree*, under two conditions: the cleaner never frees a segment holding
 what the newest manifest named by a durable segment header still needs (its pieces, its runs, the
@@ -496,7 +435,7 @@ stateDiagram-v2
 
 **How it works.** Three kinds of work may use the reserve: checkpoints, the cleaner and merge
 steps. Each frees at least what it writes once its manifest is durable. The design sizes the
-reserve to hold each at its largest, never fewer than the 8 segments the cleaner spikes ran with:
+reserve to hold each at its largest, never smaller than the free pool the cleaner spikes ran with:
 
 ```text
 reserve = room for the largest checkpoint
@@ -505,10 +444,9 @@ reserve = room for the largest checkpoint
 ```
 
 A checkpoint has a hard size bound, because producers wait beyond it (below). A merge holds at most
-one step beyond what the manifests name: installed
-whole, a merge held 65 to 258 segments of 64 MiB on a 256 GiB disk; in steps, 2
-([LSM space spike](../spikes/lsm-study-space/)). RocksDB's `SstFileManager` reserves the same
-three things, and ZFS's slop space keeps room for freeing space the same way.
+one step beyond what the manifests name: installed whole, a merge held 65 to 258 segments on a
+256 GiB disk; in steps, 2 ([LSM space spike](../spikes/lsm-study-space/)). RocksDB's file manager
+reserves the same three things, and ZFS's slop space keeps room for freeing space the same way.
 
 The reserve and the cleaner's free segments sit below the pool's write limit, so a disk at its limit
 still cleans, checkpoints and merges. The reserve is computed when the disk is opened, and a disk too
@@ -522,30 +460,29 @@ small to hold it is refused rather than run with less.
 > frees space, and only at the very end does it make writers wait. Below the pool's write limit,
 > your application sees this as slower writes, not errors.
 
-**How it works.** The cleaner keeps a target of free segments outside the reserve, 16 by default,
-and the disk's owner checks how many are left every round. The thresholds borrow RocksDB's
-proportions. RocksDB counts the unmerged files waiting at the top of its tree (*level 0*): it
-starts compacting at 4, adds compaction threads at 8, slows writes at 20 and stops them at 36.
-rock-solid reuses those proportions over its 16 spare segments; read as one used-up free segment
-standing for two level-0 files (our mapping, not a measurement), 16 free ↔ 4 files, 14 ↔ 8,
-8 ↔ 20, 0 ↔ 36:
+**How it works.** The cleaner keeps a target number of free segments outside the reserve, and the
+disk's owner checks how many are left every round. Those free segments play the part of RocksDB's
+*level 0*, the unmerged files waiting at the top of its tree: RocksDB starts compacting at 4 of
+them, adds compaction threads at 8, slows writes at 20 and stops them at 36. rock-solid borrows
+those proportions, reading one used-up free segment as two level-0 files (our mapping, not a
+measurement):
 
 ```text
-free segments outside the reserve   RocksDB level-0 files   what happens
-  16 |################|  target       4: compaction starts    one cleaner worker
- 14 |##############  |               8: more threads         a second worker joins
-  8 |########        |              20: writes slow          chunk writes go through
-    |                |                                       a token bucket
-  0 |                |              36: writes stop          ordinary items wait
- ===+================+== reserve (8 segments): checkpoints, cleaner, merge steps only ====
+free segments outside the reserve   RocksDB level 0           what happens
+ target |################|          4 files: compaction       one cleaner worker
+        |##############  |          8: more threads           a second worker joins
+   half |########        |         20: writes slow            chunk writes go through
+        |                |                                    a token bucket
+   none |                |         36: writes stop            ordinary items wait
+ =======+================+== reserve: checkpoints, cleaner, merge steps only ====
 ```
 
-Below 8, chunk write blocks pass through a token bucket refilled at the rate the cleaner measurably
-frees space, net of everything it spent (copies, checkpoints, merges, headers), so the rate is the
-room left for ordinary writes; it is smoothed over one-second windows and scaled down as free
-segments fall to none. That is how CockroachDB's admission control
-hands out write tokens from the bytes compacted out of level 0. (RocksDB slows to a fixed rate
-that needs tuning per drive, and Pebble only stops, which gives a latency cliff.) Raft entries,
+Once half the target is used up, chunk write blocks pass through a token bucket refilled at the rate
+the cleaner measurably frees space, net of everything it spent (copies, checkpoints, merges,
+headers), so the rate is the room left for ordinary writes; it is smoothed over one-second windows
+and scaled down as free segments fall to none. That is how CockroachDB's admission control hands
+out write tokens from the bytes compacted out of level 0. (RocksDB slows to a fixed rate that needs
+tuning per drive, and Pebble only stops, which gives a latency cliff.) Raft entries,
 punches and freezes are not charged: they are small, and punches free space.
 
 A chunk write the bucket refuses stays with its connection, and the loop stops reading that
@@ -560,18 +497,17 @@ A full disk can therefore show up in three ways, in this order:
 
 | Condition | What the client sees |
 | --- | --- |
-| A disk holding a member of the write's placement group is past the pool's `write_limit`, and the write adds data | Refused: `ENOSPC` from `write()` on a file volume ([post 09](09-rwx-filesystem-and-cache-coherence.md)), a wait until the pool has room on a block volume ([post 10](10-block-snapshots-and-clones.md)) |
+| A disk holding a member of the write's placement group is past the pool's write limit, and the write adds data | Refused: `ENOSPC` from `write()` on a file volume ([post 09](09-rwx-filesystem-and-cache-coherence.md)), a wait until the pool has room on a block volume ([post 10](10-block-snapshots-and-clones.md)) |
 | Below the limit, the cleaner falls behind | Slower writes, then waiting |
-| The cleaner has no victim that passes its net-gain guard: nothing more can be freed | `NoSpace` from the disk log, which reaches a file's writer late, at its next `write()`, `fsync` or `close` |
+| The cleaner has no victim that passes its net-gain guard: nothing more can be freed | A no-space error from the disk log, which reaches a file's writer late, at its next `write()`, `fsync` or `close` |
 
 The first row is the only one the application normally meets, and the design is careful about
 how. A file's buffered writes are acknowledged against a space grant so that `write()` itself
 reports a full pool. A block volume's write is never failed for space, because the filesystem
 inside the volume would stop: in the
-[block ENOSPC spike](../docs/design.md#appendix-block-enospc-spike), ext4 reported `ENOSPC` at
-`fsync`, then aborted its journal when a refused write turned out to be its own metadata, and was
-consistent again only after a log replay that needs the room the pool lacked. Held until the pool
-grew, the same writes completed and the filesystem checked clean.
+[block ENOSPC spike](../docs/design.md#appendix-block-enospc-spike), ext4 aborted its journal when
+a refused write was its own metadata, while the same writes held until the pool grew completed and
+the filesystem checked clean ([post 10](10-block-snapshots-and-clones.md)).
 
 The same wait applies to a lagging checkpoint: once the records after the newest manifest reach
 twice the checkpoint interval, group commit takes items only from the checkpoint and the cleaner
@@ -580,8 +516,8 @@ until a manifest is durable.
 Small disks fill less. The net-gain guard charges a victim's copies in whole records, a large share
 of a small segment, so it caps a victim's live share lower there, and once every segment is fuller
 than that cap writes would fail below the write limit. So a pool that leaves its write limit unset
-gives each disk a default that follows its segment size: 90% on disks of 128 GiB and up, lower on
-smaller ones ([Volume size and capacity](../docs/design.md#volume-size-and-capacity)).
+gives each disk a default that follows its segment size: 90% on large disks, lower on small ones
+([Volume size and capacity](../docs/design.md#volume-size-and-capacity)).
 
 ### TRIM, paced
 
@@ -593,8 +529,7 @@ smaller ones ([Volume size and capacity](../docs/design.md#volume-size-and-capac
 
 **How it works.** TRIMs are paced, one per segment, at a steady rate borrowed from CockroachDB's
 file deletion rate. They run faster only to clear an old backlog, as Pebble's delete pacer does.
-Unlike deleting a
-file in Pebble, a TRIM frees no space in the log, so low space never speeds it up.
+Unlike deleting a file in Pebble, a TRIM frees no space in the log, so low space never speeds it up.
 
 A freed segment's TRIM is queued only once a segment header naming the manifest that freed it is
 durable. Before that, a crash would load the older manifest, which still lists the segment, and a
@@ -602,8 +537,7 @@ listed segment whose header reads as zeros is damage. A segment allocated again 
 it is still queued and waits for one already issued, as F2FS does, so a late discard cannot erase
 new records. A drive whose discarded blocks do not read back as zeros would leave an undecodable
 header that recovery reads in full at every start, so on such a drive the freed segment's header is
-zeroed instead. A disk that is a file instead of a
-raw device ignores TRIM, since punching holes in the file would undo writing it in full when it
+zeroed instead. A disk that is a file instead of a raw device ignores TRIM, since punching holes in the file would undo writing it in full when it
 was created ([post 04](04-one-log-per-disk.md)).
 
 ## Freeing space: from `rm` to a free segment
@@ -613,8 +547,8 @@ was created ([post 04](04-one-log-per-disk.md)).
 > reclaims the segments they sat in. The one exception: a block a snapshot still needs stays
 > live, however many times you delete the file.
 
-**How it works.** Chunk IDs are computed, `(volume_id, inode_id, offset / CHUNK_SIZE)`, so freeing
-data never needs to search for chunks: a *purge* lists the IDs and punches them, batched per
+**How it works.** A chunk's ID is computed from its volume, its inode and its offset
+([post 02](02-chunks-and-placement.md)), so freeing data never needs to search for chunks: a *purge* lists the IDs and punches them, batched per
 placement group ([Freeing space](../docs/design.md#freeing-space)). A punch to a chunk that does
 not exist succeeds, so a purge interrupted by a crash simply runs again. The path:
 
@@ -634,25 +568,23 @@ flowchart LR
 
 - **Unlink and truncate** add a purge entry in the same metadata transaction that removes or
   shrinks the file; a background purger punches the chunks
-  ([post 09](09-rwx-filesystem-and-cache-coherence.md) has the file-side details). A truncate's
-  entry starts at the new size's byte offset, so its first punch zeroes the rest of the last
-  block, with a whole-block merge at the chunk's primary, and frees only the whole blocks after it.
-  A punch that covers part of a block frees nothing; it writes a new block of zeros there.
-  An inode has one purge entry: a second truncate, or an unlink before the purger has run, widens
-  the pending entry instead of overwriting it, which would leak the chunks the first one covered.
-  The purger removes entries only with a check that nobody added or widened them meanwhile.
+  ([post 09](09-rwx-filesystem-and-cache-coherence.md) has the file-side details). A punch that
+  covers part of a block, such as the rest of a truncated file's last block, frees nothing; it
+  writes a new block of zeros there. A second truncate, or an unlink before the purger has run,
+  widens the inode's pending purge instead of replacing it, which would leak the chunks the first
+  one covered.
 - **Block discard** from the pod's filesystem reaches the daemon through ublk and becomes a punch.
   The CSI driver mounts the filesystems it creates with `discard`, because without it
   deleting files frees nothing in the pool: in the block ENOSPC spike, a write after `rm` still
-  failed until the mount used `discard`. **Deleting a block volume** purges chunks `0 .. size ÷ CHUNK_SIZE`; **deleting a
-  filesystem volume** removes its metadata keys (`fs/{volume}/`) with one range removal and has
+  failed until the mount used `discard`. **Deleting a block volume** purges every chunk up to its
+  size; **deleting a filesystem volume** removes its metadata keys with one range removal and has
   every disk of the pool sweep its chunk index for the volume's ID, which is cheaper than purging
   millions of small files one by one.
 - **Tombstones.** Punching a whole chunk keeps the chunk's entry, its tombstone, and removes its
   live map. Punches are recorded in record headers like writes, so an index rebuilt from the
   headers cannot bring a deleted chunk back.
 - **Snapshots pin blocks.** Punches carry the snapshot epoch, so a purge never frees a block a
-    snapshot's frozen map still refers to. Deleting a snapshot starts a sweep that drops frozen
+  snapshot's frozen map still refers to. Deleting a snapshot starts a sweep that drops frozen
   versions nothing needs. Until then, past the write limit even an overwrite of a block a snapshot
   shares is refused like a new write, because it needs new space.
 
@@ -661,12 +593,12 @@ flowchart LR
 Every measured number above comes from a spike, a simulation, or a study of other engines' source.
 The level-0 mapping is arithmetic on those, not a measurement.
 
-| Spike | Setup | What it settled |
-| --- | --- | --- |
-| [Cleaner WA](../docs/design.md#appendix-cleaner-write-amplification-spike), [`spikes/cleaner-wa`](../spikes/cleaner-wa/) | Rust simulation, 16 GiB disk of 4,096 × 4 MiB segments standing in for 256 GiB of 64 MiB | Uniform overwrites at 80 / 90 / 95%: greedy 3.1 / 6.5 / 15.1, cost-benefit with two streams 3.4 / 7.2 / 17.3. Segment count, guards, headers |
-| [Cleaner streams](../docs/design.md#appendix-cleaner-streams-spike), [`spikes/cleaner-streams`](../spikes/cleaner-streams/) | The same simulator, extended with metadata, slots and more streams | Metadata stream, chunk slots, no temperature streams |
-| [Parallel cleaner](../docs/design.md#appendix-parallel-cleaner-spike), [`spikes/parallel-cleaner`](../spikes/parallel-cleaner/) | Rust, 1 GiB in-memory disk, 4 vCPUs, greedy cleaner | Owner work per write at 90 / 95%: inline 5.86 / 10.96 µs, worker 1.56 / 1.78 µs |
-| [LSM space](../docs/design.md#appendix-lsm-space-spike), [`spikes/lsm-study-space`](../spikes/lsm-study-space/) | Source study of Pebble, RocksDB, CockroachDB, ScyllaDB; Go model of the metadata stream | Merge steps and the reserve; slowdown, stop and TRIM pacing practices |
+| Spike | What it settled |
+| --- | --- |
+| [Cleaner WA](../docs/design.md#appendix-cleaner-write-amplification-spike), [`spikes/cleaner-wa`](../spikes/cleaner-wa/) | A simulator checked against the greedy model; cost-benefit against greedy; segment count, the two guards and the cost of headers |
+| [Cleaner streams](../docs/design.md#appendix-cleaner-streams-spike), [`spikes/cleaner-streams`](../spikes/cleaner-streams/) | The metadata stream, merge lanes, chunk slots, and no temperature streams |
+| [Parallel cleaner](../docs/design.md#appendix-parallel-cleaner-spike), [`spikes/parallel-cleaner`](../spikes/parallel-cleaner/) | A worker beside the owner loop rather than cleaning inline |
+| [LSM space](../docs/design.md#appendix-lsm-space-spike), [`spikes/lsm-study-space`](../spikes/lsm-study-space/) | Merge steps and the reserve, from a source study of Pebble, RocksDB, CockroachDB and ScyllaDB; slowdown, stop and TRIM pacing practices |
 
 The cleaner in the real log is held to the cleaner spike's figures, and the simulator's invariant
 checker holds every simulated run to three rules: each cleaner pass frees more segments than it
@@ -680,12 +612,12 @@ its reserve still finishes a checkpoint and a cleaner pass ([post 12](12-testing
 - **The worst workload gets no help.** Cost-benefit loses to greedy on uniform overwrites (see the
   options table) to win on skewed ones.
 - **Extra CPU.** The worker costs more total CPU than inline cleaning, and near full the cleaner's
-  CPU is large (about 20 µs per user 4K write at 95% in the cleaner spike's estimate).
+  CPU is large.
 - **Index churn.** The cleaner's moves cause 55, 76 and 92% of the chunk index's entries at 80, 90
   and 95% full under uniform overwrites.
-- **Fragmentation stays.** A chunk overwritten at random 4K keeps one extent per write, so its
-  sequential reads become random 4K reads, and a block volume can push a 1 TB disk toward 270
-  million index entries.
+- **Fragmentation stays.** A chunk overwritten at random 4K keeps one extent per write
+  ([post 04](04-one-log-per-disk.md#trade-offs-what-it-costs-us)), and a block volume can push a
+  1 TB disk toward 270 million index entries.
 - **Slowed, not failed.** A write can wait as long as the cleaner needs, and a slowed member delays
   the acknowledgments of every placement group it belongs to.
 - **Thresholds are borrowed** from RocksDB, not measured.
@@ -697,22 +629,19 @@ From the design's [Roadmap and open questions](../docs/design.md#roadmap-and-ope
 - **Temperature separation that never loses to two streams**, for example age classes turned on
   only when the cleaner sees skew. Needs block-volume and small-file traces.
 - **Cleaner moves once the chunk index outgrows memory**: the owner's check before each move can
-  then miss the block cache, 0.15 to 1.4 ms cold.
+  then miss the block cache and read the disk.
 - **Regrouping chunks overwritten at random**, for example rewriting a chunk with too many extents
   whole into a chunk slot. Each regroup writes 4 MiB, so it needs traces.
 - **Admission across a placement group**, so one cleaning disk does not fill a primary's whole
   replication queue.
 - **Cleaning-debt thresholds.** Does the measured-rate bucket keep latency bounded under bursty
   overwrites at 90 to 95% full, and should the thresholds scale with the current WA?
-- **Deletes on a full disk.** Punches pass the pool's `write_limit`, but with no free segment
+- **Deletes on a full disk.** Punches pass the pool's write limit, but with no free segment
   outside the reserve they, and the MetaStore's unlinks, wait like any write. Should they draw on a
   slice of the reserve? Every system studied keeps one: ext4 for punches, XFS a reserve pool, Btrfs
   for `unlink`, ZFS its slop space, CockroachDB a ballast file an operator deletes.
-- **Merge lanes shared between merges.** A worker's next merge continues its last one's segment;
-  how much that mixing strands has not been measured.
-- **The drive's own WA under this log** with 16, 64 or 256 MiB segments, measured with SMART
-  host-writes and NAND-writes counters.
-
+- **Merge lanes shared between merges** and **the drive's own WA by segment size**, as in
+  [post 04](04-one-log-per-disk.md#open-directions).
 - **Write amplification of the Go log under write admission** runs above the cleaner streams
   spike's at 90% full: admission makes rounds smaller, and the chunk index writes more than the
   spike modelled. Should a round wait for more writes while admission holds them?
