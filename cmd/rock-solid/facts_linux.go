@@ -143,6 +143,9 @@ func (s *facts) answer(gone <-chan struct{}, k factsKey, build func() ([]byte, e
 		c := s.cache[k]
 		if b := c.Fresh(s.now()); b != nil {
 			s.mu.Unlock()
+			if len(b) == 0 {
+				return nil, errNoPG
+			}
 			return b, nil
 		}
 		if fl := s.flight; fl != nil {
@@ -154,26 +157,36 @@ func (s *facts) answer(gone <-chan struct{}, k factsKey, build func() ([]byte, e
 				return nil, errors.New("the request ended")
 			}
 		}
-		fl := make(chan struct{})
-		s.flight = fl
+		s.flight = make(chan struct{})
 		s.mu.Unlock()
-		b, err := build()
+		return s.buildOnce(k, build)
+	}
+}
+
+// buildOnce runs build as the one build in flight and keeps its answer for a second; a PG no table
+// holds is kept as an empty answer, so asking for it again is rate-limited like any other path.
+func (s *facts) buildOnce(k factsKey, build func() ([]byte, error)) (b []byte, err error) {
+	defer func() {
 		s.mu.Lock()
+		defer s.mu.Unlock()
 		now := s.now()
 		for k, c := range s.cache {
 			if c.Fresh(now) == nil {
 				delete(s.cache, k)
 			}
 		}
-		if err == nil {
-			c.Keep(now, b)
+		if keep := b; err == nil || errors.Is(err, errNoPG) {
+			if keep == nil {
+				keep = []byte{}
+			}
+			c := ops.Cache{}
+			c.Keep(now, keep)
 			s.cache[k] = c
 		}
+		close(s.flight)
 		s.flight = nil
-		close(fl)
-		s.mu.Unlock()
-		return b, err
-	}
+	}()
+	return build()
 }
 
 // gather has each loop without a late call run f(i, ctx) at its next event, waits for them, and

@@ -164,15 +164,15 @@ func TestFactsServerBuildsOncePerSecond(t *testing.T) {
 			t.Fatal("a PG the node holds no table of was answered")
 		}
 	}
-	if n := calls(); n[0] != 3 {
-		t.Fatalf("two refused PG requests and /facts called loop 0 %d times, not once each", n[0])
+	if n := calls(); n[0] != 2 && time.Since(start) < time.Second {
+		t.Fatalf("/facts and two refused requests for one PG within a second called loop 0 %d times, not once per path", n[0])
 	}
 	time.Sleep(time.Second)
 	if _, err := get(&p.facts, "/facts"); err != nil {
 		t.Fatal(err)
 	}
-	if n := calls(); n[0] != 4 {
-		t.Fatalf("a request a second later called loop 0 %d times in all, not 4", n[0])
+	if n := calls(); n[0] != 3 {
+		t.Fatalf("a request a second later called loop 0 %d times in all, not 3", n[0])
 	}
 }
 
