@@ -274,7 +274,7 @@ member of, and as primary peers in it before it serves anything. Peering again i
 would not be safe: a write its previous run sent can still sit in a member's socket buffer and land
 after that member answered peering, under a version the restarted primary is about to give to
 other data. In the new interval the member refuses it. A restarted member that is not the primary
-asks too, since the writes it replayed from its log stay unread until a peering decision settles
+asks too, since the writes it replayed from its log stay hidden from reads until a peering decision settles
 them. The cost is one table change and one peering per PG of the disk, as
 Ceph peers every PG of a restarted daemon.
 
