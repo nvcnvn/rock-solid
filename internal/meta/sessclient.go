@@ -83,8 +83,7 @@ func (s *SessionClient) Leased(t lease.Time) bool {
 	return s.id != 0 && slices.ContainsFunc(s.grantors, func(g core.NodeID) bool { return s.h.Valid(g, t) })
 }
 
-// Held is the session's incarnation, the time left of its longest lease at t, and the age of its
-// last answered renewal on CLOCK_MONOTONIC_RAW, 0 before one.
+// Held is the session's incarnation, its longest lease's time left at t and its last renewal's age, 0 before one.
 func (s *SessionClient) Held(t lease.Time) (inc uint64, left, age core.Tick) {
 	for _, g := range s.grantors {
 		left = max(left, s.h.Left(g, t))

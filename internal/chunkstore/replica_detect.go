@@ -68,11 +68,34 @@ func (r *Replica) diskState(ctx *core.Context) DiskState {
 	return DiskState{Log: r.cfg.Log, Fill: fill, Oldest: r.st.Oldest(ctx.Now), Failed: r.st.Err() != nil, Pools: pools}
 }
 
-// DiskState is what the replica's next heartbeat would report of its disk.
-func (r *Replica) DiskState(ctx *core.Context) DiskState { return r.diskState(ctx) }
+// Fill is the disk's live blocks as admission or the last heartbeat summed them.
+func (r *Replica) Fill() uint64 { return r.live }
 
 // Reported is the replica's last heartbeat, which the next one overwrites.
 func (r *Replica) Reported() *Report { return &r.rep }
+
+// Lead is the replica's state now as pg's primary in interval, chunks left out; false if it leads no such interval.
+func (r *Replica) Lead(pg core.PGID, interval uint32) (LeadState, bool) {
+	if l := r.leadIn(pg, interval); l != nil {
+		return r.leadState(l), true
+	}
+	return LeadState{}, false
+}
+
+// UnfoundChunks appends to dst up to MaxReportUnfound chunks its peering of pg in interval left unfound.
+func (r *Replica) UnfoundChunks(pg core.PGID, interval uint32, dst []core.ChunkID) []core.ChunkID {
+	if l := r.leadIn(pg, interval); l != nil {
+		return l.unfoundChunks(dst)
+	}
+	return dst
+}
+
+func (r *Replica) leadIn(pg core.PGID, interval uint32) *lead {
+	if i := r.lead(pg); i >= 0 && r.leads[i].interval == interval {
+		return &r.leads[i]
+	}
+	return nil
+}
 
 // Run is the run ID the replica's loop grants its leases under.
 func (r *Replica) Run() uint64 { return r.grantor.Run() }
@@ -84,25 +107,40 @@ func (r *Replica) Disk() uint32 { return r.cfg.Disk }
 func (r *Replica) leadStates(dst []LeadState) []LeadState {
 	for i := range r.leads {
 		l := &r.leads[i]
-		p, _ := r.table.entry(l.pg)
-		s := LeadState{PG: l.pg, PGCount: uint32(len(p.PGs)), Interval: l.interval, Active: l.active}
-		if l.active {
-			// ponytail: counts the lead's decisions on every heartbeat; count once per decision if it shows in a profile.
-			s.Unfound, _ = r.Unfound(l.pg)
-			for _, k := range l.kept {
-				if k.unfound {
-					s.Chunks = append(s.Chunks, k.chunk)
-				}
-			}
-			s.Chunks = s.Chunks[:min(len(s.Chunks), MaxReportUnfound)]
-			for p, n := range l.listed {
-				s.Lacking += uint32(n)
-				if n > 0 {
-					s.Short |= 1 << p
-				}
+		s := r.leadState(l)
+		s.Chunks = l.unfoundChunks(nil)
+		dst = append(dst, s)
+	}
+	return dst
+}
+
+// leadState is what the replica reports of lead l, its unfound chunks left out.
+func (r *Replica) leadState(l *lead) LeadState {
+	p, _ := r.table.entry(l.pg)
+	s := LeadState{PG: l.pg, PGCount: uint32(len(p.PGs)), Interval: l.interval, Active: l.active}
+	if l.active {
+		// ponytail: counts the lead's decisions on every heartbeat; count once per decision if it shows in a profile.
+		s.Unfound, _ = r.Unfound(l.pg)
+		for p, n := range l.listed {
+			s.Lacking += uint32(n)
+			if n > 0 {
+				s.Short |= 1 << p
 			}
 		}
-		dst = append(dst, s)
+	}
+	return s
+}
+
+// unfoundChunks appends to dst the chunks l's last peering left unfound, up to MaxReportUnfound.
+func (l *lead) unfoundChunks(dst []core.ChunkID) []core.ChunkID {
+	if !l.active {
+		return dst
+	}
+	n := len(dst)
+	for _, k := range l.kept {
+		if k.unfound && len(dst) < n+MaxReportUnfound {
+			dst = append(dst, k.chunk)
+		}
 	}
 	return dst
 }

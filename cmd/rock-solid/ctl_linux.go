@@ -121,7 +121,7 @@ func newCtl(cfg ctlConfig) (_ *ctl, err error) {
 	}
 	p.Port = port
 	p.facts = facts{node: cfg.Node, flags: cfg.Flags, hosts: hostsOf(cfg.Voters, true), mails: []*mail{&p.mail},
-		fill: func(_ int, ctx *core.Context, f *ops.Facts) { node.CtlFacts(ctx, p.m.h, cfg.Node, release, f) }, pg: func(int, *ops.PGFacts) {}}
+		fill: func(_ int, ctx *core.Context, f *ops.Facts) { node.CtlFacts(ctx, p.m.h, cfg.Node, release, f) }, pg: func(int, *ops.PGFacts) bool { return false }}
 	if err := p.facts.listen(cfg.Admin); err != nil {
 		return nil, err
 	}

@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"errors"
+	"runtime"
 	"slices"
 	"testing"
 
@@ -31,6 +32,30 @@ type devRun struct {
 	opened *meta.OpenedDisk
 	failed bool
 	pages  looptest.Pages
+	// counting has onEvent add the mallocs and bytes the device's calls allocate to allocs and
+	// bytes, leaving out the simulated disk's and the harness's.
+	counting      bool
+	allocs, bytes uint64
+	ms            runtime.MemStats
+}
+
+// onEvent hands the device ev.
+func (r *devRun) onEvent(ev *core.Event) {
+	r.out.Reset()
+	r.counted(func() { r.d.OnEvent(&r.ctx, ev, &r.out) })
+}
+
+// counted runs f, adding what it allocates to allocs and bytes while counting.
+func (r *devRun) counted(f func()) {
+	if !r.counting {
+		f()
+		return
+	}
+	runtime.ReadMemStats(&r.ms)
+	m, n := r.ms.Mallocs, r.ms.TotalAlloc
+	f()
+	runtime.ReadMemStats(&r.ms)
+	r.allocs, r.bytes = r.allocs+r.ms.Mallocs-m, r.bytes+r.ms.TotalAlloc-n
 }
 
 func newDevRun(t testing.TB, disk *sim.Disk) *devRun {
@@ -82,8 +107,7 @@ func (r *devRun) step() bool {
 	a := r.work[0]
 	r.work = r.work[1:]
 	ev := r.disk.Execute(r.ctx.Pool, &a)
-	r.out.Reset()
-	r.d.OnEvent(&r.ctx, &ev, &r.out)
+	r.onEvent(&ev)
 	r.take()
 	return true
 }

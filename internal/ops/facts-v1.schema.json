@@ -37,7 +37,7 @@
           "device": {
             "pattern": "^[0-9]+$",
             "type": "string",
-            "x-rock-solid-name": false
+            "x-rock-solid-name": true
           },
           "disk": {
             "minimum": 0,
@@ -324,6 +324,13 @@
         }
       },
       "type": "object"
+    },
+    "unanswered_loops": {
+      "items": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "type": "array"
     }
   },
   "type": "object"
