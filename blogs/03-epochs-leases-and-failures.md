@@ -269,11 +269,13 @@ waits in its `down` state. The table keeps, for each PG, its last activated inte
 primaries report on their heartbeats, and the members of the intervals since; usually that is just
 the previous one.
 
-A primary that restarts, even with no membership change, asks for a new interval of each PG it leads
-and peers in it before it serves anything. Peering again in its old interval would not be safe: a
-write its previous run sent can still sit in a member's socket buffer and land after that member
-answered peering, under a version the restarted primary is about to give to other data. In the new
-interval the member refuses it. The cost is one table change and one peering per PG of the disk, as
+A node that restarts, even with no membership change, asks for a new interval of each PG it is a
+member of, and as primary peers in it before it serves anything. Peering again in its old interval
+would not be safe: a write its previous run sent can still sit in a member's socket buffer and land
+after that member answered peering, under a version the restarted primary is about to give to
+other data. In the new interval the member refuses it. A restarted member that is not the primary
+asks too, since the writes it replayed from its log stay unread until a peering decision settles
+them. The cost is one table change and one peering per PG of the disk, as
 Ceph peers every PG of a restarted daemon.
 
 #### Which versions to keep
@@ -376,7 +378,7 @@ bytes onto the newest version it has handed out ([post 02](02-chunks-and-placeme
 41.9 of a block may therefore hold 41.8's bytes. If peering could drop 41.8 and keep 41.9, the kept
 block would bring back bytes of a write that was never acknowledged; the
 [sub-block writes spike](../docs/design.md#appendix-sub-block-writes-spike)'s model, letting
-peering drop any subset of pending versions, went wrong on every seed.
+peering drop any subset of pending versions, lost acknowledged bytes in exactly this way.
 
 Peering never does, for three reasons that chain together. A primary sends a chunk's writes to each
 member in version order, over one connection, and again in that order after a reconnect. Each
@@ -384,7 +386,7 @@ member's log takes them in that order, and refuses a chunk's later versions once
 one. And durability is a prefix of a disk's log ([post 04](04-one-log-per-disk.md)): when a record
 is durable, so is every record before it. So a member that lacks 41.8 lacks 41.9 as well, the keep
 rule drops both, and the versions peering drops are always a suffix of each chunk's pending
-versions. With that rule the spike's model stayed correct through thousands of primary changes.
+versions. With that rule the spike's model lost nothing.
 
 #### Why recovery writes over the dropped version instead of deleting it
 
@@ -437,13 +439,18 @@ images that share a serial.
 Sometimes no rule can help: both members of a `rep2` PG die together, or the only disk holding some
 chunk's kept version never comes back. Ceph's `osd lost` then frees the PG at once, so a declaration
 made in error loses data without a report. rock-solid instead keeps the PG stopped, or the chunk
-unfound, and reports it (`Blocked`, with the down disks that might hold it) until an operator runs
+unfound, and reports it as blocked, with the down disks that might hold it, until an operator runs
 `rock-solid pg give-up`, the one step that knowingly lets an acknowledged write go. It is refused
 while any down disk that might hold the data could still return. Given up, the PG starts a new
-interval, and every node drops the lost chunks, which then read as zeros: a hole the filesystem
-above can repair or rewrite. Deleting rather than reverting to some older copy is deliberate: a
-member's older bytes may lie under a later write, so there is no older image to trust, while an
-empty chunk is one every member agrees on.
+interval whose peering skips the one given up, and what happens next depends on what was lost.
+
+- **An unfound chunk** is dropped by every node and then reads as zeros: a hole the filesystem
+  above can repair or rewrite. Deleting it rather than reverting to some older copy is deliberate:
+  a member's older bytes may lie under a later write, so there is no older image to trust, while an
+  empty chunk is one every member agrees on.
+- **A stopped PG** drops nothing up front: peering keeps whatever the members it reaches hold,
+  which may be an older version of an acknowledged write, and a chunk none of them holds is unfound,
+  to be given up as above.
 
 ## Evidence
 
