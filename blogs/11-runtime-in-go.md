@@ -9,10 +9,6 @@ drivers and event loops does all the real I/O. The core is what makes determinis
 possible, and the runtime is where Go is bent into the shape of a C or Rust storage engine: one
 epoll loop per core, no allocation per operation, bulk data off the Go heap.
 
-None of this runs yet; the README says so plainly. What exists today (roadmap phase 1) is the
-core types and seeded random generator in `internal/core`, the disk log, the LSM tree, the chunk
-index, the simulator's pool and disk, and the `tools/sansio` analyzer that enforces the rules.
-The event loops and the io_uring and TCP drivers are phase 5, and SPDK and RDMA are phase 9.
 Every number below comes from `docs/design.md`, most of them from its spikes: throwaway
 experiments that each answered one design question by measurement.
 

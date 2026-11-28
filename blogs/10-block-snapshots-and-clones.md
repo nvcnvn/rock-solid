@@ -6,9 +6,7 @@ from the same chunk store as its RWX filesystem: a Linux user-space block device
 node, NVMe over TCP for remote clients (not yet scheduled), and no metadata lookup on the write
 path. On top of both kinds of volume it builds snapshots and clones, which is what makes backup
 tools like Velero work. A snapshot copies no data: the first 4 KiB write after it writes 4 KiB,
-not a 4 MiB chunk. None of this is built yet: the block frontend is roadmap phase 8, snapshots
-and clones phase 11 and S3 phase 12. The on-disk pieces snapshots rest on, the `freeze` record
-entry and the frozen maps in the chunk index, already exist in code.
+not a 4 MiB chunk.
 
 Each section opens with an **In plain words** callout, the idea with an everyday example. The text
 after **How it works** is the mechanics, with the real names and numbers. If you read only the
