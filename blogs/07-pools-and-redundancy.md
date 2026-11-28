@@ -136,8 +136,8 @@ sequenceDiagram
 the disk holding `d0` dies. A rebuild from `d1`, `d2`, `d3` and `p0` would be correct, but one that
 happens to use the stale `p1` produces a garbage `d0`, which is why the bug can hide for so long.
 This is the **write hole**. Systems that encode in place close it with two-phase commits or
-journals across shards, and those are hard to get right: Vitastor's own chaos test failed on every
-seed of its two-phase erasure-coded configurations before its
+journals across shards, and those are hard to get right: Vitastor's own chaos test failed its
+two-phase erasure-coded configurations before its
 [3.2.0 fixes](https://vitastor.io/en/blog/2026-08-31-v3.2.0.html).
 
 ## The options real systems use
@@ -156,11 +156,10 @@ seed of its two-phase erasure-coded configurations before its
 - **Per pool** (Ceph, rock-solid). Each pool is its own set of PGs with its own scheme, and a
   Kubernetes StorageClass names the pool. One cluster can mix scratch, block and media data.
 
-**What erasure coding does with edits.** Ceph (with `allow_ec_overwrites`) and Vitastor overwrite
-stripes in place and close the write hole with extra protocol. Weka erasure-codes everything but
-never edits a stripe: a write goes into a new stripe, and the cluster garbage-collects half-dead
-stripes across nodes. Windows Azure Storage, and rock-solid, keep new and edited data as copies and
-encode it only once it has stopped changing, so edits never touch encoded data.
+**What erasure coding does with edits.** Ceph and Vitastor overwrite stripes in place and close the
+write hole with extra protocol. Weka never edits a stripe: a write goes into a new stripe, and the
+cluster garbage-collects half-dead stripes across nodes. Windows Azure Storage (WAS), and
+rock-solid, encode data only once it has stopped changing.
 
 | Approach | Small overwrite cost | Write hole | Extra machinery | Space while data is fresh |
 | --- | --- | --- | --- | --- |
@@ -206,9 +205,9 @@ data survives, and otherwise pick the option that uses less space.** What you ch
 - **A disk class,** such as NVMe only.
 
 Three more settings are about space rather than redundancy: whether volume sizes may add up to more
-than the pool holds, the disk fill past which writes that add data are refused (`write_limit`), and
-the PG count. Posts [02](02-chunks-and-placement.md) and [05](05-the-cleaner-and-free-space.md)
-cover them, and the recovery section below shows what `write_limit` still lets through.
+than the pool holds, the disk fill past which writes that add data are refused (the *write limit*),
+and the PG count. Posts [02](02-chunks-and-placement.md) and [05](05-the-cleaner-and-free-space.md)
+cover them, and the recovery section below shows what the write limit still lets through.
 
 Names follow `rep<copies>` and `ec<data>-<parity>`. The presets below are starting points; any
 combination within the creation rules is allowed. "Usable / raw" is how much of the raw disk space
@@ -238,21 +237,15 @@ copies also survive 2.
 rock-solid uses Reed-Solomon through `klauspost/reedsolomon`, a pure Go library with SIMD
 (single instruction, multiple data: one CPU instruction working on many bytes at once) assembly.
 Shard `i` of a chunk is simply the chunk's `i`-th contiguous byte range, and the parity shards are
-computed from them:
+computed from them: a 4 MiB chunk has 2 MiB shards in `ec2-1`, 1 MiB in `ec4-2` and 256 KiB in
+`ec16-2`, and stores 6, 6 and 4.5 MiB against 12 MiB for `rep3`.
 
-| Pool | Shard size | Shards stored | Bytes stored for 4 MiB | Overhead | Usable / raw |
-| --- | --- | --- | --- | --- | --- |
-| `rep3` | (whole copies) | 3 copies | 12 MiB | 3× | 1/3 |
-| `ec2-1` | 2 MiB | 2 + 1 | 6 MiB | 1.5× | 2/3 |
-| `ec4-2` | 1 MiB | 4 + 2 | 6 MiB | 1.5× | 2/3 |
-| `ec16-2` | 256 KiB | 16 + 2 | 4.5 MiB | 1.125× | 8/9 |
-
-The overhead is `(data + parity) ÷ data`, but dividing free space by it overstates capacity
-whenever the failure-domain rule stops a node taking a share in proportion to its size. `ec4-2` at
-2 per node on three nodes puts a third of every chunk on each node, so with nodes of 4, 4 and 1 TB
-the small node fills first and most of each large node is *stranded*: space this pool cannot use. A
-pool therefore reports what it can still take before its first disk fills, and asks for
-confirmation before a change strands much ([post 02](02-chunks-and-placement.md#volume-size-and-capacity)
+The overhead is `(data + parity) ÷ data`, but dividing free space by it overstates capacity whenever
+the failure-domain rule stops a node taking a share in proportion to its size. `ec4-2` at 2 per node
+on three nodes puts a third of every chunk on each node, so with nodes of 4, 4 and 1 TB the small
+node fills first and most of each large node is *stranded*: space this pool cannot use. A pool
+therefore reports what it can still take before its first disk fills, and asks for confirmation
+before a change strands much ([post 02](02-chunks-and-placement.md#volume-size-and-capacity)
 explains the figures; the [capacity model spike](../spikes/capacity-model/) measured them).
 
 Because shards are contiguous byte ranges, a 4 KiB read of an encoded chunk touches one disk, the
@@ -363,21 +356,21 @@ serving reads after the rest of the PG had moved on without it. The default is `
 | `rep3` | 3 | 2 | One member down |
 
 A stopped PG waits for a member to return or for a replacement to be added. Its down members are
-replaced sooner than usual, after about a minute rather than the usual wait (the recovery section
-below), and a replacement counts as live from the table that adds it, while it still copies.
+replaced sooner than usual (the recovery section below), and a replacement counts as live from the
+table that adds it, while it still copies.
 
 A subtler case sits between "enough members" and "enough copies". A member that joined after a
-write's interval holds no copy of that chunk until recovery reaches it. A write to a chunk with fewer
-than `min_live` copies that can serve it waits for that recovery, so a fresh, empty member never
-lets a write land on fewer copies than the pool promises.
+write's interval holds no copy of that chunk until recovery reaches it. A write to a chunk with
+fewer than `min_live` copies that can serve it waits for that recovery, so a fresh, empty member
+never lets a write land on fewer copies than the pool promises.
 
 `rep2` is the awkward pool: a planned reboot of either node would stop its PGs. The answer is the
 CLI command `maintenance <node>`, which an operator runs before a planned reboot. The mark takes the
 node's members out of the live set, so writes stop waiting for them, but they still count toward
-`min_live`, so the node's PGs accept writes on one copy until it returns and catches up. The operator
-chose that exposure for a bounded time. Setting `min_live: 1` permanently takes it for unplanned
-failures too, and the design is blunt about it: it is the setting Ceph users most often report
-losing data with.
+`min_live`, so the node's PGs accept writes on one copy until it returns and catches up. The
+operator chose that exposure for a bounded time. Setting `min_live: 1` permanently takes it for
+unplanned failures too, and the design is blunt about it: it is the setting Ceph users most often
+report losing data with.
 
 #### Encoded chunks need no write quorum
 
@@ -451,7 +444,7 @@ encoded chunk first turns it back into copies: the primary reads `data` shards, 
 then applies the write, and the chunk is encoded again once idle. That costs a full chunk read and
 a replicated chunk write. Editors write new files rather than patch footage, so media rarely pays
 it. A database on a block volume pays it on the first write to each idle chunk, which is why block
-chunks wait much longer (a day by default, against an hour for files) before they are encoded.
+chunks stay idle much longer than file chunks before they are encoded.
 
 Snapshot versions keep the form their chunk has. While a chunk is held as copies its frozen
 versions are copies too, sharing every untouched block with the live version, and when the chunk
@@ -557,7 +550,7 @@ In Kubernetes, a move starts when a `VolumeAttributesClass` with a different `po
 applied to the PVC: the CSI (Container Storage Interface, the plugin API Kubernetes uses to talk to
 storage) driver advertises the `MODIFY_VOLUME` capability and starts the move in
 `ControllerModifyVolume`. The CLI can start one too. Moves reuse the cut, read-through and flatten
-code and the simulation that covers it, so they arrive together with snapshots.
+of snapshots, and the simulation that covers them.
 
 ## Recovery and rebuild, per placement group
 
@@ -568,9 +561,11 @@ code and the simulation that covers it, so they arrive together with snapshots.
 
 ### How it works
 
-Detecting the failure, publishing a new table that starts a new interval of each affected PG,
-and peering belong to [post 03](03-epochs-leases-and-failures.md); refilling members in the
-placement table belongs to [post 02](02-chunks-and-placement.md). The flowchart shows how they
+Detecting the failure belongs to
+[post 03b](03b-leases-failure-detection-and-fencing.md#4-failure-detection); publishing a new table
+that starts a new interval of each affected PG, and peering, to
+[post 03](03-epochs-leases-and-failures.md); refilling members in the placement table to
+[post 02](02-chunks-and-placement.md). The flowchart shows how they
 connect to pools.
 
 ```mermaid
@@ -590,14 +585,14 @@ flowchart TD
 either way.*
 
 Until the new table, writes to the affected PGs wait, so a crash pauses those writes for the few
-seconds failure detection takes. **Down is not gone:** a down member keeps its place for a while
-and is replaced only after that, so a node that reboots catches up on only what it missed instead of
+seconds failure detection takes. **Down is not gone:** a down member keeps its place for a while and
+is replaced only after that, so a node that reboots catches up on only what it missed instead of
 being rebuilt from scratch. Two cases replace it sooner: at once when its disk's log is gone, since
-there is nothing to wait for, and after about a minute when its PG has fallen below `min_live`,
-since that PG serves nothing until then (a `rep2` PG falls there on any reboot outside
-`maintenance`). A node in `maintenance` keeps its place however long it is marked, and catches up
-when it returns. The design's [Failure detection](../docs/design.md#epoch-changes-and-failure-detection)
-section has the timings.
+there is nothing to wait for, and after a short wait when its PG has fallen below `min_live`, since
+that PG serves nothing until then (a `rep2` PG falls there on any reboot outside `maintenance`). A
+node in `maintenance` keeps its place however long it is marked, and catches up when it returns. The
+design's [Failure detection](../docs/design.md#epoch-changes-and-failure-detection) section has the
+timings.
 
 **A replacement joins before anything leaves.** An empty replacement counts toward `min_live`
 from the moment it joins and takes every write from then on, while recovery fills in the older data.
@@ -607,16 +602,15 @@ learners exist for the same reason ([post 02](02-chunks-and-placement.md) has th
 
 **Per PG, worst first.** A disk holds around a hundred PG members, so the loss of one disk becomes
 about a hundred separate PG repairs, not one giant copy, and table changes can be staged and
-throttled. A disk's chunk index is keyed by PG first, so a disk lists a PG's chunks with one range scan. Recovery runs most-degraded PGs
-first, because a PG that has lost two members is one failure from loss in `rep3` or `ec4-2`.
+throttled. A disk's chunk index is keyed by PG first, so a disk lists a PG's chunks with one range
+scan. Recovery runs most-degraded PGs first, because a PG that has lost two members is one failure
+from loss in `rep3` or `ec4-2`.
 
-**Filling a member.** For a copy, the data comes from a surviving copy. For a shard, Reed-Solomon
-requires `data` surviving shards to compute it, as the rebuild diagram showed.
+**Filling a member.** A copy comes from a surviving copy, a shard from `data` surviving shards, as
+the rebuild diagram showed. Chunks written while a member was down are still copies, encoded once
+idle like any other.
 
-**Deferred encodings.** Chunks written while a member was down are still copies, so they are encoded
-once idle, like any other.
-
-**Headroom.** Recovery needs free space on the disks it writes to. A pool's `write_limit` refuses
+**Headroom.** Recovery needs free space on the disks it writes to. A pool's write limit refuses
 writes that add data once any disk holding one of the PG's members reaches it, counting the space
 already promised to clients. Three kinds of write still pass: an overwrite of blocks a chunk
 already holds as copies that no snapshot shares, which frees as much as it writes; a *punch* (a
@@ -624,16 +618,17 @@ write that deletes a range), which frees space; and a flush of data a daemon buf
 grant*, which was promised when the daemon acknowledged it
 ([post 09](09-rwx-filesystem-and-cache-coherence.md#a-full-pool-space-grants)). The headroom above
 the limit serves recovery, those granted flushes and the cleaner
-([post 05](05-the-cleaner-and-free-space.md)). Recovery may pass `write_limit`, but it leaves room
+([post 05](05-the-cleaner-and-free-space.md)). Recovery may pass the write limit, but it leaves room
 for the grants already out, so a refill never refuses a flush a daemon had already acknowledged.
 
 **What the operator sees.** A pool raises conditions on its `Pool` resource, as Kubernetes events
-and metrics: as a member disk nears or reaches `write_limit`; when the pool holds more than its
-survivors could re-protect after losing its largest failure domain; and when a PG that needs copying
+and metrics: as a member disk nears or reaches the write limit; when the pool holds more than its
+survivors could re-protect after its worst likely loss, its largest failure domain or, with no
+spare domain (`rep3` on three nodes), one of its disks; and when a PG that needs copying
 has stopped making progress, typically because the disk it copies to is full, naming the PG and the
-members that may hold its missing copies. A fact of the layout, such as `rep3` on exactly three
-nodes having no spare node, is stated once at creation and in the pool's status instead of raising
-an alarm on every healthy pool.
+members that may hold its missing copies. A loss whose survivors cannot hold a PG's width at all,
+such as a node of `rep3` on three nodes, is a fact of the layout, stated once in the pool's status
+rather than raised on every healthy pool.
 
 The simulator checks, after every step, that every chunk reaches its pool's redundancy once
 recovery settles, that copies are dropped only after all shards are durable, and that a chunk with
@@ -645,8 +640,9 @@ There is no rock-solid spike that measures erasure coding. The choice of "copies
 whole or idle" rests on the cost arithmetic at the top of this post and on other systems'
 experience:
 
-- **Windows Azure Storage** ([USENIX ATC 2012](https://www.usenix.org/system/files/conference/atc12/atc12-final181_0.pdf))
-  encodes extents once sealed, which is the model rock-solid follows.
+- **Windows Azure Storage** ([USENIX ATC
+  2012](https://www.usenix.org/system/files/conference/atc12/atc12-final181_0.pdf)) encodes extents
+  once sealed, which is the model rock-solid follows.
 - **Whole chunks cost no cleaning.** A chunk written whole goes to a *chunk slot* rather than the
   log. In the [cleaner streams spike](../spikes/cleaner-streams/), whole chunks rewritten at random
   cost almost no write amplification in slots at any fill, against nearly five times at 90% full in
@@ -659,7 +655,8 @@ experience:
 - **Editing encoded data is expensive:** a full chunk read and a replicated chunk write on the first
   write to each encoded chunk.
 - **Rebuilds read more:** `data` times the rebuilt bytes, 4× in `ec4-2`, 16× in `ec16-2`.
-- **Small clusters trade node tolerance for width:** `ec4-2` at 2 per node survives one node, not two.
+- **Small clusters trade node tolerance for width:** `ec4-2` at 2 per node survives one node, not
+  two.
 - **`rep2` stops serving on a single failure** unless you use `maintenance` or accept `min_live: 1`.
 - **The shape is fixed:** changing `data` or `parity` means moving volumes, using space in both
   pools meanwhile.
@@ -686,15 +683,15 @@ both questions.
 
 ## Further reading
 
-- Design: [Pools and redundancy](../docs/design.md#pools-and-redundancy),
-  [When chunks are encoded](../docs/design.md#when-chunks-are-encoded),
-  [One-copy pools and locality](../docs/design.md#one-copy-pools-and-locality),
-  [Moving a volume to another pool](../docs/design.md#moving-a-volume-to-another-pool),
-  [Volume size and capacity](../docs/design.md#volume-size-and-capacity),
-  [Data layer: ChunkStore](../docs/design.md#data-layer-chunkstore) (placement groups and the
-  placement table), [Epoch changes and failure detection](../docs/design.md#epoch-changes-and-failure-detection),
-  [Snapshots and clones](../docs/design.md#snapshots-and-clones),
-  [Alternatives considered](../docs/design.md#alternatives-considered).
+- Design: [Pools and redundancy](../docs/design.md#pools-and-redundancy), [When chunks are
+  encoded](../docs/design.md#when-chunks-are-encoded), [One-copy pools and
+  locality](../docs/design.md#one-copy-pools-and-locality), [Moving a volume to another
+  pool](../docs/design.md#moving-a-volume-to-another-pool), [Volume size and
+  capacity](../docs/design.md#volume-size-and-capacity), [Data layer:
+  ChunkStore](../docs/design.md#data-layer-chunkstore) (placement groups and the placement table),
+  [Epoch changes and failure detection](../docs/design.md#epoch-changes-and-failure-detection),
+  [Snapshots and clones](../docs/design.md#snapshots-and-clones), [Alternatives
+  considered](../docs/design.md#alternatives-considered).
 - Glossary: [Redundancy and placement](../docs/glossary.md#redundancy-and-placement),
   [Words with more than one meaning](../docs/glossary.md#words-with-more-than-one-meaning)
   ("shard", "recovery", "seal, freeze").
@@ -705,4 +702,5 @@ both questions.
   [capacity conditions](../studies/capacity-conditions/README.md).
 - Other posts: [02 Chunks and placement](02-chunks-and-placement.md),
   [03 Epochs, leases and failures](03-epochs-leases-and-failures.md),
+  [03b Leases, failure detection and fencing](03b-leases-failure-detection-and-fencing.md),
   [10 Block, snapshots and clones](10-block-snapshots-and-clones.md).
