@@ -456,7 +456,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Settling, act, never.** The three classes of a disagreement between the cluster map and a node report. *Settling*: the protocol resolves it by itself within a known deadline, such as a node one table behind. *Act*: nothing will resolve it without the operator, or it outlived its deadline. *Never*: something the protocol forbids, which means a bug ([The collector](design.md#the-collector)).
 
-**Health state.** The one word `rock-solid status` prints and returns as its exit code: healthy, degraded (fewer copies than asked for, still two of everything), at risk (one more failure can lose acknowledged writes), unavailable, safety check failed, or not enough nodes read to tell ([Health states](design.md#health-states)).
+**Health state.** The one word `rock-solid status` prints and returns as its exit code: healthy, degraded (fewer copies than asked for; of the PGs known, still two of everything), at risk (one more failure can lose acknowledged writes), unavailable, safety check failed, or not enough nodes read to tell ([Health states](design.md#health-states)).
 
 **Auditor.** `rock-solid audit`: checks over the gathered reports that stand for the safety properties the TLA+ models prove, such as one Raft leader per term, so a protocol bug on a real cluster shows as a named violation ([The auditor](design.md#the-auditor)).
 
