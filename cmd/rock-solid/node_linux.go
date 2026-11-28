@@ -112,11 +112,10 @@ func (p *storageNode) fill(i int, ctx *core.Context, f *ops.Facts) {
 	f.Disks = append(f.Disks, ops.Disk{Loop: uint32(i), Device: dm.cfg.Device, State: state})
 }
 
-// pgFacts copies loop i's part of a PG's facts into pf, on loop i.
-func (p *storageNode) pgFacts(i int, pf *ops.PGFacts) {
-	if dm := p.loops[i].dm; dm != nil && dm.d != nil {
-		dm.d.PGFacts(pf)
-	}
+// pgFacts copies loop i's part of a PG's facts into pf, on loop i, and reports whether its table holds the PG.
+func (p *storageNode) pgFacts(i int, pf *ops.PGFacts) bool {
+	dm := p.loops[i].dm
+	return dm != nil && dm.d != nil && dm.d.PGFacts(pf)
 }
 
 // deviceID is the device's stable identity: its path, which names the same drive at every start,

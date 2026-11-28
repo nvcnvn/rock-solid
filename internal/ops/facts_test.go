@@ -3,9 +3,12 @@ package ops
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -70,7 +73,8 @@ func document(id string, v any) ([]byte, error) {
 }
 
 // facts-v1.schema.json and facts-pg-v1.schema.json are the frozen schemas; the test reads them,
-// never the reverse. Within v1 a change only adds a field.
+// never the reverse. Within v1 a change only adds a field, so the types must still generate every
+// value the files hold.
 func TestFactsSchemaGolden(t *testing.T) {
 	for _, c := range []struct {
 		file, id string
@@ -84,10 +88,38 @@ func TestFactsSchemaGolden(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !bytes.Equal(got, want) {
-			t.Errorf("%s differs from the types; they generate:\n%s", c.file, got)
+		var g, w map[string]any
+		if err := errors.Join(json.Unmarshal(got, &g), json.Unmarshal(want, &w)); err != nil {
+			t.Fatal(err)
+		}
+		if p := lost(w, g, ""); p != "" {
+			t.Errorf("%s: the types no longer generate %s, which only a v2 may drop or change", c.file, p)
+		} else if !bytes.Equal(got, want) {
+			t.Errorf("%s lacks fields the types add; they generate:\n%s", c.file, got)
+		}
+		delete(g["properties"].(map[string]any), "schema")
+		if lost(w, g, "") == "" {
+			t.Fatal("a field removed from the types went unnoticed")
 		}
 	}
+}
+
+// lost is the path of the first value in was that now lacks or holds differently, "" for none.
+func lost(was, now any, path string) string {
+	w, ok := was.(map[string]any)
+	if !ok {
+		if !reflect.DeepEqual(was, now) {
+			return path
+		}
+		return ""
+	}
+	n, _ := now.(map[string]any)
+	for _, k := range slices.Sorted(maps.Keys(w)) {
+		if p := lost(w[k], n[k], path+"/"+k); p != "" {
+			return p
+		}
+	}
+	return ""
 }
 
 func TestEveryStringFieldMarked(t *testing.T) {
@@ -136,12 +168,13 @@ func sample() Facts {
 	return Facts{Schema: FactsV1,
 		Node: Node{ID: 2, Release: 1, Roles: []string{"storage"}, Run: 1 << 60, UptimeUs: 9, BootUs: 10, RawUs: 11, Wall: "2026-11-29T00:00:00Z",
 			Flags: []Flag{{"listen", "127.0.0.1:7000"}}, Hosts: []Host{{1, "127.0.0.1:6000", true}}},
-		Map:      Map{Epoch: 3, Sessions: 4, ShardMap: 5, ReportsTo: 1},
-		Disks:    []Disk{{Loop: 1, Path: "/dev/disk/by-id/a", Device: 1<<64 - 1, State: "open", Disk: 4, Log: 7, MemberAckUs: []Latency{{4, 100}}}},
-		Members:  []Member{{Disk: 4, Pool: 1, PG: 2, Interval: 3, Role: "primary", Active: true}},
-		Replicas: []Replica{{Group: 2, ID: 9, Loop: 1, Term: 3, Leader: 9, Commit: 10, Applied: 10, Lease: true, Followers: []Follower{{8, 10}}}},
-		Session:  Session{ID: 5, Incarnation: 1, LeaseLeftUs: 3_000_000},
-		Mounts:   []Mount{{1, "/mnt/v"}},
+		Map:        Map{Epoch: 3, Sessions: 4, ShardMap: 5, ReportsTo: 1},
+		Disks:      []Disk{{Loop: 1, Path: "/dev/disk/by-id/a", Device: 1<<64 - 1, State: "open", Disk: 4, Log: 7, MemberAckUs: []Latency{{4, 100}}}},
+		Members:    []Member{{Disk: 4, Pool: 1, PG: 2, Interval: 3, Role: "primary", Active: true}},
+		Replicas:   []Replica{{Group: 2, ID: 9, Loop: 1, Term: 3, Leader: 9, Commit: 10, Applied: 10, Lease: true, Followers: []Follower{{8, 10}}}},
+		Session:    Session{ID: 5, Incarnation: 1, LeaseLeftUs: 3_000_000},
+		Mounts:     []Mount{{1, "/mnt/v"}},
+		Unanswered: []uint32{3},
 	}
 }
 
@@ -166,21 +199,52 @@ func FuzzDecodeFacts(f *testing.F) {
 	f.Add(b)
 	f.Add([]byte(`{"schema":"rock-solid.io/facts/v1"}`))
 	f.Add([]byte(`{"schema":"rock-solid.io/facts/v1","disks":[{"device":"18446744073709551616"}]}`))
-	f.Fuzz(func(t *testing.T, b []byte) {
-		got, err := DecodeFacts(b)
-		if err != nil {
-			return
-		}
-		again, err := json.Marshal(&got)
-		if err != nil {
-			t.Fatal(err)
-		}
-		back, err := DecodeFacts(again)
-		if err != nil {
-			t.Fatalf("%s decoded and encoded fails to decode: %v", again, err)
-		}
-		if twice, _ := json.Marshal(&back); !bytes.Equal(twice, again) {
-			t.Fatalf("%s decoded, encoded and decoded again encodes as %s", again, twice)
-		}
-	})
+	f.Fuzz(func(t *testing.T, b []byte) { roundTrip(t, b, DecodeFacts) })
+}
+
+func FuzzDecodePGFacts(f *testing.F) {
+	p := PGFacts{Schema: PGFactsV1, Node: 2, Pool: 1, PG: 3, Members: []Member{{Disk: 4, Pool: 1, PG: 3, Interval: 2, Role: "primary", Active: true, Unfound: 1}},
+		Unfound: []Chunk{{Volume: 1, Inode: 1<<63 + 5, Index: 2}}, Unanswered: []uint32{2}}
+	b, _ := json.Marshal(&p)
+	f.Add(b)
+	f.Add([]byte(`{"schema":"rock-solid.io/facts-pg/v1","unfound":[{"inode":"18446744073709551615"}]}`))
+	f.Add([]byte(`{"schema":"rock-solid.io/facts/v1"}`))
+	f.Fuzz(func(t *testing.T, b []byte) { roundTrip(t, b, DecodePGFacts) })
+}
+
+// roundTrip checks that what decode takes from b encodes to bytes that decode and encode the same again.
+func roundTrip[T any](t *testing.T, b []byte, decode func([]byte) (T, error)) {
+	got, err := decode(b)
+	if err != nil {
+		return
+	}
+	again, err := json.Marshal(&got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := decode(again)
+	if err != nil {
+		t.Fatalf("%s decoded and encoded fails to decode: %v", again, err)
+	}
+	if twice, _ := json.Marshal(&back); !bytes.Equal(twice, again) {
+		t.Fatalf("%s decoded, encoded and decoded again encodes as %s", again, twice)
+	}
+}
+
+func TestAV1PGAnswerDecodes(t *testing.T) {
+	p := PGFacts{Schema: PGFactsV1, Node: 2, Pool: 1, PG: 3, Unfound: []Chunk{{Volume: 1, Inode: 1<<63 + 5, Index: 2}}}
+	b, err := json.Marshal(&p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte(`"inode":"9223372036854775813"`)) {
+		t.Fatalf("an inode past 2^53 is not a string: %s", b)
+	}
+	got, err := DecodePGFacts(append(b[:len(b)-1], []byte(`,"added_later":1}`)...))
+	if err != nil || !reflect.DeepEqual(got, p) {
+		t.Fatalf("decoded %+v, %v", got, err)
+	}
+	if _, err := DecodePGFacts([]byte(`{"schema":"rock-solid.io/facts/v1"}`)); !errors.Is(err, ErrSchema) {
+		t.Fatalf("a /facts answer decoded as a PG's: %v", err)
+	}
 }

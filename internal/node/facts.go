@@ -20,8 +20,7 @@ func grow[T any](s []T) ([]T, *T) {
 	return s, &s[len(s)-1]
 }
 
-// Facts copies the node machine's part of the node's facts into f: the node, the cluster map it
-// holds and its client session.
+// Facts copies the node machine's part of the node's facts into f: the node, its cluster map and session.
 func (n *Node) Facts(ctx *core.Context, f *ops.Facts) {
 	f.Node.ID, f.Node.Release, f.Node.BootUs, f.Node.RawUs = n.cfg.Node, n.cfg.Release, ctx.Now, ctx.Raw
 	switch {
@@ -44,8 +43,7 @@ func (n *Node) Facts(ctx *core.Context, f *ops.Facts) {
 
 var phases = [...]string{recovering: "recovering", formatting: "formatting", opened: "open", failed: "failed"}
 
-// Facts copies the device's part of the node's facts into f: its disk, its PG members and its
-// MetaStore replicas.
+// Facts copies the device's part of the node's facts into f: its disk, PG members and MetaStore replicas.
 func (d *Device) Facts(ctx *core.Context, f *ops.Facts) {
 	var k *ops.Disk
 	f.Disks, k = grow(f.Disks)
@@ -55,9 +53,8 @@ func (d *Device) Facts(ctx *core.Context, f *ops.Facts) {
 		k.OldestIOUs = d.st.Oldest(ctx.Now)
 	}
 	if r := d.rep; r != nil {
-		s, rp := r.DiskState(ctx), r.Reported()
-		k.Disk, k.Fill, k.Run = r.Disk(), s.Fill, r.Run()
-		for _, l := range rp.Latencies {
+		k.Disk, k.Fill, k.Run = r.Disk(), r.Fill(), r.Run()
+		for _, l := range r.Reported().Latencies {
 			k.MemberAckUs = append(k.MemberAckUs, ops.Latency{Disk: l.Disk, Us: l.Latency})
 		}
 		f.Members = members(r, f.Members, func(core.PGID) bool { return true })
@@ -69,28 +66,31 @@ func (d *Device) Facts(ctx *core.Context, f *ops.Facts) {
 	}
 }
 
-// PGFacts copies into p what the device holds of PG p.Pool.p.PG: its member and, as primary, the
-// unfound chunks its last heartbeat named.
-func (d *Device) PGFacts(p *ops.PGFacts) {
+// PGFacts copies into p the device's member of PG p.Pool.p.PG, false when its table holds no such PG.
+func (d *Device) PGFacts(p *ops.PGFacts) bool {
 	r := d.rep
 	if r == nil {
-		return
+		return false
 	}
 	pg := core.PGID{Pool: core.PoolID(p.Pool), Index: p.PG}
 	p.Members = members(r, p.Members, func(x core.PGID) bool { return x == pg })
-	for _, l := range r.Reported().Leads {
-		if l.PG == pg {
-			for _, c := range l.Chunks {
-				p.Unfound = append(p.Unfound, ops.Chunk{Volume: uint32(c.Volume), Inode: uint64(c.Inode), Index: c.Index})
-			}
+	for _, m := range p.Members {
+		for _, c := range r.UnfoundChunks(pg, m.Interval, nil) {
+			p.Unfound = append(p.Unfound, ops.Chunk{Volume: uint32(c.Volume), Inode: uint64(c.Inode), Index: c.Index})
 		}
 	}
+	for _, t := range r.Table().Pools {
+		if t.ID == pg.Pool {
+			return int(pg.Index) < len(t.PGs)
+		}
+	}
+	return false
 }
 
 // members appends the PG members r's table names its disk in, of the PGs want takes, each with
-// what r's last heartbeat said of it as primary.
+// what r holds of it as primary.
 func members(r *chunkstore.Replica, dst []ops.Member, want func(core.PGID) bool) []ops.Member {
-	disk, leads := r.Disk(), r.Reported().Leads
+	disk := r.Disk()
 	for _, p := range r.Table().Pools {
 		for i := range p.PGs {
 			pg := core.PGID{Pool: p.ID, Index: uint32(i)}
@@ -106,10 +106,8 @@ func members(r *chunkstore.Replica, dst []ops.Member, want func(core.PGID) bool)
 				if m.Leaving {
 					mf.Role = "leaving"
 				}
-				for _, l := range leads {
-					if l.PG == pg && l.Interval == e.Interval {
-						mf.Role, mf.Active, mf.Unfound, mf.Lacking = "primary", l.Active, l.Unfound, l.Lacking
-					}
+				if l, ok := r.Lead(pg, e.Interval); ok {
+					mf.Role, mf.Active, mf.Unfound, mf.Lacking = "primary", l.Active, l.Unfound, l.Lacking
 				}
 				dst = append(dst, mf)
 			}
@@ -135,8 +133,7 @@ func replicaFacts(ctx *core.Context, sh *meta.Shard, loop uint32, halts []meta.H
 	return dst
 }
 
-// CtlFacts copies a control-plane voter's part of its facts into f: its replica and, while it
-// leads, the cluster map its committed state holds.
+// CtlFacts copies a control-plane voter's facts into f: its replica and, while it leads, its cluster map.
 func CtlFacts(ctx *core.Context, h *meta.CtlHost, node, release uint32, f *ops.Facts) {
 	f.Node.ID, f.Node.Release, f.Node.BootUs, f.Node.RawUs = node, release, ctx.Now, ctx.Raw
 	f.Node.Roles = append(f.Node.Roles, "control-plane")

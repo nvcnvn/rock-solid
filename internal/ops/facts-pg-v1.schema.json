@@ -57,6 +57,13 @@
       "type": "string",
       "x-rock-solid-name": false
     },
+    "unanswered_loops": {
+      "items": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "type": "array"
+    },
     "unfound": {
       "items": {
         "properties": {
@@ -65,8 +72,9 @@
             "type": "integer"
           },
           "inode": {
-            "minimum": 0,
-            "type": "integer"
+            "pattern": "^[0-9]+$",
+            "type": "string",
+            "x-rock-solid-name": false
           },
           "volume": {
             "minimum": 0,

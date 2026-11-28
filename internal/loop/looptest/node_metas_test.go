@@ -20,6 +20,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/meta"
 	"github.com/nvcnvn/rock-solid/internal/node"
+	"github.com/nvcnvn/rock-solid/internal/ops"
 	"github.com/nvcnvn/rock-solid/internal/raftshard"
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
@@ -1358,5 +1359,30 @@ func TestADeviceAsksLeasesOfTheLoopsItsReplicasNameOnly(t *testing.T) {
 	o.Deletes = []meta.ReplicaRef{{Group: nodeMetaGroup + 1, ID: 1}}
 	if got := asked(o); !slices.Equal(got, []uint32{2, 3, 4}) {
 		t.Fatalf("after the delete the device asked leases of loops %v", got)
+	}
+}
+
+// A device's facts copy the MetaStore replica it hosts and, while the replica leads, each
+// follower's match index, a learner's among them, into arrays a refill reuses.
+func TestFactsOfAHostedLeaderAllocateNothing(t *testing.T) {
+	nm := newNodeMetas(t)
+	cfg := nm.replica()
+	cfg.Shard.Raft.Storage = bootOf(t, 1, raftpb.ConfState{Voters: []uint64{1}, Learners: []uint64{2}})
+	cfg.Shard.Raft.Peers = append(cfg.Shard.Raft.Peers, raftshard.Peer{ID: 2, Node: core.NodeID{Node: 79}})
+	if err := nm.m.d.AddMeta(cfg); err != nil {
+		t.Fatal(err)
+	}
+	nm.lead()
+	var f ops.Facts
+	fill := func() {
+		f.Reset()
+		nm.m.d.Facts(nm.l.Context(), &f)
+	}
+	fill()
+	if len(f.Replicas) != 1 || f.Replicas[0].Leader != 1 || len(f.Replicas[0].Followers) != 1 || f.Replicas[0].Followers[0].ID != 2 {
+		t.Fatalf("the device's replicas %+v", f.Replicas)
+	}
+	if n := testing.AllocsPerRun(100, fill); n != 0 {
+		t.Fatalf("a device's facts allocate %v times per copy", n)
 	}
 }

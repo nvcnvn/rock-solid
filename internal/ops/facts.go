@@ -1,6 +1,4 @@
-// Package ops is the operator's view of a cluster: the facts each node reports of itself, their
-// schema and decoder. It is sans-IO: the daemon's server and the collector's calls live in
-// cmd/rock-solid.
+// Package ops is the operator's view of a cluster: the facts each node reports, their schema and decoders.
 package ops
 
 import (
@@ -17,8 +15,7 @@ const (
 	PGFactsV1 = "rock-solid.io/facts-pg/v1"
 )
 
-// Facts is what a node reports of itself, from its own memory and disks. Within v1 fields are only
-// added. Each string field's name tag says whether it holds a name, which redaction replaces.
+// Facts is what a node reports of itself; within v1 fields are only added, and a string's name tag drives redaction.
 type Facts struct {
 	Schema   string    `json:"schema" name:"no"`
 	Node     Node      `json:"node"`
@@ -28,11 +25,12 @@ type Facts struct {
 	Replicas []Replica `json:"replicas"`
 	Session  Session   `json:"session,omitzero"`
 	Mounts   []Mount   `json:"mounts"`
+	// Unanswered are the loops that did not answer within the node's wait: their disks, members
+	// and replicas are missing from the answer, not absent from the node.
+	Unanswered []uint32 `json:"unanswered_loops"`
 }
 
-// Node is the process: its node ID, release, roles, the run ID it drew at start, its uptime, its
-// clocks at the answer (the wall clock only to place the report on a timeline), its flags and the
-// hosts it knows from -peers, -ctl or -voters.
+// Node is the process: its identity, clocks at the answer, flags and the hosts it knows.
 type Node struct {
 	ID       uint32    `json:"id"`
 	Release  uint32    `json:"release"`
@@ -59,8 +57,7 @@ type Host struct {
 	Ctl  bool   `json:"ctl"`
 }
 
-// Map is the cluster map the node holds: the placement table's epoch, the session-table and
-// shard-map versions, the format level, and the voter it reports to, 0 for none.
+// Map is the versions of the cluster map the node holds and the voter it reports to, 0 for none.
 type Map struct {
 	Epoch     uint64 `json:"table_epoch"`
 	Sessions  uint64 `json:"session_table_version"`
@@ -69,15 +66,11 @@ type Map struct {
 	ReportsTo uint32 `json:"reports_to"`
 }
 
-// Disk is one device, answered by the loop that owns it: its path, stable identity, state
-// (recovering, formatting, open or failed), its disk ID once its replica runs, log ID, size, log
-// reserve and fill in blocks, the age of its oldest unfinished I/O, its loop's lease run ID, the
-// table epoch and session-table version its replica holds, and the 99th-percentile acknowledgment
-// time its replica measured, as a primary, per member disk in its last heartbeat.
+// Disk is one device as the loop that owns it holds it; MemberAckUs is from its replica's last heartbeat.
 type Disk struct {
 	Loop        uint32    `json:"loop"`
 	Path        string    `json:"path" name:"yes"`
-	Device      uint64    `json:"device,string" name:"no"`
+	Device      uint64    `json:"device,string" name:"yes"`
 	State       string    `json:"state" name:"no"`
 	Disk        uint32    `json:"disk"`
 	Log         uint64    `json:"log,string" name:"no"`
@@ -97,9 +90,7 @@ type Latency struct {
 	Us   core.Tick `json:"us"`
 }
 
-// Member is a PG member on one of the node's disks as its table names it: the PG, its interval,
-// its role (primary, member or leaving) and, as primary from its last heartbeat, whether it is
-// active, the chunks its last peering left unfound and the copies its members still lack.
+// Member is a PG member on one of the node's disks: its role (primary, member or leaving) and, as primary, its state now.
 type Member struct {
 	Disk     uint32 `json:"disk"`
 	Pool     uint32 `json:"pool"`
@@ -111,9 +102,7 @@ type Member struct {
 	Lacking  uint32 `json:"lacking"`
 }
 
-// Replica is a metadata or control-plane replica: its group, replica ID, the loop hosting it, its
-// term, the leader it supports, its commit and applied index, whether it holds its leader lease,
-// a halt's index and age, and while it leads each follower's match index.
+// Replica is a metadata or control-plane replica's Raft state; a leader adds its followers' match indexes.
 type Replica struct {
 	Group     uint64     `json:"group"`
 	ID        uint64     `json:"id"`
@@ -134,8 +123,7 @@ type Follower struct {
 	Match uint64 `json:"match"`
 }
 
-// Session is the client session the node holds: its ID and incarnation, its lease's time left as
-// the client counts it, and the age of its last answered renewal on CLOCK_MONOTONIC_RAW, 0 before one.
+// Session is the client session the node holds, its renewal age on CLOCK_MONOTONIC_RAW and 0 before one.
 type Session struct {
 	ID           uint64    `json:"id"`
 	Incarnation  uint64    `json:"incarnation"`
@@ -149,8 +137,7 @@ type Mount struct {
 	Path   string `json:"path" name:"yes"`
 }
 
-// PGFacts is the node's answer on /facts/pg/<pool>.<pg>: the PG's members on its disks and the
-// unfound chunks their primary's last heartbeat named, at most chunkstore.MaxReportUnfound.
+// PGFacts is the node's answer on /facts/pg/<pool>.<pg>: its members of the PG and, as primary, up to chunkstore.MaxReportUnfound unfound chunks.
 type PGFacts struct {
 	Schema  string   `json:"schema" name:"no"`
 	Node    uint32   `json:"node"`
@@ -158,12 +145,14 @@ type PGFacts struct {
 	PG      uint32   `json:"pg"`
 	Members []Member `json:"members"`
 	Unfound []Chunk  `json:"unfound"`
+	// Unanswered are the loops that did not answer within the node's wait.
+	Unanswered []uint32 `json:"unanswered_loops"`
 }
 
 // Chunk names a chunk by volume, inode and index.
 type Chunk struct {
 	Volume uint32 `json:"volume"`
-	Inode  uint64 `json:"inode"`
+	Inode  uint64 `json:"inode,string" name:"no"`
 	Index  uint32 `json:"index"`
 }
 
@@ -181,18 +170,34 @@ func (f *Facts) Reset() {
 }
 
 // ErrSchema reports an answer that names a schema other than the one asked for.
-var ErrSchema = errors.New("ops: not a facts/v1 answer")
+var ErrSchema = errors.New("ops: not a v1 answer")
 
 // DecodeFacts decodes a v1 answer, ignoring fields a later v1 release added.
 func DecodeFacts(b []byte) (Facts, error) {
 	var f Facts
-	if err := json.Unmarshal(b, &f); err != nil {
-		return Facts{}, fmt.Errorf("ops: facts: %w", err)
-	}
-	if f.Schema != FactsV1 {
-		return Facts{}, fmt.Errorf("%w: schema %q", ErrSchema, f.Schema)
+	if err := decode(b, &f, &f.Schema, FactsV1); err != nil {
+		return Facts{}, err
 	}
 	return f, nil
+}
+
+// DecodePGFacts decodes a facts-pg/v1 answer, ignoring fields a later v1 release added.
+func DecodePGFacts(b []byte) (PGFacts, error) {
+	var p PGFacts
+	if err := decode(b, &p, &p.Schema, PGFactsV1); err != nil {
+		return PGFacts{}, err
+	}
+	return p, nil
+}
+
+func decode(b []byte, v any, schema *string, want string) error {
+	if err := json.Unmarshal(b, v); err != nil {
+		return fmt.Errorf("ops: %s: %w", want, err)
+	}
+	if *schema != want {
+		return fmt.Errorf("%w: schema %q, not %q", ErrSchema, *schema, want)
+	}
+	return nil
 }
 
 // Cache holds the last answer built and when, so a node builds at most one a second.
