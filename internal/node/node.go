@@ -24,9 +24,9 @@ const (
 
 // Config is a node's place in the cluster: its ID, the release its format level is, the loops of
 // the control-plane group's voters and its group ID, the seed of the source its start draws
-// from, which the daemon takes from the operating system at each start, and its role: meta,
-// holding metadata and no PG member, client, holding a client session and neither metadata nor a
-// PG member, or else storage, holding both.
+// from, which the daemon takes from the operating system at each start, its role: meta, holding
+// metadata and no PG member, client, holding neither, or else storage, holding both; and whether
+// it holds a client session, as a node that mounts a volume does.
 type Config struct {
 	Node     uint32
 	Release  uint32
@@ -202,7 +202,7 @@ func (n *Node) FetchTable(ctx *core.Context, out *Output) {
 func New(cfg Config) *Node {
 	n := &Node{cfg: cfg, rng: core.NewRand(cfg.Seed)}
 	n.start = uint64(n.rng.Uint32()) << 32
-	if cfg.Client || cfg.Session {
+	if cfg.Session {
 		n.sess = meta.NewSessionClient(meta.ClientLease, cfg.Node, n.rng)
 	}
 	return n

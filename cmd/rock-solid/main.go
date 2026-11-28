@@ -118,7 +118,7 @@ type nodeConfig struct {
 	// Memory is the daemon's memory budget in MiB, 0 for none.
 	Memory int64
 	// MetaOnly is role meta: the node holds metadata and no PG member; Client is role client: it
-	// holds a client session and neither metadata nor a PG member.
+	// holds neither, and a client session only if it mounts.
 	MetaOnly bool
 	Client   bool
 	// Mount is the volume the node mounts at MountPath, 0 for none.

@@ -330,33 +330,31 @@ func TestASessionWritesOverTCPAndARestartedNodeWritesToTheSamePGAgain(t *testing
 	}
 }
 
-// A client-only node, `rock-solid node -role client` with no device, starts a session at the
-// control plane over TCP and renews it: the one session it started is still live past dead_wait
-// from its start, the longest the leader waits for a session that never renews.
-func TestAClientOnlyNodeRenewsItsSessionOverTCP(t *testing.T) {
+// A client-only node, `rock-solid node -role client` with no device and no mount, starts no
+// session at the control plane: nothing would re-register under it when a new inode owner asks,
+// so every grace period would wait a lease for its eviction.
+func TestAClientOnlyNodeWithNoMountStartsNoSessionOverTCP(t *testing.T) {
 	p := runCtl(t, testDir(t))
 	var out output
-	startNode(t, fmt.Sprintf("-node 2 -ctl 1=127.0.0.1:%d -group %d -listen 127.0.0.1:%d -role client", p.Port, ctlGroup, freeBase(t, 1)), &out)
-	live := func() []uint64 {
-		return onCtl(t, p, func(_ *core.Context, c *meta.Control) []uint64 {
-			if c == nil {
-				return nil
-			}
-			var ids []uint64
-			for _, e := range c.SessionTable().Sessions {
-				if e.Node == 2 && e.Fenced == 0 {
-					ids = append(ids, e.ID)
-				}
-			}
-			return ids
-		})
+	cmd := startNode(t, fmt.Sprintf("-node 2 -ctl 1=127.0.0.1:%d -group %d -listen 127.0.0.1:%d -role client", p.Port, ctlGroup, freeBase(t, 1)), &out)
+	time.Sleep(3 * time.Second)
+	if cmd.ProcessState != nil {
+		t.Fatalf("the node exited; it said:\n%s", out.String())
 	}
-	var first []uint64
-	if !within(30*time.Second, func() bool { first = live(); return len(first) != 0 }) {
-		t.Fatalf("the node started no session; it said:\n%s", out.String())
-	}
-	time.Sleep(time.Duration(meta.DeadWait)*time.Microsecond + 2*time.Second)
-	if now := live(); len(first) != 1 || len(now) != 1 || now[0] != first[0] {
-		t.Fatalf("live sessions %v at the start, %v past dead_wait; the node said:\n%s", first, now, out.String())
+	ids := onCtl(t, p, func(_ *core.Context, c *meta.Control) []uint64 {
+		if c == nil {
+			t.Error("the control plane has no leader")
+			return nil
+		}
+		var ids []uint64
+		for _, e := range c.SessionTable().Sessions {
+			if e.Node == 2 {
+				ids = append(ids, e.ID)
+			}
+		}
+		return ids
+	})
+	if len(ids) != 0 {
+		t.Fatalf("the node started sessions %v; it said:\n%s", ids, out.String())
 	}
 }

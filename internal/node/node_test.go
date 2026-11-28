@@ -769,12 +769,27 @@ func TestTheHeartbeatReportsTheHaltedReplicasADeviceReported(t *testing.T) {
 	}
 }
 
-// A client-only node, with no device, starts its session, sending the same start again until it is
-// answered, renews it rate_gap after its first answer and every second after, holds its lease from
+// A client-only node that mounts nothing takes no session: nothing would answer a new owner's ask
+// to re-register under it, so each grace period would wait a lease for its eviction.
+func TestAClientOnlyNodeWithNoMountTakesNoSession(t *testing.T) {
+	r := &run{t: t, n: New(Config{Node: 4, Release: 1, Ctls: []core.NodeID{ctl}, Group: group, Seed: 3, Client: true}), ctx: core.Context{Now: 1, Raw: 1, Pool: sim.NewPool(1<<20, 0)}}
+	r.n.Start(&r.ctx, &r.out)
+	r.ctx.Now, r.ctx.Raw = r.ctx.Now+Interval, r.ctx.Raw+Interval
+	r.event(core.Event{Kind: core.EvTimer, Timer: SessionTimer})
+	if ms := r.sends(meta.KindSessionStart); len(ms) != 0 {
+		t.Fatalf("sent %d session starts", len(ms))
+	}
+	if _, ok := r.n.Session(&r.ctx); ok {
+		t.Fatal("holds a session")
+	}
+}
+
+// A client-only node that mounts, with no device, starts its session, sending the same start
+// again until it is answered, renews it rate_gap after its first answer and every second after, holds its lease from
 // its second answer until it lapses, takes it back on the next answer, ends it on Resumed, and
 // starts a new session under a new request once an answer fences it.
 func TestAClientOnlyNodeHoldsASession(t *testing.T) {
-	r := &run{t: t, n: New(Config{Node: 4, Release: 1, Ctls: []core.NodeID{ctl}, Group: group, Seed: 3, Client: true}), ctx: core.Context{Now: 1, Raw: 1, Pool: sim.NewPool(1<<20, 0)}}
+	r := &run{t: t, n: New(Config{Node: 4, Release: 1, Ctls: []core.NodeID{ctl}, Group: group, Seed: 3, Client: true, Session: true}), ctx: core.Context{Now: 1, Raw: 1, Pool: sim.NewPool(1<<20, 0)}}
 	at := func(d core.Tick) { r.ctx.Now, r.ctx.Raw = r.ctx.Now+d, r.ctx.Raw+d }
 	start := func() uint64 {
 		t.Helper()
