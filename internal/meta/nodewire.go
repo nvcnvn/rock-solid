@@ -566,9 +566,10 @@ func EncodeEvict(pool core.BufPool, group uint64, sessions []uint64, msg *core.M
 	return encodeBody(pool, group, KindEvict, 0, body, msg)
 }
 
-// DecodeEvict appends to dst the sessions a KindEvict message names, or returns ErrMalformed.
+// DecodeEvict appends to dst the sessions a KindEvict message names; one that does not decode, or
+// has a token, is ErrMalformed.
 func DecodeEvict(pool core.BufPool, msg *core.Msg, dst []uint64) ([]uint64, error) {
-	b, err := msgBody(pool, KindEvict, msg)
+	b, err := untokened(pool, KindEvict, msg)
 	if err != nil {
 		return dst, err
 	}

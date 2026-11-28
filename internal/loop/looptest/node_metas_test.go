@@ -418,7 +418,8 @@ func TestADeviceServesReadsOfTheGroupsItLeads(t *testing.T) {
 }
 
 // A device's server takes the session tables its node hands it and frees an orphan at its last
-// close: a fenced session's open closes at its acknowledgment, and the last mount's at its release.
+// close: the table answering its ask ends the new owner's grace period, as it holds no session; a
+// fenced session's open closes at its acknowledgment, and the last mount's at its release.
 func TestADeviceFreesAnOrphanAtItsLastClose(t *testing.T) {
 	nm := newNodeMetas(t)
 	if err := nm.m.d.AddMeta(nm.replica()); err != nil {
@@ -438,6 +439,10 @@ func TestADeviceFreesAnOrphanAtItsLastClose(t *testing.T) {
 		}
 		nm.postTxn(uint64(i)+1, &fs.Txn)
 	}
+	if nm.m.ask == 0 {
+		t.Fatal("the new owner asked for no session table")
+	}
+	nm.take(node.Output{Hands: []node.Hand{{Device: 7, Answers: nm.m.ask, Table: chunkstore.SessionTable{Version: 1, Acked: 1, Next: 1}}}})
 	attr := key(t, &meta.Key{Space: meta.SpaceFS, Volume: 1, Inode: file, Tag: meta.InodeAttr})
 	for session := uint64(1); session <= 2; session++ {
 		nm.postRead(&meta.Read{Start: attr, End: append(slices.Clone(attr), 0), Limit: 1, Reg: meta.RegOpen, Session: session, Mount: 1})
@@ -456,7 +461,7 @@ func TestADeviceFreesAnOrphanAtItsLastClose(t *testing.T) {
 			t.Fatalf("Txn %d was answered %v, %v", tok, ok, err)
 		}
 	}
-	nm.take(node.Output{Hands: []node.Hand{{Device: 7, Table: chunkstore.SessionTable{Version: 1, Acked: 1, Next: 3, Live: []uint64{1}}}}})
+	nm.take(node.Output{Hands: []node.Hand{{Device: 7, Table: chunkstore.SessionTable{Version: 2, Acked: 2, Next: 3, Live: []uint64{1}, Nodes: []uint32{9}}}}})
 	if freed() {
 		t.Fatal("an orphan session 1 has open was freed")
 	}

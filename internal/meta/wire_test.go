@@ -118,7 +118,7 @@ func fuzzWire(f *testing.F, kind byte, decode func(pool core.BufPool, m *core.Ms
 		case KindAnswer:
 			_ = EncodeAnswer(pool, 5, &Answer{Token: 9, Result: Result{FailedCheck: 0, Actual: v, Updated: []uint64{1}}, Err: NotLeader{Group: 5, Leader: 1}}, &m)
 		case KindRead:
-			_ = EncodeRead(pool, 5, 9, &Read{Start: v, End: append(v, 0), Limit: 3, Reg: byte(len(v)) % 3, Session: 7, Mount: 2}, &m)
+			_ = EncodeRead(pool, 5, 9, &Read{Start: v, End: append(v, 0), Limit: 3, Reg: byte(len(v)) % 5, Session: 7, Mount: 2, Term: 4}, &m)
 		case KindReadAnswer:
 			_ = EncodeReadAnswer(pool, 5, &ReadAnswer{Token: 9, KVs: []KV{{Key: b("k"), Value: v}, {Key: v, Value: nil}}, More: true}, &m)
 		}
@@ -616,4 +616,18 @@ func TestARestartedClientIgnoresItsEarlierStartsAnswers(t *testing.T) {
 	if toks[0] == toks[1] || len(out.Answers) != 0 {
 		t.Fatalf("tokens %x and %x; the new start took %+v", toks[0], toks[1], out.Answers)
 	}
+}
+
+func FuzzDecodeReclaim(f *testing.F) {
+	fuzzNodeWire(f, func(pool core.BufPool, m *core.Msg) { _ = EncodeReclaim(pool, 5, 7, 1<<40, m) }, func(pool core.BufPool, m *core.Msg) (core.Msg, bool) {
+		var again core.Msg
+		g, s, term, err := DecodeReclaim(pool, m)
+		if err != nil {
+			return again, false
+		}
+		if err := EncodeReclaim(pool, g, s, term, &again); err != nil {
+			panic(err)
+		}
+		return again, true
+	})
 }

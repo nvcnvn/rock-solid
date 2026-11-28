@@ -75,16 +75,16 @@ type registry struct {
 // grace period runs, the session table ask whose answer lists the sessions it waits on, 0 once
 // taken, those sessions, the version of the table it took them from, which fenced the sessions
 // not live in it, those whose re-registration ended before it took them, when it took them,
-// whether it has, when it last asked them to re-register, and whether it asked to evict them.
+// whether it has, and when it last asked them to re-register and to be evicted.
 type ownership struct {
-	group, term   uint64
-	grace         bool
-	ask           uint64
-	wait          []waiting
-	fenced        uint64
-	early         []uint64
-	since, asked  core.Tick
-	timed, evicts bool
+	group, term           uint64
+	grace                 bool
+	ask                   uint64
+	wait                  []waiting
+	fenced                uint64
+	early                 []uint64
+	since, asked, evicted core.Tick
+	timed                 bool
 }
 
 // waiting is a session a new owner waits on to re-register: its ID, its node, and the version of
@@ -228,7 +228,8 @@ func (o *ownership) list(t *chunkstore.SessionTable) {
 
 // progress runs o's grace period on s: it ends once every session o waits on has re-registered or
 // left the table, when the orphan list is scanned; until then o asks each to re-register every
-// ReclaimGap, and asks the control plane once to evict those still waited on after lease.
+// ReclaimGap, and asks the control plane to evict those still waited on after lease, again each
+// lease, as an ask that reached a voter not leading is dropped.
 func (g *registry) progress(ctx *core.Context, s *Shard, o *ownership, lease core.Tick, acts []core.Action) []core.Action {
 	if !o.grace || o.ask != 0 {
 		return acts
@@ -241,8 +242,8 @@ func (g *registry) progress(ctx *core.Context, s *Shard, o *ownership, lease cor
 		g.scanOrphans(s)
 		return acts
 	}
-	if !o.evicts && ctx.Now-o.since >= lease {
-		o.evicts = true
+	if ctx.Now-max(o.since, o.evicted) >= lease {
+		o.evicted = ctx.Now
 		for _, w := range o.wait {
 			g.evicts = append(g.evicts, w.id)
 		}

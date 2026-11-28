@@ -7,6 +7,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/nvcnvn/rock-solid/internal/chunkstore"
 	"github.com/nvcnvn/rock-solid/internal/core"
 )
 
@@ -141,8 +142,8 @@ func BenchmarkServeRead(b *testing.B) {
 	}
 }
 
-// BenchmarkServeOpenRelease is an open and a release of one file at its owner, beside 0 and
-// 100,000 other opens.
+// BenchmarkServeOpenRelease is an open and a release of one file at its owner past its grace
+// period, beside 0 and 100,000 other opens.
 func BenchmarkServeOpenRelease(b *testing.B) {
 	for _, held := range []int{0, 100_000} {
 		b.Run(fmt.Sprint(held), func(b *testing.B) {
@@ -156,6 +157,12 @@ func BenchmarkServeOpenRelease(b *testing.B) {
 			c.settle()
 			ctx := c.ctx(l)
 			sv := NewServer()
+			var out Output
+			sv.Free(&ctx, c.n[l].s, &out, nil)
+			sv.SetSessions(&chunkstore.SessionTable{Version: 1, Acked: 1, Next: 1}, sv.FetchSessions())
+			if sv.Free(&ctx, c.n[l].s, &out, nil); sv.reg.own(c.n[l].s).grace {
+				b.Fatal("the owner's grace period did not end with no session to wait on")
+			}
 			for i := range held {
 				sv.reg.insert(openRow{openKey: openKey{inodeAt{dataGroup, 1, uint64(i)}, opener{1, 1}}})
 			}

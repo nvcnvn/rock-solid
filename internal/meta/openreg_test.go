@@ -298,8 +298,9 @@ func TestAGracePeriodEndsOnlyOnceEveryLiveSessionReregistered(t *testing.T) {
 	}
 }
 
-// A session that does not re-register within a lease is evicted, and the grace period ends once
-// its fence is acknowledged, not at its commit.
+// A session that does not re-register within a lease is evicted, asked again each lease since an
+// ask may reach a voter that does not lead, and the grace period ends once its fence is
+// acknowledged, not at its commit.
 func TestAnUnregisteredSessionIsEvictedAndTheGraceEndsAtItsFence(t *testing.T) {
 	o := newOwner(t, regPlants{})
 	o.reg(RegOpen, 2)
@@ -314,6 +315,14 @@ func TestAnUnregisteredSessionIsEvictedAndTheGraceEndsAtItsFence(t *testing.T) {
 	o.later(SessionLease / 2)
 	if got := o.sv.Evictions(nil); len(got) != 1 || got[0] != 2 {
 		t.Fatalf("sessions %v evicted, want 2", got)
+	}
+	o.later(SessionLease / 2)
+	if got := o.sv.Evictions(nil); len(got) != 0 {
+		t.Fatalf("sessions %v evicted again within a lease", got)
+	}
+	o.later(SessionLease / 2)
+	if got := o.sv.Evictions(nil); len(got) != 1 || got[0] != 2 {
+		t.Fatalf("a lease after the ask, sessions %v evicted, want 2", got)
 	}
 	o.table(chunkstore.SessionTable{Version: 2, Acked: 1, Next: 3, Live: []uint64{1}, Nodes: []uint32{3}})
 	if o.freed() {

@@ -508,3 +508,11 @@ func FuzzDecodeRenewed(f *testing.F) {
 		return again, true
 	})
 }
+
+func FuzzDecodeEvict(f *testing.F) {
+	fuzzRecode(f, []uint64{3, 1 << 40},
+		func(pool core.BufPool, g uint64, ids *[]uint64, m *core.Msg) error {
+			return EncodeEvict(pool, g, *ids, m)
+		},
+		func(pool core.BufPool, m *core.Msg) ([]uint64, error) { return DecodeEvict(pool, m, nil) })
+}

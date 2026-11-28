@@ -193,6 +193,8 @@ type deviceOnLoop struct {
 	out            node.DeviceOutput
 	opened, failed int
 	report         meta.OpenedDisk
+	// ask is the newest session table ask the device made.
+	ask uint64
 }
 
 func (m *deviceOnLoop) OnEvent(ctx *core.Context, ev *core.Event, out []core.Action) []core.Action {
@@ -225,6 +227,7 @@ func (m *deviceOnLoop) done(out []core.Action) []core.Action {
 	if m.out.Failed {
 		m.failed++
 	}
+	m.ask = max(m.ask, m.out.Ask)
 	return append(out, m.out.Actions...)
 }
 

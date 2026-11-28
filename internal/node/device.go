@@ -322,10 +322,12 @@ func (d *Device) OnEvent(ctx *core.Context, ev *core.Event, out *DeviceOutput) {
 	switch {
 	case ev.Kind == core.EvNetRecv && ev.Msg.Group():
 		out.Actions = d.free(ctx, d.recvGroup(ctx, ev, out.Actions))
+		d.serverAsks(out)
 		return
 	case ev.Kind == core.EvTimer && ev.Timer >= MetaTimer && ev.Timer-MetaTimer < core.TimerID(len(d.metas)):
 		if a := d.metas[ev.Timer-MetaTimer]; a != nil && !d.closed(int(ev.Timer-MetaTimer)) {
 			out.Actions = d.free(ctx, a.OnEvent(ctx, ev, out.Actions))
+			d.serverAsks(out)
 		}
 		return
 	case d.rep != nil:
@@ -564,6 +566,7 @@ func (d *Device) Hand(ctx *core.Context, h *Hand, out *DeviceOutput) {
 	}
 	d.sv.SetSessions(&h.Table, answered(h.Answers, d.srvAsk, d.srvAt))
 	out.Actions = d.free(ctx, out.Actions)
+	d.serverAsks(out)
 	if d.rep != nil {
 		d.rep.SetSessions(ctx, h.Table, answered(h.Answers, d.repAsk, d.repAt), &d.rout)
 		d.take(ctx, out)
@@ -808,11 +811,7 @@ func (d *Device) take(ctx *core.Context, out *DeviceOutput) {
 		d.asks++
 		d.repAsk, d.repAt, out.Ask = k, d.asks, d.asks
 	}
-	if k := d.sv.FetchSessions(); k > d.srvAsk {
-		d.asks++
-		d.srvAsk, d.srvAt, out.Ask = k, d.asks, d.asks
-	}
-	out.Evicts = d.sv.Evictions(out.Evicts)
+	d.serverAsks(out)
 	out.Fetch = out.Fetch || d.rout.Fetch != 0 || d.rout.Whole
 	if v := d.st.Sessions().Version; v != d.held {
 		out.Held, d.held = v, v
@@ -821,6 +820,16 @@ func (d *Device) take(ctx *core.Context, out *DeviceOutput) {
 		out.Epoch, d.epoch = e, e
 	}
 	d.rout.Reset()
+}
+
+// serverAsks numbers the server's newest ask for a session table on the device's line into out,
+// and hands on the sessions it asks to evict.
+func (d *Device) serverAsks(out *DeviceOutput) {
+	if k := d.sv.FetchSessions(); k > d.srvAsk {
+		d.asks++
+		d.srvAsk, d.srvAt, out.Ask = k, d.asks, d.asks
+	}
+	out.Evicts = d.sv.Evictions(out.Evicts)
 }
 
 // answered is the ask of the replica's or the server's, whose newest is ask, numbered at on the

@@ -378,6 +378,40 @@ func TestTheRouterHoldsATxnUntilTheElection(t *testing.T) {
 	}
 }
 
+// A Read a new owner refuses ErrGrace waits for the router's timer and then goes again to the
+// same leader, rather than being answered: a new open waits out the grace period.
+func TestARouterHoldsAReadRefusedInTheGracePeriod(t *testing.T) {
+	m := oneShard(0)
+	r, err := NewRouter(&m, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out RouterOutput
+	ctx := core.Context{Now: 1}
+	rd := Read{Start: attr(1, 2, 1), Limit: 1, Reg: RegOpen, Session: 7, Mount: 1}
+	if err := r.Read(&ctx, &rd, 1, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	r.ReadAnswer(&ctx, &ReadAnswer{Token: 1, Err: NotLeader{Group: dataGroup, Leader: 2, Node: 1, Term: 3}}, &out)
+	out.Reset()
+	r.ReadAnswer(&ctx, &ReadAnswer{Token: 1, Err: ErrGrace}, &out)
+	if len(out.Reads) != 0 || len(out.Sends) != 0 || len(out.Actions) != 1 || out.Actions[0].Timer != 1 {
+		t.Fatalf("a Read refused ErrGrace answered %+v, sent %+v and armed %+v", out.Reads, out.Sends, out.Actions)
+	}
+	ctx.Now = out.Actions[0].At
+	out.Reset()
+	r.OnEvent(&ctx, &core.Event{Kind: core.EvTimer, Timer: 1}, &out)
+	if len(out.Sends) != 1 || out.Sends[0].Node != 1 || out.Sends[0].Read != &rd {
+		t.Fatalf("at the timer the router sent %+v", out.Sends)
+	}
+	out.Reset()
+	r.ReadAnswer(&ctx, &ReadAnswer{Token: 1}, &out)
+	if len(out.Reads) != 1 || out.Reads[0].Err != nil {
+		t.Fatalf("the Read resent answered %+v", out.Reads)
+	}
+}
+
 // A NotLeader of an older term leaves the cache as it is; a lost node fails the Txns sent to it
 // as dropped, since each may have applied, and the router forgets it led.
 func TestTheRouteCacheKeepsTheNewestTerm(t *testing.T) {

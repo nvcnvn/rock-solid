@@ -1189,6 +1189,35 @@ func TestAReplicasAskAndActivationReachTheControl(t *testing.T) {
 	}
 }
 
+// An inode owner's ask to evict a session, from a storage node's replica, reaches Control.Evict:
+// the session's next heartbeat is held, not renewed.
+func TestAnOwnersAskToEvictReachesTheControl(t *testing.T) {
+	r := newHostRun(t)
+	r.lead()
+	started := r.start(core.NodeID{Node: 9, Loop: 2}, 5)
+	if len(started) != 1 {
+		t.Fatalf("started %+v", started)
+	}
+	beat := func() SessionStatus {
+		var a SessionAnswer
+		if !r.h.Control().Renew(lease.Time{Boot: r.now, Raw: r.now}, true, &SessionBeat{Session: started[0].ID, Request: 1}, &a) {
+			t.Fatal("the Control did not answer a heartbeat")
+		}
+		return a.Status
+	}
+	if st := beat(); st != SessionRenewed {
+		t.Fatalf("before the ask a heartbeat got %v", st)
+	}
+	var m core.Msg
+	if err := EncodeEvict(r.pool, hostGroup, []uint64{started[0].ID}, &m); err != nil {
+		t.Fatal(err)
+	}
+	r.recv(core.NodeID{Node: 3, Loop: 1}, m)
+	if st := beat(); st != SessionHeld {
+		t.Fatalf("after the ask a heartbeat got %v", st)
+	}
+}
+
 // After a restart, a disk whose node has not reported yet keeps its PGs and takes no new one:
 // placement reads it at size 0, not as having left its pools.
 func TestARestartKeepsThePGsOfADiskNotReportedYet(t *testing.T) {
