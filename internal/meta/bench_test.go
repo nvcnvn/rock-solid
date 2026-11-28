@@ -1,9 +1,9 @@
 package meta
 
 import (
-	"fmt"
 	"encoding/binary"
 	"flag"
+	"fmt"
 	"slices"
 	"testing"
 
@@ -141,7 +141,9 @@ func BenchmarkServeRead(b *testing.B) {
 	}
 }
 
-func BenchmarkReviewServeOpenRelease(b *testing.B) {
+// BenchmarkServeOpenRelease is an open and a release of one file at its owner, beside 0 and
+// 100,000 other opens.
+func BenchmarkServeOpenRelease(b *testing.B) {
 	for _, held := range []int{0, 100_000} {
 		b.Run(fmt.Sprint(held), func(b *testing.B) {
 			c := newGroup(b, 3, false)
@@ -155,7 +157,7 @@ func BenchmarkReviewServeOpenRelease(b *testing.B) {
 			ctx := c.ctx(l)
 			sv := NewServer()
 			for i := range held {
-				sv.reg.rows = append(sv.reg.rows, openRow{at: inodeAt{dataGroup, 1, uint64(i)}, who: opener{1, 1}})
+				sv.reg.insert(openRow{openKey: openKey{inodeAt{dataGroup, 1, uint64(i)}, opener{1, 1}}})
 			}
 			var evs [2]core.Event
 			for i, reg := range []byte{RegOpen, RegRelease} {

@@ -210,25 +210,9 @@ func (m *Machine) child(o *op, out *Output) bool {
 	return true
 }
 
-// victim reads into slots s and s + 1 the attributes and purge entry of a file losing a link.
-func (m *Machine) victim(o *op, s int, ino uint64, out *Output) {
-	m.get(o, s, ino, meta.InodeAttr, nil, out)
-	m.get(o, s+1, ino, meta.SlotPurge, nil, out)
-}
-
-// took2 decodes what victim read; false when the inode is gone.
-func took2(o *op, s int, a *meta.Attr, p *meta.Purge) (pending *meta.Purge, ok bool) {
-	if !o.got[s].ok || meta.DecodeAttr(o.got[s].v, a) != nil {
-		return nil, false
-	}
-	if o.got[s+1].ok {
-		var err error
-		if *p, err = meta.DecodePurge(o.got[s+1].v); err != nil {
-			return nil, false
-		}
-		return p, true
-	}
-	return nil, true
+// tookAttr decodes the attributes read into slot s into a; false when the inode is gone.
+func tookAttr(o *op, s int, a *meta.Attr) bool {
+	return o.got[s].ok && meta.DecodeAttr(o.got[s].v, a) == nil
 }
 
 // unlink serves UNLINK and RMDIR.
@@ -251,18 +235,17 @@ func (m *Machine) unlink(o *op, out *Output) {
 		case o.mode == meta.ModeDir:
 			m.fail(o, EISDIR, out)
 		default:
-			m.victim(o, 0, o.child, out)
+			m.get(o, 0, o.child, meta.InodeAttr, nil, out)
 			o.step = 2
 		}
 	case 2:
-		pending, ok := took2(o, 0, &o.attr, &o.pend)
-		if !ok {
+		if !tookAttr(o, 0, &o.attr) {
 			o.step, o.again = 0, true
 			m.run(o, out)
 			return
 		}
 		o.step = 3
-		m.build(o, o.fs.Unlink(dir, o.req.Name, o.child, &o.attr, true, pending, o.now), out)
+		m.build(o, o.fs.Unlink(dir, o.req.Name, o.child, &o.attr, o.now), out)
 	case -1:
 		if n := m.nodes[o.child]; n != nil && n.attr.Nlink > 0 {
 			n.attr.Nlink--
@@ -310,7 +293,7 @@ func (m *Machine) rename(o *op, out *Output) {
 			}
 			o.over, o.omode = over, omode
 			if over != o.child {
-				m.victim(o, 2, over, out)
+				m.get(o, 2, over, meta.InodeAttr, nil, out)
 			}
 		}
 		o.step = 2
@@ -318,13 +301,12 @@ func (m *Machine) rename(o *op, out *Output) {
 	case 2:
 		r := meta.Rename{SrcDir: dir, DstDir: dir, Src: o.req.Name, Dst: o.req.NewName, Child: o.child, ChildMode: o.mode, Over: o.over}
 		if o.over != 0 && o.over != o.child {
-			pending, ok := took2(o, 2, &o.attr, &o.pend)
-			if !ok {
+			if !tookAttr(o, 2, &o.attr) {
 				o.step, o.again = 0, true
 				m.run(o, out)
 				return
 			}
-			r.OverAttr, r.OverOpen, r.OverPending = &o.attr, true, pending
+			r.OverAttr = &o.attr
 		}
 		o.step = 3
 		m.build(o, o.fs.Rename(&r, o.now), out)

@@ -468,6 +468,42 @@ func TestAHandleOfAFencedSessionFails(t *testing.T) {
 	}
 }
 
+// A CREATE whose file another node unlinks between its Txn and its registering Read answers
+// ENOENT: the owner takes no open of an orphan, as purge.tla's Open needs a link, so the mount
+// has no handle to give.
+func TestACreateWhoseFileIsUnlinkedBeforeItRegistersFails(t *testing.T) {
+	h := newMount(t, Config{})
+	h.held = true
+	u := h.send(fuseproto.Request{Opcode: fuseproto.OpCreate, NodeID: meta.RootInode, Name: []byte("f"), Mode: uint32(meta.ModeFile | 0o644)})
+	for len(h.reads)+len(h.sent) > 0 {
+		reads, sent := h.reads, h.sent
+		h.reads, h.sent = nil, nil
+		for _, rd := range reads {
+			if rd.Reg == meta.RegOpen {
+				var k meta.Key
+				if err := meta.DecodeKey(rd.Start, &k); err != nil {
+					t.Fatal(err)
+				}
+				a := h.attr(k.Inode)
+				var f meta.FS
+				f.Volume = vol
+				if err := f.Unlink(meta.RootInode, []byte("f"), k.Inode, &a, h.now); err != nil {
+					t.Fatal(err)
+				}
+				h.apply(&f.Txn)
+			}
+			h.answerRead(rd)
+		}
+		for _, s := range sent {
+			h.answerTxn(s)
+		}
+		h.serve()
+	}
+	h.held = false
+	h.serve()
+	h.errno(u, ENOENT)
+}
+
 // An unlink, of an open file or not, and a rename over a file each leave the inode an orphan for
 // its owner to free, and an open of an orphan the mount does not have open is ENOENT.
 func TestAnUnlinkLeavesAnOrphanForTheOwner(t *testing.T) {

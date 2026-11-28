@@ -61,12 +61,9 @@ type Rename struct {
 	Src, Dst       []byte
 	// Child is the moved inode and ChildMode its type.
 	Child, ChildMode uint64
-	// Over is the inode the destination entry names, 0 when it is absent; OverAttr its attributes,
-	// OverOpen whether it is open, and OverPending its purge entry, nil when it has none.
-	Over        uint64
-	OverAttr    *Attr
-	OverOpen    bool
-	OverPending *Purge
+	// Over is the inode the destination entry names, 0 when it is absent, and OverAttr its attributes.
+	Over     uint64
+	OverAttr *Attr
 	// Ancestors are the new parent and, for a directory, each directory above it up to the root,
 	// each with the parent it read; a move across directories needs them.
 	Ancestors []Ancestor
@@ -255,13 +252,9 @@ func (f *FS) remove(inode uint64, a *Attr, pending *Purge) {
 	}
 }
 
-// unlink drops one of inode's links, which it had when read as a: the last link of an inode not
-// open removes it, an open one becomes an orphan.
-func (f *FS) unlink(inode uint64, a *Attr, open bool, pending *Purge, now int64) {
-	if a.Nlink <= 1 && !open {
-		f.remove(inode, a, pending)
-		return
-	}
+// unlink drops one of inode's links, which it had when read as a: the last makes it an orphan,
+// which its owner frees once no mount has it open.
+func (f *FS) unlink(inode uint64, a *Attr, now int64) {
 	k := f.key(inode, InodeAttr, nil)
 	f.op(Check(k, f.attr(a), false))
 	b := *a
@@ -422,13 +415,12 @@ func (f *FS) Link(dir, up uint64, name []byte, child uint64, a *Attr, now int64)
 	return f.end()
 }
 
-// Unlink removes name, child's entry in dir; child was read as a, with its purge entry pending.
-// With open, the last link's removal makes child an orphan, which its owner frees once no mount
-// has it open, as every client's unlink does.
-func (f *FS) Unlink(dir uint64, name []byte, child uint64, a *Attr, open bool, pending *Purge, now int64) error {
+// Unlink removes name, child's entry in dir; child was read as a. The last link's removal makes
+// child an orphan, which its owner frees once no mount has it open.
+func (f *FS) Unlink(dir uint64, name []byte, child uint64, a *Attr, now int64) error {
 	f.begin(slotOf(dir))
 	f.drop(dir, name, child, a.Mode, now)
-	f.unlink(child, a, open, pending, now)
+	f.unlink(child, a, now)
 	return f.end()
 }
 
@@ -496,7 +488,7 @@ func (f *FS) Rename(r *Rename, now int64) error {
 		f.op(Update(f.key(r.DstDir, InodeAttr, nil), AttrNlink, Add, 1<<64-1))
 	default:
 		f.op(Check(dst, f.entry(r.Over, r.OverAttr.Mode), false))
-		f.unlink(r.Over, r.OverAttr, r.OverOpen, r.OverPending, now)
+		f.unlink(r.Over, r.OverAttr, now)
 	}
 	f.op(Put(dst, f.entry(r.Child, r.ChildMode)))
 	if c != nil {

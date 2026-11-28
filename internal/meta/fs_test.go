@@ -116,6 +116,13 @@ func (h *fsT) counter(slot uint32, tag byte) uint64 {
 	return field(h.s, string(h.slotKey(slot, tag, 0)), 0)
 }
 
+// free frees orphan inode, as its owner does once no mount has it open.
+func (h *fsT) free(inode uint64) {
+	h.t.Helper()
+	a := h.attr(inode)
+	h.ok(h.f.Free(inode, &a, h.purge(inode)))
+}
+
 func (h *fsT) purge(inode uint64) *Purge {
 	v, ok := h.s.tree.Get(h.slotKey(slotOf(inode), SlotPurge, inode))
 	if !ok {
@@ -352,8 +359,9 @@ func TestUnlink(t *testing.T) {
 	h.ok(h.f.Lock(f, LockExclusive, 7, nil))
 	must(h.s.tree.Put(h.slotKey(0, SlotUsed, 0), be(10)))
 
-	// Last link, not open: one Txn, and nothing of the inode stays.
-	h.ok(h.f.Unlink(dir, b("f"), f, &a, false, nil, 30*second))
+	// Last link: an orphan, and once its owner frees it nothing of the inode stays.
+	h.ok(h.f.Unlink(dir, b("f"), f, &a, 30*second))
+	h.free(f)
 	if ks := h.keysOf(f); len(ks) != 0 || h.has(h.key(dir, InodeEntry, "f")) {
 		t.Fatalf("keys %q left after the last unlink", ks)
 	}
@@ -366,7 +374,7 @@ func TestUnlink(t *testing.T) {
 	h.create(dir, "g", g, plain)
 	h.ok(h.f.Link(dir, h.up(dir), b("g2"), g, &plain, 30*second))
 	ga := h.attr(g)
-	h.ok(h.f.Unlink(dir, b("g2"), g, &ga, false, nil, 40*second))
+	h.ok(h.f.Unlink(dir, b("g2"), g, &ga, 40*second))
 	if na := h.attr(g); na.Nlink != 1 || na.Ctime != 40*second || h.purge(g) != nil {
 		t.Fatal("unlink of one of two links")
 	}
@@ -374,14 +382,14 @@ func TestUnlink(t *testing.T) {
 	// otherwise remove an inode an entry still names.
 	stale := h.attr(g)
 	h.ok(h.f.Link(dir, h.up(dir), b("g3"), g, &stale, 50*second))
-	h.fails(h.f.Unlink(dir, b("g"), g, &stale, false, nil, 50*second), false)
+	h.fails(h.f.Unlink(dir, b("g"), g, &stale, 50*second), false)
 
-	// Still open: an orphan.
+	// The orphan keeps its keys until it is freed.
 	o := ino(0, 4)
 	h.create(dir, "o", o, plain)
-	h.ok(h.f.Unlink(dir, b("o"), o, &plain, true, nil, 60*second))
+	h.ok(h.f.Unlink(dir, b("o"), o, &plain, 60*second))
 	if !h.has(h.slotKey(0, SlotOrphan, o)) || h.attr(o).Nlink != 0 {
-		t.Fatal("an open file's last unlink must leave an orphan")
+		t.Fatal("a file's last unlink must leave an orphan")
 	}
 
 	// rmdir.
@@ -389,7 +397,7 @@ func TestUnlink(t *testing.T) {
 	h.mkdir(dir, "d", d)
 	h.create(d, "x", ino(3, 2), plain)
 	h.fails(h.f.Rmdir(dir, b("d"), d, 70*second), true)
-	h.ok(h.f.Unlink(d, b("x"), ino(3, 2), &plain, false, nil, 70*second))
+	h.ok(h.f.Unlink(d, b("x"), ino(3, 2), &plain, 70*second))
 	nlink := h.attr(dir).Nlink
 	h.ok(h.f.Rmdir(dir, b("d"), d, 70*second))
 	if len(h.keysOf(d)) != 0 || h.attr(dir).Nlink != nlink-1 {
@@ -416,17 +424,18 @@ func TestRename(t *testing.T) {
 	ea := h.attr(e)
 	h.fails(h.f.Rename(&Rename{SrcDir: root, DstDir: root, Src: b("d"), Dst: b("e"), Child: d, ChildMode: ModeDir, Over: e, OverAttr: &ea}, 30*second), true)
 
-	// Over a file someone has open, and over one no one has.
+	// Over a file: an orphan, its keys and chunks freed with it.
 	o, p := ino(0, 3), ino(0, 4)
 	big := plain
 	big.Size, big.AllocEnd = 100, 1
 	h.create(root, "o", o, plain)
 	h.create(root, "p", p, big)
-	h.ok(h.f.Rename(&Rename{SrcDir: root, DstDir: root, Src: b("g"), Dst: b("o"), Child: f, ChildMode: ModeFile, Over: o, OverAttr: &plain, OverOpen: true}, 30*second))
+	h.ok(h.f.Rename(&Rename{SrcDir: root, DstDir: root, Src: b("g"), Dst: b("o"), Child: f, ChildMode: ModeFile, Over: o, OverAttr: &plain}, 30*second))
 	if !h.has(h.slotKey(0, SlotOrphan, o)) {
-		t.Fatal("the replaced open file must be an orphan")
+		t.Fatal("the replaced file must be an orphan")
 	}
 	h.ok(h.f.Rename(&Rename{SrcDir: root, DstDir: root, Src: b("o"), Dst: b("p"), Child: f, ChildMode: ModeFile, Over: p, OverAttr: &big}, 30*second))
+	h.free(p)
 	if len(h.keysOf(p)) != 0 || *h.purge(p) != (Purge{0, 1}) {
 		t.Fatal("the replaced file's keys must go and its chunks join the purge list")
 	}
@@ -526,7 +535,8 @@ func TestNothingLandsOnARemovedInode(t *testing.T) {
 	set := h.built()
 	h.f.RemoveXattr(f, &plain, 0, b("user.x"), 0)
 	remove := h.built()
-	h.ok(h.f.Unlink(RootInode, b("f"), f, &plain, false, nil, 30*second))
+	h.ok(h.f.Unlink(RootInode, b("f"), f, &plain, 30*second))
+	h.free(f)
 	for _, late := range []Txn{set, remove} {
 		if r := run(t, h.s, late); r.FailedCheck == -1 || len(h.keysOf(f)) != 0 {
 			t.Fatalf("an xattr of a removed file left %q", h.keysOf(f))
@@ -557,7 +567,8 @@ func TestSymlinksLeaveTheByteCounter(t *testing.T) {
 	a := symlinkA
 	a.Size = 5
 	h.ok(h.f.Create(RootInode, 0, b("s"), s, &a, b("12345"), 20*second))
-	h.ok(h.f.Unlink(RootInode, b("s"), s, &a, false, nil, 30*second))
+	h.ok(h.f.Unlink(RootInode, b("s"), s, &a, 30*second))
+	h.free(s)
 	if u := h.counter(0, SlotUsed); u != 0 {
 		t.Fatalf("u = %d after a symlink's create and unlink", int64(u))
 	}
@@ -620,7 +631,8 @@ func TestAttributes(t *testing.T) {
 		t.Fatal("the failed check must be the purge entry's")
 	}
 	end := h.attr(g)
-	h.ok(h.f.Unlink(d, b("big"), g, &end, false, h.purge(g), 50*second))
+	h.ok(h.f.Unlink(d, b("big"), g, &end, 50*second))
+	h.free(g)
 	if *h.purge(g) != (Purge{0, 4}) {
 		t.Fatalf("truncate, then unlink: purge %+v, want 0 .. 4", *h.purge(g))
 	}
@@ -717,7 +729,7 @@ func TestXattrsAndCaseIndex(t *testing.T) {
 		t.Fatalf("c/ holds %q", v)
 	}
 	h.fails(h.f.Create(RootInode, 0, b("PHOTO.jpg"), ino(0, 4), &plain, nil, 0), true)
-	h.ok(h.f.Unlink(RootInode, b("Photo.JPG"), ino(0, 3), &plain, false, nil, 0))
+	h.ok(h.f.Unlink(RootInode, b("Photo.JPG"), ino(0, 3), &plain, 0))
 	if h.has(h.key(RootInode, InodeFolded, "PHOTO.JPG")) {
 		t.Fatal("unlink must drop the folded name")
 	}
@@ -780,7 +792,7 @@ func TestFSBuildsAllocateNothing(t *testing.T) {
 	var a Allocator
 	a.Adopt(2)
 	pending := Purge{5000, 4}
-	r := Rename{SrcDir: ino(2, 1), DstDir: ino(3, 1), Src: b("a"), Dst: b("b"), Child: ino(2, 5), ChildMode: ModeDir, Over: ino(3, 9), OverAttr: &plain, OverPending: &pending, Ancestors: []Ancestor{{ino(3, 1), RootInode}}}
+	r := Rename{SrcDir: ino(2, 1), DstDir: ino(3, 1), Src: b("a"), Dst: b("b"), Child: ino(2, 5), ChildMode: ModeDir, Over: ino(3, 9), OverAttr: &plain, Ancestors: []Ancestor{{ino(3, 1), RootInode}}}
 	held := []Holder{{LockShared, 3, false}, {LockExclusive, 4, false}}
 	small := plain
 	small.Size = 5000
@@ -791,7 +803,7 @@ func TestFSBuildsAllocateNothing(t *testing.T) {
 		a.Adopt(2)
 		i, _ := a.Inode(2)
 		_ = f.Create(ino(2, 1), RootInode, name, i, &plain, nil, 1)
-		_ = f.Unlink(ino(2, 1), name, i, &big, false, &pending, 1)
+		_ = f.Unlink(ino(2, 1), name, i, &big, 1)
 		_ = f.Rename(&r, 1)
 		_ = f.SetAttr(i, &big, &small, &pending)
 		_ = f.Lock(i, LockExclusive, 5, held)
@@ -1022,7 +1034,7 @@ func (w *fsWork) build(o *fsOp) error {
 	case 2:
 		return f.Link(o.dir, w.h.up(o.dir), o.name, e.inode, a, now)
 	case 3:
-		return f.Unlink(e.dir, b(e.name), e.inode, a, rng.IntN(4) == 0, w.h.purge(e.inode), now)
+		return f.Unlink(e.dir, b(e.name), e.inode, a, now)
 	case 4:
 		return f.Rmdir(e.dir, b(e.name), e.inode, now)
 	case 5:
@@ -1033,7 +1045,7 @@ func (w *fsWork) build(o *fsOp) error {
 			if over == e.inode || (mode == ModeDir) != (e.mode == ModeDir) || oa == nil {
 				return errNoOp
 			}
-			r.Over, r.OverAttr, r.OverOpen, r.OverPending = over, oa, rng.IntN(4) == 0, w.h.purge(over)
+			r.Over, r.OverAttr = over, oa
 		}
 		for d := o.dir; d != RootInode; {
 			v, ok := w.h.s.tree.Get(w.h.key(d, InodeParent, ""))

@@ -238,7 +238,6 @@ type op struct {
 	fresh    bool
 	slot     uint32
 	attr     meta.Attr
-	pend     meta.Purge
 	mreq     meta.Request
 	fs       meta.FS
 	errno    fuseproto.Errno

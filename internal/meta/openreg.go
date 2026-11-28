@@ -2,7 +2,6 @@ package meta
 
 import (
 	"bytes"
-	"cmp"
 	"errors"
 	"slices"
 
@@ -30,23 +29,26 @@ type opener struct {
 	mount   uint32
 }
 
-// openRow is a mount's open of an inode, and the newest table version of a session not live in the
-// first table that showed it so, which its fence is at or below, or 0.
+// openKey is a mount's open of an inode.
+type openKey struct {
+	at  inodeAt
+	who opener
+}
+
+// openRow is an open, and the version of the first table that showed its session not live, which
+// its fence is at or below, or 0.
 type openRow struct {
-	at     inodeAt
-	who    opener
+	openKey
 	fenced uint64
 }
 
-func cmpRow(a, b openRow) int {
-	return cmp.Or(cmp.Compare(a.at.group, b.at.group), cmp.Compare(a.at.volume, b.at.volume), cmp.Compare(a.at.inode, b.at.inode),
-		cmp.Compare(a.who.session, b.who.session), cmp.Compare(a.who.mount, b.who.mount))
-}
-
-// registry is who has each file open, a row per inode and mount in order; the orphans to look at
-// once their last opener left; the free Txns proposed, by token; and the newest session table.
+// registry is who has each file open: a row per inode and mount, in no order, each row's index by
+// its key and the rows of each inode; the orphans to look at once their last opener left; the free
+// Txns proposed, by token; and the newest session table.
 type registry struct {
 	rows    []openRow
+	index   map[openKey]int
+	opens   map[inodeAt]int
 	frees   []inodeAt
 	spare   []inodeAt
 	freeing map[uint64]inodeAt
@@ -66,10 +68,35 @@ type regPlants struct {
 	unlinkOpen, releaseOnCommit, newOwnerFrees bool
 }
 
+func newRegistry() registry {
+	return registry{index: map[openKey]int{}, opens: map[inodeAt]int{}, freeing: map[uint64]inodeAt{}}
+}
+
 // open reports whether any mount has at open.
-func (g *registry) open(at inodeAt) bool {
-	i, _ := slices.BinarySearchFunc(g.rows, openRow{at: at}, cmpRow)
-	return i < len(g.rows) && g.rows[i].at == at
+func (g *registry) open(at inodeAt) bool { return g.opens[at] > 0 }
+
+func (g *registry) insert(r openRow) {
+	g.index[r.openKey] = len(g.rows)
+	g.rows = append(g.rows, r)
+	g.opens[r.at]++
+}
+
+// remove deletes row i, moving the last row into its place.
+func (g *registry) remove(i int) {
+	k := g.rows[i].openKey
+	last := len(g.rows) - 1
+	g.rows[i] = g.rows[last]
+	g.index[g.rows[i].openKey] = i
+	g.rows = g.rows[:last]
+	delete(g.index, k)
+	g.closed(k.at)
+}
+
+// closed counts one fewer open of at.
+func (g *registry) closed(at inodeAt) {
+	if g.opens[at]--; g.opens[at] <= 0 {
+		delete(g.opens, at)
+	}
 }
 
 // holds reports whether session id may register an open: before any table, while live, and for
@@ -96,17 +123,17 @@ func (g *registry) register(group uint64, rd *Read, kvs []KV) error {
 	}
 	var a Attr
 	found := len(kvs) > 0 && bytes.Equal(kvs[0].Key, rd.Start) && DecodeAttr(kvs[0].Value, &a) == nil
-	row := openRow{at: inodeAt{group, k.Volume, k.Inode}, who: opener{rd.Session, rd.Mount}}
-	i, there := slices.BinarySearchFunc(g.rows, row, cmpRow)
+	key := openKey{inodeAt{group, k.Volume, k.Inode}, opener{rd.Session, rd.Mount}}
+	i, there := g.index[key]
 	switch {
 	case rd.Reg == RegOpen && !g.holds(rd.Session):
 		return ErrFenced
 	case rd.Reg == RegOpen && !there && found && a.Nlink > 0:
-		g.rows = slices.Insert(g.rows, i, row)
+		g.insert(openRow{openKey: key})
 	case rd.Reg == RegRelease && there:
-		g.rows = slices.Delete(g.rows, i, i+1)
-		if found && a.Nlink == 0 && !g.open(row.at) {
-			g.look(row.at)
+		g.remove(i)
+		if found && a.Nlink == 0 && !g.open(key.at) {
+			g.look(key.at)
 		}
 	}
 	return nil
@@ -156,10 +183,13 @@ func (sv *Server) SetSessions(t *chunkstore.SessionTable) {
 			r.fenced = t.Version
 		}
 		if r.fenced != 0 && (r.fenced <= t.Acked || g.plant.releaseOnCommit) {
+			delete(g.index, r.openKey)
+			g.closed(r.at)
 			g.look(r.at)
 			continue
 		}
 		g.rows[j] = r
+		g.index[r.openKey] = j
 		j++
 	}
 	g.rows = g.rows[:j]
@@ -184,9 +214,10 @@ func (sv *Server) FreeRound(ctx *core.Context, a *RoundShard, acts []core.Action
 	return acts
 }
 
-// free proposes the frees of s's group. A replica that is not its group's sole leader since boot
-// frees none, as its registry may miss the opens an earlier leader registered, and drops them:
-// the orphans stay listed until Owner failover and grace period re-registers the opens.
+// free proposes the frees of s's group, keeping to look at again an orphan whose proposal was
+// refused. A replica that is not its group's sole leader since boot frees none, as its registry
+// may miss the opens an earlier leader registered, and drops them: the orphans stay listed until
+// Owner failover and grace period re-registers the opens and scans the orphan list.
 func (sv *Server) free(s *Shard, submit func(*Txn, uint64) error) {
 	g := &sv.reg
 	todo := g.frees
@@ -202,9 +233,11 @@ func (sv *Server) free(s *Shard, submit func(*Txn, uint64) error) {
 		}
 		sv.next++
 		token := ServerToken | sv.next
-		if submit(&g.fs.Txn, token) == nil {
-			g.freeing[token] = at
+		if submit(&g.fs.Txn, token) != nil {
+			g.frees = append(g.frees, at)
+			continue
 		}
+		g.freeing[token] = at
 	}
 	g.spare = todo[:0]
 }

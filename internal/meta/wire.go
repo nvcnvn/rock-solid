@@ -611,7 +611,7 @@ type wait struct {
 
 // NewServer makes a server.
 func NewServer() *Server {
-	return &Server{Held: ServerHeld, waits: map[uint64]wait{}, held: map[uint64]int{}, reg: registry{freeing: map[uint64]inodeAt{}}}
+	return &Server{Held: ServerHeld, waits: map[uint64]wait{}, held: map[uint64]int{}, reg: newRegistry()}
 }
 
 // Serve takes ev, a Txn message, and proposes it on s, the replica of its group Peek names, or

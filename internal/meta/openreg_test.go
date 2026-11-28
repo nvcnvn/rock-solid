@@ -124,7 +124,7 @@ func (o *owner) reg(reg byte, session uint64) uint64 {
 // unlink sends a client's unlink of the file's one link, which makes it an orphan.
 func (o *owner) unlink() {
 	a := regAttr
-	if err := o.fs.Unlink(RootInode, []byte("f"), regFile, &a, true, nil, 5); err != nil {
+	if err := o.fs.Unlink(RootInode, []byte("f"), regFile, &a, 5); err != nil {
 		o.t.Fatal(err)
 	}
 	ev := o.msg(func(pool core.BufPool, m *core.Msg) error {
@@ -232,5 +232,48 @@ func TestANewOwnerFreesNoOrphan(t *testing.T) {
 		if o.freed() != p.newOwnerFrees {
 			t.Fatalf("with %+v, the new owner freed the orphan: %v", p, o.freed())
 		}
+	}
+}
+
+// A free proposed by a leader cut off before it commits is answered dropped once the replica
+// applies the next leader's entries, so no token waits forever and the orphan is looked at again.
+func TestAFreeDroppedAtALeaderChangeIsAnswered(t *testing.T) {
+	o := newOwner(t, regPlants{})
+	o.reg(RegOpen, 1)
+	o.unlink()
+	old := o.l
+	o.c.cut[old] = true
+	o.reg(RegRelease, 1)
+	if len(o.sv.reg.freeing) != 1 {
+		t.Fatalf("%d frees in flight, want 1", len(o.sv.reg.freeing))
+	}
+	o.c.renewLeases()
+	o.l = o.c.elect()
+	o.c.heartbeat()
+	o.c.cut[old] = false
+	o.c.heartbeat()
+	o.c.settle()
+	ctx := o.c.ctx(old)
+	o.sv.Reply(&ctx, []Answer{o.c.answer(old, ServerToken|o.sv.next)}, nil)
+	if len(o.sv.reg.freeing) != 0 || len(o.sv.reg.frees) != 1 {
+		t.Fatalf("%d frees in flight and %d orphans to look at after the drop", len(o.sv.reg.freeing), len(o.sv.reg.frees))
+	}
+}
+
+// An orphan whose free the replica refuses, as when its round holds all it may, is looked at again.
+func TestAFreeRefusedIsTriedAgain(t *testing.T) {
+	o := newOwner(t, regPlants{})
+	o.reg(RegOpen, 1)
+	o.unlink()
+	rd := Read{Start: o.attrKey(regFile), End: append(o.attrKey(regFile), 0), Limit: 1, Reg: RegRelease, Session: 1, Mount: 1}
+	ev := o.msg(func(pool core.BufPool, m *core.Msg) error { return EncodeRead(pool, o.c.n[o.l].s.group, 7, &rd, m) })
+	o.c.call(o.l, func(ctx *core.Context, out *Output) { o.sv.ServeRead(ctx, &ev, o.c.n[o.l].s, nil) })
+	o.sv.free(o.c.n[o.l].s, func(*Txn, uint64) error { return ErrOverloaded })
+	if len(o.sv.reg.frees) != 1 || len(o.sv.reg.freeing) != 0 {
+		t.Fatalf("after a refused free, %d orphans to look at and %d frees in flight", len(o.sv.reg.frees), len(o.sv.reg.freeing))
+	}
+	o.step(func(*core.Context, *Output) {})
+	if !o.freed() {
+		t.Fatal("the orphan was not freed once the replica took its free")
 	}
 }

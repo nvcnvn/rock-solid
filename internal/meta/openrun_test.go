@@ -65,8 +65,6 @@ type openRun struct {
 	crashAt, cutAt, healAt, moveAt core.Tick
 	cut                            [2]uint32
 	err                            error
-	moves, crashes, reboots        int
-	firstMove, lastFree            core.Tick
 }
 
 type openHeld struct{ inode, session uint64 }
@@ -148,9 +146,6 @@ func (r *openRun) check() error {
 			}
 		}
 	}
-	if freed > r.freed {
-		r.lastFree = r.s.Time()
-	}
 	r.freed = freed
 	return nil
 }
@@ -169,10 +164,6 @@ func (r *openRun) move() {
 	l := r.leader()
 	if l < 0 {
 		return
-	}
-	r.moves++
-	if r.firstMove == 0 {
-		r.firstMove = r.s.Time()
 	}
 	if r.rng.Chance(1, 2) {
 		r.s.Reboot(uint32(l))
@@ -209,7 +200,6 @@ func (r *openRun) faults() {
 		if c := r.cls[r.rng.Below(openClients)]; r.s.Node(uint32(3 + c.i)).Up() {
 			r.fences = append(r.fences, openFence{session: c.session, at: now + core.Tick(r.rng.Below(uint64(openFenceLag)))})
 			r.s.Reboot(uint32(3 + c.i))
-			r.crashes++
 		}
 	}
 	changed := false
@@ -507,7 +497,7 @@ func (c *openClient) settle(ctx *core.Context) {
 		}
 	case stepAttr:
 		if len(kvs) == 1 && DecodeAttr(kvs[0].Value, &c.attr) == nil && c.attr.Nlink > 0 {
-			if err := c.fs.Unlink(RootInode, []byte("f"), c.inode, &c.attr, true, nil, int64(ctx.Now)); err != nil {
+			if err := c.fs.Unlink(RootInode, []byte("f"), c.inode, &c.attr, int64(ctx.Now)); err != nil {
 				c.r.t.Fatal(err)
 			}
 			c.txn(ctx, stepUnlink)
@@ -528,34 +518,19 @@ func TestAnOrphanIsNeverFreedWhileALiveSessionHasItOpen(t *testing.T) {
 
 // An unlink that frees an open file at once, a fenced session's opens closed when its fence
 // commits rather than once it is acknowledged, and a new owner that frees orphans each free an
-// orphan a live session has open.
+// orphan a live session has open, on seeds 1, 2 and 3.
 func TestPlantedRegistryBugsFreeAnOpenOrphan(t *testing.T) {
-	for _, p := range []regPlants{{unlinkOpen: true}, {releaseOnCommit: true}, {newOwnerFrees: true}} {
-		caught := false
-		for seed := uint64(1); seed <= 10 && !caught; seed++ {
-			var v *sim.Violation
-			caught = errors.As(newOpenRun(t, seed, p).run(), &v) && v.Name == invOrphanOpen
-		}
-		if !caught {
-			t.Errorf("plant %+v passed 10 seeds", p)
-		}
-	}
-}
-
-func TestReviewOpenRunCounts(t *testing.T) {
-	for seed := uint64(1); seed <= 10; seed++ {
-		r := newOpenRun(t, seed, regPlants{})
-		err := r.run()
-		t.Logf("seed %d: err %v freed %d moves %d firstMove %d lastFree %d crashes %d fences pending %d", seed, err, r.freed, r.moves, r.firstMove, r.lastFree, r.crashes, len(r.fences))
-	}
-}
-
-func TestReviewPlantSeeds(t *testing.T) {
-	for _, p := range []regPlants{{unlinkOpen: true}, {releaseOnCommit: true}, {newOwnerFrees: true}} {
-		for seed := uint64(1); seed <= 10; seed++ {
-			var v *sim.Violation
-			err := newOpenRun(t, seed, p).run()
-			t.Logf("plant %+v seed %d: caught %v: %v", p, seed, errors.As(err, &v) && v.Name == invOrphanOpen, err)
+	for _, c := range []struct {
+		p    regPlants
+		seed uint64
+	}{
+		{regPlants{unlinkOpen: true}, 1},
+		{regPlants{releaseOnCommit: true}, 2},
+		{regPlants{newOwnerFrees: true}, 3},
+	} {
+		var v *sim.Violation
+		if err := newOpenRun(t, c.seed, c.p).run(); !errors.As(err, &v) || v.Name != invOrphanOpen {
+			t.Errorf("plant %+v, seed %d: %v", c.p, c.seed, err)
 		}
 	}
 }

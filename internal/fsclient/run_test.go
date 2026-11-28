@@ -1434,12 +1434,12 @@ func TestPlantedMountBugsFailTheMountsRun(t *testing.T) {
 		inv  string
 	}{
 		{plants{noIDBase: true}, 1, invIDs},
-		{plants{noAbandon: true}, 2, invLive},
-		{plants{dropRefused: true}, 2, invLive},
+		{plants{noAbandon: true}, 1, invLive},
+		{plants{dropRefused: true}, 1, invLive},
 		{plants{retryLasting: true}, 1, invReadErr},
 		{plants{entryCached: true}, 1, invCloseToOpen},
-		{plants{staleKept: true}, 9, invCloseToOpen},
-		{plants{lastingMissing: true}, 11, invErrno},
+		{plants{staleKept: true}, 6, invCloseToOpen},
+		{plants{lastingMissing: true}, 1, invErrno},
 	} {
 		r := newFSRun(t, c.seed, c.p)
 		r.inv.Only(c.inv)

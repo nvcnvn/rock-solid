@@ -441,7 +441,7 @@ func TestADeviceFreesAnOrphanAtItsLastClose(t *testing.T) {
 	for session := uint64(1); session <= 2; session++ {
 		nm.postRead(&meta.Read{Start: attr, End: append(slices.Clone(attr), 0), Limit: 1, Reg: meta.RegOpen, Session: session, Mount: 1})
 	}
-	if err := fs.Unlink(meta.RootInode, []byte("f"), file, &a, true, nil, 2); err != nil {
+	if err := fs.Unlink(meta.RootInode, []byte("f"), file, &a, 2); err != nil {
 		t.Fatal(err)
 	}
 	nm.postTxn(3, &fs.Txn)
