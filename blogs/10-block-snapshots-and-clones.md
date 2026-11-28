@@ -3,14 +3,12 @@
 A pod that wants a raw disk, such as a database or a KubeVirt virtual machine, should not need a
 different storage system from a pod that wants a shared directory. rock-solid serves block volumes
 from the same chunk store as its RWX filesystem: a Linux user-space block device (ublk) on the
-node, NVMe over TCP for remote clients (not yet scheduled), and no metadata lookup on the write
-path. On top of both kinds of volume it builds snapshots and clones, which is what makes backup
+node, NVMe over TCP for remote clients, and no metadata lookup on the write path. On top of both kinds of volume it builds snapshots and clones, which is what makes backup
 tools like Velero work. A snapshot copies no data: the first 4 KiB write after it writes 4 KiB,
 not a 4 MiB chunk.
 
-Each section opens with an **In plain words** callout, the idea with an everyday example. The text
-after **How it works** is the mechanics, with the real names and numbers. If you read only the
-callouts, you still get the whole story.
+Each section opens with an **In plain words** callout; **How it works** follows with the
+mechanics. The callouts alone tell the whole story.
 
 ## Words you need
 
@@ -29,12 +27,10 @@ callouts, you still get the whole story.
   cannot write behind everyone's back.
 - **Snapshot.** A read-only copy of a volume as it was at one instant. **Crash-consistent** means
   it holds exactly what a power cut at that instant would have left.
-- **Copy-on-write.** Never modifying shared data in place: a write puts new data elsewhere and
-  repoints the writer, so whoever still points at the old data, such as a snapshot, keeps seeing
-  it. This is the broad sense the design uses; two narrower schemes are compared below.
-- **Snapshot epoch.** A per-volume counter of snapshots. It is not the table epoch, the version
-  number of the placement table, nor a PG's interval number, which counts the changes to one
-  placement group's membership and fills the high half of every chunk version
+- **Copy-on-write.** Never modifying shared data in place, so whoever still points at the old
+  data, such as a snapshot, keeps seeing it. Two narrower schemes are compared below.
+- **Snapshot epoch.** A per-volume counter of snapshots. It is neither the placement table's
+  epoch nor a PG's interval number
   ([Words with more than one meaning](../docs/glossary.md#words-with-more-than-one-meaning)).
 - **Punch, discard.** A discard (TRIM) is a filesystem saying "these blocks are free now".
   rock-solid turns it into a punch, which zeroes the range and frees its space.
@@ -102,7 +98,7 @@ the hot path. The MetaStore sees it only at attach and detach, at snapshots and 
 | Option | What it is | Gets right | Costs |
 | --- | --- | --- | --- |
 | **ublk** (chosen, local) | Kernel forwards block I/O to a user-space server over io_uring | Little overhead; survives a daemon restart | Local node only |
-| **NVMe-oF/TCP** (chosen, remote) | NVMe commands over TCP | The native remote protocol for NVMe | Not yet in a roadmap phase |
+| **NVMe-oF/TCP** (chosen, remote) | NVMe commands over TCP | The native remote protocol for NVMe | The host's own timeouts bound how long a write may wait |
 | NBD | Linux's simple network block device | Simple | Single-threaded overhead |
 | iSCSI | SCSI commands over TCP | Network block device | Old and heavy |
 
@@ -112,8 +108,7 @@ the hot path. The MetaStore sees it only at attach and detach, at snapshots and 
 > When the pod writes 4 KiB, the daemon works out which chunk that is and which disk is its
 > primary, using only arithmetic and a table it already holds, and sends the write there. The
 > primary writes it to its own log and to the other copies at the same time, and the write is done
-> when they all have it. Remote clients use NVMe over TCP instead; no roadmap phase schedules it
-> yet, and the design does not say which machines count as remote clients.
+> when they all have it. Remote clients use NVMe over TCP instead.
 
 **How it works.** Follow one 4 KiB write. Every step before the network hop is computed locally:
 
@@ -146,9 +141,10 @@ PG's interval number lets a member reject requests sent under an outdated member
 and the table epoch tells it which table to fetch
 ([03, epochs, leases and failures](03-epochs-leases-and-failures.md)).
 
-**What it costs.** The target for a 4K write at queue depth 1 is around 0.1 ms on drives with
-power-loss protection (Vitastor class; Ceph is around 1 ms). Consumer drives without it floor at
-about 1 ms, set by the drive's flush (see Evidence).
+**What it costs.** The target for a single 4K write, with nothing else in flight (queue depth 1),
+is around 0.1 ms on drives with power-loss protection, Vitastor's class; Ceph is around 1 ms. A
+consumer drive without that protection floors at about 1 ms per durable write, because its own
+flush takes that long ([NVMe flush spike](../spikes/nvme-flush/)).
 
 ### Block size: 4 KiB, and 512 bytes only when asked
 
@@ -159,18 +155,17 @@ about 1 ms, set by the drive's flush (see Evidence).
 > its 4 KiB block. The choice is fixed when the volume is created, because a filesystem formatted
 > for one size may refuse to mount on the other.
 
-**How it works.** ublk takes a logical block size from 512 bytes to the page size
-(`logical_bs_shift` 9 to 12, `drivers/block/ublk_drv.c`). rock-solid sets 12 for the logical and
-physical size, `io_min` 4 KiB and `io_opt` the 4 MiB chunk, so the block layer never sends a
-request smaller than a block or off a block boundary, and the block path never merges. Vitastor
-makes the same choice, exposing its 4 KiB `bitmap_granularity` as the sector size; krbd keeps the
+**How it works.** ublk lets the server pick a logical block size from 512 bytes up to the
+memory page size. rock-solid sets 4 KiB for the logical and physical size, 4 KiB as the minimum
+I/O and the 4 MiB chunk as the optimal one, so the block layer never sends a request smaller
+than a block or off a block boundary, and the block path never merges. Vitastor
+makes the same choice, exposing its 4 KiB allocation unit as the sector size; krbd keeps the
 kernel's default 512 bytes, and Ceph's BlueStore then reads and rewrites the rest of the block on
 every replica.
 
 KubeVirt needs nothing special. A VM disk sees 512-byte sectors unless its spec sets a
 `blockSize`, and QEMU pads a guest's 512-byte write to the host device's 4 KiB with its own
-read-modify-write (`bdrv_padding_rmw_read` in `block/io.c`), on the node, before rock-solid sees
-it.
+read-modify-write, on the node, before rock-solid sees it.
 
 For a guest that must see 512-byte sectors on the device itself, the StorageClass parameter
 `block_size: 512` exposes them. Each 512-byte write then reaches the chunk primary as a byte range,
@@ -178,13 +173,11 @@ and the primary merges it onto the newest version of its 4 KiB block, the same m
 ([02, chunks and placement](02-chunks-and-placement.md)). That keeps RWX block correct when two
 nodes write different sectors of one block, since both merges happen at one primary in one order,
 and costs a base read plus a whole 4 KiB block per write. The size cannot change later: XFS
-formatted with 512-byte sectors refuses a device whose logical block is 4 KiB
-(`bdev_validate_blocksize` in `fs/xfs/xfs_buf.c`), so clones and restores inherit their source's
-size.
+formatted with 512-byte sectors refuses a device whose logical block is 4 KiB, so clones and
+restores inherit their source's size.
 
-**RWO: one writer, enforced.** At attach, a single-writer attach record is taken in the MetaStore
-(`volume/{id}/attach`). It stops two nodes from mounting one volume and corrupting it, and the
-simulator, once built, checks "at most one writer per RWO volume" after every step.
+**RWO: one writer, enforced.** At attach, a single-writer attach record is taken in the
+MetaStore. It stops two nodes from mounting one volume and corrupting it.
 
 **RWX block.** Several nodes attach one raw device, for KubeVirt live migration. The design calls
 this Tier 0, the lowest of its coherence tiers: the attach record allows several writers, the
@@ -225,19 +218,22 @@ sequenceDiagram
     PR->>PR: rejected, incarnation 1 is older
 ```
 
-An *incarnation* is the daemon's start time on `CLOCK_BOOTTIME`. Each connection's hello names
-it, and so does every chunk write and punch, in 8 bytes. A primary that has seen a newer
+An *incarnation* is the daemon's start time on `CLOCK_BOOTTIME`, a clock that keeps counting
+through suspend. Each connection's first message (its hello) names it, and so does every chunk
+write and punch. A primary that has seen a newer
 incarnation of a session closes the older one's connections and rejects their writes, and it checks
 when it orders a write, not only when it receives one, so a stale write it already holds is caught
 too. The incarnation rides in each write, not only in the hello, because with one event loop per
 core the old connection, the new one and the chunk's loop can be three different loops
 ([11](11-runtime-in-go.md)), and making every hello reach every loop first would be an ordering
-rule between loops kept forever. Applying a reissued write twice is harmless to the pod that sent
-it: the same bytes give the same blocks under a newer version. Under RWX block, another node's
-write landing between the two would be overwritten, and a reader on a third node could see the
-reissued write take effect twice, which live migration never causes because it never writes one
-block from two nodes at once ([Single order per chunk](../docs/design.md#data-layer-chunkstore)).
-The same check fences the chunk writes of a dead FUSE daemon. The flags and recovery steps are in
+rule between loops kept forever; 8 bytes per write is cheaper. The primary's table of newest
+incarnations need not survive a primary change either: a primary orders a held write again only
+if no other primary led the PG since, which the epoch-change model checks
+([protocol models study](../studies/protocol-models/README.md)). Applying a reissued write twice
+is harmless to the pod that sent it: the same bytes give the same blocks under a newer version.
+Under RWX block a write from another node could land between the two, which live migration never
+causes, since it never writes one block from two nodes at once. The same check fences the chunk
+writes of a dead FUSE daemon; the recovery steps are in
 [Daemon restart and upgrade](../docs/design.md#daemon-restart-and-upgrade).
 
 ### When the pool is full: pause, never fail
@@ -250,13 +246,14 @@ The same check fences the chunk writes of a dead FUSE daemon. The flags and reco
 > until there is room, the way Ceph's block devices do. A paused volume is bad; a stopped one
 > that also lost data is worse.
 
-**How it works.** Writes that add no data still pass a full pool's `write_limit`: overwrites of
+**How it works.** A pool is full when one of its disks reaches the pool's write limit, the share
+of each disk the pool may fill; the rest is kept for recovery. Writes that add no data still pass:
+overwrites of
 blocks the volume already holds and nobody else shares (in the log, each kills the block it
 replaces) and discards. So a filesystem's journal keeps working. A write that needs new space is
 held, and the daemon retries it whenever the control plane reports that the pool has room again,
-with no time limit. The evidence is the
-[block ENOSPC spike](../docs/design.md#appendix-block-enospc-spike), which ran ext4 and XFS on a
-full dm-thin pool. Refused writes got `ENOSPC` at `fsync`, but they included metadata in blocks
+with no time limit. The evidence is the [block ENOSPC spike](../spikes/block-enospc/), which ran
+ext4 and XFS on a full dm-thin pool (Linux's own thin-provisioning device). Refused writes got `ENOSPC` at `fsync`, but they included metadata in blocks
 the device had never stored: the leaf of a file's extent tree, the inodes and directory blocks of
 new files. ext4 aborted its journal at the first one and refused every later write, overwrites
 included. XFS retried while it stayed mounted, then shut down at unmount. Both were consistent
@@ -266,34 +263,36 @@ no error, and both filesystems checked clean. The options weigh up like this:
 
 | On a full pool | Who does it | What happens to the filesystem inside |
 | --- | --- | --- |
-| Fail at once with `BLK_STS_NOSPC` | dm-thin with `error_if_no_space` | Refused data lost; ext4 stops at once, XFS at unmount; usable again only after a log replay with room in the pool |
+| Fail at once with "no space" | dm-thin set to error when full | Refused data lost; ext4 stops at once, XFS at unmount; usable again only after a log replay with room in the pool |
 | Hold 60 s, then fail | dm-thin and LVM thin by default | The same, a minute later, unless the pool grows |
 | Let writes past the limit into a bounded reserve | No system studied | The same, once the reserve is spent; meanwhile recovery has less room |
 | Hold until there is room | Ceph RBD, Vitastor, rock-solid | Intact, but the volume hangs while the pool is full |
 
 The hang is real. Held writes keep their ublk tags, and ext4's journal waits for the data it
 orders, so a volume that keeps writing soon stops altogether. Its processes sleep where nothing can
-interrupt them, the kernel warns about them after 120 s, and the pod cannot be killed until the
-writes complete. The node plugin posts a Warning event on the PVC naming the pool, the pool's
+interrupt them, the kernel's hung-task detector warns about them, and the pod cannot be killed
+until the writes complete. Nothing else on the node may wait with it: the node plugin answers
+Kubernetes' volume-stats calls from the daemon's own figures, never from the filesystem on the
+device, and the daemon warns at start if the node is set to panic on a hung task. The node plugin posts a Warning event on the PVC naming the pool, the pool's
 condition is `Full`, and a metric counts held writes per volume. Three ways out, in this order:
 free space outside the volume (delete snapshots, which are what make overwrites need new space,
 delete other volumes, or add a disk), and the writes resume by themselves; raise the pool's
-`write_limit` into the room above it, which resumes them at once but leaves space grants and
-recovery less room; or run
+write limit into the room kept above it, which resumes them at once but leaves recovery less
+room; or run
 `rock-solid volume fail-held <volume>`, which completes the held writes with `ENOSPC` when the pod
 must go, knowing the held data is lost and its filesystem stops until it is mounted with room in
 the pool.
 
-Discard matters here too. In the spike, without `discard` a new write after deleting a 512 MiB file
-still failed: the space ext4 freed never reached the device. With `-o discard` it succeeded. A
-weekly `fstrim` would leave a full pool full until its next run, and a punch costs one log entry, so
-the CSI driver mounts with `discard`. A VM's raw disk sends discards only if its guest does.
+Discard matters here too. In the spike, without `discard` a new write after deleting a file still
+failed: the space ext4 freed never reached the device. With `discard` it succeeded. A weekly
+`fstrim` would leave a full pool full until its next run, and a punch costs one log entry, so the
+CSI driver mounts with `discard`. A VM's raw disk sends discards only if its guest does.
 
-Remote clients cannot be held forever: the Linux NVMe host times a command out after 30 s and
-retries a refused one at most five times. So the target holds a write 20 s, then answers Capacity
-Exceeded with the longest retry delay NVMe allows, 6,553.5 s, and a stock host pauses about 9 hours
-before it gives up, at which point its filesystem is damaged as above. A client that must never
-give up raises `nvme_core.max_retries`.
+Remote clients cannot be held forever: the Linux NVMe host times a command out after half a
+minute and retries a refused one only a few times. So the target holds a write briefly, then
+answers "capacity exceeded, retry later" with the longest retry delay NVMe allows, and a stock
+host pauses about 9 hours before it gives up, at which point its filesystem is damaged as above.
+A client that must never give up raises its retry count, which stretches the wait to weeks.
 
 ## Part 2: snapshots
 
@@ -308,8 +307,7 @@ give up raises `nvme_core.max_retries`.
 Once the driver has it, Velero and Kasten work with no further integration: Velero's data mover
 creates a temporary PVC from the snapshot, mounts it and uploads it with Kopia. Without snapshots,
 Velero falls back to backing up files from the live mount, which is not point-in-time. So the
-driver will advertise `CREATE_DELETE_SNAPSHOT` and `CLONE_VOLUME` and ship the `csi-snapshotter`
-sidecar. Everything below applies to block and filesystem volumes alike, except that a block
+driver advertises the CSI snapshot and clone capabilities and ships the snapshot sidecar. Everything below applies to block and filesystem volumes alike, except that a block
 volume has no file metadata to copy.
 
 ### Two ways to keep old data: copy out, or write elsewhere
@@ -341,9 +339,8 @@ Write elsewhere (never overwrite, repoint the writer)
 Writing elsewhere pays nothing extra on the write, but needs a map of where each block now lives,
 and the live volume scatters over the disk as it is overwritten.
 
-rock-solid's design and glossary call their scheme *copy-on-write per block*, in the broad sense:
-shared data is never modified in place, and a write puts new data elsewhere and repoints the
-writer. In the terms above that is write-elsewhere. "Per block" is the unit: the volume and its
+rock-solid calls its scheme *copy-on-write per block*, in the broad sense; in the terms above it
+is write-elsewhere. "Per block" is the unit: the volume and its
 snapshot share 4 KiB blocks, not 4 MiB chunks. The log already writes every block to a new place
 (fact 2), so a snapshot only has to keep the old map. No data is copied; the map is.
 
@@ -429,15 +426,14 @@ The edge cases:
 - **A node that never answers.** The coordinator waits until its session expires and is fenced,
   as a recall does; every primary then rejects its writes.
 - **The coordinator crashes** between pause and resume, or a MetaStore shard changes leader at the
-  cut. Both are named simulation faults. A paused node resumes only once it knows whether the
-  snapshot committed: the cut is a two-phase commit, the pause prepares it and the snapshot record
-  commits it, so a node that resumed on a timeout under the old epoch could put a post-cut write
-  into the snapshot. It asks the MetaStore whether snapshot E exists. Snapshot cuts get a TLA+
-  model in phase 11, before the cut's code; it is to settle how the commit is made conditional, so
-  a cut a node gave up on can never commit later, and how a node that attaches or mounts the
-  volume during the cut is paused. Until phase 13 a filesystem has one data shard; once it has
-  several, the markers commit with the snapshot record through the cross-shard transactions of
-  [08](08-the-metastore.md).
+  cut. A paused node resumes only once it knows whether the snapshot committed: the cut is a
+  two-phase commit, the pause prepares it and the snapshot record commits it, so a node that
+  resumed on a timeout under the old epoch could put a post-cut write into the snapshot. It asks
+  the MetaStore whether snapshot E exists. The cut gets a TLA+ model before its code; the model
+  is to settle how the commit is made conditional, so a cut a node gave up on can never commit
+  later, and how a node that attaches or mounts the volume during the cut is paused. While a
+  filesystem's metadata sits in one shard the marker commits with the record in one transaction;
+  across several shards it needs the cross-shard transactions of [08](08-the-metastore.md).
 - **Cost.** A block RWO volume has one node to pause; a volume nobody uses needs no pause.
 
 **Data still in the daemon's buffer.** By default the cut does not flush the filesystem daemon's
@@ -455,9 +451,9 @@ Application consistency (a database's own flush, `fsfreeze`) comes from backup-t
 
 **How it works.** A chunk's index entry holds its current version and the snapshot epoch of its
 last freeze. When a write carries a snapshot epoch newer than that of the chunk's newest write the
-primary has accepted, pending writes included, the primary puts a `freeze (pool, chunk_id,
-version, snapshot epoch)` entry for the chunk's current version in the same log record as the
-write. Every member copies the live map under that version's key, then applies the write.
+primary has accepted, pending writes included, the primary puts a freeze entry, naming the
+chunk's current version and the new snapshot epoch, just ahead of the write in the same log
+record. Every member copies the live map under that version's key, then applies the write.
 
 A worked example. Chunk 3 of a VM disk volume (bytes 12 to 16 MiB, 1,024 blocks of 4 KiB) was
 written by two records before the snapshot: blocks 0 to 511 at version v5 in record A, and blocks
@@ -514,8 +510,7 @@ cut 1 -> write block 100 (freezes v6 at epoch 1, writes v7)
 Frozen maps sit outside the live map's key range, so punching the live chunk never touches what a
 snapshot reads. A freeze is logged like a write, so rebuilding the index from the log restores
 which versions a snapshot pinned, and applying a freeze twice changes nothing. Code:
-[`internal/chunkstore/index.go`](../internal/chunkstore/index.go) (`freeze`, `LookupAt`) and
-[`internal/disklog/record.go`](../internal/disklog/record.go) (the 37-byte entry).
+[`internal/chunkstore/index.go`](../internal/chunkstore/index.go).
 
 ### The absent chunk: a snapshot must remember what did not exist
 
@@ -538,18 +533,19 @@ t2    write v2, tagged epoch 1               1 > 0, so freeze v1 at epoch 1
 ```
 
 At t2 the chunk looks unfrozen since epoch 0, so the write freezes v1, which was written after the
-cut. The [chunk epochs spike](../docs/design.md#appendix-chunk-epochs-spike) found exactly this in
-the real index.
+cut, and so does every older snapshot. The [chunk epochs spike](../spikes/chunk-epochs/) found
+exactly this in the real index, and a random test read snapshots wrong in most of its runs, every
+wrong read in a chunk created after a cut.
 
 The fix is to freeze version 0, the *absent* chunk. When a write reaches a chunk with no version
 in a volume that has had a snapshot, the primary puts `freeze(chunk 9, v0, epoch 1)` in the
 record. Its frozen map is empty, so snapshot 1 reads the chunk as never written, and its epoch
 tells later writes in epoch 1 not to freeze again. After cut 2, a write freezes v1 at epoch 2:
-snapshot 1 still finds nothing, and snapshot 2 finds v1. That costs one 37-byte entry per chunk
-created in a snapshotted volume, against 8 bytes on every write entry for carrying the snapshot
-epoch everywhere. Today the index still refuses a freeze of version 0 (`ErrFrozenLive`); the absent
-freeze is an open item in the [build checklist](../docs/build-checklist.md), with the spike's
-tests to become regression tests first.
+snapshot 1 still finds nothing, and snapshot 2 finds v1. That costs one small entry, 37 bytes,
+per chunk created in a snapshotted volume, against 8 bytes on every write entry for carrying the
+snapshot epoch everywhere, which is how Ceph keeps the same fact. A chunk that was punched
+(zeroed and freed) keeps its version as a tombstone, so the first write after a cut freezes that
+version and the snapshot reads zeros, as it should.
 
 ### Metadata: copy out of a point-in-time view
 
@@ -561,16 +557,16 @@ tests to become regression tests first.
 **How it works.** When a MetaStore shard applies the cut's marker key, it opens a point-in-time
 view and copies the volume's `fs/{volume}/` keys into `fs/{snapshot}/` in the background
 ([08, the MetaStore](08-the-metastore.md)). The view closes once the copy is done, so it never
-holds back space for the life of the snapshot: in the
-[KV engines spike](../docs/design.md#appendix-kv-engines-spike), one long-lived reader grew a redb
-file from 26 MB to 419 MB in 100 commits. A block volume has no `fs/` keys, so its cut writes only
+holds back space for the life of the snapshot: in the [KV engines spike](../spikes/kv-engines/),
+one long-lived reader grew an embedded database's file sixteenfold in a hundred commits, because
+nothing it could still see could be reclaimed. A block volume has no `fs/` keys, so its cut writes only
 the `volume/{id}/snap/{E}` record and no shard markers.
 
 **Backups don't load the primaries.** A backup reads the snapshot with `read(at_ver)`. A read at a
 frozen version needs no ordering against writes, so any PG member holding it can serve it.
 
 **Erasure-coded pools**, which store a chunk as data and parity pieces instead of full copies
-([07](07-pools-and-redundancy.md)), normally encode a block chunk only after a day idle. Frozen
+([07](07-pools-and-redundancy.md)), encode a block chunk only once it has been idle for a while. Frozen
 versions keep the chunk's form: copies while the chunk is copies, sharing untouched blocks with the
 live version, and encoded with it when it seals, each version into shards of its own. When an
 overwrite returns an encoded chunk to copies, the encoded version stays on as the frozen one
@@ -660,58 +656,36 @@ which is exactly why snapshots are cheap.
 
 ## Evidence
 
-- **Chunk epochs spike** ([appendix](../docs/design.md#appendix-chunk-epochs-spike),
-  [`spikes/chunk-epochs/`](../spikes/chunk-epochs/)), run against the real `internal/chunkstore`
-  index at 676095b. Without the absent freeze, a chunk first written after cut 1 is read by
-  snapshot 1 at version 1 (E1, E2), and a random property test read a snapshot wrong in **35 of 50
-  seeds**, 259 block reads, all in chunks created after the cut (E3). With the absent freeze, 0 of
-  50, with 74 absent freezes against 5,267 freezes.
-- **Cleaner spike** ([appendix](../docs/design.md#appendix-cleaner-write-amplification-spike),
-  [`spikes/cleaner-wa/`](../spikes/cleaner-wa/)). With 20% of the data snapshotted, then
-  overwritten, cleaning write amplification was 5 to 9% lower at the same fill, because frozen data
-  is cold. The snapshot raises the fill itself, so snapshot-pinned blocks count toward the pool.
-- **NVMe flush spike** ([appendix](../docs/design.md#appendix-nvme-flush-spike),
-  [`spikes/nvme-flush/`](../spikes/nvme-flush/)), N2: a 4K write plus `fdatasync` at queue depth 1
-  costs p50 0.95 ms, p99 2.4 ms, the block frontend's latency floor on such a drive.
+Five spikes shaped these decisions; each is described where it matters above.
 
-- **Sub-block writes spike** ([appendix](../docs/design.md#appendix-sub-block-writes-spike),
-  [`spikes/sub-block-writes/`](../spikes/sub-block-writes/)). Its model of two clients writing
-  unaligned bytes into one chunk, merged at the primary on its newest ordered version, was right on
-  every one of 500 seeds, and wrong on every seed when merged on the committed version only: the
-  evidence that 512-byte sectors are safe on RWX block once they merge at the primary.
-
-- **Block ENOSPC spike** ([appendix](../docs/design.md#appendix-block-enospc-spike),
-  [`spikes/block-enospc/`](../spikes/block-enospc/)). ext4 and XFS on a 1 GiB dm-thin volume over
-  a 192 MiB pool: a hold that ended when the pool grew completed every write and left both clean.
-  Refused writes gave `ENOSPC` at `fsync`, then ext4 aborted its journal and refused every write,
-  and XFS shut down at unmount; both checked clean only after a log replay with room in the pool.
-  Without `discard`, a write after `rm` still failed.
-
-The simulator will check after every step that a snapshot holds every write acknowledged before
-its cut and none issued after, that every read, live and at every snapshot, equals a byte-range
-oracle of the acknowledged writes and punches, and that no block write needing new space completes
-with an error while the pool is full unless an operator failed it. Among its faults are a snapshot
-cut while a volume overwrites near full, so its overwrites suddenly need new space, a held block
-write released by a discard, a purge or a new disk, and unaligned writes from two nodes into one
-block across a primary change.
+- [Chunk epochs](../spikes/chunk-epochs/): without the absent freeze, snapshots read data written
+  after their cut; with it, none did.
+- [Cleaner write amplification](../spikes/cleaner-wa/): frozen data is cold, so snapshots cost the
+  cleaner little beyond the fill they add, which is why snapshot-pinned blocks count toward the
+  pool.
+- [NVMe flush](../spikes/nvme-flush/): about 1 ms per durable 4K write on a consumer drive, almost
+  all inside the drive.
+- [Sub-block writes](../spikes/sub-block-writes/): unaligned writes from two clients into one
+  block stay correct only when merged at the primary onto its newest ordered version.
+- [Block ENOSPC](../spikes/block-enospc/): holding writes on a full pool left ext4 and XFS clean;
+  refusing them stopped both until a log replay with room.
 
 ## Trade-offs: what this costs
 
 - **The cut pauses writes** for about one round trip, and a node that does not answer holds the
   snapshot until its session expires and is fenced.
-- **Crash-consistent, not application-consistent.** A database still needs a backup-tool hook to
-  be clean on restore.
-- **Snapshots use space.** The first write to a pinned block needs new space, so on a pool past
-  its `write_limit` even an overwrite waits for room.
-- **A full pool hangs a block volume** until space appears or an operator acts, instead of failing
-  its writes and damaging its filesystem; remote NVMe-oF clients give up after about 9 hours.
-- **A freeze copies a map,** up to 1,024 entries for a chunk overwritten at random 4K, and an
+- **Crash-consistent, not application-consistent.** A database still needs a backup-tool hook.
+- **Snapshots use space,** since the first write to a pinned block needs new space: on a full
+  pool even an overwrite waits.
+- **A full pool hangs a block volume** until space appears or an operator acts; remote NVMe-oF
+  clients give up after about 9 hours.
+- **A freeze copies a map,** up to one entry per block for a chunk overwritten at random, and an
   unflattened clone pays an extra hop and keeps its source's frozen versions alive.
-- **Block volumes fragment the chunk index.** Random 4K overwrites can push a 1 TB disk's index
-  toward 270 million entries, more than 10 GB, and turn sequential reads into random 4K reads
-  ([06, the LSM tree](06-the-lsm-tree.md)).
-- **512-byte sectors cost a read.** A volume with `block_size: 512` pays a base read at the primary
-  and a whole 4 KiB block for every 512-byte write; its latency is not measured yet.
+- **Block volumes fragment the chunk index.** Random 4K overwrites leave a chunk at about one
+  extent per block, so a disk's index can outgrow memory and sequential reads become random
+  ([06, the LSM tree](06-the-lsm-tree.md)). That is why the index gets a block cache, reading
+  index pieces from the log on demand, before block volumes ship.
+- **512-byte sectors cost a base read** and a whole 4 KiB block per write at the primary.
 - **The daemon is in the I/O path.** A restart is a stall rather than an error only because of
   ublk's reissue, and a dead daemon's late writes need incarnation fencing.
 
@@ -719,22 +693,18 @@ block across a primary change.
 
 From the [roadmap and open questions](../docs/design.md#roadmap-and-open-questions):
 
-- **Phase 8 starts with a block cache** so the chunk index can outgrow memory, before ublk itself:
-  a block volume's fragmented index needs it.
 - **Regrouping chunks overwritten at random.** Should a chunk whose live map passes some number of
   extents be rewritten whole? Each regroup writes 4 MiB, so it needs block-volume traces.
-- **The NVMe-oF hold** has to be checked on a real initiator: does a stock host wait out five long
+- **Fewer runs searched per read.** Under random overwrites a read of a block volume's index still
+  searches several sorted runs; would finer filters, or merges triggered by reads as Pebble does,
+  bring that near one?
+- **The NVMe-oF hold** has to be checked on a real initiator: does a stock host wait out the long
   retry delays without resetting the controller?
-- **The primary's base read for a 512-byte write:** its latency at queue depth 1 on NVMe and SATA
-  drives, and how large a per-loop cache of recently merged blocks lets most merges skip it.
-- **Incarnation fencing in the epoch-change model.** A dead daemon's write delivered late to an old
-  primary, or held by one: the design expects the per-primary table of newest incarnations need
-  not survive a primary change, since every chunk write carries its incarnation, checked when it
-  is ordered. The phase 2 model is to confirm it.
-
-One gap is not an open question in the design but is worth naming: NVMe-oF/TCP is the design's
-remote block protocol and the frontend slot's opt-in driver, but no roadmap phase schedules it.
-Phase 8 ships ublk only.
+- **The primary's base read for a 512-byte write:** its latency on NVMe and SATA drives, and how
+  large a per-disk cache of recently merged blocks lets most merges skip it.
+- **Releasing a frozen version safely.** Deleting a snapshot removes the frozen map's entries, but
+  a crash replay that starts before the freeze could bring them back. Either the release becomes a
+  log entry of its own, or it waits until every replay point has passed the freeze.
 
 ## Further reading
 
