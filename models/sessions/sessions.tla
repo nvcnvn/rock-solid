@@ -5,7 +5,8 @@
 \* own rate over each client's, fences batched into session table versions that storage
 \* nodes apply and acknowledge, the acknowledged version that releases owners, down marks
 \* that start new intervals of a placement group (PG), writes through the PG's primary to
-\* its members, and a lock an inode owner grants.
+\* its members, a lock an inode owner grants, and a fenced client starting a new session,
+\* which the leader refuses from a node an operator marked out of service.
 \*
 \* Time advances in ticks. Each node's raw clock runs at a whole number of units per tick
 \* (its rate), fixed per boot except for one rise within the lease margin's headroom; the
@@ -31,7 +32,9 @@ CONSTANTS
     Windows,        \* renewals are messages and clients measure leaders' rates (FALSE: one step)
     WithLock,       \* clients contend for one lock
     MaxTerms, MaxReboots, MaxRises, MaxStops, MaxStalls, MaxEvicts, MaxCrashes,
-    MaxPartitions, MaxWrites, MaxInFlight, MaxLost
+    MaxPartitions, MaxWrites, MaxInFlight, MaxLost,
+    NewSessions,    \* sessions a fenced client of the same node may start later, at first absent
+    OnNode          \* sessions of the node an operator may mark out of service
 
 CONSTANTS
     CountFromSend,          \* the client counts its lease from the renewal's send
@@ -51,7 +54,10 @@ CONSTANTS
     DownCountsAsAck,        \* a node marked down counts as acknowledged
     CountOnHolder,          \* a leader stretches a session's lease by its measured rate over
                             \* the client's (FALSE: it counts every lease on its own clock)
-    UnmeasuredWaitsDeadWait \* a leader waits DeadWait for a session it has not measured
+    UnmeasuredWaitsDeadWait,\* a leader waits DeadWait for a session it has not measured
+    RefuseStarts,           \* the leader refuses a start from a node out of service
+    StartChecksFact,        \* a start's Txn checks the node's out-of-service key
+    FactChecksHead          \* the out-of-service fact's Txn checks the session table's head
 
 Max(a, b) == IF a >= b THEN a ELSE b
 Min(a, b) == IF a <= b THEN a ELSE b
@@ -95,15 +101,17 @@ VARIABLES
     writes,     \* client writes in flight, queued, or replicating
     lockHolder, lockGen,
     budget,
+    ops,        \* sessions not yet started, the node's out-of-service fact, and the leader's
+                \* staged starts and fact with what their Txns check
     hist        \* history: completed writes and violation flags
 
 vars == <<fage, cl, rate, run, rose, term, lnode, holding, stalled, timer, meas, evicting,
           req, rep, tver, fencedAt, acked, nver, nint, reach, down, unreach, intv, liveAt,
-          activated, actd, ctr, app, writes, lockHolder, lockGen, budget, hist>>
+          activated, actd, ctr, app, writes, lockHolder, lockGen, budget, ops, hist>>
 
 clientVars == <<cl>>
 leaderVars == <<rate, run, rose, term, lnode, holding, stalled, timer, meas, evicting>>
-tableVars == <<tver, fencedAt, acked, fage>>
+tableVars == <<tver, fencedAt, acked, fage, ops>>
 storageVars == <<nver, nint, reach, down, unreach, intv, liveAt, activated, actd, ctr, app>>
 
 FirstClient == SetMin(Clients)
@@ -158,12 +166,13 @@ Init ==
     /\ budget = [reboot |-> MaxReboots, rise |-> MaxRises, stop |-> MaxStops,
                  stall |-> MaxStalls, evict |-> MaxEvicts, crash |-> MaxCrashes,
                  part |-> MaxPartitions, w |-> MaxWrites, lost |-> MaxLost]
+    /\ ops = [fresh |-> NewSessions, fact |-> FALSE, head |-> None, starts |-> {}]
     /\ hist = [done |-> {}, fenceInLease |-> FALSE, fencedApplied |-> FALSE,
-               misordered |-> FALSE, trip |-> FALSE]
+               misordered |-> FALSE, trip |-> FALSE, outApplied |-> FALSE]
 
 Leased(c) == cl[c].on /\ cl[c].age < cl[c].len
 \* The client can act: its VM runs, its daemon is alive, and it has not learned of a fence.
-Acting(c) == ~cl[c].stopped /\ ~cl[c].crashed /\ ~cl[c].told
+Acting(c) == ~cl[c].stopped /\ ~cl[c].crashed /\ ~cl[c].told /\ c \notin ops.fresh
 Live(c) == fencedAt[c] = 0
 LeftTable(c) == fencedAt[c] # 0 /\ fencedAt[c] <= acked
 FencedIn(v, c) == fencedAt[c] # 0 /\ fencedAt[c] <= v
@@ -177,7 +186,7 @@ Primary(k) == IF liveAt[k] = {} THEN 0 ELSE SetMin(liveAt[k])
 \* One tick: every running clock advances by its node's rate. Time does not pass while the
 \* leader owes a fence it can commit, an acknowledgment it can commit, or a down mark, or
 \* while a reachable storage node lags the session table: those take well under a tick.
-Due(c) == Live(c) /\ timer[c] >= Threshold(c)
+Due(c) == Live(c) /\ c \notin ops.fresh /\ timer[c] >= Threshold(c)
 Urgent ==
     \/ Active /\ \E c \in Clients : Due(c)
     \/ Active /\ \E s \in Storage : reach[s] /\ nver[s] < tver
@@ -190,18 +199,18 @@ Tick ==
                   IF fencedAt[c] # 0 /\ Active /\ \A s \in Storage : reach[s] \/ s \in down
                   THEN Min(fage[c] + 1, 2) ELSE fage[c]]
     /\ cl' = [c \in Clients |->
-                IF cl[c].stopped THEN cl[c]
+                IF cl[c].stopped \/ c \in ops.fresh THEN cl[c]
                 ELSE LET r == ClientRate IN
                      [cl[c] EXCEPT !.age = Sat(@ + r), !.out = IF @ < 0 THEN @ ELSE Sat(@ + r),
                                    !.hs = IF Windows THEN Sat(@ + r) ELSE @,
                                    !.ra = IF Windows THEN Sat(@ + r) ELSE @,
                                    !.gt = IF Windows THEN Min(@ + 1, CapT) ELSE @]]
     /\ rep' = IF Windows THEN {[m EXCEPT !.age = Min(@ + 1, CapT)] : m \in rep} ELSE rep
-    /\ timer' = [c \in Clients |-> Min(timer[c] + rate[Leader], TCap)]
+    /\ timer' = [c \in Clients |-> IF c \in ops.fresh THEN 0 ELSE Min(timer[c] + rate[Leader], TCap)]
     /\ unreach' = [s \in Storage |-> IF reach[s] THEN 0 ELSE Min(unreach[s] + 1, DownAfter)]
     /\ UNCHANGED <<rate, run, rose, term, lnode, holding, stalled, meas, evicting, req,
                    tver, fencedAt, acked, nver, nint, reach, down, intv, liveAt, activated, actd, ctr, app, writes,
-                   lockHolder, lockGen, budget, hist>>
+                   lockHolder, lockGen, budget, ops, hist>>
 
 -----------------------------------------------------------------------------
 \* The client's side of its session.
@@ -335,13 +344,13 @@ FenceDue ==
        /\ fencedAt' = [c \in Clients |-> IF c \in due THEN tver + 1 ELSE fencedAt[c]]
        /\ hist' = [hist EXCEPT !.fenceInLease = @ \/ \E c \in due : Leased(c) /\ ~cl[c].stopped]
     /\ UNCHANGED <<cl, leaderVars, req, rep, acked, fage, storageVars, writes, lockHolder,
-                   lockGen, budget>>
+                   lockGen, budget, ops>>
 
 \* An owner asks the control plane to evict a session that left a recall unanswered. The
 \* leader stops renewing it and fences it once its lease has run out; with the rule off,
 \* it fences it at once.
 Evict(c) ==
-    /\ Active /\ Live(c) /\ ~evicting[c] /\ budget.evict > 0
+    /\ Active /\ Live(c) /\ c \notin ops.fresh /\ ~evicting[c] /\ budget.evict > 0
     /\ budget' = [budget EXCEPT !.evict = @ - 1]
     /\ evicting' = [evicting EXCEPT ![c] = TRUE]
     /\ IF EvictWaitsLease
@@ -350,7 +359,7 @@ Evict(c) ==
             /\ fencedAt' = [fencedAt EXCEPT ![c] = tver + 1]
             /\ hist' = [hist EXCEPT !.fenceInLease = @ \/ (Leased(c) /\ ~cl[c].stopped)]
     /\ UNCHANGED <<cl, rate, run, rose, term, lnode, holding, stalled, timer, meas,
-                   req, rep, acked, fage, storageVars, writes, lockHolder, lockGen>>
+                   req, rep, acked, fage, storageVars, writes, lockHolder, lockGen, ops>>
 
 \* Once every storage node holds the version, or is marked down, it is committed as
 \* acknowledged and its fenced sessions leave the table.
@@ -362,7 +371,7 @@ AckCommit ==
          \/ ~AckNeedsEveryNode /\ ~reach[s]
     /\ acked' = tver
     /\ UNCHANGED <<cl, leaderVars, req, rep, tver, fencedAt, fage, storageVars, writes,
-                   lockHolder, lockGen, budget, hist>>
+                   lockHolder, lockGen, budget, ops, hist>>
 
 \* The leader's lease ends: it crashed, was partitioned from the voters, or stalled.
 LoseLease ==
@@ -504,13 +513,14 @@ Activate ==
 \* Writes and the lock.
 
 \* A client holding the lock, under its lease, writes through the primary of the PG's
-\* current interval, tagged with that interval.
+\* current interval, tagged with that interval, and late if its node is out of service.
 Write(c) ==
     /\ Acting(c) /\ Leased(c) /\ cl[c].holds # 0 /\ cl[c].inflight < MaxInFlight
     /\ budget.w > 0 /\ Primary(intv) # 0
     /\ budget' = [budget EXCEPT !.w = @ - 1]
     /\ writes' = writes \cup {[id |-> budget.w, c |-> c, gen |-> cl[c].holds, tag |-> intv,
-                               at |-> Primary(intv), st |-> "net", v |-> <<0, 0>>, acks |-> {}, base |-> {}]}
+                               at |-> Primary(intv), st |-> "net", v |-> <<0, 0>>, acks |-> {}, base |-> {},
+                               late |-> ops.fact /\ c \in OnNode]}
     /\ cl' = [cl EXCEPT ![c].inflight = @ + 1]
     /\ UNCHANGED <<leaderVars, req, rep, tableVars, storageVars, lockHolder, lockGen, hist>>
 
@@ -559,7 +569,8 @@ Order(w) ==
                                {[w2 EXCEPT !.st = IF Held(w2, {}) THEN "ended" ELSE "replicating"]}
                   /\ app' = [app EXCEPT ![p] = @ \cup {w.id}]
                   /\ LET h == IF Held(w2, {}) THEN Completes(w2) ELSE hist
-                     IN hist' = [h EXCEPT !.fencedApplied = @ \/ FencedIn(nver[p], w.c)]
+                     IN hist' = [h EXCEPT !.fencedApplied = @ \/ FencedIn(nver[p], w.c),
+                                          !.outApplied = @ \/ w.late]
     /\ UNCHANGED <<cl, leaderVars, req, rep, tableVars, nver, nint, reach, down, unreach,
                    intv, liveAt, activated, actd, lockHolder, lockGen, budget>>
 
@@ -575,7 +586,8 @@ Replicate(w, s) ==
             IN /\ writes' = (writes \ {w}) \cup
                             {[w EXCEPT !.acks = acks, !.st = IF Held(w, acks) THEN "ended" ELSE @]}
                /\ app' = [app EXCEPT ![s] = @ \cup {w.id}]
-               /\ hist' = [h EXCEPT !.fencedApplied = @ \/ FencedIn(nver[s], w.c)]
+               /\ hist' = [h EXCEPT !.fencedApplied = @ \/ FencedIn(nver[s], w.c),
+                                    !.outApplied = @ \/ w.late]
     /\ UNCHANGED <<cl, leaderVars, req, rep, tableVars, nver, nint, reach, down, unreach,
                    intv, liveAt, activated, actd, ctr, lockHolder, lockGen, budget>>
 
@@ -598,14 +610,65 @@ Grant(c) ==
     /\ UNCHANGED <<leaderVars, req, rep, tableVars, storageVars, writes, budget, hist>>
 
 -----------------------------------------------------------------------------
+\* New sessions and the out-of-service fact.
+
+SameNode(c, d) == c \in OnNode <=> d \in OnNode
+\* The session table's head, which every session Txn checks: the next ID, here the sessions
+\* started, the version and the acknowledged version.
+Head == <<ops.fresh, tver, acked>>
+
+\* A fenced client asks to start a new session. The leader refuses it from a node out of
+\* service, and otherwise stages it in a Txn that checks the node's out-of-service key.
+StageStart(c) ==
+    /\ Active /\ c \in ops.fresh
+    /\ \E d \in Clients \ ops.fresh : SameNode(c, d) /\ cl[d].told /\ ~cl[d].stopped /\ ~cl[d].crashed
+    /\ ~\E x \in ops.starts : x.c = c
+    /\ ~(RefuseStarts /\ c \in OnNode /\ ops.fact)
+    /\ ops' = [ops EXCEPT !.starts = @ \cup {[c |-> c, fact |-> ops.fact]}]
+    /\ UNCHANGED <<cl, leaderVars, req, rep, tver, fencedAt, acked, fage, storageVars, writes,
+                   lockHolder, lockGen, budget, hist>>
+
+\* The staged start commits, unless the out-of-service key changed since the leader read it.
+CommitStart(x) ==
+    /\ Active /\ x \in ops.starts
+    /\ IF StartChecksFact /\ x.c \in OnNode /\ x.fact # ops.fact
+       THEN /\ ops' = [ops EXCEPT !.starts = @ \ {x}]
+            /\ UNCHANGED timer
+       ELSE /\ ops' = [ops EXCEPT !.starts = @ \ {x}, !.fresh = @ \ {x.c}]
+            /\ timer' = [timer EXCEPT ![x.c] = 0]
+    /\ UNCHANGED <<cl, rate, run, rose, term, lnode, holding, stalled, meas, evicting, req, rep,
+                   tver, fencedAt, acked, fage, storageVars, writes, lockHolder, lockGen, budget, hist>>
+
+\* The operator marks the node out of service. The leader refuses unless every session of
+\* the node has been fenced and has left the table, and stages the fact in a Txn that
+\* checks the head it saw.
+StageFact ==
+    /\ Active /\ OnNode # {} /\ ~ops.fact /\ ops.head = None
+    /\ \A c \in OnNode \ ops.fresh : LeftTable(c)
+    /\ ops' = [ops EXCEPT !.head = Head]
+    /\ UNCHANGED <<cl, leaderVars, req, rep, tver, fencedAt, acked, fage, storageVars, writes,
+                   lockHolder, lockGen, budget, hist>>
+
+\* The staged fact commits, unless the head changed, as a start that committed since the
+\* leader's check changes it; the operator's command then asks the leader again.
+CommitFact ==
+    /\ Active /\ ops.head # None
+    /\ ops' = [ops EXCEPT !.head = None,
+                          !.fact = ~FactChecksHead \/ ops.head = Head]
+    /\ UNCHANGED <<cl, leaderVars, req, rep, tver, fencedAt, acked, fage, storageVars, writes,
+                   lockHolder, lockGen, budget, hist>>
+
+-----------------------------------------------------------------------------
 
 Next ==
     \/ Tick
     \/ \E c \in Clients : \/ SendRenewal(c) \/ RenewNow(c) \/ Stop(c) \/ Resume(c) \/ CrashClient(c)
-                          \/ Evict(c) \/ Write(c) \/ Grant(c)
+                          \/ Evict(c) \/ Write(c) \/ Grant(c) \/ StageStart(c)
     \/ \E c \in Clients, m \in rep : Answer(c, m)
     \/ \E t \in 1 .. MaxTerms, m \in req : Renew(t, m)
     \/ FenceDue \/ AckCommit \/ LoseLease \/ Stall \/ Wake \/ Lose \/ Activate
+    \/ \E x \in ops.starts : CommitStart(x)
+    \/ StageFact \/ CommitFact
     \/ \E n \in Leaders : Elect(n) \/ Reboot(n) \/ Rise(n)
     \/ \E s \in Storage : \/ ApplyTable(s) \/ AdoptInterval(s) \/ Partition(s) \/ Heal(s)
                           \/ MarkDown(s) \/ MarkUp(s)
@@ -665,6 +728,9 @@ NoSpuriousTrip == ~hist.trip
 \* cannot pass a down mark that is due. The fence itself commits in the tick the session's
 \* lease runs out on the leader's clock, since time cannot pass a fence the leader owes.
 FenceReleasedInTime == \A c \in Clients : fage[c] >= 1 => LeftTable(c)
+
+\* No write that a session of a node out of service issues after the fact commits is applied.
+NoWriteAfterOutOfService == ~hist.outApplied
 
 \* A client that crashed is eventually fenced and leaves the table (deep only).
 CrashedClientReleased == \A c \in Clients : cl[c].crashed ~> LeftTable(c)

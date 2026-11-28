@@ -85,6 +85,9 @@ sessions/neg-ignore-resumed	meta.ignoreResumed	TestPlantedClientSessionBugs
 sessions/neg-fixed-step-check	meta.fixedStepCheck	TestPlantedClientSessionBugs
 sessions/neg-window-per-run	meta.windowPerNode	TestPlantedClientSessionBugs
 purge/neg-daemon-punch	open	Truncate
+sessions/neg-start-out-of-service	open	Node actions and the audit log
+sessions/neg-start-no-fact-check	open	Node actions and the audit log
+sessions/neg-fact-no-head-check	open	Node actions and the audit log
 purge/neg-extend-over-purge	open	Truncate
 purge/neg-grace-by-time	open	Owner failover and grace period
 purge/neg-missing-punch-fails	open	Purger
