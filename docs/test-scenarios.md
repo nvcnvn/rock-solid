@@ -9718,7 +9718,7 @@ and chunk devices.
   every system call succeeds or, overlapped by a fence, a refused allocation or a lasting `Read`
   error on its node, fails `EIO`, after which its process goes on and writes again what did not
   land, and a call in a handle opened before its daemon took a new session fails `EIO` and its
-  process closes the file; on the second node an open of a name between the first's setup sending
+  process closes the file, a close that promises nothing; on the second node an open of a name between the first's setup sending
   its unlink and its create's reply, a gap a crash may leave open, may fail `ENOENT`; no orphan is
   freed while a process holds it through a handle of its daemon's session
   ([inode owner's open registry](#inode-owners-open-registry)); no inode is handed out twice, no `mtime` goes backwards,
