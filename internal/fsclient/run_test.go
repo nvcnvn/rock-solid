@@ -37,6 +37,7 @@ const (
 	invLive        = "once faults heal, no system call or request waits longer than liveWait"
 	invIDs         = "a fenced session's chunk client numbers its requests above every ID the old one took"
 	invReadErr     = "a Read answered with an error that lasts fails its request, and one answered with any other goes again"
+	invOrphanOpen  = "an orphaned inode is never freed while a live session has it open"
 )
 
 const (
@@ -127,11 +128,12 @@ type fsRun struct {
 	// faultAt are, per client node, the times of the faults that may fail a system call in flight
 	// with EIO: fences, refused allocations and Reads answered with an error that lasts.
 	faultAt [clientNodes][]core.Tick
+	// takes are, per client node, the times its daemon took a new session: a handle opened before
+	// one fails EIO after it.
+	takes [clientNodes][]core.Tick
 	// gaps are, per name, the times from each of setup's unlinks of it being sent to its create's
-	// reply, the name gone between them, a gap a crash cut short left open; unlinked are the
-	// inodes setup unlinked.
-	gaps     map[string][][2]core.Tick
-	unlinked map[uint64]core.Tick
+	// reply, the name gone between them, a gap a crash cut short left open.
+	gaps map[string][][2]core.Tick
 	// abandons counts fences with chunk I/O in flight, lasting and transient the Read errors the
 	// mount took of each kind, refused the writes the devices refused a fenced session's live
 	// client and retried those it sent again.
@@ -180,7 +182,7 @@ func newFSRun(t testing.TB, seed uint64, p plants) *fsRun {
 	set.PoolBytes = 64 << 20
 	set.PartitionNum, set.PartitionDen = 1, 4000
 	r := &fsRun{t: t, s: sim.New(seed, set), rng: core.NewRand(seed), plant: p, last: map[uint64]uint64{},
-		creates: map[uint64]string{}, mtimes: map[uint64]int64{}, unlinked: map[uint64]core.Tick{}, gaps: map[string][][2]core.Tick{}}
+		creates: map[uint64]string{}, mtimes: map[uint64]int64{}, gaps: map[string][][2]core.Tick{}}
 	r.files = [2]runFile{{name: "a"}, {name: "b"}}
 	r.rebootAt = core.Tick(r.rng.Below(uint64(faultGap)))
 	r.pauseAt = core.Tick(r.rng.Below(uint64(faultGap)))
@@ -195,6 +197,7 @@ func newFSRun(t testing.TB, seed uint64, p plants) *fsRun {
 	r.inv.Register(invLive, r.live)
 	r.inv.Register(invReadErr, func() error { return r.readErr })
 	r.inv.Register(invIDs, func() error { return r.idsErr })
+	r.inv.Register(invOrphanOpen, r.orphansKept)
 	r.inv.Register(invCloseToOpen, func() error {
 		if i, broken := sim.CloseToOpen(r.unfaulted()); broken {
 			return fmt.Errorf("operation %d: %+v", i, r.hist.Ops()[i])
@@ -968,7 +971,6 @@ func (d *daemon) next() {
 	rq := d.steps[d.step-1]
 	for _, f := range r.files {
 		if rq.Opcode == fuseproto.OpUnlink && f.name == string(rq.Name) {
-			r.unlinked[f.ino] = r.s.Time()
 			r.gaps[f.name] = append(r.gaps[f.name], [2]core.Tick{r.s.Time(), 0})
 		}
 	}
@@ -1136,6 +1138,7 @@ func (r *fsRun) take(d *daemon) {
 	d.takeAt = 0
 	clear(d.refusedIDs)
 	r.faultAt[d.k] = append(r.faultAt[d.k], r.s.Time())
+	r.takes[d.k] = append(r.takes[d.k], r.s.Time())
 	d.n.Call(d.loop, func(ctx *core.Context, acts []core.Action) []core.Action {
 		return d.pass(ctx, acts, func() {
 			if d.g.cl.Pending() > 0 {
@@ -1165,12 +1168,13 @@ type runProc struct {
 	wake    core.Tick
 	// client is its number in the history, op the index of its last call, and failed set once a
 	// call failed, after which it stops. name and ino are the name it opened and the inode of the
-	// file it holds.
+	// file it holds, and openAt when it sent that open.
 	client uint32
 	op     int
 	failed bool
 	name   string
 	ino    uint64
+	openAt core.Tick
 }
 
 func (pr *runProc) Ready() bool {
@@ -1234,7 +1238,7 @@ func (pr *runProc) next() {
 			f.writer, pr.id, pr.written, flags = pr, r.ids, 0, 2
 			pr.size = max(f.size, 8*int64(rng.Range(1, 1536)))
 		}
-		pr.name = f.name
+		pr.name, pr.openAt = f.name, r.s.Time()
 		p.Open(f.name, flags)
 	case pr.id != 0 && pr.written < pr.size && (pr.left == 0 || rng.Chance(3, 4)):
 		n := min(pr.size-pr.written, 8*int64(rng.Range(1, 1024)))
@@ -1258,9 +1262,8 @@ func (pr *runProc) next() {
 	}
 }
 
-// failedUnder takes back an open that failed under a fault: the process holds no file. A call on
-// a file another node unlinked that no fault of its node explains closes it next, as no open
-// after that call can reach the file.
+// failedUnder takes back an open that failed under a fault: the process holds no file. A process
+// whose handle fails as its daemon took a new session since its open closes it next.
 func (pr *runProc) failedUnder(op sim.Op) {
 	r := pr.d.r
 	if op.Input[0]&0xff == sim.FileOpen {
@@ -1269,25 +1272,26 @@ func (pr *runProc) failedUnder(op sim.Op) {
 		}
 		pr.open, pr.id, pr.ino = false, 0, 0
 	}
-	if at, ok := r.unlinked[pr.ino]; ok && at <= op.Complete && !r.faulted(pr.d.k, op.Invoke, op.Complete) {
+	if pr.open && r.fenced(pr, op) {
 		pr.size, pr.left = pr.written, 0
 	}
 }
 
+// fenced reports a call on a handle opened before its daemon last took a new session, which fails.
+func (r *fsRun) fenced(pr *runProc, op sim.Op) bool {
+	return within(r.takes[pr.d.k], pr.openAt, op.Complete)
+}
+
 // excused reports a call that failed with errno under a fault the run injected: EIO under a fault
-// on the process's node, and, for daemon 1, which runs no setup, ENOENT from an open overlapping
-// a gap of the name it opened or from a call on a file that setup unlinked, which until the inode
-// owner's open registry counts daemon 1's opens may free the inode under them.
+// on the process's node or on a handle its daemon's new session fenced, and, for daemon 1, which
+// runs no setup, ENOENT from an open overlapping a gap of the name it opened.
 func (r *fsRun) excused(pr *runProc, op sim.Op, errno int32) bool {
 	k := pr.d.k
-	if errno == int32(EIO) && r.faulted(k, op.Invoke, op.Complete) {
+	if errno == int32(EIO) && (r.faulted(k, op.Invoke, op.Complete) || r.fenced(pr, op)) {
 		return true
 	}
 	if k == 0 || errno != int32(ENOENT) {
 		return false
-	}
-	if at, ok := r.unlinked[pr.ino]; ok && at <= op.Complete {
-		return true
 	}
 	if op.Input[0]&0xff != sim.FileOpen {
 		return false
@@ -1300,13 +1304,21 @@ func (r *fsRun) excused(pr *runProc, op sim.Op, errno int32) bool {
 	return false
 }
 
-// unfaulted is the history with each read a fault overlapped that succeeded asking for what it
-// got, as a fault may cut it short; every word it returned is still checked.
+// unfaulted is the history with each read that succeeded asking for what it got if a fault on its
+// node overlapped it or its daemon took a new session since its handle's open, as either may cut
+// it short; every word it returned is still checked.
 func (r *fsRun) unfaulted() []sim.Op {
 	ops := slices.Clone(r.hist.Ops())
+	opened := make([]core.Tick, r.clients)
 	for i := range ops {
-		if k := ops[i].Input[0] & 0xff; (k == sim.FileRead || k == sim.FileMapRead) && ops[i].Output[0] == 0 && r.faulted(r.nodeOf[ops[i].Client], ops[i].Invoke, ops[i].Complete) {
-			ops[i].Input[2] = ops[i].Output[1]
+		op := &ops[i]
+		k := r.nodeOf[op.Client]
+		switch kind := op.Input[0] & 0xff; {
+		case kind == sim.FileOpen:
+			opened[op.Client] = op.Invoke
+		case (kind == sim.FileRead || kind == sim.FileMapRead) && op.Output[0] == 0 &&
+			(r.faulted(k, op.Invoke, op.Complete) || within(r.takes[k], opened[op.Client], op.Complete)):
+			op.Input[2] = op.Output[1]
 		}
 	}
 	return ops
@@ -1315,9 +1327,34 @@ func (r *fsRun) unfaulted() []sim.Op {
 // faulted reports whether a fault that may fail a system call was injected on client node k from
 // invoke to complete.
 func (r *fsRun) faulted(k int, invoke, complete core.Tick) bool {
-	at := r.faultAt[k]
-	i, _ := slices.BinarySearch(at, invoke)
-	return i < len(at) && at[i] <= complete
+	return within(r.faultAt[k], invoke, complete)
+}
+
+// within reports whether any of ts, in order, falls in [from, to].
+func within(ts []core.Tick, from, to core.Tick) bool {
+	i, _ := slices.BinarySearch(ts, from)
+	return i < len(ts) && ts[i] <= to
+}
+
+// orphansKept checks that no inode on the purge list is held by a process of a running daemon
+// through a handle opened since the daemon last took a new session, and not closing.
+func (r *fsRun) orphansKept() error {
+	return r.each(func(k *meta.Key, v []byte) error {
+		if k.Tag != meta.SlotPurge {
+			return nil
+		}
+		for _, d := range r.ds {
+			if d == nil || !d.n.Up() {
+				continue
+			}
+			for _, pr := range d.procs {
+				if pr.open && !pr.closing && pr.ino == k.ID && !within(r.takes[d.k], pr.openAt, r.s.Time()) {
+					return fmt.Errorf("at %d inode %x was freed while daemon %d's client %d has it open", r.s.Time(), k.ID, d.k, pr.client)
+				}
+			}
+		}
+		return nil
+	})
 }
 
 // words is n bytes at off as a handle id writes them for CloseToOpen.
@@ -1358,8 +1395,11 @@ func (p runPool) Free(b core.IOBuf) {
 // paused and the daemons crashed and restarted: histories of opens by path keep close-to-open
 // across the nodes, every system call succeeds, no inode is handed out twice, no mtime goes
 // backwards, every file's entry is in its directory's slot, no directory is its own ancestor, at
-// each daemon crash every chunk it wrote lies below alloc_end or in its purge entry, and at the
-// end of the quiet time no system call or request has waited past liveWait.
+// each daemon crash every chunk it wrote lies below alloc_end or in its purge entry, no orphan is
+// freed while a process holds it through a handle of its daemon's session, and at the end of the
+// quiet time no system call or request has waited past liveWait. Over the ten seeds each fault
+// path is taken 100 times, but the old client's resend of a refused write 50: a handle a fence
+// leaves behind fails and its process closes it, so few writes are in flight at a fence.
 func TestAMountsHistoriesKeepTheirInvariantsAcrossCrashes(t *testing.T) {
 	var abandons, lasting, transient, refused, retried int
 	seeds.Run(t, 1, 10, func(seed uint64) {
@@ -1373,7 +1413,7 @@ func TestAMountsHistoriesKeepTheirInvariantsAcrossCrashes(t *testing.T) {
 		abandons, lasting, transient = abandons+r.abandons, lasting+r.lasting, transient+r.transient
 		refused, retried = refused+r.refused, retried+r.retried
 	})
-	if seeds.Default() && (abandons < 100 || lasting < 100 || transient < 100 || refused < 100 || retried < 100) {
+	if seeds.Default() && (abandons < 100 || lasting < 100 || transient < 100 || refused < 100 || retried < 50) {
 		t.Fatalf("%d fences abandoned chunk I/O in flight, %d Reads failed and %d went again; devices refused a fenced session's live client %d writes, %d sent again", abandons, lasting, transient, refused, retried)
 	}
 }
@@ -1394,11 +1434,11 @@ func TestPlantedMountBugsFailTheMountsRun(t *testing.T) {
 		inv  string
 	}{
 		{plants{noIDBase: true}, 1, invIDs},
-		{plants{noAbandon: true}, 1, invLive},
+		{plants{noAbandon: true}, 2, invLive},
 		{plants{dropRefused: true}, 2, invLive},
 		{plants{retryLasting: true}, 1, invReadErr},
 		{plants{entryCached: true}, 1, invCloseToOpen},
-		{plants{staleKept: true}, 17, invCloseToOpen},
+		{plants{staleKept: true}, 9, invCloseToOpen},
 		{plants{lastingMissing: true}, 11, invErrno},
 	} {
 		r := newFSRun(t, c.seed, c.p)
