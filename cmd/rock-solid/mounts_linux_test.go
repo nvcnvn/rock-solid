@@ -173,7 +173,6 @@ func TestAMountOnEachOfTwoNodesKeepsCloseToOpenAcrossAPauseAndAKill(t *testing.T
 	}
 	var stopped atomic.Bool
 	var wg sync.WaitGroup
-	t.Cleanup(func() { stopped.Store(true); wg.Wait() })
 	mnts := map[int]string{}
 	for _, n := range []int{2, 5} {
 		mnt, err := os.MkdirTemp(base0, "mnt")
@@ -183,6 +182,7 @@ func TestAMountOnEachOfTwoNodesKeepsCloseToOpenAcrossAPauseAndAKill(t *testing.T
 		t.Cleanup(func() { _ = os.Remove(mnt) })
 		mnts[n] = mnt
 	}
+	t.Cleanup(wg.Wait)
 	dir := testDir(t)
 	base := freeBase(t, 8)
 	pc, _ := runCtlOn(t, dir, base, true)
@@ -222,6 +222,7 @@ func TestAMountOnEachOfTwoNodesKeepsCloseToOpenAcrossAPauseAndAKill(t *testing.T
 			}
 		}
 	})
+	t.Cleanup(func() { stopped.Store(true) })
 	said := func() string {
 		var b strings.Builder
 		for _, n := range []int{2, 3, 4, 5} {
