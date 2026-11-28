@@ -9714,7 +9714,9 @@ and chunk devices.
   table, acknowledged, once both daemons hold their sessions. While a node's processes run:
   its session fenced up to 1 s apart and within 1 ms of one chunk write in 16, so a fence finds
   chunk I/O in flight, half the time handed to the devices up to 300 ms before the daemon takes
-  it, so they refuse the old session's writes while its client is live and it sends them again;
+  it, so they refuse the old session's writes while its client is live and it sends them again,
+  and half of those times earlier, at an open's registration in flight, with the first node
+  unlinking a file next, so an open straddles the change and may outlive its file;
   one pool allocation in 100 refused, which fails a chunk write the client cannot take; and one
   `Read` in 200 answered `ErrMalformed`, `ErrTooLarge`, `ErrOverloaded` or `ErrHalted`. Then 3 s
   without faults. Histories of both nodes pass one close-to-open check, a read such a fault
@@ -9770,7 +9772,8 @@ and chunk devices.
   (`lastingMissing`) fails "every system call succeeds" on 25 of 30 (seed 11, which an excuse of
   every `ENOENT` open while the first node's setup may run would pass); an open not registered
   at the owner (`noRegister`) and an open or `CREATE` that holds its inode only behind a release
-  in flight rather than until its registration is answered (`openUnheld`) each fail "an orphaned
+  in flight rather than until its registration is answered (`openUnheld`), and an open handed out
+  though registered under a session the mount has since left (`handOutStale`), each fail "an orphaned
   inode is never freed while a live session has it open"; and a handle of a session the mount
   replaced still served (`fencedServed`), whose process the run no longer counts as holding it,
   fails "every system call succeeds" as a read through it finds its file freed.
@@ -9866,11 +9869,14 @@ From [Inode owner](design.md#metadata-layer-metastore) and the [purge model](#pu
   the mount has replaced fails `READ`, `WRITE`, `FLUSH`, `FSYNC` and a `GETATTR` through it with
   `EIO`, its release deregisters nothing, and an open under the new session registers under it
   (`TestAHandleOfAFencedSessionFails`); a `GETATTR` in flight as the mount replaces the session
-  fails `EIO` too, though it finds the file freed (`TestAGetattrInFlightAcrossAFenceFailsEIO`).
+  fails `EIO` too, though it finds the file freed (`TestAGetattrInFlightAcrossAFenceFailsEIO`), and
+  so does an `OPEN` registered under the old session and answered after
+  (`TestAnOpenAnsweredAfterASessionChangeFailsEIO`).
 - A `CREATE` whose file another node unlinks between its `Txn` and its registration answers
   `ENOENT`, as an orphan takes no open (`TestACreateWhoseFileIsUnlinkedBeforeItRegistersFails`).
 - Open and release at a leader allocate nothing and cost the same beside 100,000 other opens
-  (`BenchmarkServeOpenRelease`).
+  (`BenchmarkServeOpenRelease`), and closing a fenced session's opens takes time linear in them
+  (`TestClosingAFencedSessionsOpensIsLinear`).
 - Every unlink of a last link makes an orphan; the owner frees it at its last release, and an open
   after the unlink does not register (`TestAnOrphanIsFreedAtItsLastRelease`,
   `TestAnUnlinkFreesAFileOnlyOnceNoMountHasItOpen`, `TestAnUnlinkLeavesAnOrphanForTheOwner`).
@@ -9879,8 +9885,10 @@ From [Inode owner](design.md#metadata-layer-metastore) and the [purge model](#pu
   storage node's device hands its server each table and proposes the frees that leaves
   (`TestADeviceFreesAnOrphanAtItsLastClose`).
 - A new owner, by failover or transfer, frees no orphan until **Owner failover and grace period**
-  (`TestANewOwnerFreesNoOrphan`). A free refused at its proposal is tried again
-  (`TestAFreeRefusedIsTriedAgain`), and one a leader change drops is answered dropped once the
+  (`TestANewOwnerFreesNoOrphan`), and a leader that can no longer be sole drops its opens and
+  registers none (`TestAnExLeaderDropsItsOpens`). A free refused at its proposal for a reason that
+  may pass, overload or a leader change, is tried again (`TestAFreeRefusedIsTriedAgain`), one
+  refused for good is dropped (`TestAFreeRefusedForGoodIsDropped`), and one a leader change drops is answered dropped once the
   replica applies the next leader's entries, so the orphan is looked at again
   (`TestAFreeDroppedAtALeaderChangeIsAnswered`).
 - **[property]** "An orphaned inode is never freed while a live session has it open" on seeded runs
@@ -9892,10 +9900,11 @@ From [Inode owner](design.md#metadata-layer-metastore) and the [purge model](#pu
   after its election) fail it on seeds 1, 2 and 3 (`TestPlantedRegistryBugsFreeAnOpenOrphan`).
 - **[property]** The mount's seeded run (`TestAMountsHistoriesKeepTheirInvariantsAcrossCrashes`,
   [Multi-node mounts](#multi-node-mounts)) checks the same invariant against its processes'
-  handles. It unlinks files while processes of both nodes have them open, under a leader no fault
+  handles, each judged by the session the mount recorded on it. It unlinks files while processes of both nodes have them open, under a leader no fault
   takes down in its first half, so the owner frees orphans at last releases and acknowledged
-  fences. Planted in the mount, an open not registered and an open that holds its inode only
-  behind a release in flight each fail it, and a handle of a replaced session still served fails
+  fences. Planted in the mount, an open not registered, an open that holds its inode only
+  behind a release in flight and an open handed out though registered under a session the mount
+  has since left each fail it, and a handle of a replaced session still served fails
   the run as a read through it finds its file freed (`TestPlantedMountBugsFailTheMountsRun`).
 
 ## Owner failover and grace period
