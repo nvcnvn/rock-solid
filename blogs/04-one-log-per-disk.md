@@ -81,7 +81,7 @@ Your 4 KiB passes two caches on its way to flash. Look at where each call return
 your process --> page cache --------> drive write cache --flush--> flash
 
 plain write()       returns here
-O_DIRECT write()                       returns here (~14 us)
+O_DIRECT write()                       returns here
 + fdatasync()                                                     returns here (~1 ms)
 
 a power cut loses everything that has not reached the right-hand column
@@ -161,13 +161,6 @@ one log, keep the index in an LSM tree whose runs also live in the log, and copy
 old segments with a *cleaner*, as WiscKey introduced and RocksDB's BlobDB, TiKV's Titan and Pebble
 ship. The cost is the cleaner and the LSM tree, and the cleaner's copying grows as the disk fills.
 
-| Approach | Used by | Gets right | Costs |
-| --- | --- | --- | --- |
-| Journal plus in-place data | Vitastor, BlueStore deferred writes | Data stays in place; no log to clean | Small writes written twice; big writes must bypass the journal; snapshots need a reference-counted extent map |
-| Embedded KV engine | `redb`, bbolt, `fjall`, Pebble | Ready-made engine | Its own files and flushes; no SPDK; not crashable in simulation; poor as a Raft log |
-| A log per core | ScyllaDB's commit log | Each core owns its log | Flushing before acknowledging means a flush stream per core |
-| **One log per disk** (rock-solid) | Value separation: WiscKey, BlobDB, Titan, Pebble | One write and one flush per round for everything; the driver sees every byte; checksums and torn-write detection built in | A cleaner and an LSM tree; write amplification near full |
-
 ## What rock-solid picked: one log per disk
 
 > **In plain words.** One log writes every byte once, flushes once per batch for everyone on the
@@ -191,17 +184,12 @@ The rest of this section walks through the log from the outside in.
 > is filled from its first line to its last, never edited in the middle. When a chapter is full of
 > crossed-out entries, the cleaner copies the few live ones forward and the chapter is reused.
 
-**How it works.** The disk is a sequence of fixed-size segments:
-
-```text
-disk = segment 0:     superblock in its first and last block (log id, segment size and count)
-       segments 1..n: segment header (log id, stream, lane, open sequence, newest manifest) + records
-```
-
-The disk is always cut into thousands of segments (64 MiB each on disks of 256 GiB and up, smaller
-on smaller disks). The *count* matters more than the size, because the cleaner keeps a fixed reserve
-of free segments: a reserve of 8 costs nothing among 4,096 segments, but among 256 it raised write
-amplification at 95% full from 17 to 70 ([cleaner spike](../docs/design.md#appendix-cleaner-write-amplification-spike)).
+**How it works.** The disk is a sequence of fixed-size segments. Segment 0 holds the superblock in
+its first and last block; every later segment starts with a segment header, then records. The disk
+is always cut into thousands of segments, their size following the disk's. The *count*
+matters more than the size, because the cleaner keeps a fixed number of segments free, which costs
+nothing among thousands and a lot among a few hundred
+([post 05](05-the-cleaner-and-free-space.md#segment-count-matters-segment-size-does-not)).
 
 Here is a small disk. Look at where segment 0's two superblocks sit and how each later segment starts
 with its header:
@@ -275,8 +263,8 @@ write is a 2-block record: one header block, one data block.
 The header's own checksum covers every header byte, and each data block has its own CRC32C in the
 header. That pair lets the header and its data go in the *same* write and the *same* flush: if the
 write tears, either the header does not decode or some block's checksum fails, and recovery treats
-the record as never written. The decoder is tested by landing every subset of a record's blocks over
-old content: it must return the whole new record, the whole old one, or an error, never a mixture.
+the record as never written. Landed over old content in any subset of its blocks, a record decodes as the whole new record, the
+whole old one, or an error, never a mixture.
 
 ### Whole blocks only: small files and small appends
 
@@ -373,9 +361,9 @@ sequenceDiagram
     O-->>S: inbox message naming what became durable
 ```
 
-The cap is 1 MiB. On the measured drive a commit costs the same from 4 KiB to 64 KiB, and more than
-twice that at 1 MiB, so past 1 MiB latency grows faster than throughput; the cap also bounds how long
-a large chunk write delays a metadata commit. It is the only bound on a round: in the
+The size cap is about a megabyte. On the measured drive a commit costs the same from 4 KiB to
+64 KiB, and more than twice that at 1 MiB, so past that latency grows faster than throughput; the
+cap also bounds how long a large chunk write delays a metadata commit. It is the only bound on a round: in the
 [raft rounds spike](../docs/design.md#appendix-raft-rounds-spike), rounds under open load stayed
 well below the cap, a smaller cap cost a third of the throughput, and a time bound changed nothing.
 
@@ -449,8 +437,7 @@ their own (next section).
 Raft entries stay in the hot stream because a round writes one record to one stream: a Raft stream
 would split a commit's chunk write and its Raft entries into two rounds and two flushes, to lower
 write amplification by only about 6%. Keeping sorted runs away from the cleaner's copies pays much
-more: mixed in, they raised block-volume write amplification by 25 to 54% at 80 to 90% full, against
-3 to 15% in a stream of their own ([cleaner streams spike](../docs/design.md#appendix-cleaner-streams-spike)).
+more ([post 05](05-the-cleaner-and-free-space.md#three-streams-keep-data-that-dies-together)).
 
 ### Chunk slots for whole-chunk writes
 
@@ -462,10 +449,9 @@ more: mixed in, they raised block-volume write amplification by 25 to 54% at 80 
 nothing but slots, instead of the log. Its record goes alone to the hot stream's slot lane, naming
 the slot and carrying the slot blocks' checksums, so recovery checks slot data as it checks log
 data, and the round's flush covers both. A slot is free once the record that rewrote or deleted its
-chunk is durable, so in the cleaner streams spike whole chunks deleted at random cost a write
-amplification of about 1 at any fill, against about 5 at 90% full in the log. A round carries at
-most one slot write, so it delays the commits behind it by at most a chunk. More in
-[post 05](05-the-cleaner-and-free-space.md).
+chunk is durable, so whole chunks deleted at random cost almost no cleaning
+([post 05](05-the-cleaner-and-free-space.md#three-streams-keep-data-that-dies-together)). A round
+carries at most one slot write, so it delays the commits behind it by at most a chunk.
 
 ### LSNs and the durable LSN
 
@@ -531,12 +517,9 @@ segment usage table (which segments are in use; [post 05](05-the-cleaner-and-fre
   reads at most twice a snapshot. Writing the whole usage table every time would cost a share of the
   log that grows with the disk, several percent on a 16 TiB disk
   ([durability study](../docs/design.md#appendix-lsm-study-durability-spike)).
-- **Freed and reused segments.** A segment the cleaner freed keeps its old header until it is
-  reused, so a header alone cannot say whether its segment was opened after the manifest or freed
-  before it. Every manifest therefore also records the open sequence the next segment opened will
-  take: a header at or past it is newer than the manifest, one below it is judged by the usage
-  table. That holds in every crash order of freeing, reusing and TRIM, which is what lets a freed
-  segment be reused at once ([log segments study](../studies/log-segments/)).
+- **Freed and reused segments.** Every manifest also records the open sequence the next segment
+  will take, which tells a segment opened since the manifest from one freed before it, so a freed
+  segment can be reused at once ([post 05](05-the-cleaner-and-free-space.md#the-segment-usage-table)).
 - **Finding it.** A manifest larger than a record is written in pieces; its last piece lists the
   pieces of its snapshot and of every edit since. Each segment header names the newest manifest when
   the segment opens, so the headers do the job of RocksDB's `CURRENT` file.
@@ -634,7 +617,7 @@ disk keeps the size it was formatted with. What block 0 holds decides what recov
 | --- | --- |
 | A valid superblock | Uses it, and rewrites the copy if the copy differs |
 | Unreadable, or this format's magic and version with a bad checksum or inconsistent contents | Uses the copy if it is valid and sits where its own geometry puts it, and rewrites block 0 |
-| Zeros, another magic or another format version | Writes nothing. Reports `CopyOnly` when the copy is valid, `NotFormatted` when block 0 and the copy are both zeros, else `Unrecognized` |
+| Zeros, another magic or another format version | Writes nothing, and reports whether the copy is valid, the disk is blank, or block 0 is something else |
 
 The last row is cautious because a partition table, a new filesystem or a partial `wipefs` writes at
 the start of a disk and leaves the copy alone, and device names such as `/dev/nvme1n1` can change
@@ -646,8 +629,8 @@ operator's repair command, as ext4, XFS and Btrfs leave their copies to offline 
 > **In plain words.** Every page says which edition of the rules it was written under, and a new
 > edition is only written once every machine can read it, so you can always roll back.
 
-**How it works.** Segment headers, record headers, sorted runs and manifests carry a format version,
-and golden byte fixtures make any accidental change fail a test. A new kind of log entry takes an
+**How it works.** Segment headers, record headers, sorted runs and manifests carry a format version.
+A new kind of log entry takes an
 entry kind of its own rather than changing an entry's size, so old records still decode. A daemon
 reads the current and the previous format, but writes the new one only after the operator raises the
 cluster's format level, once every node runs the new release. A node on an older release that
@@ -679,8 +662,7 @@ blocks, loses unflushed data, damages records in the middle and flips bits anywh
   ([post 05](05-the-cleaner-and-free-space.md)).
 - **An LSM tree to build and maintain,** instead of an embedded engine ([post 06](06-the-lsm-tree.md)).
 - **Headers are capacity.** Header blocks are dead to the cleaner, so near full they cost more than
-  their bytes: at 90% full, queue-depth-1 4K writes, one header block per data block, double write
-  amplification. The header encoding must stay compact.
+  their bytes ([post 05](05-the-cleaner-and-free-space.md#header-blocks-are-capacity)).
 - **Small files and small appends pay a whole block**, in copies and erasure-coded pools alike.
 - **Fragmented chunks read as random I/O.** A chunk overwritten at random 4K keeps one index entry
   per write, so its sequential reads become random 4K reads, fine on NVMe, worse on SATA and HDDs.
@@ -704,14 +686,13 @@ From the design's [roadmap and open questions](../docs/design.md#roadmap-and-ope
   block of the log's own address space, so one log can later span two devices, as BlueStore's DB
   device and ZFS's special vdev do: hot and metadata segments on flash, cold segments and chunk slots
   on the HDD, with no index entry rewritten.
-- **One flush for both streams.** Putting one record per stream in one round under one flush would
-  cut a hot commit's wait behind cold records, at the cost of the "one record per round" rule.
-- **Shorter commits**, collecting work while a round is in flight, as Pebble and RocksDB apply while
-  their sync runs.
+- **The shape of a round.** One record per stream in one round under one flush would cut a hot
+  commit's wait behind cold records, at the cost of the "one record per round" rule; collecting work
+  while a round is in flight, as Pebble and RocksDB apply while their sync runs, would shorten
+  commits; and a whole chunk among small writes splits them into two rounds, one more flush per slot
+  write.
 - **One loop and a fast drive.** On a PLP drive the owner loop may become CPU-bound; the drive could
   then be split into two partitions, each a disk with its own log, in one failure domain.
-- **Slot writes' own round.** A whole chunk among small writes splits them into two rounds, one more
-  flush per slot write. Should slot writes share a round?
 - **Header patches for fsync'd appends** and **short last blocks for small files**: worth it only if
   real homelab traces show many fsync'd sub-block appends or much space in small files and tails.
 - **Merge lanes shared between merges**, **chunk slots for erasure-coded pieces** (4 MiB ÷ k, so
