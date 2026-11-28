@@ -46,7 +46,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **StorageClass.** A named template for PVCs: which driver creates them and with which parameters. In rock-solid its `pool` parameter picks the pool.
 
-**Out-of-service taint.** `node.kubernetes.io/out-of-service`, a taint an operator puts on a node that is shut down for good. Kubernetes then deletes its pods and detaches their volumes so they can start elsewhere, which it otherwise refuses for fear the node still writes. rock-solid's action applies it only once the node's sessions are fenced everywhere, so it cannot write ([Actions](design.md#actions)).
+**Out-of-service taint.** `node.kubernetes.io/out-of-service`, a taint an operator puts on a node that is shut down for good. Kubernetes then deletes its pods and detaches their volumes so they can start elsewhere, which it otherwise refuses for fear the node still writes. rock-solid's action applies it only after the control plane has fenced the node's sessions everywhere and committed the node as out of service, which refuses it new sessions, so pods it still runs cannot write beside their replacements ([Actions](design.md#actions)).
 
 **Access modes: RWO, RWX.** ReadWriteOnce (RWO): one node at a time mounts the volume read-write. ReadWriteMany (RWX): many nodes mount it read-write at once. RWX is rock-solid's headline feature because it is hard: every node caches, and the caches must agree.
 
@@ -466,7 +466,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Maintenance.** A mark an operator puts on an up node before a planned reboot, until a time. Writes stop waiting for its disks, which still count toward `min_live`, so its PGs keep accepting writes on fewer copies instead of stopping or copying data away ([Writes and `min_live`](design.md#pools-and-redundancy), [Actions](design.md#actions)).
 
-**Cut off.** A mount whose session the control plane fenced: its writes are refused everywhere and its calls fail with `EIO` until the daemon starts a new session ([Sessions and fencing](design.md#sessions-and-fencing)).
+**Cut off.** A mount whose session the control plane fenced: its writes are refused everywhere, and every call on a file opened before the fence fails with `EIO` for good, so the application must reopen its files once the daemon has a new session ([Sessions and fencing](design.md#sessions-and-fencing)).
 
 **Rebuild.** The operator's word for a refill and the recovery that fills the new member: copying a PG's data onto another disk to replace a member that is down ([Actions](design.md#actions)).
 

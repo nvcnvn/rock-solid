@@ -154,3 +154,8 @@
 - **Where:** `deviceID` in `cmd/rock-solid/node_linux.go`
 - **Why:** the control plane keys a disk's device by the drive's stable identity ([A disk is its log](design.md#epoch-changes-and-failure-detection)), and nothing reads a drive's World Wide Name (WWN) or serial yet, so the process hashes the path the operator gives in `-device` and relies on it naming the same drive at every start, as a `/dev/disk/by-id` link does. A path like `/dev/sdb` can name another drive after a reboot, and a drive with no unique identity is not refused.
 - **Remove when:** the node reads each block device's WWN or serial, refuses a drive with none or one shared with another device, and reports that as `OpenedDisk.Device`.
+
+## Workaround: no admin authentication
+- **Where:** `rock-solid ui`'s `--actions` gate and the operator name in `ctl/audit/` entries, in `cmd/rock-solid` and `internal/ops` (to be built, [Actions](design.md#actions))
+- **Why:** v1 trusts the cluster network and no daemon port authenticates ([Goals](design.md#goals)), so nothing can tell who sent a command. A UI bound off localhost therefore serves actions only when asked to, and the audit log records the name the operator's machine declares.
+- **Remove when:** daemons authenticate: then the UI's actions carry the operator's credential, the leader names the verified operator in each audit entry, and `--actions` goes.
