@@ -30,7 +30,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Why two schemes.** A primary waits for every live member, so a write survives as long as one copy does, but it needs an outside authority (the control plane) to decide who is live and who is primary; otherwise two nodes could both believe they are primary. A Raft group waits only for a majority and elects its own leader, so it needs no outside authority, at the cost of tolerating fewer failures for the same number of copies (one of three). The control plane itself is a Raft group, which breaks the circle.
 
-**Control plane.** The single Raft group that holds cluster-wide state: pools, the placement table, node membership, client sessions. It changes rarely and never sits on the I/O path; every node caches its tables. "Control plane" is the usual name for the part of a system that decides configuration, as opposed to the **data plane** that moves user data.
+**Control plane.** The single Raft group that holds cluster-wide state: pools, the placement table, node membership, client sessions. It changes rarely and never sits on the I/O path; every node caches its tables. "Control plane" is the usual name for the part of a system that decides configuration, as opposed to the **data plane** that moves user data. The operator's screens call its state the [cluster map](#operating), since to a Kubernetes operator "control plane" means the API server.
 
 **Inode owner.** The leader of the MetaStore shard holding an inode. Besides serving the inode's keys, it tracks in memory who has the file open and which cache mode the file is in. See [Inode owner](design.md#metadata-layer-metastore).
 
@@ -45,6 +45,8 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 **PersistentVolumeClaim (PVC) and PersistentVolume (PV).** A PVC is a pod's request for storage ("10 GiB, shared, from class X"). The storage driver creates a PV to satisfy it, and Kubernetes binds the two. A PVC cannot change its StorageClass later, which is why [moving a volume between pools](design.md#moving-a-volume-to-another-pool) happens in place.
 
 **StorageClass.** A named template for PVCs: which driver creates them and with which parameters. In rock-solid its `pool` parameter picks the pool.
+
+**Out-of-service taint.** `node.kubernetes.io/out-of-service`, a taint an operator puts on a node that is shut down for good. Kubernetes then deletes its pods and detaches their volumes so they can start elsewhere, which it otherwise refuses for fear the node still writes. rock-solid's action applies it only once the node's sessions are fenced everywhere, so it cannot write ([Actions](design.md#actions)).
 
 **Access modes: RWO, RWX.** ReadWriteOnce (RWO): one node at a time mounts the volume read-write. ReadWriteMany (RWX): many nodes mount it read-write at once. RWX is rock-solid's headline feature because it is hard: every node caches, and the caches must agree.
 
@@ -223,6 +225,8 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 **Hard state, round.** A Raft replica's hard state is its current term, whom it voted for in that term and how far it knows the log is committed; the term and the vote must survive a crash. A shard's round is what one step of etcd-raft must make durable before the replica tells anyone: new log entries, a changed hard state or a snapshot it restores. It goes to the disk log as blobs in the next record, so every shard on a disk shares one flush. See [Raft shard](design.md#metadata-layer-metastore).
 
 **Shard, Raft group, multi-Raft.** The metadata key space is cut into ranges, and each range is its own Raft group, called a shard. Running many groups (multi-Raft) spreads leaders, and so load, over every node, instead of sending every metadata write through one leader. A shard that grows too large **splits** in two.
+
+**Halted replica.** A Raft replica that met a committed entry it cannot decode, almost always because its node runs an older release than the entry needs. It applies nothing from there on and acts as a down replica, so the group goes on with the others, and the control plane replaces it on another node after `refill_after`. Upgrading the node is the cure ([MetaStore](design.md#metadata-layer-metastore)).
 
 **Shard map.** The control plane's record, under `ctl/`, of which key range each shard holds and where each shard's three voters are meant to live. It is a plan: each group's own Raft log decides who its members are, and the group's leader changes them, one learner and one swap at a time, until they match the map. See [Replica placement and replacement](design.md#metadata-layer-metastore).
 
@@ -442,6 +446,30 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **synctest bubble.** Go's `testing/synctest` runs a test's goroutines in a bubble whose fake clock jumps ahead whenever every goroutine in it is blocked on something only another one can release, such as a channel or `time.Sleep`. It fakes only Go's `time` package, so it suits background goroutines that wait on channels and timers, but not an event loop, whose clock reads and `epoll_wait` go to the kernel. See [Testing strategy](design.md#testing-strategy).
 
+## Operating
+
+**Cluster map.** What the operator's screens call the control plane's record: pools, the placement table with every member's mark, the disk record, the session table and the shard map. A node is *down* only when the cluster map marks it so; when the command line gets no answer from a node, it says it *can't reach* it, a different fact ([Operating the cluster](design.md#operating-the-cluster)).
+
+**Node report, facts endpoint.** What one node says about itself, from its own memory and disks, when asked over HTTP on its admin port: its disks, PG members, Raft replicas, mounts, leases and the cluster map version it holds. It needs no quorum or leader, so it answers when the cluster cannot ([Node facts](design.md#node-facts)).
+
+**Collector.** The library behind `rock-solid` and `rock-solid ui` that reads every node's report, from off the cluster if need be, sets them beside the cluster map and decides the cluster's health ([The collector](design.md#the-collector)).
+
+**Settling, act, never.** The three classes of a disagreement between the cluster map and a node report. *Settling*: the protocol resolves it by itself within a known deadline, such as a node one table behind. *Act*: nothing will resolve it without the operator, or it outlived its deadline. *Never*: something the protocol forbids, which means a bug ([The collector](design.md#the-collector)).
+
+**Health state.** The one word `rock-solid status` prints and returns as its exit code: healthy, degraded (fewer copies than asked for, still two of everything), at risk (one more failure can lose acknowledged writes), unavailable, safety check failed, or not enough nodes read to tell ([Health states](design.md#health-states)).
+
+**Auditor.** `rock-solid audit`: checks over the gathered reports that stand for the safety properties the TLA+ models prove, such as one Raft leader per term, so a protocol bug on a real cluster shows as a named violation ([The auditor](design.md#the-auditor)).
+
+**Flight recorder.** The record every node keeps of what it did: every trace record in a memory ring covering seconds, and for days on disk the records that follow membership and leadership rather than I/O, so history exists from before anyone looked ([Flight recorder and support bundle](design.md#flight-recorder-and-support-bundle)).
+
+**Support bundle.** One file for an issue report: the recorders' window from every node, their reports, the cluster map versions, Kubernetes events and the audit log, with names replaced by keyed hashes unless asked otherwise ([Flight recorder and support bundle](design.md#flight-recorder-and-support-bundle)).
+
+**Maintenance.** A mark an operator puts on an up node before a planned reboot, until a time. Writes stop waiting for its disks, which still count toward `min_live`, so its PGs keep accepting writes on fewer copies instead of stopping or copying data away ([Writes and `min_live`](design.md#pools-and-redundancy), [Actions](design.md#actions)).
+
+**Cut off.** A mount whose session the control plane fenced: its writes are refused everywhere and its calls fail with `EIO` until the daemon starts a new session ([Sessions and fencing](design.md#sessions-and-fencing)).
+
+**Rebuild.** The operator's word for a refill and the recovery that fills the new member: copying a PG's data onto another disk to replace a member that is down ([Actions](design.md#actions)).
+
 ## Words with more than one meaning
 
 | Word | Meanings |
@@ -450,6 +478,8 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 | Replica | A PG member other than the primary, holding a copy of chunk data. Any copy of a Raft shard, leader included. `rep3` means three copies |
 | Member | A disk in a PG. In a cache mode, a node that has the file open |
 | Leader | A Raft group's elected coordinator; never used for chunk data, which has primaries |
+| Control plane | rock-solid's control-plane Raft group (in the design). The Kubernetes API server and its controllers (to an operator), which is why the screens say cluster map |
+| Halted | A metadata replica stopped at a committed entry it cannot decode. Never a Raft group that lost its majority, which is unavailable |
 | Owner | The inode owner, the leader of an inode's shard. The event loop that owns a disk's log and index, its connections or its shards and is the only code to change them |
 | Epoch | The placement table's version, the table epoch (almost always). A volume's snapshot epoch, which counts its snapshots. A loop-pair lease's support epoch. A chunk version holds none of them: its high half is its PG's interval number |
 | Interval | A PG's run of placement tables with the same members (almost always). Any span of time, as in a heartbeat interval |
