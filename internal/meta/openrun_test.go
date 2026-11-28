@@ -36,17 +36,23 @@ const (
 	// each a crash of its node or a transfer of its leadership to another replica.
 	openMoveAt  = core.Tick(4_000_000)
 	openMoveGap = core.Tick(3_000_000)
+	// openMoveCut is when, after a move, a client is cut off from whichever replica then leads;
+	// openLease is how long a grace period waits on a session before evicting it.
+	openMoveCut = core.Tick(200_000)
+	openLease   = core.Tick(1_500_000)
 	openTick    = core.TimerID(0x6f70656e)
 )
 
 // openRun runs a three-replica shard on nodes 0 to 2, each serving Txns, Reads and the open
 // registry through a Server, and three clients on nodes 3 to 5 that each, every openGap, look up
 // the root directory's file f, create it under a new inode when it is missing, open it, and then
-// release it or unlink it while it is open. The run is the control plane: a client's start takes
-// a session, and a crashed client's session is fenced, then acknowledged, the table handed to every
-// replica's server each time. Faults: clients crashed up to openCrashGap apart and cut off from the
-// leader for openCut up to openCutGap apart, and the leader moved up to openMoveGap apart, its node
-// crashed or its leadership handed to another replica, whose new owner has an empty registry.
+// release it or unlink it while it is open; each re-registers its open file and ends its
+// re-registration when a new owner asks. The run is the control plane: a client's start takes a
+// session, and a crashed or evicted client's session is fenced, then acknowledged, the table handed
+// to every replica's server each time and whenever one asks. Faults: clients crashed up to
+// openCrashGap apart and cut off from the leader for openCut up to openCutGap apart, and the leader
+// moved up to openMoveGap apart, its node crashed or its leadership handed to another replica, whose
+// new owner has an empty registry and a client cut off from it openMoveCut later.
 type openRun struct {
 	t     testing.TB
 	s     *sim.Scheduler
@@ -165,6 +171,9 @@ func (r *openRun) move() {
 	if l < 0 {
 		return
 	}
+	if r.healAt == 0 {
+		r.cutAt = r.s.Time() + openMoveCut
+	}
 	if r.rng.Chance(1, 2) {
 		r.s.Reboot(uint32(l))
 		return
@@ -197,10 +206,7 @@ func (r *openRun) faults() {
 	}
 	if now >= r.crashAt {
 		r.crashAt = now + core.Tick(r.rng.Below(uint64(openCrashGap)))
-		if c := r.cls[r.rng.Below(openClients)]; r.s.Node(uint32(3 + c.i)).Up() {
-			r.fences = append(r.fences, openFence{session: c.session, at: now + core.Tick(r.rng.Below(uint64(openFenceLag)))})
-			r.s.Reboot(uint32(3 + c.i))
-		}
+		r.crash(r.cls[r.rng.Below(openClients)])
 	}
 	changed := false
 	for i := 0; i < len(r.fences); i++ {
@@ -230,6 +236,24 @@ func (r *openRun) faults() {
 	}
 }
 
+// crash reboots c's node, whose session is fenced up to openFenceLag later.
+func (r *openRun) crash(c *openClient) {
+	if r.s.Node(uint32(3 + c.i)).Up() {
+		r.fences = append(r.fences, openFence{session: c.session, at: r.s.Time() + core.Tick(r.rng.Below(uint64(openFenceLag)))})
+		r.s.Reboot(uint32(3 + c.i))
+	}
+}
+
+// evict takes an owner's ask to evict session id: it stops renewing it, so its client, cut off,
+// crashes and its session is fenced.
+func (r *openRun) evict(id uint64) {
+	for _, c := range r.cls {
+		if c.session == id {
+			r.crash(c)
+		}
+	}
+}
+
 // tell hands the session table to every replica's server.
 func (r *openRun) tell() {
 	tab := r.tab.Storage()
@@ -239,7 +263,7 @@ func (r *openRun) tell() {
 		}
 		r.s.Node(uint32(m.i)).Call(m.loop, func(ctx *core.Context, acts []core.Action) []core.Action {
 			m.out.Reset()
-			m.sv.SetSessions(&tab)
+			m.sv.SetSessions(&tab, 0)
 			return m.finish(ctx, acts)
 		})
 	}
@@ -268,7 +292,7 @@ func (m *openRep) boot(n *sim.Node) {
 	}
 	rng := n.Fork()
 	m.flight, m.sv = nil, NewServer()
-	m.sv.reg.plant = m.r.plant
+	m.sv.reg.plant, m.sv.Lease = m.r.plant, openLease
 	m.loop = n.Start(sim.MachineFunc(m.onEvent), n.Disk(0))
 	n.Call(m.loop, func(ctx *core.Context, acts []core.Action) []core.Action {
 		h, g := lease.NewHolder(lease.DefaultConfig), lease.NewGrantor(lease.DefaultConfig, rng.Uint64(), lease.Time{})
@@ -318,12 +342,20 @@ func (m *openRep) onEvent(ctx *core.Context, ev *core.Event, acts []core.Action)
 	return m.finish(ctx, acts)
 }
 
-// finish replies the answers, which may leave orphans to free, then proposes their frees, whose
-// answers a later call replies.
+// finish replies the answers, which may leave orphans to free, answers the server's ask for a
+// session table, then proposes the frees, whose answers a later call replies, and takes its asks
+// to evict.
 func (m *openRep) finish(ctx *core.Context, acts []core.Action) []core.Action {
 	acts = m.sv.Reply(ctx, m.out.Answers, acts)
 	m.out.Answers = m.out.Answers[:0]
-	m.sv.Free(ctx, m.s, &m.out)
+	if ask := m.sv.FetchSessions(); ask != 0 {
+		tab := m.r.tab.Storage()
+		m.sv.SetSessions(&tab, ask)
+	}
+	acts = m.sv.Free(ctx, m.s, &m.out, acts)
+	for _, id := range m.sv.Evictions(nil) {
+		m.r.evict(id)
+	}
 	acts = m.sv.Reply(ctx, m.out.Answers, acts)
 	acts = append(acts, m.out.Raft.Actions...)
 	if f := m.out.Raft.Flush; f != 0 {
@@ -334,7 +366,9 @@ func (m *openRep) finish(ctx *core.Context, acts []core.Action) []core.Action {
 }
 
 // openClient is a client node's daemon: its session, the step it is at, the inode it looked up
-// or has open and what it read of it, and the token it waits on.
+// or has open and what it read of it, and the token it waits on; and the newest owner that asked
+// it to re-register since it last started to, the term it re-registers with, the token it waits on
+// for that, and whether it re-registered the file.
 type openClient struct {
 	r       *openRun
 	i       int
@@ -348,6 +382,11 @@ type openClient struct {
 	token   uint64
 	fs      FS
 	rd      Read
+	asked   bool
+	term    uint64
+	rtoken  uint64
+	reopen  bool
+	rrd     Read
 }
 
 const (
@@ -364,6 +403,7 @@ const (
 func (c *openClient) boot(n *sim.Node) {
 	r := c.r
 	c.session, c.step, c.open, c.token = r.tab.Next, stepIdle, false, 0
+	c.asked, c.term, c.rtoken, c.reopen = false, 0, 0, false
 	c.out.Reset()
 	r.tab.Next++
 	r.tab.Sessions = append(r.tab.Sessions, SessionEntry{ID: c.session, Node: uint32(3 + c.i)})
@@ -391,11 +431,62 @@ func (c *openClient) onEvent(ctx *core.Context, ev *core.Event, acts []core.Acti
 			c.act(ctx)
 		}
 		acts = append(acts, core.Action{Kind: core.ActSetTimer, Timer: openTick, At: ctx.Now + openGap})
+	} else if _, kind, _, _ := Peek(&ev.Msg); ev.Kind == core.EvNetRecv && kind == KindReclaim {
+		if _, session, term, err := DecodeReclaim(ctx.Pool, &ev.Msg); err == nil && session == c.session {
+			c.asked, c.term = true, max(c.term, term)
+			c.reclaim(ctx)
+		}
 	} else {
 		c.c.OnEvent(ctx, ev, &c.out)
+		c.reclaimed(ctx)
 		c.settle(ctx)
 	}
 	return append(acts, c.out.Actions...)
+}
+
+// reclaim starts the re-registration the newest owner asked for, unless one is in flight: the
+// file the client has open, or is opening, then the end of it. An owner asks again until it hears
+// the end, so the client starts over at each ask.
+func (c *openClient) reclaim(ctx *core.Context) {
+	if c.rtoken != 0 || !c.asked {
+		return
+	}
+	c.asked, c.reopen = false, c.open || c.step == stepOpen
+	reg, start := byte(RegReclaimed), c.key(RootInode, InodeAttr, nil)
+	if c.reopen {
+		reg, start = RegReopen, c.key(c.inode, InodeAttr, nil)
+	}
+	c.rrd = Read{Start: start, End: append(slices.Clip(start), 0), Limit: 1, Reg: reg, Session: c.session, Mount: 1, Term: c.term}
+	tok, err := c.c.Read(ctx, &c.rrd, &c.out)
+	if err != nil {
+		c.r.t.Fatal(err)
+	}
+	c.rtoken = tok
+}
+
+// reclaimed takes the answer to the re-registration step in flight, and starts the next.
+func (c *openClient) reclaimed(ctx *core.Context) {
+	i := slices.IndexFunc(c.out.Reads, func(a ReadAnswer) bool { return a.Token == c.rtoken })
+	if c.rtoken == 0 || i < 0 {
+		return
+	}
+	err := c.out.Reads[i].Err
+	c.out.Reads = slices.Delete(c.out.Reads, i, i+1)
+	c.rtoken = 0
+	switch {
+	case err == ErrFenced:
+		return
+	case err == nil && c.rrd.Reg == RegReopen:
+		c.rrd = Read{Start: c.key(RootInode, InodeAttr, nil), Limit: 1, Reg: RegReclaimed, Session: c.session, Mount: 1, Term: c.term}
+		c.rrd.End = append(slices.Clip(c.rrd.Start), 0)
+		tok, err := c.c.Read(ctx, &c.rrd, &c.out)
+		if err != nil {
+			c.r.t.Fatal(err)
+		}
+		c.rtoken = tok
+		return
+	}
+	c.reclaim(ctx)
 }
 
 // root creates the volume's root, until a Txn of it is answered with no error.
@@ -471,6 +562,9 @@ func (c *openClient) settle(ctx *core.Context) {
 		return
 	}
 	if err != nil {
+		if step == stepOpen && c.reopen {
+			c.read(ctx, c.key(c.inode, InodeAttr, nil), RegRelease, stepRelease)
+		}
 		return
 	}
 	switch step {
@@ -494,6 +588,8 @@ func (c *openClient) settle(ctx *core.Context) {
 		if len(kvs) == 1 && DecodeAttr(kvs[0].Value, &c.attr) == nil && c.attr.Nlink > 0 {
 			c.open = true
 			c.r.opens = append(c.r.opens, openHeld{c.inode, c.session})
+		} else if c.reopen {
+			c.read(ctx, c.key(c.inode, InodeAttr, nil), RegRelease, stepRelease)
 		}
 	case stepAttr:
 		if len(kvs) == 1 && DecodeAttr(kvs[0].Value, &c.attr) == nil && c.attr.Nlink > 0 {
@@ -526,7 +622,8 @@ func TestPlantedRegistryBugsFreeAnOpenOrphan(t *testing.T) {
 	}{
 		{regPlants{unlinkOpen: true}, 1},
 		{regPlants{releaseOnCommit: true}, 2},
-		{regPlants{newOwnerFrees: true}, 3},
+		{regPlants{orphanInGrace: true}, 3},
+		{regPlants{graceByTime: true}, 8},
 	} {
 		var v *sim.Violation
 		if err := newOpenRun(t, c.seed, c.p).run(); !errors.As(err, &v) || v.Name != invOrphanOpen {

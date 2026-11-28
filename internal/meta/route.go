@@ -373,14 +373,19 @@ func (r *Router) ReadAnswer(ctx *core.Context, a *ReadAnswer, out *RouterOutput)
 	}
 }
 
-// answered resends the flight under token, a Read's if read, after a NotLeader, or returns its
-// index when err is final; it drops an answer to no such flight in flight.
+// answered resends the flight under token, a Read's if read, after a NotLeader, holds a Read
+// refused ErrGrace for the timer, or returns its index when err is final; it drops an answer to
+// no such flight in flight.
 func (r *Router) answered(ctx *core.Context, token uint64, err error, read bool, out *RouterOutput) (int, bool) {
 	i, ok := r.at[token]
 	if !ok || r.flights[i].parked || (r.flights[i].read != nil) != read {
 		return 0, false
 	}
 	nl, ok := err.(NotLeader)
+	if read && err == ErrGrace {
+		r.park(ctx, &r.flights[i], out)
+		return 0, false
+	}
 	if !ok {
 		return i, true
 	}

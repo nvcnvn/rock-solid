@@ -501,6 +501,12 @@ func (n *Node) Take(ctx *core.Context, device uint64, o *DeviceOutput, out *Outp
 	if o.Ask != 0 {
 		n.Ask(ctx, device, o.Ask, out)
 	}
+	if len(o.Evicts) != 0 {
+		a := core.Action{Kind: core.ActNetSend, Peer: n.Ctl()}
+		if meta.EncodeEvict(ctx.Pool, n.cfg.Group, o.Evicts, &a.Msg) == nil {
+			out.Actions = append(out.Actions, a)
+		}
+	}
 	if o.Fetch {
 		n.FetchTable(ctx, out)
 	}

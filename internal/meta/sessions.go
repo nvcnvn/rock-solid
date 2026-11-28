@@ -88,12 +88,13 @@ type SessionTable struct {
 	Sessions             []SessionEntry
 }
 
-// Storage is t as a storage node holds it: its versions, next session ID and live sessions.
+// Storage is t as a storage node holds it: its versions, next session ID, and live sessions with
+// their nodes.
 func (t *SessionTable) Storage() chunkstore.SessionTable {
 	s := chunkstore.SessionTable{Version: t.Version, Acked: t.Acked, Next: t.Next}
 	for _, e := range t.Sessions {
 		if e.Fenced == 0 {
-			s.Live = append(s.Live, e.ID)
+			s.Live, s.Nodes = append(s.Live, e.ID), append(s.Nodes, e.Node)
 		}
 	}
 	return s

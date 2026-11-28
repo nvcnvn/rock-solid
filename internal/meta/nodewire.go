@@ -2,6 +2,7 @@ package meta
 
 import (
 	"encoding/binary"
+	"math"
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -46,6 +47,7 @@ const (
 	KindDelete       byte = 0x4f
 	KindSessionBeat  byte = 0x50
 	KindRenewed      byte = 0x51
+	KindEvict        byte = 0x55
 )
 
 // Membership is the leader's answer to a node's report: the committed disks, each pool's grants
@@ -207,13 +209,17 @@ func EncodeSessions(pool core.BufPool, group, token uint64, t *chunkstore.Sessio
 	body := binary.AppendUvarint(binary.AppendUvarint(binary.AppendUvarint(nil, t.Version), t.Acked), t.Next)
 	body = binary.AppendUvarint(body, uint64(len(t.Live)))
 	last := uint64(0)
-	for _, id := range t.Live {
-		body, last = binary.AppendUvarint(body, id-last), id
+	for i, id := range t.Live {
+		node := uint32(0)
+		if i < len(t.Nodes) {
+			node = t.Nodes[i]
+		}
+		body, last = binary.AppendUvarint(binary.AppendUvarint(body, id-last), uint64(node)), id
 	}
 	return encodeBody(pool, group, KindSessions, token, body, msg)
 }
 
-// DecodeSessions decodes a session table message into t, reusing its Live; one that does not
+// DecodeSessions decodes a session table message into t, reusing its Live and Nodes; one that does not
 // decode, acknowledges past its version, or whose live IDs are not rising, nonzero and below its
 // next ID, is ErrMalformed. Peek
 // gives the fetch it answers.
@@ -223,15 +229,16 @@ func DecodeSessions(pool core.BufPool, msg *core.Msg, t *chunkstore.SessionTable
 		return err
 	}
 	d := decoder{b: b}
-	*t = chunkstore.SessionTable{Version: d.uvarint(), Acked: d.uvarint(), Next: d.uvarint(), Live: t.Live[:0]}
+	*t = chunkstore.SessionTable{Version: d.uvarint(), Acked: d.uvarint(), Next: d.uvarint(), Live: t.Live[:0], Nodes: t.Nodes[:0]}
 	last := uint64(0)
 	for n := d.count(); n > 0; n-- {
 		gap := d.uvarint()
-		if gap == 0 || last+gap < last {
+		node := d.uvarint()
+		if gap == 0 || last+gap < last || node > math.MaxUint32 {
 			return ErrMalformed
 		}
 		last += gap
-		t.Live = append(t.Live, last)
+		t.Live, t.Nodes = append(t.Live, last), append(t.Nodes, uint32(node))
 	}
 	if d.bad || len(d.b) != 0 || t.Acked > t.Version || len(t.Live) > 0 && last >= t.Next {
 		return ErrMalformed
@@ -547,4 +554,30 @@ func DecodeRenewed(pool core.BufPool, msg *core.Msg, a *SessionAnswer) (uint64, 
 		return 0, ErrMalformed
 	}
 	return run, nil
+}
+
+// EncodeEvict writes an inode owner's ask that the control plane evict sessions into msg, or
+// returns the pool's error.
+func EncodeEvict(pool core.BufPool, group uint64, sessions []uint64, msg *core.Msg) error {
+	body := binary.AppendUvarint(nil, uint64(len(sessions)))
+	for _, id := range sessions {
+		body = binary.AppendUvarint(body, id)
+	}
+	return encodeBody(pool, group, KindEvict, 0, body, msg)
+}
+
+// DecodeEvict appends to dst the sessions a KindEvict message names, or returns ErrMalformed.
+func DecodeEvict(pool core.BufPool, msg *core.Msg, dst []uint64) ([]uint64, error) {
+	b, err := msgBody(pool, KindEvict, msg)
+	if err != nil {
+		return dst, err
+	}
+	d := decoder{b: b}
+	for n := d.count(); n > 0; n-- {
+		dst = append(dst, d.uvarint())
+	}
+	if d.bad || len(d.b) != 0 {
+		return dst, ErrMalformed
+	}
+	return dst, nil
 }

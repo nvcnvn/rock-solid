@@ -96,6 +96,7 @@ type CtlHost struct {
 	answers []Answer
 	nr      NodeReport
 	asks    []chunkstore.PGFields
+	evicts  []uint64
 	disks   []chunkstore.Disk
 	dels    []ReplicaRef
 	stepAt  core.Tick
@@ -313,6 +314,13 @@ func (h *CtlHost) recvGroup(ctx *core.Context, ev *core.Event, out *CtlHostOutpu
 		var err error
 		if h.asks, err = DecodeAsks(ctx.Pool, &ev.Msg, h.asks); err == nil && h.ctl != nil {
 			h.ctl.Asked(ev.Peer.Node, h.asks)
+		}
+	case kind == KindEvict:
+		var err error
+		if h.evicts, err = DecodeEvict(ctx.Pool, &ev.Msg, h.evicts[:0]); err == nil && h.ctl != nil {
+			for _, id := range h.evicts {
+				_ = h.ctl.Evict(id)
+			}
 		}
 	case kind != KindSessionFetch && kind != KindTableFetch && kind != KindSessionStart && kind != KindAdmin && kind != KindSessionBeat:
 	case h.ctl == nil:

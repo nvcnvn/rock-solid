@@ -50,9 +50,10 @@ type DeviceConfig struct {
 
 // DeviceOutput is what a call into a Device asks of its loop and of the node's machine: actions;
 // once its start ends, the disk Opened for Node.Opened, or Failed for Node.Failed; from its
-// replica, a session ask for Node.Ask, a table fetch for Node.FetchTable, and the session version
-// and placement epoch it holds when they changed, for Node.Held and Node.HeldEpoch; and, if
-// Reported, its MetaStore replicas' reports and their halts, for Node.Replicas and Node.Halts.
+// replica and its server, a session ask for Node.Ask, a table fetch for Node.FetchTable, and the
+// session version and placement epoch it holds when they changed, for Node.Held and
+// Node.HeldEpoch; from its server, the sessions to evict for Node.Evict; and, if Reported, its
+// MetaStore replicas' reports and their halts, for Node.Replicas and Node.Halts.
 type DeviceOutput struct {
 	Actions  []core.Action
 	Opened   *meta.OpenedDisk
@@ -64,11 +65,12 @@ type DeviceOutput struct {
 	Reported bool
 	Metas    []meta.ReplicaReport
 	Halts    []meta.Halt
+	Evicts   []uint64
 }
 
 // Reset empties the output for reuse.
 func (o *DeviceOutput) Reset() {
-	*o = DeviceOutput{Actions: o.Actions[:0], Metas: o.Metas[:0], Halts: o.Halts[:0]}
+	*o = DeviceOutput{Actions: o.Actions[:0], Metas: o.Metas[:0], Halts: o.Halts[:0], Evicts: o.Evicts[:0]}
 }
 
 // Clone is o without its actions, for the node's loop; false when it holds nothing for the node.
@@ -79,8 +81,8 @@ func (o *DeviceOutput) Clone() (DeviceOutput, bool) {
 		d := *o.Opened
 		c.Opened = &d
 	}
-	c.Metas, c.Halts = slices.Clone(o.Metas), slices.Clone(o.Halts)
-	return c, c.Opened != nil || c.Failed || c.Ask != 0 || c.Fetch || c.Held != 0 || c.Epoch != 0 || c.Reported
+	c.Metas, c.Halts, c.Evicts = slices.Clone(o.Metas), slices.Clone(o.Halts), slices.Clone(o.Evicts)
+	return c, c.Opened != nil || c.Failed || c.Ask != 0 || c.Fetch || c.Held != 0 || c.Epoch != 0 || c.Reported || len(c.Evicts) != 0
 }
 
 type devicePhase uint8
@@ -99,14 +101,17 @@ const (
 // the authority, which the replica starts with. It hosts the disk's MetaStore replicas on the
 // round driver of its loop, routes the store's mail to them and their replies to the store, and
 // serves the Txns sent to them.
+// Its asks for a session table number its replica's and its server's on one line: asks is the
+// newest, and each one's newest ask and the device's number for it.
 type Device struct {
-	cfg   DeviceConfig
-	rng   *core.Rand
-	start lease.Time
-	phase devicePhase
-	st    *chunkstore.Store
-	rep   *chunkstore.Replica
-	log   uint64
+	asks, repAsk, repAt, srvAsk, srvAt uint64
+	cfg                                DeviceConfig
+	rng                                *core.Rand
+	start                              lease.Time
+	phase                              devicePhase
+	st                                 *chunkstore.Store
+	rep                                *chunkstore.Replica
+	log                                uint64
 	// restarted is set when the store was opened rather than formatted.
 	restarted bool
 	// held and epoch are the session version and placement epoch last output.
@@ -557,10 +562,10 @@ func (d *Device) Hand(ctx *core.Context, h *Hand, out *DeviceOutput) {
 	if h.Table.Version > d.sess.Version || h.Table.Version == d.sess.Version && h.Table.Next > d.sess.Next {
 		d.sess = h.Table
 	}
-	d.sv.SetSessions(&h.Table)
+	d.sv.SetSessions(&h.Table, answered(h.Answers, d.srvAsk, d.srvAt))
 	out.Actions = d.free(ctx, out.Actions)
 	if d.rep != nil {
-		d.rep.SetSessions(ctx, h.Table, h.Answers, &d.rout)
+		d.rep.SetSessions(ctx, h.Table, answered(h.Answers, d.repAsk, d.repAt), &d.rout)
 		d.take(ctx, out)
 	}
 }
@@ -799,7 +804,15 @@ func (d *Device) take(ctx *core.Context, out *DeviceOutput) {
 			out.Actions = append(out.Actions, a)
 		}
 	}
-	out.Ask = max(out.Ask, d.rout.FetchSessions)
+	if k := d.rout.FetchSessions; k > d.repAsk {
+		d.asks++
+		d.repAsk, d.repAt, out.Ask = k, d.asks, d.asks
+	}
+	if k := d.sv.FetchSessions(); k > d.srvAsk {
+		d.asks++
+		d.srvAsk, d.srvAt, out.Ask = k, d.asks, d.asks
+	}
+	out.Evicts = d.sv.Evictions(out.Evicts)
 	out.Fetch = out.Fetch || d.rout.Fetch != 0 || d.rout.Whole
 	if v := d.st.Sessions().Version; v != d.held {
 		out.Held, d.held = v, v
@@ -808,4 +821,13 @@ func (d *Device) take(ctx *core.Context, out *DeviceOutput) {
 		out.Epoch, d.epoch = e, e
 	}
 	d.rout.Reset()
+}
+
+// answered is the ask of the replica's or the server's, whose newest is ask, numbered at on the
+// device's line, that an answer to the device's ask answers answers, or 0.
+func answered(answers, ask, at uint64) uint64 {
+	if at != 0 && answers >= at {
+		return ask
+	}
+	return 0
 }

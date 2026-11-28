@@ -26,6 +26,7 @@ const (
 	KindAnswer     byte = 0x41
 	KindRead       byte = 0x52
 	KindReadAnswer byte = 0x53
+	KindReclaim    byte = 0x54
 	kindAt              = 1 + 8
 	msgHead             = kindAt + 1 + 8
 	notLeaderLen        = 8 + 8 + 4 + 8
@@ -36,7 +37,7 @@ var le = binary.LittleEndian
 // wireErrs are the errors an Answer carries, by code; code 1 is a NotLeader. Any other error
 // travels as raft.ErrProposalDropped, which promises nothing about whether the Txn applied.
 var wireErrs = [...]error{nil, nil, raft.ErrProposalDropped, ErrMalformed, ErrHalted, ErrNoOps, ErrTooLarge,
-	ErrEmptyRange, ErrBadOp, ErrBadReplay, ErrReplayTagged, ErrOverloaded, ErrFenced}
+	ErrEmptyRange, ErrBadOp, ErrBadReplay, ErrReplayTagged, ErrOverloaded, ErrFenced, ErrGrace}
 
 const (
 	codeNotLeader = 1
@@ -221,23 +222,28 @@ func DecodeAnswer(pool core.BufPool, msg *core.Msg, a *Answer) error {
 // Read asks a group's leader for the keys of [Start, End), a nil End the rest of the key space, at
 // most Limit of them and MaxScanBytes of keys and values, from its state at one instant.
 // Reg makes the Read an open or a release of the file whose attributes Start names, by Session's
-// Mount, at the file's owner ("Inode owner" in docs/design.md).
+// Mount, at the file's owner ("Inode owner" in docs/design.md), or a re-registration with the
+// owner of Term.
 type Read struct {
 	Start, End []byte
 	Limit      int
 	Reg        byte
 	Session    uint64
 	Mount      uint32
+	Term       uint64
 }
 
-// A Read's Reg: none, an open, or a release.
+// A Read's Reg: none, an open, a release, a re-registration of an open, and the end of a session's
+// re-registration with the owner of Term.
 const (
 	RegNone byte = iota
 	RegOpen
 	RegRelease
+	RegReopen
+	RegReclaimed
 )
 
-const regLen = 1 + 8 + 4
+const regLen = 1 + 8 + 4 + 8
 
 // check reports the Scan error a leader would refuse r with: ErrLimit, or ErrTooLarge for a bound
 // longer than MaxKey + 1 bytes.
@@ -248,7 +254,7 @@ func (r *Read) check() error {
 	if len(r.Start) > MaxKey+1 || len(r.End) > MaxKey+1 {
 		return ErrTooLarge
 	}
-	if r.Reg > RegRelease {
+	if r.Reg > RegReclaimed {
 		return ErrMalformed
 	}
 	return nil
@@ -289,7 +295,7 @@ func EncodeRead(pool core.BufPool, group, token uint64, r *Read, msg *core.Msg) 
 	}
 	dst = binary.AppendUvarint(dst, limit)
 	if r.Reg != RegNone {
-		dst = le.AppendUint32(le.AppendUint64(append(dst, r.Reg), r.Session), r.Mount)
+		dst = le.AppendUint64(le.AppendUint32(le.AppendUint64(append(dst, r.Reg), r.Session), r.Mount), r.Term)
 	}
 	if len(dst) != n {
 		panic("meta: a Read's encoding is not the size counted")
@@ -315,7 +321,7 @@ func DecodeRead(pool core.BufPool, msg *core.Msg, r *Read) error {
 	*r = Read{Start: start, End: end, Limit: int(limit)}
 	tail := len(d.b) == regLen
 	if tail {
-		r.Reg, r.Session, r.Mount = d.b[0], le.Uint64(d.b[1:]), le.Uint32(d.b[9:])
+		r.Reg, r.Session, r.Mount, r.Term = d.b[0], le.Uint64(d.b[1:]), le.Uint32(d.b[9:]), le.Uint64(d.b[13:])
 		d.b = nil
 	}
 	if d.bad || len(d.b) != 0 || present > 1 || limit > MaxScanBytes || tail && r.Reg == RegNone {
@@ -576,8 +582,10 @@ var ErrServerToken = errors.New("meta: token has ServerToken set")
 // replica gives back to the loop the Txn came from. A replica on the round driver gathers the Txns
 // that arrive while backpressure holds its round in flight, which the disk does not bound, so the
 // server refuses one with ErrOverloaded while Held of its group's are proposed and unanswered.
+// Lease is how long a new owner's grace period waits on a session before asking to evict it.
 type Server struct {
 	Held  int
+	Lease core.Tick
 	next  uint64
 	waits map[uint64]wait
 	held  map[uint64]int
@@ -611,7 +619,7 @@ type wait struct {
 
 // NewServer makes a server.
 func NewServer() *Server {
-	return &Server{Held: ServerHeld, waits: map[uint64]wait{}, held: map[uint64]int{}, reg: newRegistry()}
+	return &Server{Held: ServerHeld, Lease: SessionLease, waits: map[uint64]wait{}, held: map[uint64]int{}, reg: newRegistry()}
 }
 
 // Serve takes ev, a Txn message, and proposes it on s, the replica of its group Peek names, or
@@ -680,7 +688,7 @@ func (sv *Server) ServeRead(ctx *core.Context, ev *core.Event, s *Shard, acts []
 			sv.ra.KVs, sv.ra.More = sv.scan.KVs, sv.scan.More
 		}
 		if err == nil && sv.rd.Reg != RegNone {
-			err = sv.reg.register(group, &sv.rd, sv.scan.KVs, !s.lost() || sv.reg.plant.newOwnerFrees)
+			err = sv.reg.register(group, &sv.rd, sv.scan.KVs, sv.reg.own(s))
 		}
 	}
 	if ok {

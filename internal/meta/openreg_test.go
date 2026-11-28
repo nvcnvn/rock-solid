@@ -11,11 +11,12 @@ import (
 
 // owner is a three-replica group's leader serving the open registry, as a host drives its Server.
 type owner struct {
-	t  *testing.T
-	c  *group
-	l  int
-	sv *Server
-	fs FS
+	t    *testing.T
+	c    *group
+	l    int
+	sv   *Server
+	fs   FS
+	sent []core.Action
 }
 
 const regFile = 5
@@ -41,7 +42,17 @@ func newOwner(t *testing.T, p regPlants) *owner {
 	if ans := o.c.answer(o.l, 2); ans.Err != nil || ans.Result.FailedCheck >= 0 || !o.has(&Key{Space: SpaceFS, Volume: 1, Inode: regFile, Tag: InodeAttr}) {
 		t.Fatalf("the create was answered %+v", ans)
 	}
+	o.table(chunkstore.SessionTable{Next: 1})
 	return o
+}
+
+// failover cuts the leader off and elects another, whose server starts empty.
+func (o *owner) failover(p regPlants) {
+	o.c.cut[o.l] = true
+	o.c.renewLeases()
+	o.l, o.sv = o.c.elect(), NewServer()
+	o.sv.reg.plant = p
+	o.c.heartbeat()
 }
 
 func (o *owner) attrKey(inode uint64) []byte {
@@ -73,7 +84,7 @@ func (o *owner) step(f func(ctx *core.Context, out *Output)) {
 	from := o.sv.next
 	o.c.call(o.l, f)
 	for {
-		o.c.call(o.l, func(ctx *core.Context, out *Output) { o.sv.Free(ctx, o.c.n[o.l].s, out) })
+		o.c.call(o.l, func(ctx *core.Context, out *Output) { o.sent = o.sv.Free(ctx, o.c.n[o.l].s, out, o.sent[:0]) })
 		o.c.settle()
 		to := o.sv.next
 		if from == to {
@@ -97,9 +108,10 @@ func (o *owner) msg(encode func(pool core.BufPool, m *core.Msg) error) core.Even
 	return ev
 }
 
-// ask sends session's open or release of the file from mount 1 and returns its answer.
+// ask sends session's open, release or re-registration of the file from mount 1, or the end of its
+// re-registration with the leader's term, and returns its answer.
 func (o *owner) ask(reg byte, session uint64) ReadAnswer {
-	rd := Read{Start: o.attrKey(regFile), End: append(o.attrKey(regFile), 0), Limit: 1, Reg: reg, Session: session, Mount: 1}
+	rd := Read{Start: o.attrKey(regFile), End: append(o.attrKey(regFile), 0), Limit: 1, Reg: reg, Session: session, Mount: 1, Term: o.c.n[o.l].s.raft.Term()}
 	ev := o.msg(func(pool core.BufPool, m *core.Msg) error { return EncodeRead(pool, o.c.n[o.l].s.group, 7, &rd, m) })
 	var acts []core.Action
 	o.step(func(ctx *core.Context, out *Output) { acts = o.sv.ServeRead(ctx, &ev, o.c.n[o.l].s, nil) })
@@ -148,8 +160,29 @@ func (o *owner) unlink() {
 	o.step(func(*core.Context, *Output) {})
 }
 
+// table hands the server t, as read after every ask it made.
 func (o *owner) table(t chunkstore.SessionTable) {
-	o.step(func(*core.Context, *Output) { o.sv.SetSessions(&t) })
+	o.step(func(*core.Context, *Output) {})
+	o.step(func(*core.Context, *Output) { o.sv.SetSessions(&t, o.sv.FetchSessions()) })
+}
+
+// asked reports the sessions the last Free asked to re-register.
+func (o *owner) asked() []uint64 {
+	var ids []uint64
+	for i := range o.sent {
+		if _, session, term, err := DecodeReclaim(o.c.n[o.l].pool, &o.sent[i].Msg); err == nil && term == o.c.n[o.l].s.raft.Term() {
+			ids = append(ids, session)
+		}
+	}
+	return ids
+}
+
+// later moves the clock on by d, renewing the leader's lease.
+func (o *owner) later(d core.Tick) {
+	o.c.now += d
+	o.c.renewLeases()
+	o.c.heartbeat()
+	o.step(func(*core.Context, *Output) {})
 }
 
 // An unlinked file stays an orphan while any mount has it open, and its owner frees it at its last
@@ -226,21 +259,100 @@ func TestAnUnlinkFreesAFileOnlyOnceNoMountHasItOpen(t *testing.T) {
 	}
 }
 
-// A new owner frees no orphan, as its registry lacks the opens its predecessor registered; the
-// planted bug frees one a mount has open at the old owner.
-func TestANewOwnerFreesNoOrphan(t *testing.T) {
-	for _, p := range []regPlants{{}, {newOwnerFrees: true}} {
+// A new owner frees no orphan in its grace period, which ends only once every live session has
+// re-registered, an empty re-registration counting, never by time alone; then it scans the orphan
+// list, and frees an orphan at its last release. The planted bugs free the orphan a live session
+// has open but has not yet re-registered: one at the grace period's start, and one at its end by
+// time.
+func TestAGracePeriodEndsOnlyOnceEveryLiveSessionReregistered(t *testing.T) {
+	for _, p := range []regPlants{{}, {orphanInGrace: true}, {graceByTime: true}} {
 		o := newOwner(t, p)
+		o.table(chunkstore.SessionTable{Version: 1, Acked: 1, Next: 3, Live: []uint64{1, 2}, Nodes: []uint32{3, 4}})
 		o.reg(RegOpen, 1)
-		o.c.cut[o.l] = true
-		o.c.renewLeases()
-		o.l, o.sv = o.c.elect(), NewServer()
-		o.sv.reg.plant = p
-		o.c.heartbeat()
 		o.unlink()
-		if o.freed() != p.newOwnerFrees {
-			t.Fatalf("with %+v, the new owner freed the orphan: %v", p, o.freed())
+		o.failover(p)
+		o.table(chunkstore.SessionTable{Version: 1, Acked: 1, Next: 3, Live: []uint64{1, 2}, Nodes: []uint32{3, 4}})
+		if got := o.asked(); len(got) != 2 {
+			t.Fatalf("with %+v, the new owner asked sessions %v to re-register, want 1 and 2", p, got)
 		}
+		o.reg(RegReclaimed, 2)
+		o.later(SessionLease / 2)
+		if o.freed() != (p != regPlants{}) {
+			t.Fatalf("with %+v, the orphan session 1 has open was freed before it re-registered: %v", p, o.freed())
+		}
+		if p != (regPlants{}) {
+			continue
+		}
+		if got := o.asked(); len(got) != 1 || got[0] != 1 {
+			t.Fatalf("the new owner asked sessions %v to re-register, want 1", got)
+		}
+		o.reg(RegReopen, 1)
+		o.reg(RegReclaimed, 1)
+		if o.freed() || !o.sv.reg.open(inodeAt{o.c.n[o.l].s.group, 1, regFile}) {
+			t.Fatal("the orphan was freed, or its re-registered open not counted, at the grace period's end")
+		}
+		o.reg(RegRelease, 1)
+		if !o.freed() {
+			t.Fatal("the orphan was not freed at its last release after the grace period")
+		}
+	}
+}
+
+// A session that does not re-register within a lease is evicted, and the grace period ends once
+// its fence is acknowledged, not at its commit.
+func TestAnUnregisteredSessionIsEvictedAndTheGraceEndsAtItsFence(t *testing.T) {
+	o := newOwner(t, regPlants{})
+	o.reg(RegOpen, 2)
+	o.unlink()
+	o.failover(regPlants{})
+	o.table(chunkstore.SessionTable{Version: 1, Acked: 1, Next: 3, Live: []uint64{1, 2}, Nodes: []uint32{3, 4}})
+	o.reg(RegReclaimed, 1)
+	o.later(SessionLease / 2)
+	if got := o.sv.Evictions(nil); len(got) != 0 {
+		t.Fatalf("sessions %v evicted within a lease", got)
+	}
+	o.later(SessionLease / 2)
+	if got := o.sv.Evictions(nil); len(got) != 1 || got[0] != 2 {
+		t.Fatalf("sessions %v evicted, want 2", got)
+	}
+	o.table(chunkstore.SessionTable{Version: 2, Acked: 1, Next: 3, Live: []uint64{1}, Nodes: []uint32{3}})
+	if o.freed() {
+		t.Fatal("the grace period ended at the fence's commit")
+	}
+	o.table(chunkstore.SessionTable{Version: 2, Acked: 2, Next: 3, Live: []uint64{1}, Nodes: []uint32{3}})
+	if !o.freed() {
+		t.Fatal("the grace period did not end once the evicted session's fence was acknowledged")
+	}
+}
+
+// A new owner holds new opens in its grace period, refusing them ErrGrace for the router to send
+// again, while it takes re-registrations; the planted bug registers a new open in it.
+func TestANewOpenWaitsOutTheGracePeriod(t *testing.T) {
+	for _, p := range []regPlants{{}, {openInGrace: true}} {
+		o := newOwner(t, p)
+		o.failover(p)
+		o.table(chunkstore.SessionTable{Version: 1, Acked: 1, Next: 3, Live: []uint64{1, 2}, Nodes: []uint32{3, 4}})
+		if ra := o.ask(RegOpen, 1); (ra.Err == ErrGrace) == p.openInGrace {
+			t.Fatalf("with %+v, an open in the grace period was answered %+v", p, ra)
+		}
+		o.reg(RegReclaimed, 1)
+		o.reg(RegReclaimed, 2)
+		if ra := o.ask(RegOpen, 2); ra.Err != nil || !o.sv.reg.open(inodeAt{o.c.n[o.l].s.group, 1, regFile}) {
+			t.Fatalf("an open after the grace period was answered %+v", ra)
+		}
+	}
+}
+
+// A re-registration that ends at an older owner counts for none after it.
+func TestAReregistrationForAnOlderOwnerDoesNotCount(t *testing.T) {
+	o := newOwner(t, regPlants{})
+	o.failover(regPlants{})
+	o.table(chunkstore.SessionTable{Version: 1, Acked: 1, Next: 2, Live: []uint64{1}, Nodes: []uint32{3}})
+	rd := Read{Start: o.attrKey(regFile), End: append(o.attrKey(regFile), 0), Limit: 1, Reg: RegReclaimed, Session: 1, Mount: 1, Term: o.c.n[o.l].s.raft.Term() - 1}
+	ev := o.msg(func(pool core.BufPool, m *core.Msg) error { return EncodeRead(pool, o.c.n[o.l].s.group, 7, &rd, m) })
+	o.step(func(ctx *core.Context, out *Output) { o.sv.ServeRead(ctx, &ev, o.c.n[o.l].s, nil) })
+	if !o.sv.reg.owners[0].grace {
+		t.Fatal("a re-registration with an older owner ended the grace period")
 	}
 }
 
@@ -275,7 +387,8 @@ func TestAFreeRefusedIsTriedAgain(t *testing.T) {
 	o.reg(RegOpen, 1)
 	o.unlink()
 	o.serve(RegRelease, 1)
-	o.sv.free(o.c.n[o.l].s, func(*Txn, uint64) error { return ErrOverloaded })
+	ctx := o.c.ctx(o.l)
+	o.sv.free(&ctx, o.c.n[o.l].s, nil, func(*Txn, uint64) error { return ErrOverloaded })
 	if len(o.sv.reg.frees) != 1 || len(o.sv.reg.freeing) != 0 {
 		t.Fatalf("after a refused free, %d orphans to look at and %d frees in flight", len(o.sv.reg.frees), len(o.sv.reg.freeing))
 	}
@@ -292,14 +405,15 @@ func TestAFreeRefusedForGoodIsDropped(t *testing.T) {
 	o.reg(RegOpen, 1)
 	o.unlink()
 	o.serve(RegRelease, 1)
-	o.sv.free(o.c.n[o.l].s, func(*Txn, uint64) error { return ErrHalted })
+	ctx := o.c.ctx(o.l)
+	o.sv.free(&ctx, o.c.n[o.l].s, nil, func(*Txn, uint64) error { return ErrHalted })
 	if len(o.sv.reg.frees) != 0 || len(o.sv.reg.listed) != 0 {
 		t.Fatalf("after a lasting refusal, %d orphans to look at", len(o.sv.reg.frees))
 	}
 }
 
 // A leader that loses its group drops the opens it registered, which a later leader serves, at
-// its next free; it registers none while it cannot become sole again.
+// its next free.
 func TestAnExLeaderDropsItsOpens(t *testing.T) {
 	o := newOwner(t, regPlants{})
 	o.reg(RegOpen, 1)
@@ -314,13 +428,9 @@ func TestAnExLeaderDropsItsOpens(t *testing.T) {
 	if len(o.sv.reg.rows) != 1 {
 		t.Fatalf("%d opens before the ex-leader frees, want 1", len(o.sv.reg.rows))
 	}
-	o.c.call(old, func(ctx *core.Context, out *Output) { o.sv.Free(ctx, o.c.n[old].s, out) })
-	if len(o.sv.reg.rows) != 0 || len(o.sv.reg.index) != 0 || len(o.sv.reg.opens) != 0 || len(o.sv.reg.groups) != 0 {
+	o.c.call(old, func(ctx *core.Context, out *Output) { o.sv.Free(ctx, o.c.n[old].s, out, nil) })
+	if len(o.sv.reg.rows) != 0 || len(o.sv.reg.index) != 0 || len(o.sv.reg.opens) != 0 || len(o.sv.reg.groups) != 0 || len(o.sv.reg.owners) != 0 {
 		t.Fatalf("the ex-leader kept %d opens", len(o.sv.reg.rows))
-	}
-	o.serve(RegOpen, 2)
-	if len(o.sv.reg.rows) != 0 {
-		t.Fatal("a leader that cannot become sole registered an open")
 	}
 }
 
@@ -331,12 +441,12 @@ func TestClosingAFencedSessionsOpensIsLinear(t *testing.T) {
 		best := time.Duration(math.MaxInt64)
 		for range 3 {
 			sv := NewServer()
-			sv.SetSessions(&chunkstore.SessionTable{Version: 1, Acked: 1, Next: 2, Live: []uint64{1}})
+			sv.SetSessions(&chunkstore.SessionTable{Version: 1, Acked: 1, Next: 2, Live: []uint64{1}}, 0)
 			for i := range n {
 				sv.reg.insert(openRow{openKey: openKey{inodeAt{1, 1, uint64(i)}, opener{1, 1}}})
 			}
 			start := time.Now()
-			sv.SetSessions(&chunkstore.SessionTable{Version: 2, Acked: 2, Next: 2})
+			sv.SetSessions(&chunkstore.SessionTable{Version: 2, Acked: 2, Next: 2}, 0)
 			best = min(best, time.Since(start))
 			if len(sv.reg.rows) != 0 || len(sv.reg.frees) != n {
 				t.Fatalf("%d opens left and %d orphans to look at, want 0 and %d", len(sv.reg.rows), len(sv.reg.frees), n)
