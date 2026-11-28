@@ -424,7 +424,7 @@ func (g *Mount) restart(ctx *core.Context, r *reclaim) {
 		g.key = g.m.key(g.key[:0], ino, meta.InodeAttr, nil)
 		g.end = append(append(g.end[:0], g.key...), 0)
 		id, err := g.smap.RouteScan(g.key, g.end)
-		return err != nil || id != r.group
+		return err != nil || id != r.group || g.plant.noReclaim
 	})
 	g.step(ctx, r)
 }

@@ -49,10 +49,19 @@ const (
 	// between two fences.
 	faultGap = core.Tick(8_000_000)
 	fenceGap = core.Tick(1_000_000)
-	// stableEnd is when the shard's leader may first be taken down, so its orphans are freed until
-	// then, and churnGap the most time between two of daemon 0's unlinks while its processes run.
+	// stableEnd is when a reboot or a pause may first take down the shard's leader, and churnGap
+	// the most time between two of daemon 0's unlinks while its processes run.
 	stableEnd = runFor / 2
 	churnGap  = core.Tick(1_000_000)
+	// moveFrom is when the shard's leader first hands its leadership to another replica, and moveGap
+	// the most time from a move's end to the next; a move waits for a daemon to hold the leader's
+	// answer to an open, or after moveWait for a process holding a file. It ends moveFor after it
+	// starts, and lingerFor is the most a handle it lingers waits before each call.
+	moveFrom  = runFor / 6
+	moveGap   = core.Tick(3_000_000)
+	moveWait  = core.Tick(1_000_000)
+	moveFor   = core.Tick(2_000_000)
+	lingerFor = core.Tick(3_000_000)
 	// fenceLag is the most time, in a fence the devices are handed first, before the daemon takes
 	// the new session: past ClientRetryAfter, so the old client sends a refused write again.
 	fenceLag = 3 * chunkstore.ClientRetryAfter
@@ -85,21 +94,21 @@ const (
 // follow the other's closes. Faults: partitions; up to faultGap apart until rebootsEnd a replica's
 // node rebooted, so leaders change, and a replica's or a daemon's node paused; and each daemon
 // crashed, also within 3 ms of a chunk write it sends, half the time for a file's first and one
-// time in 32 for another; daemon 1's crash takes replica 2 down with it. Until stableEnd no fault
-// takes down the shard's leader; each new leader's grace period waits for both daemons to
-// re-register, and an owner's ask to evict a session fences it. A daemon restarts
-// in a new session; daemon 0's, before its processes start, creates each file not yet made and,
-// with even odds, unlinks and creates each other again, while daemon 1's processes go on, and while
-// its processes run it unlinks a file and creates it again up to churnGap apart. The replicas take
-// each session table once both daemons hold their sessions and the devices the table, acknowledged,
-// as a storage node's server does, and a new owner's ask is answered with it then. While a daemon's processes run, until runFor: its session
-// fenced up to fenceGap apart, and within 1 ms of one
-// write in 16, half the time handed to the devices up to fenceLag before the daemon takes it, so
-// they refuse the old session's writes while its client is live; one allocation in allocOdds
-// refused; and one Read in readErrOdds answered with an error, half of them lasting. A system call
-// such a fault overlaps may fail EIO, a read may come back short, and the process goes on. The
-// devices do not crash: a restarted primary asks the control plane, which the run does not have,
-// for a new interval.
+// time in 32 for another; daemon 1's crash takes replica 2 down with it. Until stableEnd no other
+// fault takes down the shard's leader, but from moveFrom to rebootsEnd it hands its leadership on
+// while handles are open (see transfer); each new leader's grace period waits for both daemons to
+// re-register, and an owner's ask to evict a session fences it. A daemon restarts in a new session;
+// daemon 0's, before its processes start, creates each file not yet made and, with even odds,
+// unlinks and creates each other again, while daemon 1's processes go on, and while its processes
+// run it unlinks a file and creates it again up to churnGap apart. The replicas take each session
+// table once both daemons hold their sessions and the devices the table, acknowledged, as a storage
+// node's server does, and a new owner's ask is answered with it then. While a daemon's processes
+// run, until runFor: its session fenced up to fenceGap apart, and within 1 ms of one write in 16,
+// half the time handed to the devices up to fenceLag before the daemon takes it, so they refuse the
+// old session's writes while its client is live; one allocation in allocOdds refused; and one Read
+// in readErrOdds answered with an error, half of them lasting. A system call such a fault overlaps
+// may fail EIO, a read may come back short, and the process goes on. The devices do not crash: a
+// restarted primary asks the control plane, which the run does not have, for a new interval.
 //
 // Each daemon holds each read's send for up to readLatency, so requests arrive during fetches and
 // the machine's stale-attribute rule runs, and one Read answer in answerOdds for up to
@@ -128,9 +137,17 @@ type fsRun struct {
 	// sizes are, per inode, the most any writer of it wrote.
 	sizes  map[uint64]int64
 	mtimes map[uint64]int64
-	// rebootAt is when a replica's node reboots next, and pauseAt when a node is paused.
-	rebootAt, pauseAt core.Tick
-	crashes           int
+	// rebootAt is when a replica's node reboots next, and pauseAt when a node is paused. moveAt is
+	// when the leader moves next, and moved the old leader's node while moveEnd, when the move ends,
+	// is set; movedAt is when it started, movedTerm the old leader's term, and calm set while it
+	// fences no session. reopens counts the files re-registered, and late the asks to re-register
+	// that came while the daemon held the old owner's answer to an open.
+	rebootAt, pauseAt, moveAt, moveEnd, movedAt core.Tick
+	moved                                       uint32
+	movedTerm                                   uint64
+	calm                                        bool
+	reopens, late                               int
+	crashes                                     int
 	// session is the last session a client node took: each start and each fence takes the next,
 	// and the devices' session table, of that version, holds each node's.
 	session uint64
@@ -203,6 +220,7 @@ func newFSRun(t testing.TB, seed uint64, p plants) *fsRun {
 	r.files = [2]runFile{{name: "a"}, {name: "b"}}
 	r.rebootAt = core.Tick(r.rng.Below(uint64(faultGap)))
 	r.pauseAt = core.Tick(r.rng.Below(uint64(faultGap)))
+	r.moveAt = moveFrom
 	r.hist = sim.NewHistory(r.s, 1<<14)
 	r.inv.Register("driver contract", r.s.DriverContract)
 	r.inv.Register(invInodeNew, func() error { return r.idErr })
@@ -337,15 +355,16 @@ func (r *fsRun) faults() {
 			}
 			r.s.CrashRandom(d.n.ID())
 		}
-		if d.n.Up() && d.injects() && now >= d.fenceAt {
+		if d.n.Up() && d.injects() && now >= d.fenceAt && !r.calm {
 			d.fenceAt = now + core.Tick(r.rng.Below(uint64(fenceGap)))
 			r.fence(d)
 		}
 		if d.k == 0 && d.n.Up() && d.injects() && !d.waiting && now >= d.churnAt {
 			d.churnAt = now + core.Tick(r.rng.Below(uint64(churnGap)))
-			r.churn(d)
+			r.churn(d, &r.files[r.rng.Below(2)])
 		}
 	}
+	r.move()
 	if now >= r.rebootAt && now < rebootsEnd {
 		r.rebootAt = now + core.Tick(r.rng.Below(uint64(faultGap)))
 		if i := uint32(r.rng.Below(3)); r.s.Node(i).Up() && !r.steady(i) {
@@ -368,8 +387,95 @@ func (r *fsRun) faults() {
 	}
 }
 
+// move has the shard's leader hand its leadership to another replica at moveAt, while a process
+// holds a file or an open is in flight, before rebootsEnd; the move lasts until moveEnd, when a
+// transfer that did not take, as when its MsgTimeoutNow was lost, is made again, as the shard's
+// own transfers are, since the old leader serves no lease read in its term once one left.
+func (r *fsRun) move() {
+	now := r.s.Time()
+	if r.moveEnd != 0 && now >= r.moveEnd {
+		r.moveEnd, r.moveAt, r.calm = 0, now+core.Tick(r.rng.Below(uint64(moveGap))), false
+		if m := r.reps[r.moved]; m.s != nil && r.s.Node(r.moved).Up() && m.s.Raft().Leader() == uint64(r.moved)+1 && m.s.Raft().Term() == r.movedTerm {
+			r.transfer(int(r.moved))
+		}
+	}
+	if r.moveEnd != 0 || now < r.moveAt || now >= rebootsEnd {
+		return
+	}
+	for i, m := range r.reps {
+		if m.s == nil || !r.s.Node(uint32(i)).Up() || m.s.Raft().Leader() != uint64(i)+1 {
+			continue
+		}
+		answered := slices.ContainsFunc(r.ds[:], func(d *daemon) bool { return d != nil && d.answered(uint32(i)) })
+		if answered || now >= r.moveAt+moveWait && slices.ContainsFunc(r.ds[:], func(d *daemon) bool { return d != nil && d.holds() }) {
+			r.transfer(i)
+		}
+		return
+	}
+}
+
+// transfer has leader i hand its leadership to another replica, as the target's MsgTransferLeader
+// would. Each daemon holds the old leader's Read answers until a new owner asks it to re-register,
+// or the move ends, so the old owner's answer to an open comes in after the ask. The move's file,
+// that open's or else one a reader holds, daemon 0 unlinks, its readers and the opens in flight
+// linger, and no session is fenced meanwhile: a mount that skips the file at its re-registration,
+// or hands out the open on the old owner's answer, lets the new owner free it under a handle.
+func (r *fsRun) transfer(i int) {
+	m := r.reps[i]
+	r.moved, r.movedTerm, r.movedAt, r.moveEnd = uint32(i), m.s.Raft().Term(), r.s.Time(), r.s.Time()+moveFor
+	to := uint64(i+1+int(r.rng.Below(2)))%3 + 1
+	var msg core.Msg
+	msg.Body[0] = core.ProtoGroup
+	binary.LittleEndian.PutUint64(msg.Body[1:], runGroup)
+	n, err := (&raftpb.Message{Type: raftpb.MsgTransferLeader, From: to, To: uint64(i) + 1, Term: r.movedTerm}).MarshalTo(msg.Body[10:])
+	if err != nil {
+		panic(err)
+	}
+	msg.Len, msg.Buf = uint16(10+n), core.NoBuf
+	r.s.Node(uint32(i)).Call(m.loop, func(ctx *core.Context, acts []core.Action) []core.Action {
+		m.out.Reset()
+		m.s.OnEvent(ctx, &core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: uint32(to - 1)}, Msg: msg}, &m.out)
+		return m.finish(ctx, acts)
+	})
+	var k meta.Key
+	victim := uint64(0)
+	for _, d := range r.ds {
+		for j := range d.held {
+			h := &d.held[j]
+			if !h.recv || h.ev.Peer.Node != r.moved {
+				continue
+			}
+			h.at = max(h.at, d.n.Context().Now+moveFor)
+			_, _, tok, _ := meta.Peek(&h.ev.Msg)
+			if s, ok := d.g.reads[tok]; ok && s.rd.Reg == meta.RegOpen && meta.DecodeKey(s.rd.Start, &k) == nil {
+				victim = k.Inode
+			}
+		}
+	}
+	for _, d := range r.ds {
+		for _, pr := range d.procs {
+			if victim == 0 && pr.open && pr.id == 0 {
+				victim = pr.ino
+			}
+		}
+	}
+	f := slices.IndexFunc(r.files[:], func(f runFile) bool { return f.ino == victim })
+	if c := r.ds[0]; f < 0 || victim == 0 || !c.ready || !c.n.Up() {
+		return
+	}
+	r.calm = true
+	for _, d := range r.ds {
+		for _, pr := range d.procs {
+			if pr.open && (pr.ino == 0 || pr.ino == victim && pr.id == 0) {
+				pr.linger, pr.left = lingerFor, max(pr.left, 3)
+			}
+		}
+	}
+	r.churn(r.ds[0], &r.files[f])
+}
+
 // steady reports whether node id runs the shard's leader before stableEnd, which no fault the run
-// injects takes down then.
+// injects takes down then; a move does.
 func (r *fsRun) steady(id uint32) bool {
 	if r.s.Time() >= stableEnd || id >= 3 {
 		return false
@@ -390,15 +496,16 @@ func (r *fsRun) rename(name []byte) string {
 	return ""
 }
 
-// churn has daemon d unlink one of the files and create it again, as setup does, while processes
-// of both daemons may have it open.
-func (r *fsRun) churn(d *daemon) {
-	f := &r.files[r.rng.Below(2)]
+// churn has daemon d unlink file f and create it again, as setup does, while processes of both
+// daemons may have it open.
+func (r *fsRun) churn(d *daemon, f *runFile) {
 	if f.ino == 0 {
 		return
 	}
 	d.steps = append(d.steps, fuseproto.Request{Opcode: fuseproto.OpUnlink, NodeID: meta.RootInode, Name: []byte(f.name)}, createStep(f.name))
-	d.n.Call(d.loop, func(ctx *core.Context, acts []core.Action) []core.Action { return d.pass(ctx, acts, d.next) })
+	if !d.waiting {
+		d.n.Call(d.loop, func(ctx *core.Context, acts []core.Action) []core.Action { return d.pass(ctx, acts, d.next) })
+	}
 }
 
 // createStep is setup's CREATE of name in the root directory.
@@ -836,6 +943,8 @@ type daemon struct {
 	upd     chunkstore.Update
 	rp      chunkstore.Response
 	held    []heldSend
+	// askedAt is when a new owner last asked the daemon to re-register.
+	askedAt core.Tick
 	// armed is set while readTimer is set, for armedAt.
 	armed   bool
 	armedAt core.Tick
@@ -849,6 +958,20 @@ type daemon struct {
 	takeOnOpen               bool
 	session                  uint64
 	refusedIDs               map[core.RequestID]bool
+}
+
+// answered reports a Read answer d holds from node id to an open's registration.
+func (d *daemon) answered(id uint32) bool {
+	return slices.ContainsFunc(d.held, func(h heldSend) bool {
+		_, _, tok, _ := meta.Peek(&h.ev.Msg)
+		s, ok := d.g.reads[tok]
+		return h.recv && h.ev.Peer.Node == id && ok && s.rd.Reg == meta.RegOpen
+	})
+}
+
+// holds reports a process of d's holding a file, or an open of d's mount in flight.
+func (d *daemon) holds() bool {
+	return d.ready && (d.registering() || slices.ContainsFunc(d.procs, func(pr *runProc) bool { return pr.open && pr.ino != 0 }))
 }
 
 // registering reports an OPEN of d's mount whose registration is in flight.
@@ -1025,6 +1148,26 @@ func (d *daemon) wrote(msg *core.Msg) {
 	}
 }
 
+// asked takes a new owner's ask to re-register: the old leader's Read answers held for a move come
+// in soon after it, so an owner that failed may answer an open after its re-registration.
+func (d *daemon) asked() {
+	d.askedAt = d.r.s.Time()
+	if d.r.moveEnd == 0 || d.r.movedAt > d.askedAt {
+		return
+	}
+	if d.answered(d.r.moved) {
+		d.r.late++
+	}
+	held := d.held
+	d.held, d.armed = nil, false
+	for _, h := range held {
+		if h.recv && h.ev.Peer.Node == d.r.moved {
+			h.at = min(h.at, d.ctx.Now+1+core.Tick(d.r.rng.Below(uint64(answerLatency))))
+		}
+		d.hold(h)
+	}
+}
+
 // heldFrom reports whether the daemon holds a message from peer, and until when the last: a
 // connection delivers in order, so what comes after it is held as long.
 func (d *daemon) heldFrom(peer core.NodeID) (core.Tick, bool) {
@@ -1153,8 +1296,15 @@ func (d *daemon) onEvent(ctx *core.Context, ev *core.Event, acts []core.Action) 
 		default:
 			if ev.Kind == core.EvNetRecv {
 				at, held := d.heldFrom(ev.Peer)
-				if _, kind, _, ok := meta.Peek(&ev.Msg); ok && kind == meta.KindReadAnswer && d.r.rng.Chance(1, answerOdds) {
+				_, kind, _, ok := meta.Peek(&ev.Msg)
+				if ok && kind == meta.KindReadAnswer && d.r.rng.Chance(1, answerOdds) {
 					at, held = max(at, d.ctx.Now+1+core.Tick(d.r.rng.Below(uint64(answerLatency)))), true
+				}
+				if ok && kind == meta.KindReadAnswer && d.r.moveEnd != 0 && ev.Peer.Node == d.r.moved && d.askedAt < d.r.movedAt {
+					at, held = max(at, d.ctx.Now+d.r.moveEnd-d.r.s.Time()), true
+				}
+				if ok && kind == meta.KindReclaim {
+					d.asked()
 				}
 				if held {
 					d.hold(heldSend{ev: *ev, recv: true, at: at})
@@ -1179,6 +1329,13 @@ func (d *daemon) answer(ev *core.Event, tok uint64) {
 	}
 	_, kind, _, _ := meta.Peek(&ev.Msg)
 	h, sent := d.g.reads[tok]
+	if sent && h.group != 0 {
+		if h.rd.Reg == meta.RegReopen {
+			r.reopens++
+		}
+		d.g.OnEvent(d.ctx, ev, &d.out)
+		return
+	}
 	if ev.Kind != core.EvNetRecv || kind != meta.KindReadAnswer || !sent || meta.DecodeReadAnswer(d.ctx.Pool, &ev.Msg, &d.ans) != nil || d.ans.Err == nil {
 		d.g.OnEvent(d.ctx, ev, &d.out)
 		return
@@ -1327,6 +1484,8 @@ type runProc struct {
 	name   string
 	ino    uint64
 	openAt core.Tick
+	// linger is the most a lingering handle waits before each call.
+	linger core.Tick
 }
 
 func (pr *runProc) Ready() bool {
@@ -1343,6 +1502,9 @@ func (pr *runProc) Next(ctx *core.Context, acts []core.Action) []core.Action {
 			pr.op = before
 		}
 		pr.wake = ctx.Now + core.Tick(pr.d.r.rng.Below(2000))
+		if pr.linger != 0 && pr.open {
+			pr.wake += core.Tick(pr.d.r.rng.Below(uint64(pr.linger)))
+		}
 	})
 }
 
@@ -1393,7 +1555,7 @@ func (pr *runProc) next() {
 			f.writer, pr.id, pr.written, flags = pr, r.ids, 0, 2
 			pr.size = 8 * int64(rng.Range(1, 1536))
 		}
-		pr.name, pr.openAt = f.name, r.s.Time()
+		pr.name, pr.openAt, pr.linger = f.name, r.s.Time(), 0
 		p.Open(f.name, flags)
 	case pr.id != 0 && pr.written < pr.size && (pr.left == 0 || rng.Chance(3, 4)):
 		n := min(pr.size-pr.written, 8*int64(rng.Range(1, 1024)))
@@ -1577,11 +1739,12 @@ func (p runPool) Free(b core.IOBuf) {
 // each daemon crash every chunk it wrote lies below alloc_end or in its purge entry, no orphan is
 // freed while a process holds it through a handle of its daemon's session, and at the end of the
 // quiet time no system call or request has waited past liveWait. Over the ten seeds each fault
-// path is taken 100 times, but the old client's resend of a refused write 50: a handle a fence
-// leaves behind fails and its process closes it, so few writes are in flight at a fence; and the
-// checks see 20 orphans freed.
+// path is taken 100 times, but the old client's resend of a refused write 40: a handle a fence
+// leaves behind fails and its process closes it, so few writes are in flight at a fence; the
+// checks see 20 orphans freed; across the leader moves the mounts re-register 50 open files, and
+// 25 times an open the old owner answered comes in after the new owner's ask.
 func TestAMountsHistoriesKeepTheirInvariantsAcrossCrashes(t *testing.T) {
-	var abandons, lasting, transient, refused, retried, frees int
+	var abandons, lasting, transient, refused, retried, frees, reopens, late int
 	seeds.Run(t, 1, 10, func(seed uint64) {
 		r := newFSRun(t, seed, plants{})
 		if err := r.run(); err != nil {
@@ -1592,9 +1755,10 @@ func TestAMountsHistoriesKeepTheirInvariantsAcrossCrashes(t *testing.T) {
 		}
 		abandons, lasting, transient = abandons+r.abandons, lasting+r.lasting, transient+r.transient
 		refused, retried, frees = refused+r.refused, retried+r.retried, frees+r.frees
+		reopens, late = reopens+r.reopens, late+r.late
 	})
-	if seeds.Default() && (abandons < 100 || lasting < 100 || transient < 100 || refused < 100 || retried < 50 || frees < 20) {
-		t.Fatalf("%d fences abandoned chunk I/O in flight, %d Reads failed and %d went again; devices refused a fenced session's live client %d writes, %d sent again; %d orphans freed", abandons, lasting, transient, refused, retried, frees)
+	if seeds.Default() && (abandons < 100 || lasting < 100 || transient < 100 || refused < 100 || retried < 40 || frees < 20 || reopens < 50 || late < 25) {
+		t.Fatalf("%d fences abandoned chunk I/O in flight, %d Reads failed and %d went again; devices refused a fenced session's live client %d writes, %d sent again; %d orphans freed; %d files re-registered, %d opens answered by an old owner after an ask", abandons, lasting, transient, refused, retried, frees, reopens, late)
 	}
 }
 
@@ -1607,9 +1771,11 @@ func TestAMountsHistoriesKeepTheirInvariantsAcrossCrashes(t *testing.T) {
 // read after it, their answer held up behind that LOOKUP; on the second mount, a Read answered
 // with an error that lasts taken as finding no key, an open failing ENOENT outside any gap of its
 // name; an open not registered at the owner, an open holding its inode only behind a release in
-// flight, and an open handed out though registered under a session the mount has since left, each
-// letting the owner free an orphan a process holds through a handle of its daemon's session; and a handle of a session the mount left still served, whose read finds its file freed
-// and fails ENOENT.
+// flight, an open handed out though registered under a session the mount has since left, a new
+// owner's ask to re-register answered with no file, and an open the old owner answered before a
+// leader move handed out on that answer, each letting the owner free an orphan a process holds
+// through a handle of its daemon's session; and a handle of a session the mount left still served,
+// whose read finds its file freed and fails ENOENT.
 func TestPlantedMountBugsFailTheMountsRun(t *testing.T) {
 	for _, c := range []struct {
 		p    plants
@@ -1618,14 +1784,16 @@ func TestPlantedMountBugsFailTheMountsRun(t *testing.T) {
 	}{
 		{plants{noIDBase: true}, 1, invIDs},
 		{plants{noAbandon: true}, 1, invLive},
-		{plants{dropRefused: true}, 3, invLive},
+		{plants{dropRefused: true}, 4, invLive},
 		{plants{retryLasting: true}, 1, invReadErr},
 		{plants{entryCached: true}, 2, invCloseToOpen},
-		{plants{staleKept: true}, 25, invCloseToOpen},
-		{plants{lastingMissing: true}, 1, invErrno},
+		{plants{staleKept: true}, 120, invCloseToOpen},
+		{plants{lastingMissing: true}, 2, invErrno},
 		{plants{noRegister: true}, 1, invOrphanOpen},
-		{plants{openUnheld: true}, 5, invOrphanOpen},
-		{plants{handOutStale: true}, 3, invOrphanOpen},
+		{plants{openUnheld: true}, 4, invOrphanOpen},
+		{plants{handOutStale: true}, 18, invOrphanOpen},
+		{plants{noReclaim: true}, 14, invOrphanOpen},
+		{plants{handOutFirst: true}, 2, invOrphanOpen},
 		{plants{fencedServed: true}, 2, invErrno},
 	} {
 		r := newFSRun(t, c.seed, c.p)
@@ -1637,8 +1805,7 @@ func TestPlantedMountBugsFailTheMountsRun(t *testing.T) {
 }
 
 // Planted, a raise of alloc_end after the chunk write past it leaves, at a daemon crash between
-// them, a chunk that neither alloc_end nor the purge entry of its file covers; seed 1 catches it,
-// as 29 of the first 30 seeds do.
+// them, a chunk that neither alloc_end nor the purge entry of its file covers; seed 1 catches it.
 func TestARaiseAfterItsChunkWriteFailsTheMountsRun(t *testing.T) {
 	r := newFSRun(t, 1, plants{raiseAfterWrite: true})
 	r.inv.Only(invPurgeMisses)

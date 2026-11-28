@@ -368,7 +368,8 @@ func (m *openRep) finish(ctx *core.Context, acts []core.Action) []core.Action {
 // openClient is a client node's daemon: its session, the step it is at, the inode it looked up
 // or has open and what it read of it, and the token it waits on; and the newest owner that asked
 // it to re-register since it last started to, the term it re-registers with, the token it waits on
-// for that, and whether it re-registered the file.
+// for that, and whether its open in flight registers again once answered, as the mount's does: an
+// owner that has since failed may have answered it.
 type openClient struct {
 	r       *openRun
 	i       int
@@ -385,7 +386,7 @@ type openClient struct {
 	asked   bool
 	term    uint64
 	rtoken  uint64
-	reopen  bool
+	again   bool
 	rrd     Read
 }
 
@@ -403,7 +404,7 @@ const (
 func (c *openClient) boot(n *sim.Node) {
 	r := c.r
 	c.session, c.step, c.open, c.token = r.tab.Next, stepIdle, false, 0
-	c.asked, c.term, c.rtoken, c.reopen = false, 0, 0, false
+	c.asked, c.term, c.rtoken, c.again = false, 0, 0, false
 	c.out.Reset()
 	r.tab.Next++
 	r.tab.Sessions = append(r.tab.Sessions, SessionEntry{ID: c.session, Node: uint32(3 + c.i)})
@@ -445,15 +446,15 @@ func (c *openClient) onEvent(ctx *core.Context, ev *core.Event, acts []core.Acti
 }
 
 // reclaim starts the re-registration the newest owner asked for, unless one is in flight: the
-// file the client has open, or is opening, then the end of it. An owner asks again until it hears
-// the end, so the client starts over at each ask.
+// file the client has open, then the end of it, an open in flight going again once answered. An
+// owner asks again until it hears the end, so the client starts over at each ask.
 func (c *openClient) reclaim(ctx *core.Context) {
 	if c.rtoken != 0 || !c.asked {
 		return
 	}
-	c.asked, c.reopen = false, c.open || c.step == stepOpen
+	c.asked, c.again = false, c.again || c.step == stepOpen
 	reg, start := byte(RegReclaimed), c.key(RootInode, InodeAttr, nil)
-	if c.reopen {
+	if c.open {
 		reg, start = RegReopen, c.key(c.inode, InodeAttr, nil)
 	}
 	c.rrd = Read{Start: start, End: append(slices.Clip(start), 0), Limit: 1, Reg: reg, Session: c.session, Mount: 1, Term: c.term}
@@ -561,10 +562,15 @@ func (c *openClient) settle(ctx *core.Context) {
 		c.root(ctx)
 		return
 	}
-	if err != nil {
-		if step == stepOpen && c.reopen {
-			c.read(ctx, c.key(c.inode, InodeAttr, nil), RegRelease, stepRelease)
+	if step == stepOpen {
+		again := c.again
+		c.again = false
+		if again && err == nil {
+			c.read(ctx, c.key(c.inode, InodeAttr, nil), RegOpen, stepOpen)
+			return
 		}
+	}
+	if err != nil {
 		return
 	}
 	switch step {
@@ -588,8 +594,6 @@ func (c *openClient) settle(ctx *core.Context) {
 		if len(kvs) == 1 && DecodeAttr(kvs[0].Value, &c.attr) == nil && c.attr.Nlink > 0 {
 			c.open = true
 			c.r.opens = append(c.r.opens, openHeld{c.inode, c.session})
-		} else if c.reopen {
-			c.read(ctx, c.key(c.inode, InodeAttr, nil), RegRelease, stepRelease)
 		}
 	case stepAttr:
 		if len(kvs) == 1 && DecodeAttr(kvs[0].Value, &c.attr) == nil && c.attr.Nlink > 0 {
@@ -612,9 +616,10 @@ func TestAnOrphanIsNeverFreedWhileALiveSessionHasItOpen(t *testing.T) {
 	})
 }
 
-// An unlink that frees an open file at once, a fenced session's opens closed when its fence
-// commits rather than once it is acknowledged, and a new owner that frees orphans each free an
-// orphan a live session has open, on seeds 1, 2 and 3.
+// An unlink that frees an open file at once (seed 1), a fenced session's opens closed when its
+// fence commits rather than once it is acknowledged (seed 2), a new owner that frees orphans in
+// its grace period (seed 3), and one whose grace period ends by time alone (seed 8) each free an
+// orphan a live session has open.
 func TestPlantedRegistryBugsFreeAnOpenOrphan(t *testing.T) {
 	for _, c := range []struct {
 		p    regPlants

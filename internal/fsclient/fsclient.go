@@ -141,6 +141,9 @@ type plants struct {
 	// handle of a session the mount has left, and handOutStale hands out a handle for an open
 	// registered under a session the mount has since left.
 	noRegister, openUnheld, fencedServed, handOutStale bool
+	// noReclaim re-registers none of the mount's open files when a new owner asks, and handOutFirst
+	// marks no open in flight then, so the old owner's answer hands out its handle.
+	noReclaim, handOutFirst bool
 }
 
 // Machine serves one mount. Each request names its inodes by FUSE node ID, which is the inode ID.

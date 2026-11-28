@@ -41,7 +41,7 @@ func (m *Machine) Reclaim(dst []uint64) []uint64 {
 		if o.req.Opcode == fuseproto.OpCreate {
 			ino = o.child
 		}
-		if n := m.nodes[ino]; n != nil && (o.req.Opcode == fuseproto.OpOpen || o.req.Opcode == fuseproto.OpCreate) {
+		if n := m.nodes[ino]; n != nil && (o.req.Opcode == fuseproto.OpOpen || o.req.Opcode == fuseproto.OpCreate) && !m.plant.handOutFirst {
 			m.change(n)
 		}
 	}
