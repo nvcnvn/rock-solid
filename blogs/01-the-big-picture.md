@@ -5,13 +5,13 @@ rock-solid is a design for a distributed storage system, written in Go, for Kube
 directory read-write, with each node talking straight to the disks that hold the data. The first
 release gives NFS-style close-to-open sharing; automatic per-file cache switching, which caches
 while that is safe and turns caching off by itself the moment it is not, follows in the next phase.
-Block volumes and, later, S3 object storage come from the same small core. The bet is that on
-homelab hardware the network, not the kernel, limits throughput, so a short, correct code path wins
-and kernel-bypass tricks stay optional. Nothing runs yet: this post, the first of twelve, tours the
-design and the measurements behind it, and points to the post covering each part.
+macOS and Windows machines reach the same volumes over SMB, through a Samba gateway. Block volumes
+and, later, S3 object storage come from the same small core. The bet is that on homelab hardware the
+network, not the kernel, limits throughput, so a short, correct code path wins and kernel-bypass
+tricks stay optional. This post, the first of twelve, tours the design and the measurements behind
+it, and points to the post covering each part.
 
-**How to read this series.** Every section opens with an **In plain words** box, then **How it
-works** subsections with the design's real names and numbers. The boxes alone tell the whole story.
+**How to read this series.** Every section opens with an **In plain words** box, then **How it works** subsections with the design's real mechanisms. The boxes alone tell the whole story.
 
 ## Words you need
 
@@ -76,8 +76,7 @@ TODAY (Longhorn RWX): all traffic for a volume goes through one NFS pod
                          |                     and a pause when it fails over
               [the volume's replicas]
 
-
-ROCK-SOLID (planned): any daemon talks to any disk, nothing in the middle
+ROCK-SOLID: any daemon talks to any disk, nothing in the middle
 
   [daemon A]   [daemon B]   [daemon C]     one daemon per node, serving its pods
       |  \    /    |  \    /    |          through FUSE
@@ -136,7 +135,7 @@ features).
 | [OpenEBS Mayastor](https://github.com/openebs/mayastor) | Block only | Not compared | Not applicable | Hugepages and dedicated cores |
 | Weka, DAOS, [3FS](https://github.com/deepseek-ai/3fs) | Direct, kernel bypass | 3FS: FoundationDB | Weka: per-file switch; DAOS: left to the user | GPU clusters; commercial or heavy |
 | MinIO, RustFS, Garage | No file access | None | Not applicable | Object storage only |
-| **rock-solid (planned)** | **FUSE client, direct** | **None: one binary plus CSI** | **Per-file mode switch** | **Not built yet** |
+| **rock-solid** | **FUSE client, direct** | **None: one binary plus CSI** | **Per-file mode switch** | **A young system that has to earn trust** |
 
 Four takeaways shape everything that follows:
 
@@ -219,12 +218,17 @@ The design's principles, in priority order:
    experiment.
 6. **Correctness before features**, with deterministic simulation from day one, and **Apache 2.0**.
 
-Not in v1: SMB (Server Message Block) file sharing for macOS and Windows clients, GPU-cluster scale,
-shared-writable `mmap` across nodes, cross-directory hard links, a custom kernel module, hard disk
-drives (HDDs, which can come later as a capacity tier behind flash, see
-[post 04](04-one-log-per-disk.md#open-directions)), and authentication or encryption between
-daemons. A spike found that a Samba gateway can be added later on top of the file frontend
-([post 09](09-rwx-filesystem-and-cache-coherence.md)).
+macOS and Windows clients get Server Message Block (SMB, the Windows file-sharing protocol) shares
+from the first release: one Samba gateway per shared volume, an ordinary pod that mounts the volume
+through FUSE like any other. The [Samba gateway spike](../docs/design.md#appendix-samba-gateway-spike)
+found that Samba's client caching rights (leases) know nothing of writes from pods on other nodes, so
+a share that pods also write turns them off ([post 09](09-rwx-filesystem-and-cache-coherence.md)).
+
+Not in v1: SMB leases that stay correct while pods on other nodes write the same file, several SMB
+gateways per volume, GPU-cluster scale, shared-writable `mmap` across nodes, cross-directory hard
+links, a custom kernel module, hard disk drives (HDDs, which can come later as a capacity tier behind
+flash, see [post 04](04-one-log-per-disk.md#open-directions)), and authentication or encryption
+between daemons.
 
 ## The architecture: two primitives, three frontends, pluggable drivers
 
@@ -391,9 +395,8 @@ stateDiagram-v2
 
 Entering WriteShared, the owner sends a **recall** to every other node that has the file open and
 waits until each has flushed its buffered writes, dropped its cached pages, switched new opens to
-direct I/O and made already-open files check for changes before every read. A node that never
-answers is waited out until its session lease (10 s by default) expires, or for `recall_timeout`
-(30 s) if it still renews its session, and it is then **fenced**: the control plane, which alone
+direct I/O and made already-open files check for changes before every read. A node that never answers is waited out until its session lease expires, or for a recall timeout if
+it still renews its session, and it is then **fenced**: the control plane, which alone
 keeps every session's lease, has every chunk primary reject its writes before its locks go to
 anyone else. While a file is write-shared,
 every read and write goes to the chunk primary, which orders them: one network round trip per I/O,
@@ -527,24 +530,25 @@ than sixty decisions; most belong to later posts. These six shape the whole syst
 
 The name states the priority behind all of it: correctness before features.
 
-## Open directions: roadmap, status and open questions
+## Open directions: roadmap and open questions
 
-> **In plain words.** The build order puts the simulator before any real disk or network code, and the
-> first thing a user can run is the shared filesystem at Tier 1, in phase 6. Today the project is in
-> phase 1: the foundations, the disk log and the index exist with their tests, and nothing runs as a
-> storage system yet.
+> **In plain words.** The build order puts the simulator and the protocol models before any real disk
+> or network code, and the first thing a user can run is the shared filesystem with NFS-style
+> sharing. Everything after it is built on the same core. Where each piece stands today is in the
+> [series index](README.md#where-the-build-stands).
 
-### How it works: the thirteen phases
+### How it works: the build order
 
-Each phase ends with something that runs and is tested. Follow the chain left to right; phase 6 is the
-first usable product. Phase 2 writes TLA+ models: precise descriptions of the protocols that a model
-checker, TLC, explores state by state, catching design bugs before code exists. It models the
-protocols phases 3 to 7 build: changing a placement group's primary, together with the read
-leases and Raft leader leases that rest on the same leases between pairs of nodes, as one model;
-client sessions and fencing; cache-mode recalls; and purges. Each model has a configuration small enough to check exhaustively in
-CI in under 5 minutes, a deeper one run once per change, and a nightly random run. Later protocols
-get their models in the phase that builds them, before their code: the snapshot cut and the pool
-move in phase 11, cross-shard transactions in phase 13.
+Each step ends with something that runs and is tested. Follow the chain left to right; the sixth
+step is the first usable product. The second step writes TLA+ models: precise descriptions of the
+protocols that a model checker, TLC, explores state by state, catching design bugs before code
+exists. They cover changing a placement group's primary, together with the read leases and Raft
+leader leases that rest on the same leases between pairs of nodes, as one model; client sessions
+and fencing; cache-mode recalls; and purges. Each model has a configuration small enough to check
+exhaustively on every change and deeper ones for milestones. Later protocols get their models in the
+step that builds them, before their code: the snapshot cut and the pool move, then cross-shard
+transactions. After scale-out comes a last step that offers the MetaStore's ordered, transactional
+keys as a product of their own, with a SQL layer on top, as CockroachDB and TiDB are built.
 
 ```mermaid
 flowchart LR
@@ -559,18 +563,14 @@ flowchart LR
     P9 --> P10["Phase 10<br/>erasure-coded<br/>pools"]
     P10 --> P11["Phase 11<br/>snapshots, clones,<br/>pool moves, modelled first"]
     P11 --> P12["Phase 12<br/>S3"]
-    P12 --> P13["Phase 13<br/>scale-out, cross-shard<br/>transactions, Tier 3"]
+        P12 --> P13["Phase 13<br/>scale-out, cross-shard<br/>transactions, Tier 3"]
+    P13 --> P14["Phase 14<br/>transactional key-value<br/>and SQL"]
 ```
 
 *Simulator first, real drivers fifth, the first thing you can mount sixth.*
 
 Tier numbers are not build order: Tier 0 (RWX block) ships in phase 8, after Tiers 1 and 2, because
 the file frontend is the first product.
-
-**Where the build stands.** 18 of the 46 phase 1 items in the
-[build checklist](../docs/build-checklist.md) are done: the tooling, the foundation types in
-`internal/core`, the disk log, the index's memtable and sorted runs, and the chunk index. The
-simulator and the single-node ChunkStore are next.
 
 **Open questions.** The design settles open questions by measurement, not argument. Two touch the
 whole system:
@@ -624,5 +624,5 @@ If you want to know how a byte finds its disk, start with [post 02](02-chunks-an
 - Supporting docs: [glossary, starting with "One write, end to end"](../docs/glossary.md#one-write-end-to-end),
   [build checklist](../docs/build-checklist.md), [tech debts](../docs/tech-debts.md),
   [README](../README.md).
-- Code so far: [internal/core](../internal/core/), [internal/disklog](../internal/disklog/),
+- Code: [internal/core](../internal/core/), [internal/disklog](../internal/disklog/),
   [internal/lsm](../internal/lsm/), [internal/chunkstore](../internal/chunkstore/).
