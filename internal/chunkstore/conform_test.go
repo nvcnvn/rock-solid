@@ -80,15 +80,28 @@ func (c *rcluster) noteResends() {
 		}
 		disk := uint64(rep.cfg.Disk)
 		note(trace.OutResends, disk)
+		var keys, vals [][]byte
 		x.tree.Iter(&x.it)
 		for ok := x.it.SeekGE(lo); ok && bytes.HasPrefix(x.it.Key(), lo); ok = x.it.Next() {
-			k, v := x.it.Key(), x.it.Value()
-			if len(k) != resendKeySize || len(v) != resendValueSize {
+			if k, v := x.it.Key(), x.it.Value(); len(k) == resendKeySize && len(v) == resendValueSize {
+				keys, vals = append(keys, bytes.Clone(k)), append(vals, bytes.Clone(v))
+			}
+		}
+		// An entry at or below its session's watermark is one Resent never reads: a recovery may bring
+		// the source's watermark past the target's entries of other chunks and leave them.
+		for i, k := range keys {
+			v := vals[i]
+			ch := core.ChunkIDFromBytes([core.ChunkIDSize]byte(v))
+			pool := core.PoolID(binary.BigEndian.Uint32(k[4:]))
+			pgs := uint32(1) << k[8]
+			if pt := rep.table.pool(pool); pt != nil {
+				pgs = uint32(len(pt.PGs))
+			}
+			session, inc, req := binary.BigEndian.Uint64(k[13:]), binary.BigEndian.Uint64(k[21:]), binary.BigEndian.Uint64(k[resendWatermarkSize:])
+			if req <= x.watermark(pool, ch, pgs, session, inc) {
 				continue
 			}
-			ch := core.ChunkIDFromBytes([core.ChunkIDSize]byte(v))
-			note(trace.OutResendEntry, disk, ch.Hash(), binary.LittleEndian.Uint64(v[core.ChunkIDSize:]),
-				binary.BigEndian.Uint64(k[13:])<<32|binary.BigEndian.Uint64(k[21:]), binary.BigEndian.Uint64(k[resendWatermarkSize:]))
+			note(trace.OutResendEntry, disk, ch.Hash(), binary.LittleEndian.Uint64(v[core.ChunkIDSize:]), session<<32|inc, req)
 		}
 	}
 }
