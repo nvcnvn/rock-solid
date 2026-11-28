@@ -124,6 +124,9 @@ type nodeConfig struct {
 	// Mount is the volume the node mounts at MountPath, 0 for none.
 	Mount     uint32
 	MountPath string
+	// Session gives the node a client session with no mount; only tests set it, to renew a session
+	// over TCP without the root a mount needs.
+	Session bool
 	// Admin is the admin port's address, "" for none; Flags every flag's value, which it reports.
 	Admin string
 	Flags []ops.Flag
@@ -134,7 +137,7 @@ const release = 1
 
 // machine is the configuration of cfg's node machine.
 func (cfg nodeConfig) machine() node.Config {
-	nc := node.Config{Node: cfg.Node, Release: release, Group: cfg.Group, Seed: rand.Uint64(), MetaOnly: cfg.MetaOnly, Client: cfg.Client, Session: cfg.Mount != 0}
+	nc := node.Config{Node: cfg.Node, Release: release, Group: cfg.Group, Seed: rand.Uint64(), MetaOnly: cfg.MetaOnly, Client: cfg.Client, Session: cfg.Mount != 0 || cfg.Session}
 	for _, v := range cfg.Ctls {
 		nc.Ctls = append(nc.Ctls, core.NodeID{Node: v.Node})
 	}

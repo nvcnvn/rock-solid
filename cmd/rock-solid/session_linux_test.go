@@ -358,3 +358,33 @@ func TestAClientOnlyNodeWithNoMountStartsNoSessionOverTCP(t *testing.T) {
 		t.Fatalf("the node started sessions %v; it said:\n%s", ids, out.String())
 	}
 }
+
+// A node holding a session, here one given a session with no mount, starts it at the control
+// plane over TCP and renews it: the one session it started is still live past dead_wait from its
+// start, the longest the leader waits for a session that never renews.
+func TestAClientNodeRenewsItsSessionOverTCP(t *testing.T) {
+	p := runCtl(t, testDir(t))
+	runNode(t, nodeConfig{Node: 2, Ctls: []voter{{1, local(p.Port)}}, Group: ctlGroup, Listen: local(freeBase(t, 1)), Client: true, Session: true})
+	live := func() []uint64 {
+		return onCtl(t, p, func(_ *core.Context, c *meta.Control) []uint64 {
+			if c == nil {
+				return nil
+			}
+			var ids []uint64
+			for _, e := range c.SessionTable().Sessions {
+				if e.Node == 2 && e.Fenced == 0 {
+					ids = append(ids, e.ID)
+				}
+			}
+			return ids
+		})
+	}
+	var first []uint64
+	if !within(30*time.Second, func() bool { first = live(); return len(first) != 0 }) {
+		t.Fatal("the node started no session")
+	}
+	time.Sleep(time.Duration(meta.DeadWait)*time.Microsecond + 2*time.Second)
+	if now := live(); len(first) != 1 || len(now) != 1 || now[0] != first[0] {
+		t.Fatalf("live sessions %v at the start, %v past dead_wait", first, now)
+	}
+}
