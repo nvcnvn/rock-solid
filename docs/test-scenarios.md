@@ -4255,10 +4255,10 @@ next milestone's run, which is also the twins' first.
 | Cache-mode recall | `ci-failover` | 2 nodes, 2 writes, an owner failover, a lost message, a pause, a lease lapse | 41 | 14,447,464 | 131 s |
 | Cache-mode recall | `ci-handles` | 2 nodes, 2 handles each, 3 writes | 40 | 247,682 | 3 s |
 | Cache-mode recall | `ci-extend` | 2 nodes, a region past the size, 2 writes | 37 | 398,236 | 5 s |
-| Purge | `ci-list` | 3 inodes, truncates to 1 or 5, 2 truncates, 2 unlinks, 1 crash | 60 | 3,741,390 | 54 s |
+| Purge | `ci-list` | 3 inodes, truncates to 1 or 5, 2 truncates, 2 unlinks, 1 crash | 61 | 3,741,390 | 33 s |
 | Purge | `ci-write` | 1 inode of 7 bytes, 2 nodes, writes at 2 and 6, truncates to 1, 5 or 8, 2 crashes | 38 | 797,082 | 11 s |
 | Purge | `ci-extend` | 1 inode of 3 bytes, 2 nodes, writes at 4 and 6, truncates to 2 or 8, 2 crashes | 39 | 1,145,014 | 13 s |
-| Purge | `ci-orphan` | 1 inode of 3 bytes, 2 nodes, writes at 5, an unlink, a fence, an owner failover, a crash | 30 | 35,516 | 2 s |
+| Purge | `ci-orphan` | 1 inode of 3 bytes, 2 nodes, writes at 5, an unlink, a fence, an owner failover, a crash | 31 | 35,516 | 2 s |
 | Epoch change | `ci-peering` | [Epoch change model](#epoch-change-model) | 32 | 1,209,415 | 288 s |
 | Epoch change | `ci-restarts` | [Epoch change model](#epoch-change-model) | 27 | 1,227,241 | 348 s |
 | Epoch change | `ci-restarts-moved` | [Epoch change model](#epoch-change-model) | 29 | 287,256 | 108 s |
@@ -4326,7 +4326,7 @@ next milestone's run, which is also the twins' first.
 | Cache-mode recall | `deep` | `ci-failover` with 2 owner failovers | 49 | 138,142,376 | 1,719 s |
 | Purge | `deep-list` | `ci-list` with 2 crashes, safety only | 74 | 38,193,992 | 384 s |
 | Purge | `deep-write` | `ci-write` with 3 crashes, `PurgeSettles` | 43 | 6,337,400 | 430 s |
-| Purge | `deep-orphan` | `ci-orphan` with 3 writes and 2 crashes, `PurgeSettles` | 38 | 935,148 | 44 s |
+| Purge | `deep-orphan` | `ci-orphan` with 3 writes and 2 crashes, `PurgeSettles` | 39 | 935,148 | 37 s |
 | Voter replacement | `ci-swap` | [Voter replacement model](#voter-replacement-model) | 30 | 1,202,022 | 245 s |
 | Voter replacement | `ci-live` | [Voter replacement model](#voter-replacement-model) | 24 | 4,613 | 4 s |
 | Voter replacement | `ci-live-moved` | [Voter replacement model](#voter-replacement-model) | 27 | 54,991 | 56 s |
