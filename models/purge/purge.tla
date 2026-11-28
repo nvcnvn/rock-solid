@@ -37,6 +37,7 @@ CONSTANTS
     OrphanAfterGrace,       \* an orphan moves to the purge list only after the grace period
     GraceUntilReregistered, \* the grace period lasts until every live session re-registered
     ReleaseOnAck,           \* a fenced session's opens count as closed at its acknowledgment
+    AnswerAfterReregister,  \* an open in flight at a re-registration registers again
     MergeEntries,           \* a new purge range for an inode is merged with its pending one
     CheckedRemoval,         \* the purger's range removal checks each entry and each gap
     DrainBeforePurge,       \* the purger waits for chunk writes sent under an older size
@@ -78,6 +79,8 @@ VARIABLES
     writes,             \* writes in progress
     punches,            \* the purger's punches in flight
     opens,              \* node -> inodes it has open
+    opening,            \* node -> inode -> "no", "sent", "answer", or "changed": an answer
+                        \* a re-registration marked, as the owner that sent it may have failed
     reg,                \* the owner's open registry: inode -> nodes
     grace, rereg,       \* the owner's grace period, and who re-registered in it
     fence,              \* node -> "live", "committed", "applied" (by storage) or "acked"
@@ -88,8 +91,8 @@ VARIABLES
     flags               \* history: rerunFailed, lost, exposed
 
 vars == <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, entry, tailPunch,
-          memTail, writes, punches, opens, reg, grace, rereg, fence, inc, purger, budget,
-          ghost, flags>>
+          memTail, writes, punches, opens, opening, reg, grace, rereg, fence, inc, purger,
+          budget, ghost, flags>>
 
 Init ==
     /\ size = [i \in Inodes |-> InitSize]
@@ -107,6 +110,7 @@ Init ==
     /\ writes = {}
     /\ punches = {}
     /\ opens = [n \in Nodes |-> {}]
+    /\ opening = [n \in Nodes |-> [i \in Inodes |-> "no"]]
     /\ reg = [i \in Inodes |-> {}]
     /\ grace = FALSE
     /\ rereg = {}
@@ -148,13 +152,35 @@ Ready(n) == Live(n) /\ inc[n] = "ok"
 -----------------------------------------------------------------------------
 \* Client operations.
 
-\* open() registers with the inode owner, which takes no new opens in its grace period.
+\* open() sends its registration to the inode owner.
 Open(n, i) ==
-    /\ linked[i] /\ Ready(n) /\ ~grace /\ i \notin opens[n]
-    /\ opens' = [opens EXCEPT ![n] = @ \cup {i}]
-    /\ reg' = [reg EXCEPT ![i] = @ \cup {n}]
+    /\ linked[i] /\ Ready(n) /\ i \notin opens[n] /\ opening[n][i] = "no"
+    /\ opening' = [opening EXCEPT ![n][i] = "sent"]
+    /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, entry, tailPunch,
+                   memTail, writes, punches, opens, reg, grace, rereg, fence, inc, purger, budget,
+                   ghost, flags>>
+
+\* The owner registers an open of a linked file, and takes none in its grace period; it
+\* answers an open of an unlinked one with a failure.
+Register(n, i) ==
+    /\ opening[n][i] = "sent" /\ ~grace
+    /\ opening' = [opening EXCEPT ![n][i] = IF linked[i] THEN "answer" ELSE "no"]
+    /\ reg' = IF linked[i] THEN [reg EXCEPT ![i] = @ \cup {n}] ELSE reg
+    /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, entry, tailPunch,
+                   memTail, writes, punches, opens, grace, rereg, fence, inc, purger, budget,
+                   ghost, flags>>
+
+\* The owner's answer reaches the node, which hands out the handle, or registers again when
+\* a re-registration marked the open.
+Answer(n, i) ==
+    /\ opening[n][i] \in {"answer", "changed"}
+    /\ IF opening[n][i] = "changed" /\ AnswerAfterReregister
+       THEN /\ opening' = [opening EXCEPT ![n][i] = "sent"]
+            /\ UNCHANGED opens
+       ELSE /\ opening' = [opening EXCEPT ![n][i] = "no"]
+            /\ opens' = [opens EXCEPT ![n] = @ \cup {i}]
     /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, entry,
-                   tailPunch, memTail, writes, punches, grace, rereg, fence, inc, purger,
+                   tailPunch, memTail, writes, punches, reg, grace, rereg, fence, inc, purger,
                    budget, ghost, flags>>
 
 \* The last close of a file on a node. The kernel sends it only once the node's writes to
@@ -165,7 +191,7 @@ Close(n, i) ==
     /\ opens' = [opens EXCEPT ![n] = @ \ {i}]
     /\ reg' = [reg EXCEPT ![i] = @ \ {n}]
     /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, entry,
-                   tailPunch, memTail, writes, punches, grace, rereg, fence, inc, purger,
+                   tailPunch, memTail, writes, punches, opening, grace, rereg, fence, inc, purger,
                    budget, ghost, flags>>
 
 \* A write of byte b starts by reading the inode. An extension (past the size, or a chunk
@@ -177,9 +203,9 @@ StartWrite(n, i, b) ==
                                av |-> aver[i], dead |-> FALSE,
                                st |-> IF RaiseBeforeWrite THEN "raise" ELSE "land"]}
     /\ budget' = [budget EXCEPT !.w = @ - 1]
-    /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, entry,
-                   tailPunch, memTail, punches, opens, reg, grace, rereg, fence, inc, purger,
-                   ghost, flags>>
+    /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, entry, tailPunch,
+                   memTail, punches, opens, opening, reg, grace, rereg, fence, inc, purger, ghost,
+                   flags>>
 
 AfterRaise(w) == IF RaiseBeforeWrite THEN "land" ELSE IF w.ext THEN "size" ELSE "done"
 AfterLand(w) == IF w.dead THEN "done" ELSE IF ~RaiseBeforeWrite THEN "raise" ELSE IF w.ext THEN "size" ELSE "done"
@@ -204,7 +230,8 @@ Raise(w) ==
                /\ aver' = [aver EXCEPT ![w.i] = @ + 1]
                /\ writes' = (writes \ {w}) \cup {[w2 EXCEPT !.st = AfterRaise(w2), !.av = aver[w.i] + 1]}
     /\ UNCHANGED <<size, linked, orphan, gone, data, exists, seen, entry, tailPunch, memTail,
-                   punches, opens, reg, grace, rereg, fence, inc, purger, budget, ghost, flags>>
+                   punches, opens, opening, reg, grace, rereg, fence, inc, purger, budget, ghost,
+                   flags>>
 
 \* The chunk write reaches its primary, which rejects it once its storage node applied
 \* the session's fence. A write already sent outlives its daemon's crash. A write inside
@@ -220,7 +247,7 @@ Land(w) ==
                                       !.acked[w.i][w.b] = ~w.ext /\ ~w.dead /\ w.b < size[w.i]]
             /\ writes' = Advance(w, AfterLand(w))
     /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, seen, entry, tailPunch, memTail,
-                   punches, opens, reg, grace, rereg, fence, inc, purger, budget, flags>>
+                   punches, opens, opening, reg, grace, rereg, fence, inc, purger, budget, flags>>
 
 \* An extending write commits the new size with a check on the attributes it read, then
 \* is acknowledged. It waits for a pending purge over its range. If the check fails, it
@@ -242,7 +269,7 @@ CommitSize(w) ==
                                               !.exposed = @ \/ Exposes(data, w.i, size[w.i], w.b)]
                     /\ writes' = writes \ {w}
     /\ UNCHANGED <<allocEnd, linked, orphan, gone, data, exists, seen, entry, tailPunch, memTail,
-                   punches, opens, reg, grace, rereg, fence, inc, purger, budget>>
+                   punches, opens, opening, reg, grace, rereg, fence, inc, purger, budget>>
 
 \* truncate() down: one transaction commits the new size, alloc_end lowered to the new
 \* end and a purge range from the new size to the old alloc_end, merged into a pending one.
@@ -261,8 +288,8 @@ TruncateDown(i, s) ==
                    !.cut[i] = [b \in Bytes |-> @[b] \/ (b >= s /\ data[i][b] = 1)],
                    !.acked[i] = [b \in Bytes |-> @[b] /\ b < s]]
     /\ budget' = [budget EXCEPT !.t = @ - 1]
-    /\ UNCHANGED <<linked, orphan, gone, data, exists, seen, writes, punches, opens, reg, grace,
-                   rereg, fence, inc, purger, flags>>
+    /\ UNCHANGED <<linked, orphan, gone, data, exists, seen, writes, punches, opens, opening, reg,
+                   grace, rereg, fence, inc, purger, flags>>
 
 \* truncate() up: waits for a pending purge and commits the size.
 TruncateUp(i, s) ==
@@ -273,7 +300,7 @@ TruncateUp(i, s) ==
     /\ aver' = [aver EXCEPT ![i] = @ + 1]
     /\ budget' = [budget EXCEPT !.t = @ - 1]
     /\ UNCHANGED <<allocEnd, linked, orphan, gone, data, exists, seen, entry, tailPunch, memTail,
-                   writes, punches, opens, reg, grace, rereg, fence, inc, purger, ghost>>
+                   writes, punches, opens, opening, reg, grace, rereg, fence, inc, purger, ghost>>
 
 \* (DaemonPunch) the truncating daemon's own first punch reaches the primary, possibly
 \* after the purger finished the entry.
@@ -282,7 +309,7 @@ TailPunch(i) ==
     /\ tailPunch' = [tailPunch EXCEPT ![i] = None]
     /\ ApplyPunch(i, ChunkOf(tailPunch[i][1]), PunchFrom(<<tailPunch[i][1], 0>>, 0))
     /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, seen, entry, memTail, writes,
-                   punches, opens, reg, grace, rereg, fence, inc, purger, budget, ghost>>
+                   punches, opens, opening, reg, grace, rereg, fence, inc, purger, budget, ghost>>
 
 \* (MemoryTail) the tail zeroed in memory reaches the disk.
 MemTailFlush(i) ==
@@ -290,7 +317,7 @@ MemTailFlush(i) ==
     /\ data' = ZeroData(i, memTail[i][1], memTail[i][2])
     /\ memTail' = [memTail EXCEPT ![i] = None]
     /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, exists, seen, entry, tailPunch,
-                   writes, punches, opens, reg, grace, rereg, fence, inc, purger, budget,
+                   writes, punches, opens, opening, reg, grace, rereg, fence, inc, purger, budget,
                    ghost, flags>>
 
 CutAll(i) == [ghost EXCEPT !.cut[i] = [b \in Bytes |-> @[b] \/ data[i][b] = 1],
@@ -311,7 +338,7 @@ Unlink(i) ==
             /\ ghost' = CutAll(i)
             /\ UNCHANGED orphan
     /\ UNCHANGED <<size, allocEnd, aver, data, exists, seen, tailPunch, memTail, writes, punches,
-                   opens, reg, grace, rereg, fence, inc, purger, flags>>
+                   opens, opening, reg, grace, rereg, fence, inc, purger, flags>>
 
 \* The owner moves an orphan to the purge list once no node has it open, and only after
 \* its grace period.
@@ -323,7 +350,7 @@ FreeOrphan(i) ==
     /\ entry' = [entry EXCEPT ![i] = Merge(@, 0, allocEnd[i])]
     /\ ghost' = CutAll(i)
     /\ UNCHANGED <<size, allocEnd, aver, linked, data, exists, seen, tailPunch, memTail, writes,
-                   punches, opens, reg, grace, rereg, fence, inc, purger, budget, flags>>
+                   punches, opens, opening, reg, grace, rereg, fence, inc, purger, budget, flags>>
 
 -----------------------------------------------------------------------------
 \* Sessions, the owner and crashes.
@@ -336,15 +363,15 @@ FenceCommit(n) ==
     /\ budget' = [budget EXCEPT !.f = @ - 1]
     /\ reg' = IF ReleaseOnAck THEN reg ELSE [i \in Inodes |-> reg[i] \ {n}]
     /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, entry,
-                   tailPunch, memTail, writes, punches, opens, grace, rereg, inc, purger,
+                   tailPunch, memTail, writes, punches, opens, opening, grace, rereg, inc, purger,
                    ghost, flags>>
 
 FenceApply(n) ==
     /\ fence[n] = "committed"
     /\ fence' = [fence EXCEPT ![n] = "applied"]
-    /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, entry,
-                   tailPunch, memTail, writes, punches, opens, reg, grace, rereg, inc, purger,
-                   budget, ghost, flags>>
+    /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, entry, tailPunch,
+                   memTail, writes, punches, opens, opening, reg, grace, rereg, inc, purger, budget,
+                   ghost, flags>>
 
 \* Once acknowledged, the session leaves the table, and owners drop its opens.
 FenceAck(n) ==
@@ -352,6 +379,7 @@ FenceAck(n) ==
     /\ fence' = [fence EXCEPT ![n] = "acked"]
     /\ reg' = [i \in Inodes |-> reg[i] \ {n}]
     /\ opens' = [opens EXCEPT ![n] = {}]
+    /\ opening' = [opening EXCEPT ![n] = [i \in Inodes |-> "no"]]
     /\ writes' = {w \in writes : w.n # n}
     /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, entry,
                    tailPunch, memTail, punches, grace, rereg, inc, purger, budget, ghost, flags>>
@@ -363,13 +391,16 @@ OwnerFailover ==
     /\ grace' = TRUE
     /\ rereg' = {}
     /\ budget' = [budget EXCEPT !.o = @ - 1]
-    /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, entry,
-                   tailPunch, memTail, writes, punches, opens, fence, inc, purger, ghost, flags>>
+    /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, entry, tailPunch,
+                   memTail, writes, punches, opens, opening, fence, inc, purger, ghost, flags>>
 
-\* A live session re-registers its open files with the new owner.
+\* A live session re-registers its open files with the new owner, and marks each open whose
+\* answer it awaits, which an owner that failed since may have sent.
 Reregister(n) ==
     /\ grace /\ n \notin rereg /\ Live(n)
     /\ reg' = [i \in Inodes |-> IF i \in opens[n] THEN reg[i] \cup {n} ELSE reg[i]]
+    /\ opening' = [opening EXCEPT ![n] = [i \in Inodes |->
+                      IF opening[n][i] = "answer" THEN "changed" ELSE opening[n][i]]]
     /\ rereg' = rereg \cup {n}
     /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, entry,
                    tailPunch, memTail, writes, punches, opens, grace, fence, inc, purger,
@@ -380,9 +411,9 @@ EndGrace ==
     /\ grace
     /\ GraceUntilReregistered => \A n \in Nodes : n \in rereg \/ fence[n] = "acked"
     /\ grace' = FALSE
-    /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, entry,
-                   tailPunch, memTail, writes, punches, opens, reg, rereg, fence, inc, purger,
-                   budget, ghost, flags>>
+    /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, entry, tailPunch,
+                   memTail, writes, punches, opens, opening, reg, rereg, fence, inc, purger, budget,
+                   ghost, flags>>
 
 \* A daemon crash loses what it held in memory: writes not yet sent and a tail zeroed in
 \* memory. Its chunk writes already sent can still land. Its successor resumes the session
@@ -396,7 +427,7 @@ CrashDaemon(n) ==
     /\ inc' = [inc EXCEPT ![n] = IF IncarnationFence THEN "fencing" ELSE "ok"]
     /\ budget' = [budget EXCEPT !.c = @ - 1]
     /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, entry,
-                   punches, opens, reg, grace, rereg, fence, purger, ghost, flags>>
+                   punches, opens, opening, reg, grace, rereg, fence, purger, ghost, flags>>
 
 \* The successor's incarnation is committed in the session table, every storage node
 \* applies it and rejects the old incarnation's writes from then on, queued ones included,
@@ -405,8 +436,8 @@ FenceIncarnation(n) ==
     /\ inc[n] = "fencing"
     /\ inc' = [inc EXCEPT ![n] = "ok"]
     /\ writes' = {w \in writes : w.n # n \/ ~w.dead}
-    /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, entry,
-                   tailPunch, memTail, punches, opens, reg, grace, rereg, fence, purger, budget,
+    /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, entry, tailPunch,
+                   memTail, punches, opens, opening, reg, grace, rereg, fence, purger, budget,
                    ghost, flags>>
 
 -----------------------------------------------------------------------------
@@ -422,9 +453,9 @@ Scan ==
     /\ purger' = [purger EXCEPT !.on = TRUE, !.read = entry,
                                 !.run = {i \in Inodes : entry[i] # None /\ Drained(i)},
                                 !.done = {}, !.step = 0, !.wait = FALSE]
-    /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, entry,
-                   tailPunch, memTail, writes, punches, opens, reg, grace, rereg, fence, inc,
-                   budget, ghost, flags>>
+    /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, entry, tailPunch,
+                   memTail, writes, punches, opens, opening, reg, grace, rereg, fence, inc, budget,
+                   ghost, flags>>
 
 \* It sends the next punch of the lowest entry of the run it has not finished, tagged with
 \* its term, and waits for it to complete.
@@ -438,9 +469,9 @@ PurgeSend ==
                /\ purger' = [purger EXCEPT !.step = @ + 1, !.wait = TRUE]
           ELSE /\ purger' = [purger EXCEPT !.done = @ \cup {i}, !.step = 0]
                /\ UNCHANGED punches
-    /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, entry,
-                   tailPunch, memTail, writes, opens, reg, grace, rereg, fence, inc, budget,
-                   ghost, flags>>
+    /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, entry, tailPunch,
+                   memTail, writes, opens, opening, reg, grace, rereg, fence, inc, budget, ghost,
+                   flags>>
 
 \* A punch reaches its primary, which rejects it if it has seen a newer purger term.
 PunchLand(p) ==
@@ -452,7 +483,7 @@ PunchLand(p) ==
             /\ seen' = [seen EXCEPT ![p.i][p.c] = Max(@, p.term)]
     /\ purger' = IF purger.on /\ p.term = purger.term THEN [purger EXCEPT !.wait = FALSE] ELSE purger
     /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, entry, tailPunch, memTail, writes,
-                   opens, reg, grace, rereg, fence, inc, budget, ghost>>
+                   opens, opening, reg, grace, rereg, fence, inc, budget, ghost>>
 
 \* Through a long entry it records progress: the entry, checked to still hold what it read,
 \* is rewritten to start at the next chunk to punch, so a successor resumes there. A failed
@@ -470,7 +501,7 @@ RecordProgress ==
              ELSE /\ purger' = [purger EXCEPT !.on = FALSE]
                   /\ UNCHANGED entry
     /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, tailPunch,
-                   memTail, writes, punches, opens, reg, grace, rereg, fence, inc, budget,
+                   memTail, writes, punches, opens, opening, reg, grace, rereg, fence, inc, budget,
                    ghost, flags>>
 
 \* It removes the consumed run with one range removal, checking that each entry still holds
@@ -488,7 +519,7 @@ RemoveRun ==
                    ELSE entry
     /\ purger' = [purger EXCEPT !.on = FALSE]
     /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, tailPunch,
-                   memTail, writes, punches, opens, reg, grace, rereg, fence, inc, budget,
+                   memTail, writes, punches, opens, opening, reg, grace, rereg, fence, inc, budget,
                    ghost, flags>>
 
 \* The purger's shard leader crashes or loses its term; the next leader, in a newer term,
@@ -498,9 +529,9 @@ CrashPurger ==
     /\ purger.on /\ budget.c > 0
     /\ purger' = [purger EXCEPT !.on = FALSE, !.term = @ + 1, !.wait = FALSE]
     /\ budget' = [budget EXCEPT !.c = @ - 1]
-    /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, entry,
-                   tailPunch, memTail, writes, punches, opens, reg, grace, rereg, fence, inc,
-                   ghost, flags>>
+    /\ UNCHANGED <<size, allocEnd, aver, linked, orphan, gone, data, exists, seen, entry, tailPunch,
+                   memTail, writes, punches, opens, opening, reg, grace, rereg, fence, inc, ghost,
+                   flags>>
 
 -----------------------------------------------------------------------------
 
@@ -512,6 +543,7 @@ Next ==
     \/ \E i \in Inodes : TailPunch(i) \/ MemTailFlush(i) \/ Unlink(i) \/ FreeOrphan(i)
     \/ \E n \in Nodes : \/ FenceCommit(n) \/ FenceApply(n) \/ FenceAck(n)
                         \/ Reregister(n) \/ CrashDaemon(n) \/ FenceIncarnation(n)
+                        \/ \E i \in Inodes : Register(n, i) \/ Answer(n, i)
     \/ OwnerFailover \/ EndGrace
     \/ Scan \/ PurgeSend \/ RecordProgress \/ RemoveRun \/ CrashPurger
     \/ \E p \in punches : PunchLand(p)
@@ -538,6 +570,7 @@ TypeOK ==
     /\ data \in [Inodes -> [Bytes -> {0, 1}]]
     /\ fence \in [Nodes -> {"live", "committed", "applied", "acked"}]
     /\ inc \in [Nodes -> {"ok", "fencing"}]
+    /\ opening \in [Nodes -> [Inodes -> {"no", "sent", "answer", "changed"}]]
 
 \* An interrupted purge reruns safely: running an entry again after any prefix of its
 \* punches never fails, so it ends as a single run would.

@@ -94,6 +94,7 @@ sessions/neg-fact-no-head-check	open	Node actions and the audit log
 purge/neg-daemon-punch	open	Truncate
 purge/neg-extend-over-purge	open	Truncate
 purge/neg-grace-by-time	meta.graceByTime	TestPlantedRegistryBugsFreeAnOpenOrphan
+purge/neg-handle-on-first-answer	fsclient.handOutFirst	TestPlantedMountBugsFailTheMountsRun
 purge/neg-missing-punch-fails	open	Purger
 purge/neg-no-drain	open	Truncate
 purge/neg-no-incarnation-fence	open	Daemon restart by descriptor handoff
