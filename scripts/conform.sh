@@ -1,6 +1,6 @@
 #!/bin/bash
 # Spec conformance: runs the simulator's conformance traces and has TLC 1.7.4 check each is a behavior
-# of its model ("Spec conformance" in docs/test-scenarios.md): a trace named voters-* of models/voters/voters.tla,
+# of its model ("From spec to code" in docs/design.md): a trace named voters-* of models/voters/voters.tla,
 # any other of models/epoch/epoch.tla. Not part of lint; the conform workflow runs it nightly, and the gate
 # workflow for a change to a path in scripts/conform-paths.
 #   scripts/conform.sh                  every trace of TestConform*, or of the test RUN names, seeded

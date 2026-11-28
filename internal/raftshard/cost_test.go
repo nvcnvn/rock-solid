@@ -269,7 +269,7 @@ func TestCostPerGroup(t *testing.T) {
 
 // BenchmarkCostPerGroup is one pass of 1 ms at 60,000 proposals/s over 1,000 groups per node, and
 // BenchmarkCostPerGroup/idle one 10 ms tick of every replica with no proposals; it reports the
-// metrics docs/test-scenarios.md tracks under Raft cost per group.
+// metrics Raft cost per group's checklist item names.
 func BenchmarkCostPerGroup(b *testing.B) {
 	b.Run("load", func(b *testing.B) {
 		c := newCostNet(b)

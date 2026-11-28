@@ -31,8 +31,7 @@ type metaSet struct {
 	run      metamorphic.Options
 }
 
-// metaSets push one internal choice each to its extreme (docs/test-scenarios.md, Metamorphic
-// index tests); F, the memtable alone, comes first.
+// metaSets push one internal choice each to its extreme; F, the memtable alone, comes first.
 var metaSets = []metaSet{
 	{name: "F", piece: 1 << 20},
 	{name: "A", piece: 1 << 20, run: metamorphic.Options{FlushOps: true, Compact: metamorphic.CompactAtOps}},

@@ -19,7 +19,7 @@
   heap; I/O buffers as pool handles; hand-written encodings. Off the data path, write ordinary Go.
 - Tests feed events and assert on actions, with no mocks. Fuzz every decoder. Register new
   invariants with the simulator in the same change, and turn a seed that finds a bug into a
-  regression test before the fix. A component covers its section of `docs/test-scenarios.md`.
+  regression test before the fix. A component's tests cover its checklist item's test plan.
 - Hot-path benchmarks call `b.ReportAllocs` and must report zero allocations per operation.
 
 ## Protocol models
@@ -61,9 +61,14 @@
 
 ## Documents
 - `docs/design.md` is the design, including every decision and why it was made;
-  `docs/build-checklist.md` the reviewable pieces of phases 1 to 6; `docs/test-scenarios.md`
-  the scenarios their tests cover; `docs/glossary.md` explains the terms they use. The
-  `design-doc` skill says which change goes where.
+  `docs/build-checklist.md` the reviewable pieces of phases 1 to 6, each with its test plan by
+  test name; `docs/glossary.md` explains the terms they use. The `design-doc` skill says which
+  change goes where.
+- Docs say what the spec and code can't: decisions and why, with the alternatives rejected;
+  contracts in plain words; a map into specs and packages; operating facts (budgets, how to run,
+  open questions, tech debt). They don't restate spec actions or code steps, trace-mapping rules
+  (those live in `tools/tracedata` and `tools/votersdata`, with a rule's reason beside it), or
+  per-test evidence, state counts, timings and discrepancy tables (commit messages hold those).
 - Docs and code state current facts, arranged so they are easiest to read and understand.
   Git history keeps the past; don't preserve it in the text. A reversed decision is rewritten
   as the new decision.

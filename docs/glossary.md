@@ -418,9 +418,9 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Deterministic simulation testing (DST), seed.** Running a whole cluster (nodes, disks, network, clients) inside one process, driven by one random number generator. The simulator injects crashes, lost messages and disk faults. The same **seed** produces exactly the same run, so any bug it finds can be replayed. See [Testing strategy](design.md#testing-strategy).
 
-**Invariant.** A property that must hold at every step, such as "every acknowledged write is readable". Each simulated run keeps its invariants in a registry, the invariant checker, which checks them at the run's check points, after every step unless a component's tests set another cadence, and names the first one broken. See [test scenarios](test-scenarios.md#invariant-checker).
+**Invariant.** A property that must hold at every step, such as "every acknowledged write is readable". Each simulated run keeps its invariants in a registry, the invariant checker, which checks them at the run's check points, after every step unless a component's tests set another cadence, and names the first one broken. See [Testing strategy](design.md#testing-strategy).
 
-**Planted bug, planted variant.** A known bug switched on in the code under test, such as a rule a model's counterexample removes, to show that a test catches it: the test must fail with the bug planted and pass without it. A test that passes either way would miss the real bug too. See [test scenarios](test-scenarios.md#planted-bug-check).
+**Planted bug, planted variant.** A known bug switched on in the code under test, such as a rule a model's counterexample removes, to show that a test catches it: the test must fail with the bug planted and pass without it. A test that passes either way would miss the real bug too. See [Testing strategy](design.md#testing-strategy).
 
 **Fault injection, nemesis.** Deliberately causing failures (kills, partitions, slow disks) to see whether the system survives them. Jepsen calls the component that does this the nemesis.
 
@@ -430,7 +430,7 @@ The file's name, size and directory live elsewhere, in the **MetaStore**: a set 
 
 **Jepsen, Elle, Porcupine.** Tools that record what clients saw and check whether any valid order of operations could explain it; one that cannot reveals a consistency bug.
 
-**Maelstrom.** A Jepsen-based workbench that runs each node of a distributed system as a process speaking JSON on stdin and stdout, routes their messages through a simulated network it can partition, drives client workloads against them and checks the history. Its `lin-kv` workload checks that a key-value store is linearizable; the Raft shard runs under it through a small adapter ([Maelstrom harness](test-scenarios.md#maelstrom-harness)).
+**Maelstrom.** A Jepsen-based workbench that runs each node of a distributed system as a process speaking JSON on stdin and stdout, routes their messages through a simulated network it can partition, drives client workloads against them and checks the history. Its `lin-kv` workload checks that a key-value store is linearizable; the Raft shard runs under it through a small adapter (`scripts/maelstrom.sh`).
 
 **Fuzzing.** Feeding a function large numbers of generated inputs to find ones that crash it. Every decoder of on-disk or network bytes is fuzzed, because those bytes can be corrupt.
 

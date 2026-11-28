@@ -18,7 +18,7 @@
 ## Version pin: `go.etcd.io/raft/v3` v3.6.0
 - **Where:** the `require` in `go.mod`, which the `replace` below points at `third_party/raft`
 - **Why:** v3.7.0 generates its messages with `google.golang.org/protobuf`, a pointer per field: 16 allocations per message against v3.6.0's 2.7, 1.64× the CPU per proposal, and a `Storage` returning `[]*pb.Entry` that would allocate on every read of entries kept off the Go heap ([raft rounds spike](design.md#appendix-raft-rounds-spike)).
-- **Remove when:** an etcd-raft release keeps messages and entries without per-field allocations, at most 3 allocations per message in `TestCostPerGroup` ([Raft cost per group](test-scenarios.md#raft-cost-per-group)), which a tag update of the fork below runs with `go test ./...`. Moving to it is that tag update.
+- **Remove when:** an etcd-raft release keeps messages and entries without per-field allocations, at most 3 allocations per message in `TestCostPerGroup`, which a tag update of the fork below runs with `go test ./...`. Moving to it is that tag update.
 
 ## Workaround: etcd-raft fork in `third_party/raft`
 - **Where:** `third_party/raft`, a copy of etcd-raft v3.6.0 (commit `f35a0221`) that `replace go.etcd.io/raft/v3 => ./third_party/raft` in `go.mod` builds in its place; `scripts/raft-tests.sh`
@@ -26,9 +26,14 @@
   - `Config.Rand`, a `math/rand/v2` source a replica draws its election timeouts from; nil keeps `globalRand`. Tested in `seeded_rand_test.go`.
   - etcd-io/raft#397, upstream commits `9b9d6ee` (its test, `TestReadOnlyDuplicateRequest`) and `63903dd` (the fix).
 
-  Upstream main's single-voter ReadIndex fixes, #535 (`b8a3280`) and #536 (`1917bb4`, `3009105`), are left out: every group has three voters ([Replica placement and replacement](design.md#metadata-layer-metastore)), and carrying either means carrying all three commits.
+  Upstream main's single-voter ReadIndex fixes, #535 (`b8a3280`) and #536 (`1917bb4`, `3009105`), are left out: nothing calls `ReadIndex`, since reads go under leader leases ([Replica placement and replacement](design.md#metadata-layer-metastore)), so a group of one voter (below) never meets the bug, and carrying either means carrying all three commits.
 - **Moving to a new tag:** replace the copy with the new tag's tree in one commit, apply the patches still needed as one commit each, and bump the `require` in `go.mod` in the same change. The change merges only once `scripts/raft-tests.sh`, `go test ./...` and `scripts/seeds.sh` pass; a failing test blocks the move and is recorded by name.
 - **Remove when:** an etcd-raft release takes a configurable random source, includes #397 and meets the pin's bar of 3 allocations per message; then the `replace` and `third_party/raft` go.
+
+## Workaround: a control-plane group of one voter
+- **Where:** `scripts/fuse-review.sh`, which starts `rock-solid ctl` with one voter in `-voters`; the single-voter control planes of `cmd/rock-solid`'s process tests (`runCtl` in `node_linux_test.go`, `ctl_linux_test.go`, `admin_linux_test.go`) and of `internal/meta`'s host tests (`ctlhost_test.go`, `ctlcheckpoint_test.go`); `rock-solid ctl`, which takes a `-voters` list of any length
+- **Why:** milestone 1 runs on one machine, and a lone voter elects itself and commits on its own flush, so the mount review and the process tests need no other control-plane process. It has no failover, and its group loses its state with its one disk, since a lost control-plane voter is not yet replaced (**Replacing a lost control-plane voter** in the [build checklist](build-checklist.md)). A group of one voter, this one or a data group on a cluster of one metadata node (`meta.PlaceVoters` places one voter per node), is also what the etcd-raft fork above leaves exposed to upstream's single-voter `ReadIndex` bug (#535): a new single-voter leader answers a `ReadIndex` before it commits an entry of its term, so a read could miss a committed write. No code calls `ReadIndex` today.
+- **Remove when:** the review scripts and process tests run the control plane with three voters, and `rock-solid ctl` refuses fewer than three outside tests; or, to keep a one-voter control plane for development, the fork carries #535 and #536 before anything calls `ReadIndex`.
 
 ## Workaround: LSM runs and retained Raft entries on the Go heap
 - **Where:** the blocks of `run` in `internal/lsm/run.go`; the payload chunks and entry slots of `Storage` in `internal/raftshard/storage.go`
@@ -48,7 +53,7 @@
 ## Version pin: TLC 1.7.4
 - **Where:** `version` and `sha256` in `scripts/models.sh`, which downloads the TLC jar into `~/.cache/rock-solid` (`$XDG_CACHE_HOME` when set) and checks it against the checksum
 - **Why:** a TLC release can change what a configuration explores or how fast, so an unpinned checker would move every model's state counts and `ci` times without a spec change ([Testing strategy](design.md#testing-strategy)). The 1.8 line is a pre-release whose jar is rebuilt in place, so the models use no CommunityModules operator that needs it ([protocol models study](../studies/protocol-models/README.md)).
-- **Remove when:** never removed, only bumped. A bump reruns every `ci` and negative configuration (`scripts/models.sh ci`, which CI runs on the change), every `deep` one (the next nightly CI run, since the pin is part of each configuration's hash) and every `heavy` one (by hand on the M4 Pro), and records the new state counts in the [model-to-simulator map](test-scenarios.md#model-to-simulator-map).
+- **Remove when:** never removed, only bumped. A bump reruns every `ci` and negative configuration (`scripts/models.sh ci`, which CI runs on the change), every `deep` one (the next nightly CI run, since the pin is part of each configuration's hash) and every `heavy` one (by hand on the M4 Pro), and each must still fit its budget.
 
 ## Workaround: no simulation of `FairSpec` configurations
 - **Where:** the `sim` case that lists configurations in `scripts/models.sh`
@@ -57,8 +62,8 @@
 
 ## Version pin: Maelstrom v0.2.4
 - **Where:** `VERSION`, `SHA256` and `JAR_SHA256` in `scripts/maelstrom.sh`, which downloads the release into `~/.cache/rock-solid/maelstrom` (`$XDG_CACHE_HOME` when set), checks the archive against `SHA256` and the jar against `JAR_SHA256` on every run; the cache key in `.github/workflows/maelstrom.yml`
-- **Why:** a Maelstrom release can change the `lin-kv` workload, its nemesis or its checker, so an unpinned one could fail or pass the [Maelstrom harness](test-scenarios.md#maelstrom-harness) without a code change.
-- **Remove when:** never removed, only bumped. A bump runs the script three times and records its results in the harness's section.
+- **Why:** a Maelstrom release can change the `lin-kv` workload, its nemesis or its checker, so an unpinned one could fail or pass `scripts/maelstrom.sh` without a code change.
+- **Remove when:** never removed, only bumped. A bump runs the script three times, and all three must pass.
 
 ## Workaround: Maelstrom runs judged by their `results.edn`
 - **Where:** the verdict checks in `scripts/maelstrom.sh`
@@ -77,12 +82,12 @@
 
 ## Version pin: GitHub Actions and Java 17 in CI
 - **Where:** each `uses:` in `.github/workflows/`, pinned to a commit with its release in a trailing comment; `java-version` of `actions/setup-java` (Temurin 17) in `gate.yml`, `models.yml`, `conform.yml` and `maelstrom.yml`
-- **Why:** a release tag can be moved to other code, so a tag would let an action's owner change what runs with this repository's token; a commit cannot change. TLC's speed depends on the JVM, and the 600 s `ci` budget and the [model-to-simulator map](test-scenarios.md#model-to-simulator-map)'s wall times were measured on Java 17, which TLC 1.7.4 runs on.
-- **Remove when:** never removed, only bumped. Bump an action to a release at least two weeks old, and Java only with a `ci` run of every model whose times are compared with the map's.
+- **Why:** a release tag can be moved to other code, so a tag would let an action's owner change what runs with this repository's token; a commit cannot change. TLC's speed depends on the JVM, and the 600 s `ci` budget was measured on Java 17, which TLC 1.7.4 runs on.
+- **Remove when:** never removed, only bumped. Bump an action to a release at least two weeks old, and Java only with a `ci` run of every model that still fits the budget.
 
 ## Workaround: `go test -p 3` in CI
 - **Where:** the `test` job in `.github/workflows/gate.yml`
-- **Why:** `internal/chunkstore`'s tests peak near 4.3 GB resident ([invariant checker](test-scenarios.md#invariant-checker)), and Go's default runs as many packages at once as the runner has CPUs, 4, so three at a time keeps a runner's 16 GB clear of the heaviest packages running together.
+- **Why:** `internal/chunkstore`'s tests peak near 4.3 GB resident, and Go's default runs as many packages at once as the runner has CPUs, 4, so three at a time keeps a runner's 16 GB clear of the heaviest packages running together.
 - **Remove when:** the heaviest test package peaks under 3 GB, or the runner has 32 GB.
 
 ## Workaround: a primary's whole-chunk writes skip chunk slots

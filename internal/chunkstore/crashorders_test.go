@@ -10,8 +10,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/sim"
 )
 
-// The stale-header crash orders of the log segments study (docs/test-scenarios.md, Cleaner:
-// Freed segments and NextSeq), staged by the cleaner itself: a store on 16-block segments, a
+// The stale-header crash orders of the log segments study, staged by the cleaner itself: a store on 16-block segments, a
 // checkpoint whenever 40 blocks follow the manifest, overwrites of block 0 of 16 chunks, and a
 // pass over every chunk segment whose records all precede the replay point. Allocation takes the
 // lowest free segment, so the segments opened after the pass take the lower victims first, and

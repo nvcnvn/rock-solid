@@ -29,7 +29,7 @@ func keepEntry(down map[uint32][]uint32) *PGEntry {
 	return &PGEntry{Members: ms(43), Interval: 43, Activated: 41, Past: []PastInterval{{Interval: 41, Members: ms(41)}, {Interval: 42, Members: ms(42)}}}
 }
 
-// The keep rule's table in test-scenarios.md, one chunk: the version kept, whether it is unfound,
+// The keep rule's cases, one chunk: the version kept, whether it is unfound,
 // and each up member's missing list.
 func TestTheKeepRule(t *testing.T) {
 	ch := core.ChunkID{Volume: 1, Inode: 2}

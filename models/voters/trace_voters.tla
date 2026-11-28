@@ -3,8 +3,8 @@
 \* internal/raftshard, as tools/votersdata writes it into module trace_data, is a behavior of
 \* voters.tla. Each line names the spec action that takes it; what the record observed is
 \* checked against the state the action leaves. No protocol rule lives here. A record the spec
-\* compresses into another action's step is a stutter: see "Spec conformance" in
-\* docs/test-scenarios.md. Variables no line observes stay free.
+\* compresses into another action's step is a stutter: see "From spec to code" in
+\* docs/design.md's Testing strategy. Variables no line observes stay free.
 \*
 \* Replicate hands the follower the leader's whole log and its commit index, or its log up to
 \* that index and the commit index before its latest advance, as it takes the append, where the

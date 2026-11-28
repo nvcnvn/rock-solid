@@ -4,8 +4,8 @@
 \* Each line names the spec action that takes it; what the record observed is
 \* checked against the state the action leaves. No protocol rule lives here.
 \* A record the spec compresses into another action's step is a stutter, whose
-\* guard says which step holds it: see "Spec conformance" in
-\* docs/test-scenarios.md. Variables no line observes stay free.
+\* guard says which step holds it: see "From spec to code" in
+\* docs/design.md's Testing strategy. Variables no line observes stay free.
 \*
 \* TraceIncomplete is an invariant whose violation is the pass: the line counter
 \* passed the end. A run that finishes with no violation failed, and its search

@@ -72,7 +72,7 @@ func stepWorkers(f *fakeLog, from int) []int {
 	return slices.DeleteFunc(slices.Clone(f.workers[from:]), func(w int) bool { return w == 0 })
 }
 
-// Four runs merged in steps of two pieces (docs/test-scenarios.md, Merge steps): after the first
+// Four runs merged in steps of two pieces: after the first
 // step, which installs while a flush writes, the inputs hold only keys above the bound, a range
 // removal across it clipped, the output the keys at or below it, a view opened before still
 // reads the four runs, and the merge's copies of the input blocks below the bound are gone. That

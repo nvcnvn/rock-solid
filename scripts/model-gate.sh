@@ -42,7 +42,7 @@ if [ "${1:-}" = for ]; then
 	done < <(rows)
 	if [ "$found" = 0 ]; then
 		echo "No plant is in $file, which does not mean no rule applies: $(rows | grep -c "${tab}open$tab") rules have no plant yet."
-		echo "Find the protocol in docs/test-scenarios.md, and its open rows in $map."
+		echo "Find the protocol's open rows in $map, and its checklist item in docs/build-checklist.md."
 	fi
 	exit 0
 fi

@@ -188,7 +188,7 @@ func TestAbsentFreezeE3(t *testing.T) {
 	}
 }
 
-// The scenarios of the absent freeze section of docs/test-scenarios.md.
+// The absent freeze's cases, in order.
 func TestAbsentFreezeScenarios(t *testing.T) {
 	x := newIndex(t)
 	c := chunk(9)

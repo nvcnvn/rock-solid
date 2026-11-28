@@ -2,8 +2,8 @@
 # and the settings a case changes: trigger, ratio (%), size-amp (%), buffer-mib, limit (0 auto),
 # max-mib (the most a run may hold). Defaults: trigger 4, ratio 1, size-amp 200, buffer-mib 1,
 # limit 0. Each pick prints the rule that fires and the runs [i, j) it merges, then picks again
-# with them held. The cases of docs/test-scenarios.md come first, then RocksDB's universal cases
-# that exercise the three rules.
+# with them held. The design's cases come first, then RocksDB's universal cases that exercise
+# the three rules.
 
 # three runs
 pick mib=(1, 1, 1)

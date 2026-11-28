@@ -96,8 +96,7 @@ func TestKeyOrder(t *testing.T) {
 	}
 }
 
-// The scenarios of the chunk index section of docs/test-scenarios.md, in order: apply, trim and
-// split, freeze, rebuild, cleaner moves.
+// The chunk index's cases, in order: apply, trim and split, freeze, rebuild, cleaner moves.
 func TestIndexScenarios(t *testing.T) {
 	x := newIndex(t)
 	var log []*disklog.Event

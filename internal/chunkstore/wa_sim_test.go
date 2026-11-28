@@ -366,8 +366,7 @@ const waIndex = 0.0125
 // each, run alone: go test -run 'TestCleanerWriteAmplification/80'. The chunk data's write
 // amplification, every block the disk was asked to write outside the metadata stream over the
 // user blocks acknowledged, lands within 5% of the cleaner streams spike's run under the store's
-// conditions (spikes/cleaner-streams, test-scenarios.md, "Cleaner write amplification in
-// simulation"): 1,024 segments of 4 MiB, or at 90% 2,048 of 8 MiB, whose net-gain guard passes
+// conditions (spikes/cleaner-streams): 1,024 segments of 4 MiB, or at 90% 2,048 of 8 MiB, whose net-gain guard passes
 // victims up to 92.6% live in records of 192 KiB, where 4 MiB segments pass at most 89.35% and
 // run out of victims; 16 segments free, the reserve and the admission point write admission
 // holds them at; and user records of as many writes as the store's rounds carried under

@@ -2882,8 +2882,7 @@ Ed(p, mem, marks) == [k |-> "edit", p |-> p, mem |-> mem, marks |-> marks]
 Plan(m, w, f) == [free |-> FALSE, m |-> m, w |-> w, f |-> f, t |-> 600, k |-> 1, s |-> Spare]
 WithFlags(S, f) == {[x EXCEPT !.f = @ \cup f] : x \in S}
 
-\* The membership faults of test-scenarios.md "Epoch change model" on 3 nodes,
-\* each with the writes whose rules it tests.
+\* The membership faults on 3 nodes, each with the writes whose rules it tests.
 \* A member removed and added back; PG 2 is below min_live in between.
 RemovedAndBack == Plan(<<Mark(3, "down"), Mark(3, "up")>>, Partial, {})
 \* PG 1's primary down and back: a member live in the last activated interval
