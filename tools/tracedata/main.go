@@ -785,7 +785,10 @@ func (g *gen) run(recs []trace.Record) {
 			g.past[k] = append(g.past[k], fmt.Sprintf(`k |-> "pastrefused", n |-> %d, c |-> %d, v |-> %s`, n, g.chunk(r.Fields[0]), ver(r.Fields[1])))
 		case trace.OutFail:
 			g.heard(func(c uint64, _ refusal) bool { return c == r.Fields[0] })
-			g.heardPast(r.Fields[0], r.Fields[1])
+			// A primary that activated a later interval than the version's fails a recovery write logged under it, not its client.
+			if f := g.chunkField(r.Fields[0]); g.primary[f] != n || g.activated[f] <= r.Fields[1]>>32 {
+				g.heardPast(r.Fields[0], r.Fields[1])
+			}
 		case trace.OutLogged:
 			kind := "logged"
 			if slices.Contains(g.ownOpen[n], [2]uint64{r.Fields[0], r.Fields[1]}) {

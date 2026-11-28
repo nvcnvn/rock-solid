@@ -124,6 +124,15 @@ func TestRunWritesAPastRefusalAtTheFailOfItsVersion(t *testing.T) {
 	}
 }
 
+func TestRunWritesNoPastRefusalAtAFailOfALaterInterval(t *testing.T) {
+	const pg, c, v = 7, 9, 1<<32 | 4
+	g := runOf(pg, rec(0, trace.OutSend, 1, c, pg, 4096, 1), rec(2, trace.OutPastRefused, c, v),
+		rec(0, trace.OutActivate, pg, 2), rec(0, trace.OutFail, c, v))
+	if slices.ContainsFunc(g.lines, func(l string) bool { return strings.Contains(l, `"pastrefused"`) }) {
+		t.Errorf("lines %q", g.lines)
+	}
+}
+
 func TestRunMovesAMergedSendAfterTheOrderItMergedWith(t *testing.T) {
 	const pg, c = 7, 9
 	send := rec(0, trace.OutSend, 1, c, pg, 4096, 1)
