@@ -38,10 +38,11 @@ env:
   GATE_PLANT_COUNT: "10"
   # The SYS-2 runs a trace about half as fast as the M4 Pro, and a trace that passes in 1,200 s there
   # gets 40 minutes here: seed 391795 passes in 549 s on the M4 Pro and gave no verdict in 20 minutes. A
-  # sweep of 1,000 traces takes about 80 minutes. Its runner has 8 threads and 20 GB: 6 traces of 2 GB
-  # heap at once.
+  # sweep of 1,000 traces takes about 80 minutes at 6 traces at once. Its two runners share one slice
+  # of 8 threads and 20 GB, and a gate's jobs can run beside a nightly's, so each runs 4 traces of 2 GB
+  # heap: at 6 each, a gate's traces beside a nightly ran 4.5 times slower and missed this limit.
   TLC_SECONDS: "2400"
-  JOBS: "6"
+  JOBS: "4"
   # 320 minutes, inside the jobs' timeout of 340: a run slowed by traces that give no verdict still
   # prints every line before the job ends.
   DEADLINE: "19200"
