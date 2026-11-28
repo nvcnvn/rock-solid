@@ -1,6 +1,7 @@
 package fsclient
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -56,9 +57,12 @@ type Mount struct {
 	routs   stack[meta.RouterOutput]
 	couts   stack[chunkstore.ClientOutput]
 
-	// reclaims are the re-registrations new owners asked for, and key and end a re-registration's bounds.
+	// reclaims are the re-registrations new owners asked for, and key and end a re-registration's
+	// bounds. parked are releases held until the re-registration of their file in flight is answered,
+	// so that none reaches the owner ahead of it.
 	reclaims []reclaim
 	key, end []byte
+	parked   []*sentRead
 }
 
 // sentRead is a Read in flight, kept by the mount since the router keeps a pointer to it: the
@@ -70,12 +74,14 @@ type sentRead struct {
 
 // reclaim is a new owner's ask that the mount re-register its opens of group: the newest term
 // asked, whether an ask came since the re-registration in flight started and the term it started
-// for, the inodes it has yet to re-register, and whether a step of it is in flight. An owner asks
-// until it hears the end, which counts only for the term the re-registration started for.
+// for, the inodes it has yet to re-register, whether a step of it is in flight, and the key of
+// the file whose re-registration is. An owner asks until it hears the end, which counts only for
+// the term the re-registration started for.
 type reclaim struct {
 	group, term, at uint64
 	asked, busy     bool
 	inos            []uint64
+	reopen          []byte
 }
 
 // stack hands each nested call an output of its own, as answers handed out inline call back in.
@@ -114,8 +120,8 @@ func (g *Mount) WantsTable() bool { return g.table.Epoch == 0 || g.fetch > g.tab
 // SetSession takes the node's session, starting the machine on the first and a chunk client for
 // each new one: a fence starts a new session, whose incarnation is 1. The old session's chunk I/O
 // in flight fails with EIO, and the new client numbers its requests above the old one's, whose late
-// answers arrive on the same connections. It comes first in a pass, before anything that could
-// make the old client send.
+// answers arrive on the same connections. Releases held behind the old session's re-registrations
+// go at once. It comes first in a pass, before anything that could make the old client send.
 func (g *Mount) SetSession(ctx *core.Context, session uint64, out *MountOutput) {
 	if session == 0 || session == g.session {
 		return
@@ -140,6 +146,11 @@ func (g *Mount) SetSession(ctx *core.Context, session uint64, out *MountOutput) 
 	}
 	if old != nil && !g.plant.noAbandon {
 		g.chunked(ctx, func(o *chunkstore.ClientOutput) { old.Abandon(ctx, o) })
+	}
+	for len(g.parked) > 0 {
+		h := g.parked[len(g.parked)-1]
+		g.parked = g.parked[:len(g.parked)-1]
+		g.send(ctx, h, false)
 	}
 }
 
@@ -367,6 +378,10 @@ func (g *Mount) read(ctx *core.Context, rd Read) {
 	if rd.End == nil {
 		h.rd.End = nil
 	}
+	if rd.Reg == meta.RegRelease && slices.ContainsFunc(g.reclaims, func(r reclaim) bool { return r.busy && bytes.Equal(r.reopen, rd.Start) }) {
+		g.parked = append(g.parked, h)
+		return
+	}
 	g.send(ctx, h, false)
 }
 
@@ -418,10 +433,15 @@ func (g *Mount) restart(ctx *core.Context, r *reclaim) {
 // to the start of r's group.
 func (g *Mount) step(ctx *core.Context, r *reclaim) {
 	rd := meta.Read{Limit: 1, Session: g.session, Mount: g.cfg.Mount}
+	for n := len(r.inos); n > 0 && !slices.Contains(g.m.held, r.inos[n-1]); n-- {
+		r.inos = r.inos[:n-1]
+	}
+	r.reopen = r.reopen[:0]
 	if n := len(r.inos); n > 0 {
 		g.key = g.m.key(g.key[:0], r.inos[n-1], meta.InodeAttr, nil)
 		r.inos = r.inos[:n-1]
 		rd.Reg = meta.RegReopen
+		r.reopen = append(r.reopen, g.key...)
 	} else if k := slices.IndexFunc(g.smap.Groups, func(gr meta.Group) bool { return gr.ID == r.group }); k >= 0 {
 		g.key = append(g.key[:0], g.smap.Groups[k].Start...)
 		rd.Reg, rd.Term = meta.RegReclaimed, r.at
@@ -453,6 +473,7 @@ func (g *Mount) reclaimed(ctx *core.Context, group uint64, reg byte, err error) 
 	}
 	r := &g.reclaims[i]
 	r.busy = false
+	g.unpark(ctx, r.reopen)
 	switch {
 	case err != nil:
 		g.drop(r)
@@ -462,6 +483,22 @@ func (g *Mount) reclaimed(ctx *core.Context, group uint64, reg byte, err error) 
 		g.restart(ctx, r)
 	default:
 		g.drop(r)
+	}
+}
+
+// unpark sends the releases held behind the re-registration of key.
+func (g *Mount) unpark(ctx *core.Context, key []byte) {
+	if len(key) == 0 {
+		return
+	}
+	for i := 0; i < len(g.parked); {
+		h := g.parked[i]
+		if !bytes.Equal(h.rd.Start, key) {
+			i++
+			continue
+		}
+		g.parked = slices.Delete(g.parked, i, i+1)
+		g.send(ctx, h, false)
 	}
 }
 

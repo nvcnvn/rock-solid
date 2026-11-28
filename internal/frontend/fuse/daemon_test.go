@@ -309,3 +309,90 @@ func TestTheDaemonReregistersItsOpensWhenANewOwnerAsks(t *testing.T) {
 		t.Fatalf("after the end the daemon asked for %+v", acts)
 	}
 }
+
+// A file whose last close comes during a new owner's re-registration stays released there: the
+// mount skips a file closed before its turn, and holds the release of one whose re-registration is
+// in flight until that is answered, so neither registers the file after its release.
+func TestAFileClosedDuringAReregistrationIsNotRegisteredAfter(t *testing.T) {
+	k := newFakeKernel(t)
+	var fhs [2]uint64
+	for i, ino := range []uint64{meta.RootInode, 9} {
+		h, body := k.call(&fuseproto.Request{Opcode: fuseproto.OpOpen, Unique: uint64(2 + 2*i), NodeID: ino})
+		o, err := fuseproto.DecodeOpen(body)
+		if h.Error != 0 || err != nil {
+			t.Fatalf("OPEN of %d answered %+v, %v", ino, h, err)
+		}
+		fhs[i] = o.Fh
+	}
+	type sentRead struct {
+		token uint64
+		meta.Read
+	}
+	sent := func(acts []core.Action) []sentRead {
+		var rds []sentRead
+		for _, a := range acts {
+			if a.Kind != core.ActNetSend {
+				t.Fatalf("the daemon asked for %+v", a)
+			}
+			if err := meta.DecodeRead(k.ctx.Pool, &a.Msg, &k.rd); err != nil {
+				t.Fatal(err)
+			}
+			_, _, token, _ := meta.Peek(&a.Msg)
+			rd := k.rd
+			rd.Start = slices.Clone(rd.Start)
+			rds = append(rds, sentRead{token, rd})
+		}
+		return rds
+	}
+	answer := func(rd sentRead) []sentRead {
+		k.kv[0] = meta.KV{Key: rd.Start, Value: k.root}
+		k.ans = meta.ReadAnswer{Token: rd.token, KVs: k.kv[:]}
+		k.ev = core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: 2, Loop: 1}}
+		if err := meta.EncodeReadAnswer(k.ctx.Pool, 2, &k.ans, &k.ev.Msg); err != nil {
+			t.Fatal(err)
+		}
+		return sent(k.d.OnEvent(&k.ctx, &k.ev, nil))
+	}
+	release := func(i int) []sentRead {
+		k.req = fuseproto.AppendRequest(k.req[:0], &fuseproto.Request{Opcode: fuseproto.OpRelease, Unique: uint64(10 + 2*i), NodeID: []uint64{meta.RootInode, 9}[i], Fh: fhs[i]})
+		if _, err := unix.Write(k.fd, k.req); err != nil {
+			t.Fatal(err)
+		}
+		acts, err := k.d.Serve(&k.ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sent(acts)
+	}
+	key := func(ino uint64) []byte {
+		b, err := meta.AppendKey(nil, &meta.Key{Space: meta.SpaceFS, Volume: 1, Inode: ino, Tag: meta.InodeAttr})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	k.ev = core.Event{Kind: core.EvNetRecv, Peer: core.NodeID{Node: 2, Loop: 1}}
+	if err := meta.EncodeReclaim(k.ctx.Pool, 2, 7, 5, &k.ev.Msg); err != nil {
+		t.Fatal(err)
+	}
+	rds := sent(k.d.OnEvent(&k.ctx, &k.ev, nil))
+	if len(rds) != 1 || rds[0].Reg != meta.RegReopen || !bytes.Equal(rds[0].Start, key(9)) {
+		t.Fatalf("the ask sent %+v, want the re-registration of 9", rds)
+	}
+	reopen := rds[0]
+	if rds := release(1); len(rds) != 0 {
+		t.Fatalf("the last close of 9 sent %+v while its re-registration was in flight", rds)
+	}
+	rds = release(0)
+	if len(rds) != 1 || rds[0].Reg != meta.RegRelease || !bytes.Equal(rds[0].Start, key(meta.RootInode)) {
+		t.Fatalf("the last close of the root sent %+v", rds)
+	}
+	if rds := answer(rds[0]); len(rds) != 0 {
+		t.Fatalf("the root's release answered sent %+v", rds)
+	}
+	rds = answer(reopen)
+	if len(rds) != 2 || !slices.ContainsFunc(rds, func(rd sentRead) bool { return rd.Reg == meta.RegRelease && bytes.Equal(rd.Start, key(9)) }) ||
+		!slices.ContainsFunc(rds, func(rd sentRead) bool { return rd.Reg == meta.RegReclaimed && rd.Term == 5 }) {
+		t.Fatalf("the re-registration of 9 answered sent %+v, want 9's release and the end", rds)
+	}
+}
