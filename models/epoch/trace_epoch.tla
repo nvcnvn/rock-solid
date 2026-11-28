@@ -13,7 +13,7 @@
 
 EXTENDS epoch, trace_data
 
-VARIABLES line, healed, stayed
+VARIABLES line, healed, stayed, rdropped
 
 \* healed: the [c, v] a recovered line took Recover for. A primary records its
 \* own copy of a recovery write, on a disk that lists nothing, so that line is a
@@ -50,9 +50,18 @@ KeptBelowTorn(r) ==
         i == Max(at)
     IN at # {} /\ Trace[i + 1].k = "mayfail" /\ Trace[i + 1].n = Trace[i].n => i + 1 \in stayed
 
+\* On a chunk the disk lists, the store's replay may drop fewer of the versions
+\* it logged than Held does: ReplayDrops gates every version past the disk's
+\* persisted decision, where the store holds back only those past its replay
+\* point, so the reply may name a newer version that a replay dropped while
+\* the running store had it mapped (rdropped, kept until a recovery or format
+\* clears drp). A version the store itself dropped stays compared.
 ReplyMatches(l) ==
     \A r \in l.rep :
-        /\ Reply(r.d, r.c).whole = r.whole
+        /\ \/ Reply(r.d, r.c).whole = r.whole
+           \/ /\ Reply(r.d, r.c).list # NoMiss
+              /\ r.whole > Reply(r.d, r.c).whole
+              /\ [c |-> r.c, v |-> r.whole] \in rdropped[r.d] \cap drp[r.d]
         /\ \/ r.logged = r.whole
            \/ /\ r.logged > r.whole
               /\ \E x \in vers : x.c = r.c /\ x.v = r.logged
@@ -307,7 +316,7 @@ Line(l) ==
        /\ \A d \in UpIn(l.p, l.iv) : persIv[d][l.p] = l.iv
        /\ Activate(l.n, l.p)
 
-TraceInit == Init /\ line = 1 /\ healed = {} /\ stayed = {}
+TraceInit == Init /\ line = 1 /\ healed = {} /\ stayed = {} /\ rdropped = [d \in Disk |-> {}]
 
 TraceNext ==
     /\ line <= Len(Trace)
@@ -320,8 +329,11 @@ TraceNext ==
     /\ stayed' = IF Trace[line].k = "mayfail" /\ Trace[line].v \in dlog'[ddisk[Trace[line].n]][Trace[line].c]
                  THEN stayed \cup {line}
                  ELSE stayed
+    /\ rdropped' = IF Trace[line].k = "restart"
+                   THEN [rdropped EXCEPT ![ddisk[Trace[line].n]] = @ \cup rdrp[ddisk[Trace[line].n]]]
+                   ELSE rdropped
 
-TraceSpec == TraceInit /\ [][TraceNext]_<<vars, line, healed, stayed>>
+TraceSpec == TraceInit /\ [][TraceNext]_<<vars, line, healed, stayed, rdropped>>
 
 TraceIncomplete == line <= Len(Trace)
 
