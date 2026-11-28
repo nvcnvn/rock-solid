@@ -680,7 +680,7 @@ func (sv *Server) ServeRead(ctx *core.Context, ev *core.Event, s *Shard, acts []
 			sv.ra.KVs, sv.ra.More = sv.scan.KVs, sv.scan.More
 		}
 		if err == nil && sv.rd.Reg != RegNone {
-			err = sv.reg.register(group, &sv.rd, sv.scan.KVs)
+			err = sv.reg.register(group, &sv.rd, sv.scan.KVs, !s.lost() || sv.reg.plant.newOwnerFrees)
 		}
 	}
 	if ok {

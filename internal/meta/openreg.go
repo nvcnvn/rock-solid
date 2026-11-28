@@ -7,6 +7,7 @@ import (
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
 	"github.com/nvcnvn/rock-solid/internal/core"
+	"go.etcd.io/raft/v3"
 )
 
 // The open registry is the inode owner's of docs/design.md's "Inode owner" and models/purge's
@@ -43,13 +44,15 @@ type openRow struct {
 }
 
 // registry is who has each file open: a row per inode and mount, in no order, each row's index by
-// its key and the rows of each inode; the orphans to look at once their last opener left; the free
-// Txns proposed, by token; and the newest session table.
+// its key and the rows of each inode and of each group; the orphans to look at once their last
+// opener left, and the set of them; the free Txns proposed, by token; and the newest session table.
 type registry struct {
 	rows    []openRow
 	index   map[openKey]int
 	opens   map[inodeAt]int
+	groups  map[uint64]int
 	frees   []inodeAt
+	listed  map[inodeAt]struct{}
 	spare   []inodeAt
 	freeing map[uint64]inodeAt
 	sess    chunkstore.SessionTable
@@ -69,7 +72,7 @@ type regPlants struct {
 }
 
 func newRegistry() registry {
-	return registry{index: map[openKey]int{}, opens: map[inodeAt]int{}, freeing: map[uint64]inodeAt{}}
+	return registry{index: map[openKey]int{}, opens: map[inodeAt]int{}, groups: map[uint64]int{}, listed: map[inodeAt]struct{}{}, freeing: map[uint64]inodeAt{}}
 }
 
 // open reports whether any mount has at open.
@@ -79,6 +82,7 @@ func (g *registry) insert(r openRow) {
 	g.index[r.openKey] = len(g.rows)
 	g.rows = append(g.rows, r)
 	g.opens[r.at]++
+	g.groups[r.at.group]++
 }
 
 // remove deletes row i, moving the last row into its place.
@@ -97,6 +101,29 @@ func (g *registry) closed(at inodeAt) {
 	if g.opens[at]--; g.opens[at] <= 0 {
 		delete(g.opens, at)
 	}
+	if g.groups[at.group]--; g.groups[at.group] <= 0 {
+		delete(g.groups, at.group)
+	}
+}
+
+// retain keeps the rows keep reports true for and closes the others, looking at an inode it
+// leaves no open of when look is set.
+func (g *registry) retain(keep func(*openRow) bool, look bool) {
+	j := 0
+	for _, r := range g.rows {
+		if !keep(&r) {
+			delete(g.index, r.openKey)
+			g.closed(r.at)
+			if look && !g.open(r.at) {
+				g.look(r.at)
+			}
+			continue
+		}
+		g.rows[j] = r
+		g.index[r.openKey] = j
+		j++
+	}
+	g.rows = g.rows[:j]
 }
 
 // holds reports whether session id may register an open: before any table, while live, and for
@@ -107,16 +134,17 @@ func (g *registry) holds(id uint64) bool {
 }
 
 func (g *registry) look(at inodeAt) {
-	if !slices.Contains(g.frees, at) {
+	if _, ok := g.listed[at]; !ok {
+		g.listed[at] = struct{}{}
 		g.frees = append(g.frees, at)
 	}
 }
 
 // register serves rd, an open or a release of the file whose attributes Start names, to which
-// kvs, from the leader's state, answer: an open registers its mount while the file has a link,
-// or is refused ErrFenced from a session that may not register, and a release deregisters it,
-// leaving an orphan no mount has open to be freed.
-func (g *registry) register(group uint64, rd *Read, kvs []KV) error {
+// kvs, from the leader's state, answer: an open registers its mount while the file has a link
+// and keep is set, or is refused ErrFenced from a session that may not register, and a release
+// deregisters it, leaving an orphan no mount has open to be freed.
+func (g *registry) register(group uint64, rd *Read, kvs []KV, keep bool) error {
 	var k Key
 	if DecodeKey(rd.Start, &k) != nil || k.Space != SpaceFS || k.Tag != InodeAttr {
 		return ErrMalformed
@@ -128,7 +156,7 @@ func (g *registry) register(group uint64, rd *Read, kvs []KV) error {
 	switch {
 	case rd.Reg == RegOpen && !g.holds(rd.Session):
 		return ErrFenced
-	case rd.Reg == RegOpen && !there && found && a.Nlink > 0:
+	case rd.Reg == RegOpen && !there && found && a.Nlink > 0 && keep:
 		g.insert(openRow{openKey: key})
 	case rd.Reg == RegRelease && there:
 		g.remove(i)
@@ -175,24 +203,14 @@ func (sv *Server) SetSessions(t *chunkstore.SessionTable) {
 	g.sess.Version, g.sess.Acked, g.sess.Next = t.Version, t.Acked, t.Next
 	g.sess.Live = append(g.sess.Live[:0], t.Live...)
 	g.known = true
-	j := 0
-	for _, r := range g.rows {
+	g.retain(func(r *openRow) bool {
 		switch {
 		case g.holds(r.who.session):
 		case r.fenced == 0:
 			r.fenced = t.Version
 		}
-		if r.fenced != 0 && (r.fenced <= t.Acked || g.plant.releaseOnCommit) {
-			delete(g.index, r.openKey)
-			g.closed(r.at)
-			g.look(r.at)
-			continue
-		}
-		g.rows[j] = r
-		g.index[r.openKey] = j
-		j++
-	}
-	g.rows = g.rows[:j]
+		return r.fenced == 0 || r.fenced > t.Acked && !g.plant.releaseOnCommit
+	}, true)
 }
 
 // Free proposes on s, as Serve does into out, a Txn per orphan of its group that no mount has
@@ -204,7 +222,7 @@ func (sv *Server) Free(ctx *core.Context, s *Shard, out *Output) {
 
 // FreeRound is Free for a, a replica on the round driver, or nil when the node hosts none.
 func (sv *Server) FreeRound(ctx *core.Context, a *RoundShard, acts []core.Action) []core.Action {
-	if a == nil || a.Err() != nil || len(sv.reg.frees) == 0 {
+	if a == nil || a.Err() != nil || len(sv.reg.frees) == 0 && sv.reg.groups[a.Shard().group] == 0 {
 		return acts
 	}
 	sv.free(a.Shard(), func(t *Txn, token uint64) (err error) {
@@ -215,11 +233,15 @@ func (sv *Server) FreeRound(ctx *core.Context, a *RoundShard, acts []core.Action
 }
 
 // free proposes the frees of s's group, keeping to look at again an orphan whose proposal was
-// refused. A replica that is not its group's sole leader since boot frees none, as its registry
-// may miss the opens an earlier leader registered, and drops them: the orphans stay listed until
-// Owner failover and grace period re-registers the opens and scans the orphan list.
+// refused for a reason that may pass. A replica that is not its group's sole leader since boot
+// frees none, as its registry may miss the opens an earlier leader registered, and drops them:
+// the orphans stay listed until Owner failover and grace period re-registers the opens and scans
+// the orphan list. One that can no longer become sole drops the group's opens too.
 func (sv *Server) free(s *Shard, submit func(*Txn, uint64) error) {
 	g := &sv.reg
+	if g.groups[s.group] > 0 && s.lost() && !g.plant.newOwnerFrees {
+		g.retain(func(r *openRow) bool { return r.at.group != s.group }, false)
+	}
 	todo := g.frees
 	g.frees = g.spare[:0]
 	sole := s.sole() || g.plant.newOwnerFrees
@@ -228,18 +250,27 @@ func (sv *Server) free(s *Shard, submit func(*Txn, uint64) error) {
 			g.frees = append(g.frees, at)
 			continue
 		}
+		delete(g.listed, at)
 		if !sole || !g.freeTxn(s, at) {
 			continue
 		}
 		sv.next++
 		token := ServerToken | sv.next
-		if submit(&g.fs.Txn, token) != nil {
-			g.frees = append(g.frees, at)
+		if err := submit(&g.fs.Txn, token); err != nil {
+			if passing(err) {
+				g.look(at)
+			}
 			continue
 		}
 		g.freeing[token] = at
 	}
 	g.spare = todo[:0]
+}
+
+// passing reports a refusal of a proposal that may pass: an overloaded replica, or a leader change.
+func passing(err error) bool {
+	var nl NotLeader
+	return errors.Is(err, ErrOverloaded) || errors.Is(err, raft.ErrProposalDropped) || errors.As(err, &nl)
 }
 
 // freeTxn builds in g.fs the Txn that frees at, from s's state, unless a mount has it open or it

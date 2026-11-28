@@ -1,7 +1,9 @@
 package meta
 
 import (
+	"math"
 	"testing"
+	"time"
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
 	"github.com/nvcnvn/rock-solid/internal/core"
@@ -106,6 +108,13 @@ func (o *owner) ask(reg byte, session uint64) ReadAnswer {
 		o.t.Fatal("the open or release was not answered")
 	}
 	return ra
+}
+
+// serve serves session's open or release of the file from mount 1 with no free after it.
+func (o *owner) serve(reg byte, session uint64) {
+	rd := Read{Start: o.attrKey(regFile), End: append(o.attrKey(regFile), 0), Limit: 1, Reg: reg, Session: session, Mount: 1}
+	ev := o.msg(func(pool core.BufPool, m *core.Msg) error { return EncodeRead(pool, o.c.n[o.l].s.group, 7, &rd, m) })
+	o.c.call(o.l, func(ctx *core.Context, out *Output) { o.sv.ServeRead(ctx, &ev, o.c.n[o.l].s, nil) })
 }
 
 // reg is ask, failing on an error, and returns the links it was answered.
@@ -265,9 +274,7 @@ func TestAFreeRefusedIsTriedAgain(t *testing.T) {
 	o := newOwner(t, regPlants{})
 	o.reg(RegOpen, 1)
 	o.unlink()
-	rd := Read{Start: o.attrKey(regFile), End: append(o.attrKey(regFile), 0), Limit: 1, Reg: RegRelease, Session: 1, Mount: 1}
-	ev := o.msg(func(pool core.BufPool, m *core.Msg) error { return EncodeRead(pool, o.c.n[o.l].s.group, 7, &rd, m) })
-	o.c.call(o.l, func(ctx *core.Context, out *Output) { o.sv.ServeRead(ctx, &ev, o.c.n[o.l].s, nil) })
+	o.serve(RegRelease, 1)
 	o.sv.free(o.c.n[o.l].s, func(*Txn, uint64) error { return ErrOverloaded })
 	if len(o.sv.reg.frees) != 1 || len(o.sv.reg.freeing) != 0 {
 		t.Fatalf("after a refused free, %d orphans to look at and %d frees in flight", len(o.sv.reg.frees), len(o.sv.reg.freeing))
@@ -275,5 +282,70 @@ func TestAFreeRefusedIsTriedAgain(t *testing.T) {
 	o.step(func(*core.Context, *Output) {})
 	if !o.freed() {
 		t.Fatal("the orphan was not freed once the replica took its free")
+	}
+}
+
+// An orphan whose free the replica refuses for good, as a halted replica does, is not looked at
+// again.
+func TestAFreeRefusedForGoodIsDropped(t *testing.T) {
+	o := newOwner(t, regPlants{})
+	o.reg(RegOpen, 1)
+	o.unlink()
+	o.serve(RegRelease, 1)
+	o.sv.free(o.c.n[o.l].s, func(*Txn, uint64) error { return ErrHalted })
+	if len(o.sv.reg.frees) != 0 || len(o.sv.reg.listed) != 0 {
+		t.Fatalf("after a lasting refusal, %d orphans to look at", len(o.sv.reg.frees))
+	}
+}
+
+// A leader that loses its group drops the opens it registered, which a later leader serves, at
+// its next free; it registers none while it cannot become sole again.
+func TestAnExLeaderDropsItsOpens(t *testing.T) {
+	o := newOwner(t, regPlants{})
+	o.reg(RegOpen, 1)
+	old := o.l
+	o.c.cut[old] = true
+	o.c.renewLeases()
+	o.l = o.c.elect()
+	o.c.heartbeat()
+	o.c.cut[old] = false
+	o.c.heartbeat()
+	o.c.settle()
+	if len(o.sv.reg.rows) != 1 {
+		t.Fatalf("%d opens before the ex-leader frees, want 1", len(o.sv.reg.rows))
+	}
+	o.c.call(old, func(ctx *core.Context, out *Output) { o.sv.Free(ctx, o.c.n[old].s, out) })
+	if len(o.sv.reg.rows) != 0 || len(o.sv.reg.index) != 0 || len(o.sv.reg.opens) != 0 || len(o.sv.reg.groups) != 0 {
+		t.Fatalf("the ex-leader kept %d opens", len(o.sv.reg.rows))
+	}
+	o.serve(RegOpen, 2)
+	if len(o.sv.reg.rows) != 0 {
+		t.Fatal("a leader that cannot become sole registered an open")
+	}
+}
+
+// Closing a fenced session's opens takes time linear in them: five times the opens take well under
+// twenty-five times as long.
+func TestClosingAFencedSessionsOpensIsLinear(t *testing.T) {
+	cost := func(n int) time.Duration {
+		best := time.Duration(math.MaxInt64)
+		for range 3 {
+			sv := NewServer()
+			sv.SetSessions(&chunkstore.SessionTable{Version: 1, Acked: 1, Next: 2, Live: []uint64{1}})
+			for i := range n {
+				sv.reg.insert(openRow{openKey: openKey{inodeAt{1, 1, uint64(i)}, opener{1, 1}}})
+			}
+			start := time.Now()
+			sv.SetSessions(&chunkstore.SessionTable{Version: 2, Acked: 2, Next: 2})
+			best = min(best, time.Since(start))
+			if len(sv.reg.rows) != 0 || len(sv.reg.frees) != n {
+				t.Fatalf("%d opens left and %d orphans to look at, want 0 and %d", len(sv.reg.rows), len(sv.reg.frees), n)
+			}
+		}
+		return best
+	}
+	small, large := cost(10_000), cost(50_000)
+	if large > 12*small {
+		t.Fatalf("closing 10,000 opens took %v and 50,000 took %v", small, large)
 	}
 }

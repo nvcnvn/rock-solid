@@ -82,6 +82,10 @@ const unseen = math.MaxUint64
 // leader serves Reads only once an entry of its term commits, so no other can have served one.
 func (s *Shard) sole() bool { return s.first == s.raft.Term() && s.raft.Leader() == s.id }
 
+// lost reports whether the replica can no longer become sole: its first entry is seen and it does
+// not lead in that entry's term.
+func (s *Shard) lost() bool { return s.first != unseen && !s.sole() }
+
 // proposal is an entry this replica proposed as leader: its term, its Txn count, and its buffer,
 // which Raft holds until the entry applies or a later term's does.
 type proposal struct {
