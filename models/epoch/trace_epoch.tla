@@ -167,14 +167,16 @@ RecoverLine(l) ==
 KnownIds(d, c) == {g \in ids[d] : g.c = c /\ g.v \in Known(d, c)}
 
 \* The entry of write w in n's pin that an order, reanswer or stale line takes.
-\* A write's entries differ only in hold, and a step's guards see hold only in
-\* Fenced. The step takes the earliest-held entry it allows, which a later
-\* hold, or none, is fenced no more often than, so the trace does not double
-\* its states at each line of a write sent again while held. A later Send of w
-\* merges into the [w, 0] this leaves, where taking [w, 0] would have kept two
-\* entries, so the choice may reject a trace the spec accepts, never accepts
-\* one it rejects, and hides no bug of the code. Fenced reads n's decision of
-\* its interval, which Order and Reanswer require before they read it.
+\* A write's entries differ in hold, which a step's guards see only in Fenced,
+\* and in dup, which only Reanswer reads: a reanswer line may also take any
+\* duplicate, which the code answers whatever its hold or fence. Of the holds
+\* the step takes the earliest it allows, which a later hold, or none, is fenced
+\* no more often than, so the trace does not double its states at each line of
+\* a write sent again while held. A later Send of w may merge into an unheld
+\* entry this leaves, where taking that one would have kept two, so the choice
+\* may reject a trace the spec accepts, never accepts one it rejects, and hides
+\* no bug of the code. Fenced reads n's decision of its interval, which Order
+\* and Reanswer require before they read it.
 Took(n, w, fenceable) ==
     LET p == ChunkPG[Writes[w].c]
         S == {y \in pin[n] : y.w = w /\ ~(fenceable /\ Decided(n, p, IvAt(n, p)) /\ Fenced(n, y))}
@@ -280,7 +282,7 @@ Line(l) ==
           THEN UNCHANGED vars
           ELSE \E r \in {x \in pend : x.c = l.c /\ x.v = l.v} : IF l.heard THEN Answer(r) ELSE LoseAnswer(r)
     \/ /\ l.k = "reanswer"
-       /\ \E x \in Took(l.n, l.w, TRUE) :
+       /\ \E x \in Took(l.n, l.w, TRUE) \cup {y \in pin[l.n] : y.w = l.w /\ y.dup # 0} :
             /\ KnownOf(l.n, x) # {}
             /\ Max(KnownOf(l.n, x)) = l.v
             /\ IF l.heard THEN Reanswer(l.n, x) ELSE LoseReanswer(l.n, x)

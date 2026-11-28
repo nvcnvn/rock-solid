@@ -116,7 +116,8 @@ VARIABLES
     \* Primaries
     pr,       \* [Node -> [PG -> [iv, act, srv, since, ask]]]; ask: the interval ended under it
     pv,       \* [Node -> [Chunk -> Nat]]: newest version a primary ordered
-    pin,      \* [Node -> SUBSET [w, hold]]: client writes a primary holds unordered
+    pin,      \* [Node -> SUBSET [w, hold, dup]]: client writes a primary holds unordered; dup:
+              \* the version of the write pending at the primary when it arrived, 0 for none
     known,    \* [Node -> [PG -> Nat]]: newest incarnation of the session a primary has seen
     dec,      \* set of [p, k, n, r, kept, gone, img, torn, unf]: peering decisions; gone: per chunk
               \* the gated versions of the primary the decision drops; img: the chunks whose
@@ -699,7 +700,7 @@ Adopt(n, e) ==
     /\ pin' = [pin EXCEPT ![n] =
           {IF tbl[e][ChunkPG[Writes[x.w].c]].iv = IvAt(n, ChunkPG[Writes[x.w].c])
            THEN x
-           ELSE [w |-> x.w, hold |-> IF x.hold # 0 THEN x.hold ELSE IvAt(n, ChunkPG[Writes[x.w].c])] :
+           ELSE [x EXCEPT !.hold = IF @ # 0 THEN @ ELSE IvAt(n, ChunkPG[Writes[x.w].c])] :
              x \in {y \in pin[n] : LET p == ChunkPG[Writes[y.w].c]
                                    IN tbl[e][p].iv = IvAt(n, p) \/ AdoptPr(n, p, e).iv # 0}}]
     /\ pend' = {r \in pend : r.n # n \/ AdoptPr(n, ChunkPG[r.c], e).iv # 0 \/ Bug("NoDemote")}
@@ -1437,11 +1438,13 @@ Pre(i) ==
 \* on, which it holds until a later interval's peering; the code refuses that
 \* write before its first table and holds it only while asking, which the hold
 \* covers, as it only adds behaviours. Once the hello of incarnation 2 reached
-\* it, it refuses every write of incarnation 1.
+\* it, it refuses every write of incarnation 1. A write sent while a version of
+\* it is pending at the primary is that version's duplicate (dup).
 Send(i) ==
     LET w == Writes[i]
         p == ChunkPG[w.c]
         n == PrimNode(p, Cur(p))
+        P == {r.v : r \in {r \in pend : r.w = i /\ r.n = n}}
     IN /\ wst[i] # 2
        /\ sends[i] < MaxSend
        /\ Pre(i)
@@ -1452,7 +1455,7 @@ Send(i) ==
        /\ IF /\ \/ pr[n][p].iv # 0 /\ Cur(p) >= pr[n][p].since
                 \/ pr[n][p].iv = 0 /\ rsIv[n][p] = Cur(p)
              /\ w.inc = 0 \/ w.inc >= known[n][p]
-          THEN /\ pin' = [pin EXCEPT ![n] = @ \cup {[w |-> i, hold |-> 0]}]
+          THEN /\ pin' = [pin EXCEPT ![n] = @ \cup {[w |-> i, hold |-> 0, dup |-> IF P = {} THEN 0 ELSE Max(P)]}]
                /\ known' = [known EXCEPT ![n][p] = Max({@, w.inc})]
           ELSE UNCHANGED <<pin, known>>
        /\ UNCHANGED <<ctlVars, nodeVars, pr, pv, dec, act, rm, vers, ackd, dmn, bad, pend, refd, ownw,
@@ -1555,12 +1558,13 @@ Order(n, x) ==
 \* A write sent again that an earlier attempt took effect for is answered with
 \* that attempt's version, not ordered, when the primary would order it: after
 \* the same holds, and once that version is mapped, so a resend of a pending one
-\* waits for its outcome. One whose version is acknowledged already is answered
-\* whatever the primary's state since: the resend held for a pending attempt is
-\* answered with that attempt's OK, though by then the primary may have adopted
-\* a table, the write been fenced or the chunk degraded. A version peering
-\* dropped has left Known, so its write is ordered afresh. ResendAtOnce answers
-\* before the version is mapped.
+\* waits for its outcome. A duplicate of a pending version is answered with that
+\* version's OK once it is acknowledged, whatever the primary's state by then:
+\* the code holds it beside the version and answers it with the version's
+\* answer, though the primary may since have adopted a table, the write been
+\* fenced or the chunk degraded. A version peering dropped has left Known, so
+\* its write is ordered afresh. ResendAtOnce answers before the version is
+\* mapped.
 \* With "lose", this answer too can be lost, while the client may send again.
 ReanswerAs(n, x, heard) ==
     LET c == Writes[x.w].c
@@ -1573,7 +1577,7 @@ ReanswerAs(n, x, heard) ==
        /\ x \in pin[n]
        /\ sends[x.w] > 1
        /\ V # {}
-       /\ \/ [c |-> c, v |-> Max(V)] \in ackd
+       /\ \/ x.dup = Max(V) /\ [c |-> c, v |-> Max(V)] \in ackd
           \/ /\ Leads(n, p)
              /\ pr[n][p].act
              /\ ~pr[n][p].ask
