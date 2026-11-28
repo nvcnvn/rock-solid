@@ -54,14 +54,16 @@ KeptBelowTorn(r) ==
 \* it logged than Held does: ReplayDrops gates every version past the disk's
 \* persisted decision, where the store holds back only those past its replay
 \* point, so the reply may name a newer version that a replay dropped while
-\* the running store had it mapped (rdropped, kept until a recovery or format
-\* clears drp). A version the store itself dropped stays compared.
+\* the running store had it mapped (rdropped). An entry leaves rdropped when a
+\* recovery or format clears it from drp, and a later drop of that version is
+\* the store's own, so it stays compared, as does every version the store
+\* itself dropped.
 ReplyMatches(l) ==
     \A r \in l.rep :
         /\ \/ Reply(r.d, r.c).whole = r.whole
            \/ /\ Reply(r.d, r.c).list # NoMiss
               /\ r.whole > Reply(r.d, r.c).whole
-              /\ [c |-> r.c, v |-> r.whole] \in rdropped[r.d] \cap drp[r.d]
+              /\ [c |-> r.c, v |-> r.whole] \in rdropped[r.d]
         /\ \/ r.logged = r.whole
            \/ /\ r.logged > r.whole
               /\ \E x \in vers : x.c = r.c /\ x.v = r.logged
@@ -332,9 +334,10 @@ TraceNext ==
     /\ stayed' = IF Trace[line].k = "mayfail" /\ Trace[line].v \in dlog'[ddisk[Trace[line].n]][Trace[line].c]
                  THEN stayed \cup {line}
                  ELSE stayed
-    /\ rdropped' = IF Trace[line].k = "restart"
-                   THEN [rdropped EXCEPT ![ddisk[Trace[line].n]] = @ \cup rdrp[ddisk[Trace[line].n]]]
-                   ELSE rdropped
+    /\ rdropped' = LET R == IF Trace[line].k = "restart"
+                            THEN [rdropped EXCEPT ![ddisk[Trace[line].n]] = @ \cup rdrp[ddisk[Trace[line].n]]]
+                            ELSE rdropped
+                   IN [d \in Disk |-> R[d] \cap drp'[d]]
 
 TraceSpec == TraceInit /\ [][TraceNext]_<<vars, line, healed, stayed, rdropped>>
 
