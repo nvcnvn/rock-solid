@@ -220,9 +220,10 @@ func (sv *Server) Free(ctx *core.Context, s *Shard, out *Output) {
 	sv.free(s, func(t *Txn, token uint64) error { return s.submit(ctx, t, token, out) })
 }
 
-// FreeRound is Free for a, a replica on the round driver, or nil when the node hosts none.
+// FreeRound is Free for a, a replica on the round driver, or nil when the node hosts none; one
+// not started yet frees nothing.
 func (sv *Server) FreeRound(ctx *core.Context, a *RoundShard, acts []core.Action) []core.Action {
-	if a == nil || a.Err() != nil || len(sv.reg.frees) == 0 && sv.reg.groups[a.Shard().group] == 0 {
+	if a == nil || a.Err() != nil || a.Shard() == nil || len(sv.reg.frees) == 0 && sv.reg.groups[a.Shard().group] == 0 {
 		return acts
 	}
 	sv.free(a.Shard(), func(t *Txn, token uint64) (err error) {

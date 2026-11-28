@@ -349,3 +349,16 @@ func TestClosingAFencedSessionsOpensIsLinear(t *testing.T) {
 		t.Fatalf("closing 10,000 opens took %v and 50,000 took %v", small, large)
 	}
 }
+
+// A replica on the round driver that has not started its shard frees nothing and keeps the
+// orphans and opens it holds for once it does.
+func TestARoundReplicaNotStartedFreesNothing(t *testing.T) {
+	sv := NewServer()
+	sv.reg.insert(openRow{openKey: openKey{inodeAt{1, 1, 6}, opener{1, 1}}})
+	sv.reg.look(inodeAt{1, 1, regFile})
+	var ctx core.Context
+	sv.FreeRound(&ctx, &RoundShard{}, nil)
+	if len(sv.reg.frees) != 1 || len(sv.reg.rows) != 1 {
+		t.Fatalf("%d orphans to look at and %d opens after a free on a replica not started", len(sv.reg.frees), len(sv.reg.rows))
+	}
+}
