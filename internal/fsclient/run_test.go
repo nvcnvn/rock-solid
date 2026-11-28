@@ -1085,9 +1085,13 @@ func (d *daemon) reply(frame []byte) {
 		if g := d.r.gaps[string(rq.Name)]; len(g) > 0 && g[len(g)-1][1] == 0 {
 			g[len(g)-1][1] = d.r.s.Time()
 		}
+		// The other daemon's writer may have opened the new file, and written it, before this reply.
 		for i := range d.r.files {
 			if f := &d.r.files[i]; f.name == string(rq.Name) && f.ino != e.NodeID {
 				f.ino, f.size = e.NodeID, 0
+				if w := f.writer; w != nil && w.ino == e.NodeID {
+					f.size = w.written
+				}
 			}
 		}
 	}
@@ -1306,7 +1310,9 @@ func (r *fsRun) excused(pr *runProc, op sim.Op, errno int32) bool {
 
 // unfaulted is the history with each read that succeeded asking for what it got if a fault on its
 // node overlapped it or its daemon took a new session since its handle's open, as either may cut
-// it short; every word it returned is still checked.
+// it short, every word it returned still checked; and with each close of a handle its daemon's
+// new session fenced failed, as the writes the fence failed did not land, though a close with
+// nothing to flush reaches no daemon to fail.
 func (r *fsRun) unfaulted() []sim.Op {
 	ops := slices.Clone(r.hist.Ops())
 	opened := make([]core.Tick, r.clients)
@@ -1319,6 +1325,8 @@ func (r *fsRun) unfaulted() []sim.Op {
 		case (kind == sim.FileRead || kind == sim.FileMapRead) && op.Output[0] == 0 &&
 			(r.faulted(k, op.Invoke, op.Complete) || within(r.takes[k], opened[op.Client], op.Complete)):
 			op.Input[2] = op.Output[1]
+		case kind == sim.FileClose && within(r.takes[k], opened[op.Client], op.Complete):
+			op.Output[0] = uint64(EIO)
 		}
 	}
 	return ops
