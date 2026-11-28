@@ -23,6 +23,9 @@ func (m *Machine) opening(o *op, ino uint64, out *Output) {
 
 // reg makes the Read just sent an open or a release of the file by this mount under session.
 func (m *Machine) reg(reg byte, session uint64, out *Output) {
+	if m.plant.noRegister && reg == meta.RegOpen {
+		return
+	}
 	rd := &out.Reads[len(out.Reads)-1]
 	rd.Reg, rd.Session, rd.Mount = reg, session, m.cfg.Mount
 }
@@ -40,15 +43,20 @@ func (m *Machine) opens(n *node) int {
 // have open already.
 func (m *Machine) unregistered(n *node) bool { return n.attr.Nlink == 0 && m.opens(n) == 0 }
 
-// fenced reports a request on a handle opened under a session the mount has left, which fails EIO:
-// the owner no longer counts that open, so an orphan may be freed under it.
+// fenced reports a request on a handle opened under a session the mount has left, a GETATTR of one
+// included, which fails EIO: the owner no longer counts that open, so an orphan may be freed under it.
 func (m *Machine) fenced(r *fuseproto.Request) bool {
 	switch r.Opcode {
+	case fuseproto.OpGetattr:
+		if r.OpFlags&fuseproto.GetattrFh == 0 {
+			return false
+		}
 	case fuseproto.OpRead, fuseproto.OpWrite, fuseproto.OpFlush, fuseproto.OpFsync:
-		h := m.handles[r.Fh]
-		return h != nil && h.session != m.cfg.Session
+	default:
+		return false
 	}
-	return false
+	h := m.handles[r.Fh]
+	return h != nil && h.session != m.cfg.Session && !m.plant.fencedServed
 }
 
 // release ends a handle; the last of a file's on the mount under its session deregisters the
@@ -206,7 +214,7 @@ func (m *Machine) getattr(o *op, out *Output) {
 func (m *Machine) open(o *op, out *Output) {
 	ino := o.req.NodeID
 	if o.step == 0 {
-		if !m.lock(o, m.node(ino)) {
+		if !m.lockOpen(o, m.node(ino)) {
 			return
 		}
 		m.opening(o, ino, out)

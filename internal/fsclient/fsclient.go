@@ -136,6 +136,10 @@ type plants struct {
 	staleKept bool
 	// lastingMissing takes a Read answered with an error that lasts as finding no key.
 	lastingMissing bool
+	// noRegister registers no open at the owner, openUnheld holds an open's or CREATE's inode only
+	// behind a release in flight, not until its registration is answered, and fencedServed serves a
+	// handle of a session the mount has left.
+	noRegister, openUnheld, fencedServed bool
 }
 
 // Machine serves one mount. Each request names its inodes by FUSE node ID, which is the inode ID.
@@ -317,6 +321,9 @@ func (m *Machine) done(o *op) {
 }
 
 func (m *Machine) fail(o *op, errno fuseproto.Errno, out *Output) {
+	if m.fenced(&o.req) {
+		errno = EIO
+	}
 	out.Replies = fuseproto.AppendError(out.Replies, o.req.Unique, errno)
 	m.end(o, out)
 }
@@ -340,6 +347,14 @@ func (m *Machine) lock(o *op, n *node) bool {
 	}
 	n.queue = append(n.queue, o)
 	return false
+}
+
+// lockOpen locks n for an open or CREATE that registers, as lock does.
+func (m *Machine) lockOpen(o *op, n *node) bool {
+	if m.plant.openUnheld && (n.busy == nil || n.busy.req.Opcode != fuseproto.OpRelease) {
+		return true
+	}
+	return m.lock(o, n)
 }
 
 // unlock hands o's locks on until a queued request takes each: its inode's, and a CREATE's of

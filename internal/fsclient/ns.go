@@ -66,7 +66,7 @@ func (m *Machine) create(o *op, out *Output) {
 			m.fail(o, EISDIR, out)
 			return
 		}
-		if !m.lock(o, m.node(o.child)) {
+		if !m.lockOpen(o, m.node(o.child)) {
 			return
 		}
 		m.node(o.child).last = max(m.node(o.child).last, o.seq)
@@ -138,7 +138,7 @@ func (m *Machine) create(o *op, out *Output) {
 		o.step = 3
 		m.build(o, err, out)
 	case -1:
-		if !mkdir && !m.lock(o, m.node(o.child)) {
+		if !mkdir && !m.lockOpen(o, m.node(o.child)) {
 			return
 		}
 		if o.fresh {

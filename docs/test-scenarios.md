@@ -9706,8 +9706,12 @@ and chunk devices.
   replicas' nodes rebooted so leaders change and replicas' or daemons' nodes paused up to 2 s
   (each until 5 s before the end, a reboot's heartbeat and restart wait, so a quorum votes once
   faults heal), and each daemon crashed, half the time within 3 ms of a file's first chunk write,
-  restarting in a new session, the storage node's taking its replica down with it; the first node's start may unlink and create each file again
-  through the same `Mount` while the second node's processes go on. While a node's processes run:
+  restarting in a new session, the storage node's taking its replica down with it, but none
+  taking down the shard's leader in the first half, so its orphans are freed; the first node's
+  start may unlink and create each file again through the same `Mount` while the second node's
+  processes go on, and while its processes run it unlinks a file and creates it again now and
+  then, while processes of either node may have it open. The replicas' servers take each session
+  table, acknowledged, once both daemons hold their sessions. While a node's processes run:
   its session fenced up to 1 s apart and within 1 ms of one chunk write in 16, so a fence finds
   chunk I/O in flight, half the time handed to the devices up to 300 ms before the daemon takes
   it, so they refuse the old session's writes while its client is live and it sends them again;
@@ -9718,9 +9722,10 @@ and chunk devices.
   every system call succeeds or, overlapped by a fence, a refused allocation or a lasting `Read`
   error on its node, fails `EIO`, after which its process goes on and writes again what did not
   land, and a call in a handle opened before its daemon took a new session fails `EIO` and its
-  process closes the file, a close that promises nothing; on the second node an open of a name between the first's setup sending
-  its unlink and its create's reply, a gap a crash may leave open, may fail `ENOENT`; no orphan is
-  freed while a process holds it through a handle of its daemon's session
+  process closes the file, a close that promises nothing; an open of a name between the first
+  node sending its unlink and its create's reply, a gap a crash may leave open, may fail
+  `ENOENT`; no orphan is freed while a process holds it through a handle of its daemon's session,
+  one opened, written or synced since the daemon last took a new session
   ([inode owner's open registry](#inode-owners-open-registry)); no inode is handed out twice, no `mtime` goes backwards,
   every file's entry is in its directory's slot, no directory is its own ancestor, at each daemon
   crash every chunk written lies below `alloc_end` or within its purge entry, a `Read` answered
@@ -9745,8 +9750,8 @@ and chunk devices.
   `Txn`'s come in order from one leader on one connection, so only a leader change between them
   could bring the fetch back after the change. The devices do not crash: a restarted primary asks the
   control plane for a new interval, which the run does not model.
-- The plant `neg-raise-after-write` fails "a purge never misses a chunk written before a crash" on
-  each of the run's first 30 seeds (`TestARaiseAfterItsChunkWriteFailsTheMountsRun`, seed 1).
+- The plant `neg-raise-after-write` fails "a purge never misses a chunk written before a crash"
+  (`TestARaiseAfterItsChunkWriteFailsTheMountsRun`).
 - Each of the `Mount`'s plants fails the run (`TestPlantedMountBugsFailTheMountsRun`): a fenced
   session's chunk client numbering from 0 (`noIDBase`) fails the ID rule on each of the first 30
   seeds (seed 1), though that rule checks the very ID the plant changes, and with it off no other
@@ -9763,7 +9768,12 @@ and chunk devices.
   (seed 29), and with only the rule against a fetch before the machine's own change gone none; and
   on the second mount, a `Read` answered with an error that lasts taken as finding no key
   (`lastingMissing`) fails "every system call succeeds" on 25 of 30 (seed 11, which an excuse of
-  every `ENOENT` open while the first node's setup may run would pass).
+  every `ENOENT` open while the first node's setup may run would pass); an open not registered
+  at the owner (`noRegister`) and an open or `CREATE` that holds its inode only behind a release
+  in flight rather than until its registration is answered (`openUnheld`) each fail "an orphaned
+  inode is never freed while a live session has it open"; and a handle of a session the mount
+  replaced still served (`fencedServed`), whose process the run no longer counts as holding it,
+  fails "every system call succeeds" as a read through it finds its file freed.
 - One router output carrying both a read's answer and a `Txn`'s hands out both, though the read's
   answer, an `UNLINK`'s entry found, moves the `UNLINK` on to a call whose own pass through the
   router takes an output of its own (`TestOneRouterOutputHandsOutAReadsAnswerAndATxns`).
@@ -9853,9 +9863,10 @@ From [Inode owner](design.md#metadata-layer-metastore) and the [purge model](#pu
   deregisters nothing (`TestAReleaseBehindAnOpenWaitsForItsRegistration`).
 - The owner answers an open from a session its table shows fenced `ErrFenced`, with no attributes,
   and registers nothing (`TestAnOpenFromAFencedSessionIsRefused`); a handle opened under a session
-  the mount has replaced fails `READ`, `WRITE`, `FLUSH` and `FSYNC` with `EIO`, its release
-  deregisters nothing, and an open under the new session registers under it
-  (`TestAHandleOfAFencedSessionFails`).
+  the mount has replaced fails `READ`, `WRITE`, `FLUSH`, `FSYNC` and a `GETATTR` through it with
+  `EIO`, its release deregisters nothing, and an open under the new session registers under it
+  (`TestAHandleOfAFencedSessionFails`); a `GETATTR` in flight as the mount replaces the session
+  fails `EIO` too, though it finds the file freed (`TestAGetattrInFlightAcrossAFenceFailsEIO`).
 - A `CREATE` whose file another node unlinks between its `Txn` and its registration answers
   `ENOENT`, as an orphan takes no open (`TestACreateWhoseFileIsUnlinkedBeforeItRegistersFails`).
 - Open and release at a leader allocate nothing and cost the same beside 100,000 other opens
@@ -9881,8 +9892,11 @@ From [Inode owner](design.md#metadata-layer-metastore) and the [purge model](#pu
   after its election) fail it on seeds 1, 2 and 3 (`TestPlantedRegistryBugsFreeAnOpenOrphan`).
 - **[property]** The mount's seeded run (`TestAMountsHistoriesKeepTheirInvariantsAcrossCrashes`,
   [Multi-node mounts](#multi-node-mounts)) checks the same invariant against its processes'
-  handles; every unlink there comes at a daemon's restart, after a leader change, so it frees no
-  orphan until **Owner failover and grace period**.
+  handles. It unlinks files while processes of both nodes have them open, under a leader no fault
+  takes down in its first half, so the owner frees orphans at last releases and acknowledged
+  fences. Planted in the mount, an open not registered and an open that holds its inode only
+  behind a release in flight each fail it, and a handle of a replaced session still served fails
+  the run as a read through it finds its file freed (`TestPlantedMountBugsFailTheMountsRun`).
 
 ## Owner failover and grace period
 

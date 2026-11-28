@@ -456,6 +456,7 @@ func TestAHandleOfAFencedSessionFails(t *testing.T) {
 	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpRead, NodeID: ino, Fh: fh, Size: 6}), EIO)
 	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpFlush, NodeID: ino, Fh: fh}), EIO)
 	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpFsync, NodeID: ino, Fh: fh}), EIO)
+	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpGetattr, NodeID: ino, OpFlags: fuseproto.GetattrFh, Fh: fh}), EIO)
 	fh2 := h.open(ino).Fh
 	h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpRelease, NodeID: ino, Fh: fh}))
 	if len(h.regs) != 1 || h.regs[0].Reg != meta.RegOpen || h.regs[0].Session != 8 {
@@ -466,6 +467,24 @@ func TestAHandleOfAFencedSessionFails(t *testing.T) {
 	if len(h.regs) != 1 || h.regs[0].Reg != meta.RegRelease || h.regs[0].Session != 8 {
 		t.Fatalf("registrations %+v, want one release under session 8", h.regs)
 	}
+}
+
+// A GETATTR through a handle, sent before the mount leaves the handle's session and finding the
+// file freed after, fails EIO, as the handle does, not ENOENT.
+func TestAGetattrInFlightAcrossAFenceFailsEIO(t *testing.T) {
+	h := newMount(t, Config{})
+	ino, fh := h.create(meta.RootInode, "f")
+	h.held = true
+	u := h.send(fuseproto.Request{Opcode: fuseproto.OpGetattr, NodeID: ino, OpFlags: fuseproto.GetattrFh, Fh: fh})
+	h.m.SetSession(8)
+	h.held = false
+	reads := h.reads
+	h.reads = nil
+	for _, rd := range reads {
+		h.m.ReadDone(&h.ctx, rd.Token, nil, &h.out)
+	}
+	h.serve()
+	h.errno(u, EIO)
 }
 
 // A CREATE whose file another node unlinks between its Txn and its registering Read answers
