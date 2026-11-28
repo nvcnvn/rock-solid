@@ -14,63 +14,75 @@ func (m *Machine) fetch(o *op, ino uint64, dir bool, out *Output) {
 	o.fetch = m.seq
 }
 
-// opening reads ino's attributes as fetch does, and registers the mount's open of it at its owner.
+// opening reads ino's attributes as fetch does, and registers the mount's open of it at its owner
+// under o's session.
 func (m *Machine) opening(o *op, ino uint64, out *Output) {
 	m.fetch(o, ino, false, out)
-	m.reg(meta.RegOpen, out)
+	m.reg(meta.RegOpen, o.mreq.Session, out)
 }
 
-// reg makes the Read just sent an open or a release of the file by this mount.
-func (m *Machine) reg(reg byte, out *Output) {
+// reg makes the Read just sent an open or a release of the file by this mount under session.
+func (m *Machine) reg(reg byte, session uint64, out *Output) {
 	rd := &out.Reads[len(out.Reads)-1]
-	rd.Reg, rd.Session, rd.Mount = reg, m.cfg.Session, m.cfg.Mount
+	rd.Reg, rd.Session, rd.Mount = reg, session, m.cfg.Mount
+}
+
+// opens is n's handles opened under the mount's session; those of a session it has left fail, and
+// their opens close at the owner once that session's fence is acknowledged.
+func (m *Machine) opens(n *node) int {
+	if n.sess != m.cfg.Session {
+		return 0
+	}
+	return n.opens
 }
 
 // unregistered reports a file its owner took no open of: one with no link that this mount does not
 // have open already.
-func unregistered(n *node) bool { return n.attr.Nlink == 0 && n.opens == 0 }
+func (m *Machine) unregistered(n *node) bool { return n.attr.Nlink == 0 && m.opens(n) == 0 }
 
-// releasing reports a release of n in flight, and queues o behind it: an open sent before its
-// answer could reach the owner first and be deregistered.
-func releasing(o *op, n *node) bool {
-	if n.busy == nil || n.busy.req.Opcode != fuseproto.OpRelease {
-		return false
+// fenced reports a request on a handle opened under a session the mount has left, which fails EIO:
+// the owner no longer counts that open, so an orphan may be freed under it.
+func (m *Machine) fenced(r *fuseproto.Request) bool {
+	switch r.Opcode {
+	case fuseproto.OpRead, fuseproto.OpWrite, fuseproto.OpFlush, fuseproto.OpFsync:
+		h := m.handles[r.Fh]
+		return h != nil && h.session != m.cfg.Session
 	}
-	n.queue = append(n.queue, o)
-	return true
+	return false
 }
 
-// release ends a handle; the last of a file's on the mount deregisters the mount's open at the
-// file's owner before its reply, holding the inode so no open overtakes it.
+// release ends a handle; the last of a file's on the mount under its session deregisters the
+// mount's open at the file's owner before its reply, holding the inode so no open overtakes it.
+// A handle of a session the mount has left deregisters nothing: the owner closes its open once
+// that session's fence is acknowledged.
 func (m *Machine) release(o *op, out *Output) {
 	h := m.handles[o.req.Fh]
-	if o.step == 1 {
-		m.empty(o, out)
-		return
-	}
-	if h == nil {
+	if o.step == 1 || h == nil {
 		m.empty(o, out)
 		return
 	}
 	n := m.nodes[h.ino]
-	last := n != nil && o.req.Opcode == fuseproto.OpRelease && n.opens == 1
+	file := n != nil && o.req.Opcode == fuseproto.OpRelease && h.session == m.cfg.Session
+	last := file && m.opens(n) == 1
 	if last && !m.lock(o, n) {
 		return
 	}
 	delete(m.handles, o.req.Fh)
 	m.freeFh = append(m.freeFh, h)
-	if n == nil || o.req.Opcode != fuseproto.OpRelease {
+	if n != nil && o.req.Opcode == fuseproto.OpRelease {
+		defer m.drop(h.ino, n)
+	}
+	if !file {
 		m.empty(o, out)
 		return
 	}
 	n.opens--
-	defer m.drop(h.ino, n)
 	if !last {
 		m.empty(o, out)
 		return
 	}
 	m.get(o, 0, h.ino, meta.InodeAttr, nil, out)
-	m.reg(meta.RegRelease, out)
+	m.reg(meta.RegRelease, h.session, out)
 	o.step = 1
 }
 
@@ -194,7 +206,7 @@ func (m *Machine) getattr(o *op, out *Output) {
 func (m *Machine) open(o *op, out *Output) {
 	ino := o.req.NodeID
 	if o.step == 0 {
-		if releasing(o, m.node(ino)) {
+		if !m.lock(o, m.node(ino)) {
 			return
 		}
 		m.opening(o, ino, out)
@@ -206,7 +218,7 @@ func (m *Machine) open(o *op, out *Output) {
 		return
 	}
 	n, ok := m.took(o, ino)
-	if !ok || unregistered(n) {
+	if !ok || m.unregistered(n) {
 		m.fail(o, ENOENT, out)
 		return
 	}
@@ -214,8 +226,16 @@ func (m *Machine) open(o *op, out *Output) {
 }
 
 // handOut gives o a handle of ino, answering an OPEN, or a CREATE with ino's entry; keep_cache
-// only when the attributes are those of the node's previous open.
+// only when the attributes are those of the node's previous open. An open registered under a
+// session the mount has since left fails EIO, as its handle would.
 func (m *Machine) handOut(o *op, n *node, ino uint64, create bool, out *Output) {
+	if o.mreq.Session != m.cfg.Session {
+		m.fail(o, EIO, out)
+		return
+	}
+	if n.sess != m.cfg.Session {
+		n.sess, n.opens = m.cfg.Session, 0
+	}
 	var flags uint32
 	if n.opened == n.attr && !create {
 		flags = fuseproto.OpenKeepCache

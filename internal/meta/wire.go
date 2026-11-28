@@ -36,7 +36,7 @@ var le = binary.LittleEndian
 // wireErrs are the errors an Answer carries, by code; code 1 is a NotLeader. Any other error
 // travels as raft.ErrProposalDropped, which promises nothing about whether the Txn applied.
 var wireErrs = [...]error{nil, nil, raft.ErrProposalDropped, ErrMalformed, ErrHalted, ErrNoOps, ErrTooLarge,
-	ErrEmptyRange, ErrBadOp, ErrBadReplay, ErrReplayTagged, ErrOverloaded}
+	ErrEmptyRange, ErrBadOp, ErrBadReplay, ErrReplayTagged, ErrOverloaded, ErrFenced}
 
 const (
 	codeNotLeader = 1

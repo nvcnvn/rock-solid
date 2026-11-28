@@ -66,7 +66,7 @@ func (m *Machine) create(o *op, out *Output) {
 			m.fail(o, EISDIR, out)
 			return
 		}
-		if releasing(o, m.node(o.child)) {
+		if !m.lock(o, m.node(o.child)) {
 			return
 		}
 		m.node(o.child).last = max(m.node(o.child).last, o.seq)
@@ -78,7 +78,8 @@ func (m *Machine) create(o *op, out *Output) {
 			return
 		}
 		n, ok := m.took(o, o.child)
-		if !ok || unregistered(n) {
+		if !ok || m.unregistered(n) {
+			m.unhold(o, o.child, out)
 			o.child = 0
 			m.recreate(o, out)
 			return
@@ -99,7 +100,7 @@ func (m *Machine) create(o *op, out *Output) {
 		m.handOut(o, n, o.child, true, out)
 	case createRegistered:
 		var a meta.Attr
-		if !o.got[0].ok || meta.DecodeAttr(o.got[0].v, &a) != nil || a.Nlink == 0 && m.node(o.child).opens == 0 {
+		if !o.got[0].ok || meta.DecodeAttr(o.got[0].v, &a) != nil || a.Nlink == 0 && m.opens(m.node(o.child)) == 0 {
 			m.fail(o, ENOENT, out)
 			return
 		}
@@ -137,6 +138,9 @@ func (m *Machine) create(o *op, out *Output) {
 		o.step = 3
 		m.build(o, err, out)
 	case -1:
+		if !mkdir && !m.lock(o, m.node(o.child)) {
+			return
+		}
 		if o.fresh {
 			m.alloc.Adopt(o.slot)
 		}
@@ -150,7 +154,7 @@ func (m *Machine) create(o *op, out *Output) {
 			m.end(o, out)
 		} else {
 			m.get(o, 0, o.child, meta.InodeAttr, nil, out)
-			m.reg(meta.RegOpen, out)
+			m.reg(meta.RegOpen, o.mreq.Session, out)
 			o.step = createRegistered
 		}
 	}

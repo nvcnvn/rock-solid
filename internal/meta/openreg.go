@@ -3,6 +3,7 @@ package meta
 import (
 	"bytes"
 	"cmp"
+	"errors"
 	"slices"
 
 	"github.com/nvcnvn/rock-solid/internal/chunkstore"
@@ -11,6 +12,10 @@ import (
 
 // The open registry is the inode owner's of docs/design.md's "Inode owner" and models/purge's
 // Open, Close, FreeOrphan and FenceAck: a Server keeps it for the groups whose leader it serves.
+
+// ErrFenced answers an open from a session the owner's session table shows not live: no open is
+// registered, so the mount must not hand out a handle.
+var ErrFenced = errors.New("meta: the session is fenced")
 
 // inodeAt names an inode of a volume in a group.
 type inodeAt struct {
@@ -82,7 +87,8 @@ func (g *registry) look(at inodeAt) {
 
 // register serves rd, an open or a release of the file whose attributes Start names, to which
 // kvs, from the leader's state, answer: an open registers its mount while the file has a link,
-// and a release deregisters it, leaving an orphan no mount has open to be freed.
+// or is refused ErrFenced from a session that may not register, and a release deregisters it,
+// leaving an orphan no mount has open to be freed.
 func (g *registry) register(group uint64, rd *Read, kvs []KV) error {
 	var k Key
 	if DecodeKey(rd.Start, &k) != nil || k.Space != SpaceFS || k.Tag != InodeAttr {
@@ -93,7 +99,9 @@ func (g *registry) register(group uint64, rd *Read, kvs []KV) error {
 	row := openRow{at: inodeAt{group, k.Volume, k.Inode}, who: opener{rd.Session, rd.Mount}}
 	i, there := slices.BinarySearchFunc(g.rows, row, cmpRow)
 	switch {
-	case rd.Reg == RegOpen && !there && found && a.Nlink > 0 && g.holds(rd.Session):
+	case rd.Reg == RegOpen && !g.holds(rd.Session):
+		return ErrFenced
+	case rd.Reg == RegOpen && !there && found && a.Nlink > 0:
 		g.rows = slices.Insert(g.rows, i, row)
 	case rd.Reg == RegRelease && there:
 		g.rows = slices.Delete(g.rows, i, i+1)

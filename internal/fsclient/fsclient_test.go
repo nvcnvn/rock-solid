@@ -419,6 +419,55 @@ func TestOpensAndTheLastReleaseRegisterAtTheOwner(t *testing.T) {
 	h.wantRegs(meta.RegOpen)
 }
 
+// An open holds its file until its registration is answered, so a last release the kernel sends
+// meanwhile waits and, no longer the last, deregisters nothing: the owner keeps the mount's open.
+func TestAReleaseBehindAnOpenWaitsForItsRegistration(t *testing.T) {
+	h := newMount(t, Config{})
+	ino, fh := h.create(meta.RootInode, "f")
+	h.wantRegs(meta.RegOpen)
+	h.held = true
+	open := h.send(fuseproto.Request{Opcode: fuseproto.OpOpen, NodeID: ino})
+	rel := h.send(fuseproto.Request{Opcode: fuseproto.OpRelease, NodeID: ino, Fh: fh})
+	h.held = false
+	reads := h.reads
+	h.reads = nil
+	for _, rd := range reads {
+		h.answerRead(rd)
+	}
+	h.serve()
+	h.ok(open)
+	h.ok(rel)
+	h.wantRegs(meta.RegOpen)
+	if n := h.m.nodes[ino]; n == nil || n.opens != 1 {
+		t.Fatal("the mount does not hold the open it registered")
+	}
+}
+
+// A handle opened under a session the mount has left fails EIO, and its release deregisters
+// nothing, as the owner closes its open once that session's fence is acknowledged; an open under
+// the new session registers under it.
+func TestAHandleOfAFencedSessionFails(t *testing.T) {
+	h := newMount(t, Config{})
+	ino, fh := h.create(meta.RootInode, "f")
+	h.wantRegs(meta.RegOpen)
+	h.ok(h.write(ino, fh, 0, []byte("before")))
+	h.m.SetSession(8)
+	h.errno(h.write(ino, fh, 0, []byte("after the fence")), EIO)
+	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpRead, NodeID: ino, Fh: fh, Size: 6}), EIO)
+	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpFlush, NodeID: ino, Fh: fh}), EIO)
+	h.errno(h.send(fuseproto.Request{Opcode: fuseproto.OpFsync, NodeID: ino, Fh: fh}), EIO)
+	fh2 := h.open(ino).Fh
+	h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpRelease, NodeID: ino, Fh: fh}))
+	if len(h.regs) != 1 || h.regs[0].Reg != meta.RegOpen || h.regs[0].Session != 8 {
+		t.Fatalf("registrations %+v, want one open under session 8", h.regs)
+	}
+	h.regs = nil
+	h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpRelease, NodeID: ino, Fh: fh2}))
+	if len(h.regs) != 1 || h.regs[0].Reg != meta.RegRelease || h.regs[0].Session != 8 {
+		t.Fatalf("registrations %+v, want one release under session 8", h.regs)
+	}
+}
+
 // An unlink, of an open file or not, and a rename over a file each leave the inode an orphan for
 // its owner to free, and an open of an orphan the mount does not have open is ENOENT.
 func TestAnUnlinkLeavesAnOrphanForTheOwner(t *testing.T) {
@@ -853,28 +902,27 @@ func TestARequestQueuedBehindTwoCommitsRuns(t *testing.T) {
 	}
 }
 
-// An open's and a getattr's fetch read before a close committed the size, and answered after the
-// commit, are fetched again rather than taken: the getattr answers the whole size, and a read in
-// the handle sees the whole file.
+// An open waits for a close's commit, which holds the inode, and a getattr's fetch read before the
+// commit and answered after it is fetched again rather than taken: the getattr answers the whole
+// size, and a read in the handle sees the whole file.
 func TestAFetchFromBeforeTheMachinesOwnCommitIsNotTaken(t *testing.T) {
 	h := newMount(t, Config{})
 	ino, fh := h.create(meta.RootInode, "f")
 	h.ok(h.write(ino, fh, 0, []byte("hello")))
 	h.held = true
 	flush := h.send(fuseproto.Request{Opcode: fuseproto.OpFlush, NodeID: ino, Fh: fh})
-	h.send(fuseproto.Request{Opcode: fuseproto.OpOpen, NodeID: ino})
+	open := h.send(fuseproto.Request{Opcode: fuseproto.OpOpen, NodeID: ino})
 	ga := h.send(fuseproto.Request{Opcode: fuseproto.OpGetattr, NodeID: ino})
-	if len(h.sent) != 1 || len(h.reads) != 2 {
+	if len(h.sent) != 1 || len(h.reads) != 1 {
 		t.Fatalf("%d Txns and %d reads in flight", len(h.sent), len(h.reads))
 	}
-	old := [][]meta.KV{h.scanNow(h.reads[0]), h.scanNow(h.reads[1])}
+	old := h.scanNow(h.reads[0])
 	h.held = false
 	h.answerTxn(h.sent[0])
-	for i, rd := range h.reads {
-		h.m.ReadDone(&h.ctx, rd.Token, old[i], &h.out)
-	}
+	h.m.ReadDone(&h.ctx, h.reads[0].Token, old, &h.out)
 	h.serve()
 	h.ok(flush)
+	h.ok(open)
 	if _, _, a, err := fuseproto.DecodeAttrOut(h.ok(ga)); err != nil || a.Size != 5 {
 		t.Fatalf("getattr answered size %d: %v", a.Size, err)
 	}

@@ -168,7 +168,9 @@ type node struct {
 	last    uint64
 	changed uint64
 	lookups uint64
-	opens   int
+	// opens is its handles opened under session sess.
+	opens int
+	sess  uint64
 	// opened is the attributes its last open saw, which say whether the kernel's pages are current.
 	opened meta.Attr
 	// written is the end of the writes acknowledged since the size was last committed; wrote and
@@ -183,7 +185,8 @@ type node struct {
 }
 
 type handle struct {
-	ino uint64
+	ino     uint64
+	session uint64
 	// count is the entries a directory handle returned, the last of them named last.
 	count uint64
 	last  []byte
@@ -282,7 +285,7 @@ func (m *Machine) handle(ino uint64) uint64 {
 	} else {
 		h = &handle{}
 	}
-	h.ino = ino
+	h.ino, h.session = ino, m.cfg.Session
 	m.nextFh++
 	m.handles[m.nextFh] = h
 	return m.nextFh
@@ -340,10 +343,17 @@ func (m *Machine) lock(o *op, n *node) bool {
 	return false
 }
 
-// unlock hands n's lock on until a queued request takes it: one may end without it, as a commit
-// finding nothing left to commit does.
+// unlock hands o's locks on until a queued request takes each: its inode's, and a CREATE's of
+// the file it opens. One may end without them, as a commit finding nothing left to commit does.
 func (m *Machine) unlock(o *op, out *Output) {
-	n := m.nodes[o.req.NodeID]
+	m.unhold(o, o.req.NodeID, out)
+	if o.req.Opcode == fuseproto.OpCreate {
+		m.unhold(o, o.child, out)
+	}
+}
+
+func (m *Machine) unhold(o *op, ino uint64, out *Output) {
+	n := m.nodes[ino]
 	if n == nil || n.busy != o {
 		return
 	}
@@ -379,6 +389,10 @@ func (m *Machine) Request(ctx *core.Context, now int64, r *fuseproto.Request, ou
 		m.node(r.NodeID).last = m.seq
 	}
 	m.mutating(o)
+	if m.fenced(r) {
+		m.fail(o, EIO, out)
+		return
+	}
 	if r.Opcode == fuseproto.OpWrite {
 		m.write(o, r.Data, out)
 		return
@@ -408,7 +422,7 @@ func (m *Machine) change(n *node) {
 }
 
 func (m *Machine) drop(ino uint64, n *node) {
-	if n.lookups == 0 && n.opens == 0 && n.busy == nil && !n.wrote && ino != meta.RootInode {
+	if n.lookups == 0 && m.opens(n) == 0 && n.busy == nil && !n.wrote && ino != meta.RootInode {
 		delete(m.nodes, ino)
 	}
 }

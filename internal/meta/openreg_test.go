@@ -95,14 +95,23 @@ func (o *owner) msg(encode func(pool core.BufPool, m *core.Msg) error) core.Even
 	return ev
 }
 
-// reg sends session's open or release of the file from mount 1 and returns the links it was answered.
-func (o *owner) reg(reg byte, session uint64) uint64 {
+// ask sends session's open or release of the file from mount 1 and returns its answer.
+func (o *owner) ask(reg byte, session uint64) ReadAnswer {
 	rd := Read{Start: o.attrKey(regFile), End: append(o.attrKey(regFile), 0), Limit: 1, Reg: reg, Session: session, Mount: 1}
 	ev := o.msg(func(pool core.BufPool, m *core.Msg) error { return EncodeRead(pool, o.c.n[o.l].s.group, 7, &rd, m) })
 	var acts []core.Action
 	o.step(func(ctx *core.Context, out *Output) { acts = o.sv.ServeRead(ctx, &ev, o.c.n[o.l].s, nil) })
 	var ra ReadAnswer
-	if len(acts) != 1 || DecodeReadAnswer(o.c.n[o.l].pool, &acts[0].Msg, &ra) != nil || ra.Err != nil {
+	if len(acts) != 1 || DecodeReadAnswer(o.c.n[o.l].pool, &acts[0].Msg, &ra) != nil {
+		o.t.Fatal("the open or release was not answered")
+	}
+	return ra
+}
+
+// reg is ask, failing on an error, and returns the links it was answered.
+func (o *owner) reg(reg byte, session uint64) uint64 {
+	ra := o.ask(reg, session)
+	if ra.Err != nil {
 		o.t.Fatalf("the open or release was answered %+v", ra)
 	}
 	var a Attr
@@ -175,6 +184,20 @@ func TestAFencedSessionsOpensCloseOnlyOnceItsFenceIsAcknowledged(t *testing.T) {
 		if !o.freed() {
 			t.Fatal("the orphan was not freed once its holder's fence was acknowledged")
 		}
+	}
+}
+
+// An open from a session the table shows fenced is refused with no attributes, and registers
+// nothing, so the orphan is freed at once.
+func TestAnOpenFromAFencedSessionIsRefused(t *testing.T) {
+	o := newOwner(t, regPlants{})
+	o.table(chunkstore.SessionTable{Version: 2, Acked: 1, Next: 4, Live: []uint64{1, 3}})
+	if ra := o.ask(RegOpen, 2); ra.Err != ErrFenced || len(ra.KVs) != 0 {
+		t.Fatalf("an open from a fenced session was answered %+v", ra)
+	}
+	o.unlink()
+	if !o.freed() {
+		t.Fatal("the refused open was registered")
 	}
 }
 

@@ -65,6 +65,8 @@ type openRun struct {
 	crashAt, cutAt, healAt, moveAt core.Tick
 	cut                            [2]uint32
 	err                            error
+	moves, crashes, reboots        int
+	firstMove, lastFree            core.Tick
 }
 
 type openHeld struct{ inode, session uint64 }
@@ -146,6 +148,9 @@ func (r *openRun) check() error {
 			}
 		}
 	}
+	if freed > r.freed {
+		r.lastFree = r.s.Time()
+	}
 	r.freed = freed
 	return nil
 }
@@ -164,6 +169,10 @@ func (r *openRun) move() {
 	l := r.leader()
 	if l < 0 {
 		return
+	}
+	r.moves++
+	if r.firstMove == 0 {
+		r.firstMove = r.s.Time()
 	}
 	if r.rng.Chance(1, 2) {
 		r.s.Reboot(uint32(l))
@@ -200,6 +209,7 @@ func (r *openRun) faults() {
 		if c := r.cls[r.rng.Below(openClients)]; r.s.Node(uint32(3 + c.i)).Up() {
 			r.fences = append(r.fences, openFence{session: c.session, at: now + core.Tick(r.rng.Below(uint64(openFenceLag)))})
 			r.s.Reboot(uint32(3 + c.i))
+			r.crashes++
 		}
 	}
 	changed := false
@@ -528,6 +538,24 @@ func TestPlantedRegistryBugsFreeAnOpenOrphan(t *testing.T) {
 		}
 		if !caught {
 			t.Errorf("plant %+v passed 10 seeds", p)
+		}
+	}
+}
+
+func TestReviewOpenRunCounts(t *testing.T) {
+	for seed := uint64(1); seed <= 10; seed++ {
+		r := newOpenRun(t, seed, regPlants{})
+		err := r.run()
+		t.Logf("seed %d: err %v freed %d moves %d firstMove %d lastFree %d crashes %d fences pending %d", seed, err, r.freed, r.moves, r.firstMove, r.lastFree, r.crashes, len(r.fences))
+	}
+}
+
+func TestReviewPlantSeeds(t *testing.T) {
+	for _, p := range []regPlants{{unlinkOpen: true}, {releaseOnCommit: true}, {newOwnerFrees: true}} {
+		for seed := uint64(1); seed <= 10; seed++ {
+			var v *sim.Violation
+			err := newOpenRun(t, seed, p).run()
+			t.Logf("plant %+v seed %d: caught %v: %v", p, seed, errors.As(err, &v) && v.Name == invOrphanOpen, err)
 		}
 	}
 }

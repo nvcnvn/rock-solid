@@ -363,7 +363,7 @@ func (g *Mount) send(ctx *core.Context, h *sentRead, later bool) {
 
 // lasting reports a Read error that asking again gets again.
 func lasting(err error) bool {
-	return errors.Is(err, meta.ErrMalformed) || errors.Is(err, meta.ErrTooLarge)
+	return errors.Is(err, meta.ErrMalformed) || errors.Is(err, meta.ErrTooLarge) || errors.Is(err, meta.ErrFenced)
 }
 
 // routed runs f on the meta client and hands each answer to the machine. A Read answered with an
