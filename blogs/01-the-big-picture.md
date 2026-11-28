@@ -395,11 +395,12 @@ stateDiagram-v2
 
 Entering WriteShared, the owner sends a **recall** to every other node that has the file open and
 waits until each has flushed its buffered writes, dropped its cached pages, switched new opens to
-direct I/O and made already-open files check for changes before every read. A node that never answers is waited out until its session lease expires, or for a recall timeout if
-it still renews its session, and it is then **fenced**: the control plane, which alone
-keeps every session's lease, has every chunk primary reject its writes before its locks go to
-anyone else. While a file is write-shared,
-every read and write goes to the chunk primary, which orders them: one network round trip per I/O,
+direct I/O and made already-open files check for changes before every read. A node that never
+answers is waited out until its session lease expires, or, if it still renews its session, for a
+recall timeout, after which its renewals stop and it is **fenced** once its lease runs out: the
+control plane, which alone keeps every session's lease, has every chunk primary reject its writes
+before its locks go to anyone else. While a file is write-shared, every read and write goes to
+the chunk primary, which orders them: one network round trip per I/O,
 plus about 5 to 20 µs of FUSE overhead, acceptable because write-sharing is rare in homelabs
 ([post 09](09-rwx-filesystem-and-cache-coherence.md)).
 
@@ -440,16 +441,18 @@ rows that matter for a first read:
 ### How it works: events in, actions out
 
 This pattern is called sans-IO, and each component written this way is a state machine: a piece of
-state plus one function, `OnEvent`, that updates it. The diagram shows the two plugs the same core
-fits into.
+state plus one function that takes an event, updates the state and lists the actions to take. The
+diagram shows the two plugs the same core fits into.
 
 ```text
-           events in                                actions out
- NetRecv, DiskDone, Timer, PeerLost     NetSend, DiskWrite, DiskFsync, DiskTrim, SetTimer
+            events in                               actions out
+ a message arrived, a disk write      send a message, write, flush or trim
+ finished, a timer fired, a peer      a disk, set a timer
+ went away
               |                                          ^
               v                                          |
       +-----------------------------------------------------------+
-      |  state machine: OnEvent(ctx, event, out) -> out           |
+      |  state machine: (state, event) -> new state, actions      |
       |  ChunkStore replica, MetaStore shard, inode owner, ...    |
       |  time from ctx only; no clock reads, goroutines, sockets  |
       +-----------------------------------------------------------+
@@ -563,7 +566,7 @@ flowchart LR
     P9 --> P10["Phase 10<br/>erasure-coded<br/>pools"]
     P10 --> P11["Phase 11<br/>snapshots, clones,<br/>pool moves, modelled first"]
     P11 --> P12["Phase 12<br/>S3"]
-        P12 --> P13["Phase 13<br/>scale-out, cross-shard<br/>transactions, Tier 3"]
+    P12 --> P13["Phase 13<br/>scale-out, cross-shard<br/>transactions, Tier 3"]
     P13 --> P14["Phase 14<br/>transactional key-value<br/>and SQL"]
 ```
 
@@ -577,7 +580,7 @@ whole system:
 
 - **Drive classes.** Flush latency has been measured on one DRAM-less consumer NVMe drive only. Drives
   with DRAM, QLC drives, SATA SSDs and PLP drives are still to measure, including whether a PLP drive
-  does better with writes that skip its cache (`durability: fua`) than with write plus flush.
+  does better with writes that skip its cache (Force Unit Access, or FUA, writes) than with write plus flush.
 - **FUSE over io_uring.** Linux 6.14 added a FUSE transport over io_uring, but it strands or fails
   requests when the daemon crashes, so the daemon never uses it. Once the kernel requeues those
   requests, does it cut CPU per request enough to adopt?
@@ -596,7 +599,8 @@ If you want to know how a byte finds its disk, start with [post 02](02-chunks-an
 | Post | What it covers, in one line |
 | --- | --- |
 | [02 Chunks and placement](02-chunks-and-placement.md) | How a byte offset becomes a chunk ID, a placement group and a disk, with no lookup |
-| [03 Epochs, leases and failures](03-epochs-leases-and-failures.md) | How the cluster notices a dead or slow disk and hands its work over without two primaries at once |
+| [03 Epochs, leases and failures](03-epochs-leases-and-failures.md) | How a new primary takes over a PG's writes without losing an acknowledged one, and how recovery repairs the rest |
+| [03b Leases, failure detection and fencing](03b-leases-failure-detection-and-fencing.md) | How the cluster notices a dead or slow disk, why no two primaries serve at once, and how a stale writer is cut off |
 | [04 One log per disk](04-one-log-per-disk.md) | The on-disk format: one append-only log, group commit, crash recovery |
 | [05 The cleaner and free space](05-the-cleaner-and-free-space.md) | Reclaiming space in a log, write amplification, and slowing writers before the disk fills |
 | [06 The LSM tree](06-the-lsm-tree.md) | The index inside the log: memtable, sorted runs, Bloom filters, compaction |
