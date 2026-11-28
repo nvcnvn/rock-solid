@@ -108,9 +108,6 @@ sequenceDiagram
     Note over KB,WB: Node B never hears about the write.<br/>Its cached page still looks valid.
 ```
 
-Look at the last three arrows: node B's kernel has no reason to doubt its copy, so it never asks
-anyone, and `web` serves stale data indefinitely.
-
 The obvious fixes each break something else. Turning the page cache off everywhere makes every
 read a network round trip, even for the many files only one node touches. Caching for one second
 is correct only if the application tolerates a second of staleness, and a paused node can blow
@@ -226,10 +223,9 @@ backwards ([clock skew study](../studies/clock-skew/README.md)). An explicit `to
 
 ### Three rules the kernel forces on the design
 
-> **In plain words.** The project first tested what Linux lets a FUSE daemon control. Three facts
-> shaped everything: the kernel's own write cache cannot be switched off for one file, so writes
-> are buffered in the daemon instead; the daemon can tell the kernel to forget cached pages; and
-> whether a handle uses the cache is fixed when the file is opened.
+> **In plain words.** The project first tested what Linux lets a FUSE daemon control, and three
+> facts shaped everything: where writes may be buffered, how cached pages can be dropped, and when
+> a handle's caching is decided.
 
 #### How it works
 
