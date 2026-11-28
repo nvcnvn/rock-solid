@@ -7,7 +7,8 @@ with its own leader, all embedded in the one daemon binary. Metadata needs a dif
 because it needs something chunk data does not: when two clients race for the same lock or the
 same file name, exactly one must win, on every replica, even across crashes, and that is a
 consensus problem. This post explains why, how Raft solves it, and how rock-solid keeps Raft cheap
-enough to run hundreds of groups per node on homelab hardware.
+enough that a node could run hundreds of groups, far more than a small cluster needs, on homelab
+hardware.
 
 ## Words you need
 
@@ -25,7 +26,7 @@ enough to run hundreds of groups per node on homelab hardware.
 - **Slot.** A range of inode numbers that always stays in one shard.
 - **Lease.** A right that expires on its own unless renewed.
   ([glossary](../docs/glossary.md#coordination-and-failure))
-- **Event loop.** One thread pinned to a core that handles every event for the disks and shards it
+- **Event loop.** One goroutine per core that handles every event for the disks and shards it
   owns, in turn, with no locks ([post 11](11-runtime-in-go.md)).
 - **LSM tree.** A log-structured merge tree: an in-memory sorted table plus immutable sorted runs.
   Each shard's state is one. See [06-the-lsm-tree.md](06-the-lsm-tree.md).
@@ -241,8 +242,7 @@ or own their storage, which rules both out.
 Election timeouts are randomized on a fine tick, so followers rarely time out together and split
 the vote. A leader that crashes is noticed through the leases described below rather than through
 a missed Raft heartbeat, and its followers campaign soon after, so a group fails over a few seconds
-after its leader's node dies. That budget is reasoned from the lease timings, not yet measured over
-many groups at once (an open direction below).
+after its leader's node dies, a budget reasoned from the lease timings (an open direction below).
 
 ## The options: where can metadata live?
 
@@ -294,9 +294,8 @@ shard 3       [s3    follow]   [s3    follow]   [s3    leader]   the next key ra
 
 Every key a `Txn` reads or writes routes through the *shard map*, which gives each group the first
 key of its range. One shard is the fast path, one Raft round; several shards take the slow path, a
-cross-shard commit that is rare by design. Until that protocol exists, a `Txn` or `Scan` that
-reaches two groups is refused before anything is sent, so nothing comes to depend on an unmodelled
-path. The work, in the next section, is making the one-shard branch the common one.
+cross-shard commit that is rare by design. The work, in the next section, is making the one-shard
+branch the common one.
 
 A daemon sends each `Txn` to the shard's leader from its route cache. A follower never forwards
 it: it answers "not the leader" with the leader it knows of, and the daemon updates its cache and
@@ -319,17 +318,17 @@ comes with leader balancing. The Raft shard is still built to stay cheap at abou
 node, so that per-group cost never limits splitting. A planned leader transfer moves leadership
 without an election, for balancing, a rolling upgrade or draining a node.
 
-**Replacing a voter.** The control-plane leader places every group's three voters, one per node
-that holds metadata, and records them in the shard map; the map is the plan, and each group's
-leader drives its own Raft configuration toward it. A voter whose disk has been down for as long as
-a PG member is given ([post 07](07-pools-and-redundancy.md#recovery-and-rebuild-per-placement-group))
-is replaced, and one whose disk lost its log is replaced at once. The Raft paper warns about the
+**Replacing a voter.** The control-plane leader places every group's three voters, one per node that
+holds metadata, and records them in the shard map; the map is the plan, and each group's leader
+drives its own Raft configuration toward it. A voter whose disk has been down for as long as a PG
+member is given ([post 07](07-pools-and-redundancy.md#recovery-and-rebuild-per-placement-group)) is
+replaced, and one whose disk lost its log is replaced at once. The Raft paper warns about the
 obvious way: adding the new, empty replica as a fourth voter while one of the three is dead makes
 the quorum three, and every commit then waits for the newcomer to copy a whole shard. So the new
-replica joins as a *learner*, which receives the log but has no vote, and once it has caught up,
-one joint configuration change removes the dead voter and promotes the learner in a single step.
-The two survivors are a majority of both the old and the new set, so the swap never waits on
-anyone who is missing:
+replica joins as a *learner*, which receives the log but has no vote, and once it has caught up, one
+joint configuration change removes the dead voter and promotes the learner in a single step. The two
+survivors are a majority of both the old and the new set, so the swap never waits on anyone who is
+missing:
 
 ```text
  voters {A, B, C}, C down           add D as learner     D caught up        one joint change
@@ -390,19 +389,10 @@ contiguous key range, and shards split only at slot boundaries.
   slot.
 - IDs are never reused. The root is inode 1; sequence 0 of each slot holds the slot's own keys.
 
-The main keys (the [design's table](../docs/design.md#metadata-layer-metastore) also lists replay
-records, volume records, case-folded names for SMB and the later S3 index):
-
-| Data | Key | Shard rule |
-| --- | --- | --- |
-| Pools, placement table, membership, sessions | `ctl/...` | The control-plane group, not sharded |
-| Inode attributes, including size and allocated end | `fs/{volume}/{inode}/a` | The inode's slot |
-| Directory entries | `fs/{volume}/{dir}/d/{name}` → inode, type | The directory's slot, so `readdirplus` is one request to one shard |
-| A directory's parent | `fs/{volume}/{dir}/P` → parent | Its own key, so a cross-directory rename can check that a directory never moves under itself without creates in an ancestor failing that check |
-| Extended attributes | `fs/{volume}/{inode}/x/{name}` | Next to the attributes |
-| flock and whole-file locks | `fs/{volume}/{inode}/l/{mode}/{session}` | The inode's slot |
-| Slot counters, orphans, purge list | under `fs/{volume}/{slot · 0}/` | The slot itself |
-
+The [design's key table](../docs/design.md#metadata-layer-metastore) lists every kind of key.
+Attributes, directory entries, extended attributes, locks, slot counters and the orphan and purge
+lists all sit in their inode's or directory's slot, so `readdirplus` is one request to one shard;
+the cluster's own keys (pools, placement, membership, sessions) sit in the control-plane group.
 The volume prefix makes a filesystem one contiguous key range, which a snapshot copies and a
 deletion drops with one range removal. Result: `create`, `mkdir`, `unlink` and `readdirplus` touch
 one shard, and a split never cuts a directory away from its files.
@@ -451,19 +441,18 @@ sequenceDiagram
    record, so anyone can finish or abort T after a coordinator crash.
 
 This is CockroachDB's scheme, which needs no central service. The alternatives each add one:
-Percolator with a central timestamp oracle (TiKV), and a central sequencer (FoundationDB). Cross-directory `rename` is the
-main file operation that takes this path, and it keeps the inode in its old slot, so locality
-decays slowly over time without affecting correctness.
+Percolator with a central timestamp oracle (TiKV), and a central sequencer (FoundationDB).
+Cross-directory `rename` is the main file operation that takes this path, and it keeps the inode in
+its old slot, so locality decays slowly over time without affecting correctness.
 
 The four steps leave out exactly where other systems' bugs came from: what a reader or writer that
 meets a PENDING intent does (wait, or abort T, and how the coordinator learns it lost), when a
 record may be removed, how a rename checks ancestors on other shards, and how a snapshot's markers
 commit with its record. Models of CockroachDB's parallel commits and of MongoDB's two-shard
-transactions found exactly such bugs ([protocol models study](../studies/protocol-models/README.md)).
-So the protocol gets a TLA+ model as its first precise form, before its code, and it is needed only
-once range splitting makes a second data shard: until then every volume's keys sit on one data
-shard, and no designed operation writes the control-plane group and a data shard in one
-transaction.
+transactions found exactly such bugs ([protocol models
+study](../studies/protocol-models/README.md)). So the protocol gets a TLA+ model as its first
+precise form, before its code. It is needed only once a split makes a second data shard, and no
+designed operation writes the control-plane group and a data shard in one transaction.
 
 ### Where the bytes go: shards share the disk log
 
@@ -546,7 +535,8 @@ metadata, is copied out instead.
 
 rock-solid already has leases between every pair of event loops that share a group: they back
 chunk primaries' read leases and are renewed by heartbeats that flow between the loops anyway
-([03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md)). Raft leaders ride on those
+([03b](03b-leases-failure-detection-and-fencing.md#one-lease-per-pair-of-event-loops-not-per-pg)).
+Raft leaders ride on those
 instead of running their own, as CockroachDB's leader leases ride on its store liveness, so the
 cost does not grow with the number of groups. This diagram shows a new leader *fortifying* its
 term; look at what each follower records and what it then refuses to do.
@@ -579,9 +569,10 @@ sequenceDiagram
   each give a majority.
 - Each expiry is counted on two clocks, ending at whichever runs faster for the holder while the
   grantor waits for the slower, so a time daemon's slew cannot stretch a lease and the clocks need
-  not be synchronized ([03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md#two-clocks-because-a-time-daemon-can-bend-either-one)).
-  A holder that cannot yet bound how fast a grantor's clock runs takes no expiry from it, so
-  groups led from a freshly started node read through ReadIndex for their first moments.
+  not be synchronized
+  ([03b](03b-leases-failure-detection-and-fencing.md#two-clocks-because-a-time-daemon-can-bend-either-one)).
+  A holder that cannot yet bound how fast a grantor's clock runs takes no expiry from it, so groups
+  led from a freshly started node read through ReadIndex for their first moments.
 - Until a new leader is fortified and has committed an entry of its own term, it answers reads
   through etcd-raft's **ReadIndex** round (a majority round trip that confirms leadership).
 
@@ -633,22 +624,22 @@ and writes on open handles carry on. See
 > is never on the I/O path.
 
 The `ctl/...` keys live in one dedicated control-plane Raft group, not sharded. It stays small
-because it maps placement groups, not chunks ([02-chunks-and-placement.md](02-chunks-and-placement.md)).
-Its leader's logic is a sans-IO machine that proposes ordinary `Txn`s on `ctl/` keys, so the shard
-state machine, its tests and its model cover the control plane too. Its leader commits each new
-placement table as one Raft entry holding only the changed PG entries, sends nodes the change
-rather than the whole table, and marks a node down when its heartbeats stop. A new leader starts
-that count from its own lease, so when the old leader's node crashed, its PGs wait for the
-failover plus the usual detection time.
+because it maps placement groups, not chunks
+([02-chunks-and-placement.md](02-chunks-and-placement.md)). Its leader's logic is a sans-IO machine
+that proposes ordinary `Txn`s on `ctl/` keys, so the shard state machine, its tests and its model
+cover the control plane too. Its leader commits each new placement table as one Raft entry holding
+only the changed PG entries, sends nodes the change rather than the whole table, and marks a node
+down when its heartbeats stop. A new leader starts that count from its own lease, so when the old
+leader's node crashed, its PGs wait for the failover plus the usual detection time.
 
 Each node's heartbeat also renews its client sessions, reports its disks' fill and asks for the
 node's *space grant*: the bytes of each pool its daemon may buffer before flushing
 ([09-rwx-filesystem-and-cache-coherence.md](09-rwx-filesystem-and-cache-coherence.md#a-full-pool-space-grants)).
 Renewals and grants live only in the leader's memory, and only a leader holding its leader lease
-answers them, so they cost no Raft writes. The Raft log changes only when a session starts or is
-fenced: the leader commits expired sessions as fenced in a new version of the *session table*. From
-the reported fills it computes each pool's capacity figures
-([07-pools-and-redundancy.md](07-pools-and-redundancy.md)).
+answers them, so they cost no Raft writes. The Raft log changes only when a session starts, when a
+restarted daemon's successor registers its new incarnation, or when sessions are fenced: the leader
+commits expired sessions as fenced in a new version of the *session table*. From the reported fills
+it computes each pool's capacity figures ([07-pools-and-redundancy.md](07-pools-and-redundancy.md)).
 
 Chunk primaries need an outside authority to say who is live and who is primary; a Raft group
 elects its own leader and needs none, "which breaks the circle".
@@ -691,8 +682,8 @@ all cover the shard.
 
 Most of a shard's index sits in prefix-compressed sorted runs in memory, where a file (its
 attributes plus its directory entry) costs well under its memtable size. From the
-[MetaStore memory spike](../spikes/metastore-memory/)'s file model, the design budgets that a
-16 GiB node holds roughly 40 million distinct files at three replicas
+[MetaStore memory spike](../spikes/metastore-memory/)'s file model, the design budgets that 16 GiB
+of MetaStore memory per node holds roughly 40 million distinct files at three replicas
 ([On-disk format](../docs/design.md#on-disk-format)). SMB-shared volumes, whose clients store
 extended attributes such as `user.DOSATTRIB` on every file, fit fewer. Past that, a block cache
 that reads runs from the log instead of memory takes over.
@@ -702,12 +693,11 @@ that reads runs from the log instead of memory takes over.
 The decisions above rest on four spikes:
 
 - **Many groups per node are affordable,** if the library leaves ticks, I/O and threads to the
-  caller: the [multi-raft spike](../spikes/multi-raft/) found a `Ready`-style library at a few KiB
-  per group and one flush covering thousands of groups' appends, against hundreds of KiB per group
-  for a library that runs its own tasks.
-- **One entry per group per round,** not one per proposal: the [raft rounds spike](../spikes/raft-rounds/)
-  measured an order of magnitude more throughput at a fraction of the latency, and is why the
-  etcd-raft version is pinned.
+  caller: in the [multi-raft spike](../spikes/multi-raft/) a `Ready`-style library cost a few KiB
+  per group, against hundreds of KiB for one that runs its own tasks.
+- **One entry per group per round,** not one per proposal: the
+  [raft rounds spike](../spikes/raft-rounds/) found an order of magnitude more throughput, and is
+  why the etcd-raft version is pinned.
 - **No embedded key-value engine as the Raft log:** the [KV engines spike](../spikes/kv-engines/)
   showed one shared commit for 100 shards costing about a hundredth of 100 separate commits, and
   the engines it tried writing many times the payload or keeping far more on disk than was live.
@@ -725,9 +715,11 @@ The decisions above rest on four spikes:
   `st_ino` that can overflow 32-bit programs, one extra key per create on SMB volumes.
 - **Leases need bounded oscillator drift**, so each is counted on two clocks, and a holder gives
   up its leases when its machine resumes from suspend. A paused VM can stop every clock in the
-  guest; [post 03](03-epochs-leases-and-failures.md) explains what catches it and what does not.
+  guest; [post 03b](03b-leases-failure-detection-and-fencing.md#trade-offs-and-what-it-costs-us)
+  explains what catches it and what does not.
 - **A fork to maintain**, an older library version, and an in-house lease around `RawNode`.
-- **Metadata lives in RAM** until the block cache arrives.
+- **The metadata index lives in RAM**, so memory bounds the files a node holds until the block
+  cache reads runs from the log.
 
 ## Open directions
 
@@ -763,6 +755,7 @@ each of these.
   [`studies/protocol-models/`](../studies/protocol-models/README.md).
 - Glossary: [Consensus and metadata](../docs/glossary.md#consensus-and-metadata).
 - Series: [03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md),
+  [03b-leases-failure-detection-and-fencing.md](03b-leases-failure-detection-and-fencing.md),
   [06-the-lsm-tree.md](06-the-lsm-tree.md),
   [09-rwx-filesystem-and-cache-coherence.md](09-rwx-filesystem-and-cache-coherence.md),
   [11-runtime-in-go.md](11-runtime-in-go.md).
