@@ -16,6 +16,7 @@ epoch/neg-compare-table-epochs	chunkstore.sendEpoch	TestPlantedPeeringBugsBreakT
 epoch/neg-decide-by-own-interval	chunkstore.ownInterval	TestPlantedPeeringBugsBreakTheFaultRun
 epoch/neg-drop-all-leaving	chunkstore.dropAllLeaving	TestDropAllLeavingStrandsAWrite
 epoch/neg-edit-keeps-interval	chunkstore.editKeepsInterval	TestPlantedPeeringBugsBreakTheOracle
+epoch/neg-expiry-keeps-interval	open	Node actions and the audit log
 epoch/neg-fence-on-arrival	chunkstore.fenceOnArrival,listerOrders	TestPlantedReadBugsBreakTheReadRun
 epoch/neg-fresh-grant-no-table-check	chunkstore.freshGrantNoCheck	TestPlantedBugsBreakTheirTraces
 epoch/neg-gone-while-up	chunkstore.goneWhileUp	TestPlantedPeeringBugsBreakTheOracle
@@ -84,10 +85,10 @@ sessions/neg-no-drift	meta.noDrift	TestPlantedClientSessionBugs
 sessions/neg-ignore-resumed	meta.ignoreResumed	TestPlantedClientSessionBugs
 sessions/neg-fixed-step-check	meta.fixedStepCheck	TestPlantedClientSessionBugs
 sessions/neg-window-per-run	meta.windowPerNode	TestPlantedClientSessionBugs
-purge/neg-daemon-punch	open	Truncate
 sessions/neg-start-out-of-service	open	Node actions and the audit log
 sessions/neg-start-no-fact-check	open	Node actions and the audit log
 sessions/neg-fact-no-head-check	open	Node actions and the audit log
+purge/neg-daemon-punch	open	Truncate
 purge/neg-extend-over-purge	open	Truncate
 purge/neg-grace-by-time	open	Owner failover and grace period
 purge/neg-missing-punch-fails	open	Purger

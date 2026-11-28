@@ -405,6 +405,7 @@ Allowed(p, d, from, to) ==
     \/ from = "down" /\ to = "up" /\ dnode[d] # 0
     \/ from = "up" /\ to = "maint" /\ Maint[p]
     \/ from = "maint" /\ to = "up" /\ dnode[d] # 0
+    \/ from = "maint" /\ to = "down"
 
 \* A change of the pool's min_live starts a new interval of the PG.
 SetMinLive(p, to) ==
@@ -412,12 +413,16 @@ SetMinLive(p, to) ==
     /\ UNCHANGED <<reqIv, reports, recd>>
 
 \* Marking a disk down, up or in maintenance starts a new interval of every PG
-\* it belongs to.
+\* it belongs to; a maintenance mark ends at its deadline as down when the disk
+\* does not heartbeat. With ExpiryKeepsInterval that end keeps the interval.
 MarkDisk(d, to) ==
     /\ LET ps == {p \in PG : d \in Mem(p, Cur(p)) /\ Allowed(p, d, St(p, Cur(p), d), to)}
+           y == [p \in PG |-> [ivs[p][Cur(p)] EXCEPT !.st[d] = to]]
        IN /\ ps # {}
-          /\ NewIntervals(ps, [p \in PG |->
-               [ivs[p][Cur(p)] EXCEPT !.st[d] = to]])
+          /\ IF Bug("ExpiryKeepsInterval") /\ to = "down" /\ \E p \in ps : St(p, Cur(p), d) = "maint"
+             THEN /\ Commit(tbl[Len(tbl)])
+                  /\ ivs' = [p \in PG |-> IF p \in ps THEN [ivs[p] EXCEPT ![Cur(p)] = y[p]] ELSE ivs[p]]
+             ELSE NewIntervals(ps, y)
     /\ UNCHANGED <<reqIv, reports, recd>>
 
 \* A refill replaces a member with another disk in one table only once the
@@ -2917,6 +2922,10 @@ BelowMinLive == Plan(<<Mark(3, "down"), Mark(3, "up"), Mark(2, "maint")>>, Sessi
 MaintMerges == Plan(<<Mark(3, "maint"), Mark(3, "up"), Mark(2, "maint")>>, Partial2, {})
 \* Two activations and two spare tables, so a report can be folded late.
 LateReport == [Plan(<<Mark(3, "down"), Mark(3, "up")>>, <<>>, {}) EXCEPT !.s = 2]
+\* PG 2's member 3 in maintenance under the partial writes, the mark expiring
+\* with its node down, and the node back.
+MaintExpires == Plan(<<Mark(3, "maint"), Mark(3, "down"), Mark(3, "up")>>, Partial2, {})
+MaintExpiryPlans == {MaintExpires}
 
 \* PG 2's replica down, its primary stopped below min_live, then an empty disk
 \* beside it: a write in flight is kept on the primary alone, and the primary
