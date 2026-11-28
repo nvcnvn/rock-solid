@@ -439,7 +439,7 @@ type ChunkStore interface {
 `Seal` is [post 07](07-pools-and-redundancy.md)'s topic. Each write and punch also carries the
 client's session ID, so primaries can reject a client whose session has expired (fencing), and its
 *incarnation*, which tells a restarted daemon from its dead predecessor
-([post 03](03-epochs-leases-and-failures.md), [post 09](09-rwx-filesystem-and-cache-coherence.md)).
+([post 03b](03b-leases-failure-detection-and-fencing.md#incarnations), [post 09](09-rwx-filesystem-and-cache-coherence.md)).
 The next five sections are the promises behind these calls.
 
 ## Versions: an interval on top, a counter below
@@ -687,7 +687,7 @@ Longhorn, CockroachDB and MinIO report capacity).
   PGs.
 - **A partial block can cost a read**, and the chunk's later writes wait behind it.
 - **Writes wait for every live member**, so a slow disk slows every PG it is in. Fail-slow detection
-  ([post 03](03-epochs-leases-and-failures.md)) exists because of this.
+  ([post 03b](03b-leases-failure-detection-and-fencing.md#5-fail-slow-disks)) exists because of this.
 - **Every write leaves a small index entry** in the resend table until its client's next write moves
   past it.
 
@@ -724,7 +724,7 @@ Longhorn, CockroachDB and MinIO report capacity).
   [studies/capacity-conditions](../studies/capacity-conditions/README.md).
 - Code: [internal/core/ids.go](../internal/core/ids.go) (chunk IDs and the PG hash),
   [internal/chunkstore](../internal/chunkstore/) (the store and placement).
-- Series: [01](01-the-big-picture.md), [03](03-epochs-leases-and-failures.md),
+- Series: [01](01-the-big-picture.md), [03](03-epochs-leases-and-failures.md), [03b](03b-leases-failure-detection-and-fencing.md),
   [04](04-one-log-per-disk.md), [05](05-the-cleaner-and-free-space.md),
   [07](07-pools-and-redundancy.md), [08](08-the-metastore.md),
   [10](10-block-snapshots-and-clones.md).

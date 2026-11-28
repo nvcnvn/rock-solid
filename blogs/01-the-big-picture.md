@@ -278,8 +278,8 @@ flowchart TB
 - **The ChunkStore** is "dumb, fast and versioned". A chunk's ID is computed from the volume, the
   file's inode number and the offset, then hashed to a placement group, so finding data never needs
   a metadata query; each chunk has one primary that applies its writes in one order
-  ([post 02](02-chunks-and-placement.md), and [post 03](03-epochs-leases-and-failures.md) for
-  failures).
+  ([post 02](02-chunks-and-placement.md), and posts [03](03-epochs-leases-and-failures.md) and
+  [03b](03b-leases-failure-detection-and-fencing.md) for failures).
 - **The MetaStore** is a transactional key-value store split into many small Raft groups. It needs
   consensus because locks and atomic `rename` are compare-and-set operations, which need one agreed
   winner. One more Raft group, the **control plane**, holds cluster-wide state: the pools, the
