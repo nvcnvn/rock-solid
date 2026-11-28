@@ -1,7 +1,9 @@
 package main
 
 import (
+	"regexp"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/nvcnvn/rock-solid/internal/trace"
@@ -91,6 +93,61 @@ func TestMergedSendMovesAfterTheTakeItMergedWith(t *testing.T) {
 		g.takeMerged(w)
 		if !slices.Equal(g.lines, c.want) {
 			t.Errorf("%s: lines %q, want %q", c.name, g.lines, c.want)
+		}
+	}
+}
+
+func rec(node uint32, name trace.Name, f ...uint64) trace.Record {
+	r := trace.Record{Node: node, Name: name}
+	copy(r.Fields[:], f)
+	return r
+}
+
+// runOf runs tracedata over a first table naming PG pg alone, then recs.
+func runOf(pg uint64, recs ...trace.Record) *gen {
+	g := newGen()
+	g.run(append([]trace.Record{rec(0, trace.OutTable, 1), rec(0, trace.OutEntry, pg, 1, 1, 2)}, recs...))
+	return g
+}
+
+func TestRunWritesAPastRefusalAtTheFailOfItsVersion(t *testing.T) {
+	const pg, c, v = 7, 9, 1<<32 | 4
+	for _, failed := range []bool{false, true} {
+		recs := []trace.Record{rec(0, trace.OutSend, 1, c, pg, 4096, 1), rec(2, trace.OutPastRefused, c, v)}
+		if failed {
+			recs = append(recs, rec(0, trace.OutFail, c, v))
+		}
+		g := runOf(pg, recs...)
+		if got := slices.ContainsFunc(g.lines, func(l string) bool { return strings.Contains(l, `"pastrefused"`) }); got != failed {
+			t.Errorf("failed %v: lines %q", failed, g.lines)
+		}
+	}
+}
+
+func TestRunMovesAMergedSendAfterTheOrderItMergedWith(t *testing.T) {
+	const pg, c = 7, 9
+	send := rec(0, trace.OutSend, 1, c, pg, 4096, 1)
+	g := runOf(pg, send, send, rec(0, trace.OutOrder, 1, c, 1<<32|1, 1), rec(0, trace.OutOrder, 1, c, 1<<32|2, 1))
+	kind := regexp.MustCompile(`k \|-> "([a-z]+)"`)
+	var kinds []string
+	for _, l := range g.lines {
+		kinds = append(kinds, kind.FindStringSubmatch(l)[1])
+	}
+	if want := []string{"send", "order", "send", "order"}; !slices.Equal(kinds, want) {
+		t.Errorf("kinds %q, want %q", kinds, want)
+	}
+}
+
+func TestRunCountsADecisionsListingInRepliedLater(t *testing.T) {
+	const pg, c, iv = 7, 9, 3
+	for _, listed := range []bool{false, true} {
+		recs := []trace.Record{rec(0, trace.OutSend, 1, c, pg, 4096, 1),
+			rec(1, trace.OutReply, pg, iv+1, 1, 0), rec(1, trace.OutReplyChunk, 1, c, 1<<32|1, 1<<32|1, 0), rec(1, trace.OutDecide, pg, iv+1)}
+		if listed {
+			recs = append(recs, rec(1, trace.OutListed, 1, c, 1<<32|1))
+		}
+		if got := runOf(pg, recs...).repliedLater(1, pg, c, iv, nil); got != listed {
+			t.Errorf("decision listed %v: repliedLater %v", listed, got)
 		}
 	}
 }

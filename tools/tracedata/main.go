@@ -1099,15 +1099,19 @@ func (g *gen) write(w *bufio.Writer, module string) {
 
 var heardToken = regexp.MustCompile(`@heard[0-9]+@`)
 
+func newGen() *gen {
+	return &gen{entries: map[uint64]*entry{}, initial: map[uint64]entry{}, wid: map[[2]uint64]int{}, byID: map[uint64]int{}, verWrite: map[[2]uint64]int{}, answer: map[int]string{}, unanswered: map[int]int{}, mergedAt: map[int]int{}, takenAt: map[int]int{}, heardOK: map[string]bool{}, watermark: map[[3]uint64]uint64{}, epochs: map[uint64]int{}, replies: map[[3]uint64]map[uint64]*reply{}, decisions: map[[3]uint64]bool{},
+		lists: map[[3]uint64]bool{}, operatorAsk: map[uint64]bool{}, restarted: map[[2]uint64]bool{}, diskIDs: map[uint64]uint64{}, primary: map[uint64]int{}, ownOpen: map[int][][2]uint64{}, memberOpen: map[int][][2]uint64{},
+		activated: map[uint64]uint64{}, tableIv: map[uint64]map[uint64]uint64{}, left: map[[2]uint64]int{}, formatAt: map[uint64]int{}, outOfPool: map[uint64]bool{}, nodeDisk: map[int]uint64{}, recovering: map[int][][4]uint64{}, orderAt: map[[2]uint64]int{}, served: map[[3]uint64]bool{}, landAt: map[[3]uint64]int{}, refused: map[uint64][]refusal{}, past: map[[2]uint64][]string{}, listedBy: map[[4]uint64]bool{}}
+}
+
 func main() {
 	module := flag.String("module", "trace_data", "module name")
 	flag.Parse()
 	if flag.NArg() != 1 {
 		fatal("usage: tracedata [-module name] run.trace")
 	}
-	g := &gen{entries: map[uint64]*entry{}, initial: map[uint64]entry{}, wid: map[[2]uint64]int{}, byID: map[uint64]int{}, verWrite: map[[2]uint64]int{}, answer: map[int]string{}, unanswered: map[int]int{}, mergedAt: map[int]int{}, takenAt: map[int]int{}, heardOK: map[string]bool{}, watermark: map[[3]uint64]uint64{}, epochs: map[uint64]int{}, replies: map[[3]uint64]map[uint64]*reply{}, decisions: map[[3]uint64]bool{},
-		lists: map[[3]uint64]bool{}, operatorAsk: map[uint64]bool{}, restarted: map[[2]uint64]bool{}, diskIDs: map[uint64]uint64{}, primary: map[uint64]int{}, ownOpen: map[int][][2]uint64{}, memberOpen: map[int][][2]uint64{},
-		activated: map[uint64]uint64{}, tableIv: map[uint64]map[uint64]uint64{}, left: map[[2]uint64]int{}, formatAt: map[uint64]int{}, outOfPool: map[uint64]bool{}, nodeDisk: map[int]uint64{}, recovering: map[int][][4]uint64{}, orderAt: map[[2]uint64]int{}, served: map[[3]uint64]bool{}, landAt: map[[3]uint64]int{}, refused: map[uint64][]refusal{}, past: map[[2]uint64][]string{}, listedBy: map[[4]uint64]bool{}}
+	g := newGen()
 	recs := g.load(flag.Arg(0))
 	if len(recs) == 0 {
 		fatal("no table in the trace")
