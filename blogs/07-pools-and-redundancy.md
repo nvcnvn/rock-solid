@@ -56,11 +56,9 @@ the control plane (the small Raft group that runs the cluster) and cached on eve
 PG's members. Each version of the table is a **table epoch**, and each PG's run of tables with the
 same members is one of its **intervals**.
 
-Two facts matter for this post. First, the PG is the unit of recovery and rebalancing: adding a
-disk moves whole PGs onto it, never single chunks. Second, the pool is part of a PG's identity, so
-the same chunk ID lands in different PGs in different pools. That is what lets a volume move between
-pools later in this post. The table's size follows the pools' PG counts and widths, never the
-amount of data, so even wide erasure-coded pools keep it small enough for every node to cache.
+Two facts matter for this post. The PG is the unit of recovery and rebalancing: adding a disk
+moves whole PGs onto it, never single chunks. And the pool is part of a PG's identity, so the same
+chunk ID lands in different PGs in different pools, which is what lets a volume move between pools.
 
 ## The problem: erasure coding meets overwrites
 
@@ -158,19 +156,11 @@ seed of its two-phase erasure-coded configurations before its
 - **Per pool** (Ceph, rock-solid). Each pool is its own set of PGs with its own scheme, and a
   Kubernetes StorageClass names the pool. One cluster can mix scratch, block and media data.
 
-**What erasure coding does with edits.**
-
-- **Overwrite stripes in place** (Ceph's `allow_ec_overwrites`, Vitastor). Any data can be encoded,
-  but every small write pays read-modify-write, and the write hole must be closed with extra
-  protocol.
-- **Erasure-code everything with redirect-on-write** (Weka). A write never edits a stripe; it goes
-  into a new stripe and the old blocks become garbage. No read-modify-write and no write hole, but
-  the cluster now needs garbage collection of half-dead stripes across nodes.
-- **Encode only data that has stopped changing** (Windows Azure Storage, rock-solid). New and
-  edited data lives as copies; it is encoded once it is whole or idle. Edits never touch encoded
-  data, so neither read-modify-write nor the write hole can occur, and nothing needs stripe garbage
-  collection. The cost: data pays copy prices until it is encoded, and editing an encoded chunk
-  first turns it back into copies.
+**What erasure coding does with edits.** Ceph (with `allow_ec_overwrites`) and Vitastor overwrite
+stripes in place and close the write hole with extra protocol. Weka erasure-codes everything but
+never edits a stripe: a write goes into a new stripe, and the cluster garbage-collects half-dead
+stripes across nodes. Windows Azure Storage, and rock-solid, keep new and edited data as copies and
+encode it only once it has stopped changing, so edits never touch encoded data.
 
 | Approach | Small overwrite cost | Write hole | Extra machinery | Space while data is fresh |
 | --- | --- | --- | --- | --- |
@@ -257,18 +247,13 @@ computed from them:
 | `ec4-2` | 1 MiB | 4 + 2 | 6 MiB | 1.5× | 2/3 |
 | `ec16-2` | 256 KiB | 16 + 2 | 4.5 MiB | 1.125× | 8/9 |
 
-The overhead is `(data + parity) ÷ data`. Dividing a pool's free space by it gives its capacity
-only when every node can take a share of each chunk in proportion to its size, and the
-failure-domain rule often forbids that. `ec4-2` at 2 per node on three nodes puts exactly two shards
-of every chunk on each node, a third of the chunk, whatever the nodes hold. With nodes of 4, 4 and
-1 TB the small node fills first, and most of each large node is *stranded*: space no chunk of this
-pool can use. So a pool reports as *available* what its placement lets through before its first
-disk fills, next to the *balanced* figure the best placement could reach, and creating a pool or
-changing its disks shows what each failure domain strands and asks for confirmation when one would
-strand a large share of its capacity ([post 02](02-chunks-and-placement.md#volume-size-and-capacity)
-has the formulas, the [capacity model spike](../spikes/capacity-model/) the measurements and the
-[capacity conditions study](../studies/capacity-conditions/README.md) the thresholds). Placement
-never refuses such a layout, because a one-copy pool on the same disks can still use stranded space.
+The overhead is `(data + parity) ÷ data`, but dividing free space by it overstates capacity
+whenever the failure-domain rule stops a node taking a share in proportion to its size. `ec4-2` at
+2 per node on three nodes puts a third of every chunk on each node, so with nodes of 4, 4 and 1 TB
+the small node fills first and most of each large node is *stranded*: space this pool cannot use. A
+pool therefore reports what it can still take before its first disk fills, and asks for
+confirmation before a change strands much ([post 02](02-chunks-and-placement.md#volume-size-and-capacity)
+explains the figures; the [capacity model spike](../spikes/capacity-model/) measured them).
 
 Because shards are contiguous byte ranges, a 4 KiB read of an encoded chunk touches one disk, the
 one holding the shard that contains those bytes. No decoding is needed while that shard is healthy.
@@ -354,13 +339,6 @@ fits on 6 nodes and survives none, which is exactly why the CLI prints the numbe
 `failure_domain: disk` no PG's members are kept on distinct nodes, so the printed node tolerance is
 zero.
 
-The placement computation in [post 02](02-chunks-and-placement.md) keeps the failure-domain rule
-whenever it places or moves a member, and it aims each disk at a target built from the same rule:
-the disk's capacity for the pool, with no failure domain asked for more members of a PG than the
-rule allows. Under `rep2` on a small and a large node, each node holds one copy of every PG whatever
-its size, so a target proportional to size could never be met; the capped targets are what let
-placement settle on mismatched disks.
-
 ## `min_live`: when to stop accepting writes
 
 > **In plain words.** If two of three copies are down, should a write go to the one copy that is
@@ -397,12 +375,9 @@ lets a write land on fewer copies than the pool promises.
 CLI command `maintenance <node>`, which an operator runs before a planned reboot. The mark takes the
 node's members out of the live set, so writes stop waiting for them, but they still count toward
 `min_live`, so the node's PGs accept writes on one copy until it returns and catches up. The operator
-chose that exposure for a bounded time, and peering counts members in `maintenance` the same way,
-so it never skips an interval that accepted writes under the mark. Setting `min_live: 1`
-permanently takes the same exposure for unplanned failures, and the design is blunt about it: it is
-the setting Ceph users most often report losing data with. `min_live` also guards fail-slow
-detection: a disk that turns slow is marked down as if it had failed, but never when that would drop
-a PG below `min_live`.
+chose that exposure for a bounded time. Setting `min_live: 1` permanently takes it for unplanned
+failures too, and the design is blunt about it: it is the setting Ceph users most often report
+losing data with.
 
 #### Encoded chunks need no write quorum
 
@@ -437,7 +412,7 @@ stateDiagram-v2
     Copies --> Copies : overwrites
 ```
 
-*Follow the arrows into `Encoded`: there are only two, and neither is an overwrite.*
+*Follow the arrows into `Encoded`: neither is an overwrite.*
 
 **1. On write.** The daemon's write-back buffer (the memory where the file client collects a file's
 writes before sending them, covered in [post 09](09-rwx-filesystem-and-cache-coherence.md)) works
@@ -518,9 +493,8 @@ pool none, locality: node                    pool none, locality: spread
 locality, reads of lost chunks return `EIO` (an I/O error) and the pool lists the volumes affected.
 With spread, any disk loss takes part of every volume in the pool.
 
-The same trade applies to replicated pools, just further out. A volume spread over every disk is hit
-by any failure, anywhere in its pool, that takes out more members of one PG than the pool survives.
-That is why recovery starts with the PGs that have lost the most members.
+Replicated pools make the same trade further out: a spread volume is hit by any failure in its pool
+that takes out more members of one PG than the pool survives.
 
 **Metadata is not pooled.** Pools set the redundancy of data only. MetaStore shards and the control
 plane are always 3-voter Raft groups, whatever pool their files use: metadata is small, and losing a
@@ -548,13 +522,10 @@ change the shape, you move each volume to another pool.
 Snapshot and restore could do that, but the result is a new PVC, and Kubernetes does not let a PVC
 change its StorageClass, so the application would have to stop and rebind its claim. Instead a
 volume moves in place, keeping its volume ID, PVC and inode numbers, by reusing the snapshot
-machinery ([post 10](10-block-snapshots-and-clones.md)): a cut at snapshot epoch E that pauses
-every node using the volume, a transaction that points the volume at the new pool with the old
-pool at E as its source, reads that fall through to the source, and a background copy like a
-clone's *flatten*. Chunk IDs are the same in both pools; only the PG changes, because the pool is
-part of the PG. A chunk's versions in the new pool therefore follow its new PG's intervals and are
-never compared with the old pool's: reads fall through by snapshot epoch, and a compare-and-set on a
-version read before the move fails. The sequence below follows one move.
+machinery of [post 10](10-block-snapshots-and-clones.md): a short pause at a snapshot epoch E, one
+metadata transaction that points the volume at the new pool with the old pool at E as its source,
+and a background copy like a clone's *flatten*. Chunk IDs are the same in both pools; only the PG
+changes, so versions in the new pool are never compared with the old pool's.
 
 ```mermaid
 sequenceDiagram
@@ -628,19 +599,15 @@ since that PG serves nothing until then (a `rep2` PG falls there on any reboot o
 when it returns. The design's [Failure detection](../docs/design.md#epoch-changes-and-failure-detection)
 section has the timings.
 
-**A replacement joins before anything leaves.** An empty replacement counts toward `min_live` from
-the moment it joins and takes every write from then on, while recovery fills in the older data. A
-member that is merely down, rather than gone, stays listed beside its replacement as a *leaving*
-member, because it may hold the last copy of some chunk. A planned move between disks works the same
-way: the new member is added and the old one marked leaving in one table, and the old one goes only
-once the PG reports itself recovered. Ceph keeps the old set as `pg_temp` until backfill ends, and
-CockroachDB adds a learner before removing a replica, for the same reason: a swap in one step would
-leave the chunks written before the move one copy short.
+**A replacement joins before anything leaves.** An empty replacement counts toward `min_live`
+from the moment it joins and takes every write from then on, while recovery fills in the older data.
+A member that is merely down stays listed beside it, because it may hold the last copy of some
+chunk, and goes only once the PG reports itself recovered. Ceph's `pg_temp` and CockroachDB's
+learners exist for the same reason ([post 02](02-chunks-and-placement.md) has the details).
 
 **Per PG, worst first.** A disk holds around a hundred PG members, so the loss of one disk becomes
 about a hundred separate PG repairs, not one giant copy, and table changes can be staged and
-throttled. A disk's chunk index is keyed by pool and PG hash first, so a PG's chunks form one
-contiguous key range that a disk can list with a single range scan. Recovery runs most-degraded PGs
+throttled. A disk's chunk index is keyed by PG first, so a disk lists a PG's chunks with one range scan. Recovery runs most-degraded PGs
 first, because a PG that has lost two members is one failure from loss in `rep3` or `ec4-2`.
 
 **Filling a member.** For a copy, the data comes from a surviving copy. For a shard, Reed-Solomon
@@ -661,14 +628,12 @@ the limit serves recovery, those granted flushes and the cleaner
 for the grants already out, so a refill never refuses a flush a daemon had already acknowledged.
 
 **What the operator sees.** A pool raises conditions on its `Pool` resource, as Kubernetes events
-and metrics: one as a member disk nears `write_limit` and one when it reaches it; one when the pool
-holds more than its survivors could re-protect after losing its largest failure domain (`rep3` on
-nodes of 4, 4, 2 and 1 TB can hold more than the other three could re-protect if a 4 TB node died);
-and one when a PG that needs copying has copied nothing for a minute, typically because the disk it
-copies to is full, naming the PG and the members that may hold the missing copies. On exactly three
-nodes, where losing any node leaves too few for the copies whatever the data, the pool says so once
-at creation and in its status instead of raising an alarm on every healthy pool. A one-copy pool has
-nothing to re-protect.
+and metrics: as a member disk nears or reaches `write_limit`; when the pool holds more than its
+survivors could re-protect after losing its largest failure domain; and when a PG that needs copying
+has stopped making progress, typically because the disk it copies to is full, naming the PG and the
+members that may hold its missing copies. A fact of the layout, such as `rep3` on exactly three
+nodes having no spare node, is stated once at creation and in the pool's status instead of raising
+an alarm on every healthy pool.
 
 The simulator checks, after every step, that every chunk reaches its pool's redundancy once
 recovery settles, that copies are dropped only after all shards are durable, and that a chunk with
@@ -677,26 +642,16 @@ too few survivors returns an error, never wrong data ([post 12](12-testing-for-t
 ## Evidence
 
 There is no rock-solid spike that measures erasure coding. The choice of "copies first, encode when
-whole or idle" rests on arithmetic and on other systems' experience:
+whole or idle" rests on the cost arithmetic at the top of this post and on other systems'
+experience:
 
-- **The cost arithmetic** in [Pools and redundancy](../docs/design.md#pools-and-redundancy): a 4K
-  overwrite in a 4 + 2 stripe costs 3 reads plus 3 cross-node writes and risks the write hole; three
-  copies cost 3 writes and 0 reads. Encoding on write sends 1.5× the data over the network where
-  copies-then-encode sends 3× and then 1.5× more.
 - **Windows Azure Storage** ([USENIX ATC 2012](https://www.usenix.org/system/files/conference/atc12/atc12-final181_0.pdf))
   encodes extents once sealed, which is the model rock-solid follows.
-- **Vitastor's** chaos test failed on every seed of its two-phase erasure-coded configurations before
-  its [3.2.0 fixes](https://vitastor.io/en/blog/2026-08-31-v3.2.0.html): closing the write hole in
-  place is hard even for a team that set out to do it.
 - **Whole chunks cost no cleaning.** A chunk written whole goes to a *chunk slot* rather than the
   log. In the [cleaner streams spike](../spikes/cleaner-streams/), whole chunks rewritten at random
   cost almost no write amplification in slots at any fill, against nearly five times at 90% full in
   log segments. The spike did not model erasure-coded shards and their slot sizes, which is an open
   question below.
-- **Stranding is common enough to report.** The [capacity model spike](../spikes/capacity-model/)
-  and the [capacity conditions study](../studies/capacity-conditions/README.md) showed mismatched
-  homelab disks stranding a large share of capacity under the failure-domain rule, which is why
-  pools report *available* and *balanced* separately and ask before a change strands much.
 
 ## Trade-offs and what it costs us
 
@@ -748,12 +703,6 @@ both questions.
   [`spikes/sub-block-writes/`](../spikes/sub-block-writes/).
 - Studies: [pool capacity and ENOSPC](../studies/capacity-and-enospc/README.md),
   [capacity conditions](../studies/capacity-conditions/README.md).
-- Other posts: [01 The big picture](01-the-big-picture.md),
-  [02 Chunks and placement](02-chunks-and-placement.md),
+- Other posts: [02 Chunks and placement](02-chunks-and-placement.md),
   [03 Epochs, leases and failures](03-epochs-leases-and-failures.md),
-  [04 One log per disk](04-one-log-per-disk.md),
-  [05 The cleaner and free space](05-the-cleaner-and-free-space.md),
-  [08 The MetaStore](08-the-metastore.md),
-  [09 RWX filesystem and cache coherence](09-rwx-filesystem-and-cache-coherence.md),
-  [10 Block, snapshots and clones](10-block-snapshots-and-clones.md),
-  [12 Testing for trust](12-testing-for-trust.md).
+  [10 Block, snapshots and clones](10-block-snapshots-and-clones.md).
