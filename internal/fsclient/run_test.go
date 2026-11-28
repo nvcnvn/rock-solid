@@ -86,12 +86,13 @@ const (
 // node rebooted, so leaders change, and a replica's or a daemon's node paused; and each daemon
 // crashed, also within 3 ms of a chunk write it sends, half the time for a file's first and one
 // time in 32 for another; daemon 1's crash takes replica 2 down with it. Until stableEnd no fault
-// takes down the shard's leader, which frees orphans only while no other has led. A daemon restarts
+// takes down the shard's leader; each new leader's grace period waits for both daemons to
+// re-register, and an owner's ask to evict a session fences it. A daemon restarts
 // in a new session; daemon 0's, before its processes start, creates each file not yet made and,
 // with even odds, unlinks and creates each other again, while daemon 1's processes go on, and while
 // its processes run it unlinks a file and creates it again up to churnGap apart. The replicas take
 // each session table once both daemons hold their sessions and the devices the table, acknowledged,
-// as a storage node's server does. While a daemon's processes run, until runFor: its session
+// as a storage node's server does, and a new owner's ask is answered with it then. While a daemon's processes run, until runFor: its session
 // fenced up to fenceGap apart, and within 1 ms of one
 // write in 16, half the time handed to the devices up to fenceLag before the daemon takes it, so
 // they refuse the old session's writes while its client is live; one allocation in allocOdds
