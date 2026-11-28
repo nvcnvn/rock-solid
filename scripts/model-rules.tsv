@@ -115,13 +115,13 @@ recall/neg-answer-early	open	phase 7
 recall/neg-any-ack	open	phase 7
 recall/neg-attr-past-lease	open	Client fencing
 recall/neg-evict-at-once	open	phase 7
-recall/neg-grace-by-time	meta.graceByTime	TestPlantedRegistryBugsFreeAnOpenOrphan
+recall/neg-grace-by-time	open	phase 7
 recall/neg-keep-cache	open	phase 7
 recall/neg-leave-ws-early	open	phase 7
 recall/neg-no-drop	open	phase 7
 recall/neg-no-flush	open	phase 7
 recall/neg-no-reval	open	phase 7
-recall/neg-open-in-grace	meta.openInGrace	TestANewOpenWaitsOutTheGracePeriod
+recall/neg-open-in-grace	open	phase 7
 recall/neg-open-skips-holder	open	phase 7
 recall/neg-rereg-no-wrote	open	phase 7
 recall/neg-timeout-answer	open	phase 7
