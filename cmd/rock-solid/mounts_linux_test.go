@@ -168,8 +168,6 @@ func TestAMountOnEachOfTwoNodesKeepsCloseToOpenAcrossAPauseAndAKill(t *testing.T
 		t.Skip("RS_FUSE_DIR names no directory to mount under")
 	case os.Geteuid() != 0:
 		t.Skip("mounting with allow_other needs root")
-	case os.Getenv("RS_THREE_VOTERS") == "":
-		t.Skip("a data group of three voters on storage nodes serves no read until their node-pair leases are renewed (MetaStore replicas' halts and leases on a storage node)")
 	}
 	var stopped atomic.Bool
 	var wg sync.WaitGroup
