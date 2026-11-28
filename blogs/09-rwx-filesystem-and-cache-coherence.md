@@ -35,9 +35,8 @@ Each term is explained again where it first matters; the glossary has longer ent
   the replicated MetaStore ([post 08](08-the-metastore.md)).
 - **Session, lease, fencing.** A session is a daemon's registration with the cluster, kept alive
   by a lease that the control plane renews on the node's heartbeat and alone declares expired.
-  Fencing stops a daemon whose session expired from
-  writing, even if it does not know yet
-  ([03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md)).
+  Fencing stops a daemon whose session expired from writing, even if it does not know yet
+  ([03b](03b-leases-failure-detection-and-fencing.md#6-fencing-client-sessions)).
 - **CSI (Container Storage Interface).** How Kubernetes drives a storage system; its node plugin
   mounts volumes into pods.
 
@@ -126,13 +125,10 @@ and correctness never depends on timeouts alone* ([Strategy](../docs/design.md#s
 > accept close-to-open and let applications cope, build a full protocol of per-client cache
 > permissions, or switch caching off per file only while it is actually contended.
 
-NFS-Ganesha (a user-space NFS server) in front of each volume, as Longhorn's share-manager runs
-it, is familiar but puts every byte through one pod. JuiceFS has no gateway but uses an object
-store and an external metadata engine, close-to-open only. CephFS clients hold *capabilities*,
-per-client rights to cache or buffer each file, granted and revoked as access changes: the most
-complete answer, with its own kernel module. Weka, a commercial GPU-cluster filesystem, caches by
-default and bypasses the page cache for a file only while several servers access it and one
-writes.
+CephFS clients hold *capabilities*, per-client rights to cache or buffer each file, granted and
+revoked as access changes: the most complete answer, with its own kernel module. Weka, a
+commercial GPU-cluster filesystem, bypasses the page cache for a file only while several servers
+access it and one writes. NFS-Ganesha is a user-space NFS server.
 
 | System | Clients talk to | Coherence for shared files | What else you run | Main cost |
 | --- | --- | --- | --- | --- |
@@ -204,13 +200,13 @@ uncached handle: FUSE read every time -> daemon -> ChunkStore.read via the chunk
 both:            the daemon clamps a read to the file's size
 ```
 
-"Shared" here means the WriteShared cache mode explained under Tier 2 below; the space grant and
-the late error are explained [below](#a-full-pool-space-grants). `alloc_end` is a mark on the
-inode, one past the highest chunk that may hold data: it tells a later delete or truncate which
-chunks to remove, even after a crash. The daemon raises it in growing steps, so it costs a
-metadata write only now and then, and other nodes see a large file grow while it is written. Namespace
-operations (`create`, `mkdir`, `unlink`, `rename`, `setattr`) are MetaStore transactions,
-single-shard except a cross-directory `rename`. The design's targets, stated as round trips:
+"Shared" here means the WriteShared cache mode explained under Tier 2 below; the space grant and the
+late error are explained [below](#a-full-pool-space-grants). `alloc_end` is a mark on the inode, one
+past the highest chunk that may hold data: it tells a later delete or truncate which chunks to
+remove, even after a crash. The daemon raises it in growing steps, so it costs a metadata write only
+now and then, and other nodes see a large file grow while it is written. Namespace operations
+(`create`, `mkdir`, `unlink`, `rename`, `setattr`) are MetaStore transactions, single-shard except a
+cross-directory `rename`. The design's targets, stated as round trips:
 
 | Operation | Target cost |
 | --- | --- |
@@ -223,10 +219,10 @@ single-shard except a cross-directory `rename`. The design's targets, stated as 
 wrote it: the daemon sends the time of the file's last write with its `close` or `fsync`
 transaction. Wall clocks on different nodes disagree by milliseconds or more, and a time daemon can
 step one back, so a file written on node A and then on node B could see its `mtime` go backwards,
-which breaks `make` and `rsync`. So the transaction stores the later of that time and a hair past the stored
-`mtime`, the rule CockroachDB's hybrid logical clocks use to keep timestamps from going backwards
-([clock skew study](../studies/clock-skew/README.md)). An explicit `touch -d` or `rsync -t` stores
-exactly the time it is given.
+which breaks `make` and `rsync`. So the transaction stores the later of that time and a hair past
+the stored `mtime`, the rule CockroachDB's hybrid logical clocks use to keep timestamps from going
+backwards ([clock skew study](../studies/clock-skew/README.md)). An explicit `touch -d` or `rsync
+-t` stores exactly the time it is given.
 
 ### Three rules the kernel forces on the design
 
@@ -237,7 +233,8 @@ exactly the time it is given.
 
 #### How it works
 
-The three rules, each from the [FUSE coherence spike](../docs/design.md#appendix-fuse-coherence-spike):
+The three rules, each from the [FUSE coherence
+spike](../docs/design.md#appendix-fuse-coherence-spike):
 
 1. **The kernel page cache is used for reads only.** FUSE has a `writeback_cache` option that
    lets the kernel buffer writes in the page cache. rock-solid never enables it. It is a
@@ -246,15 +243,14 @@ The three rules, each from the [FUSE coherence spike](../docs/design.md#appendix
    on for files that are already open: in the spike, a node mounted with it kept reading stale
    data.
 2. **Write-back buffering lives in the daemon.** Every `write()` reaches the daemon as a FUSE
-   request (about 5 µs), so the daemon always knows when a file has been written and can flush it
-   on demand. While the file is not shared, the daemon buffers writes in its own memory and
-   acknowledges at once, as long as its *space grant* covers them ([below](#a-full-pool-space-grants)).
-   It flushes a chunk as soon as it is full, and the rest on `fsync`,
-   `close` or a recall, in whole blocks where it can
-   ([below](#small-writes-truncate-and-the-end-of-file)). The buffer has a fixed size per node;
-   when it is full, the oldest partial chunk is flushed. As with the kernel's dirty pages, a crash loses
-   what has not been flushed; the [restart section](#daemon-restart-and-upgrade) shows how that
-   loss is reported instead of hidden.
+   request (about 5 µs), so the daemon always knows when a file has been written and can flush it on
+   demand. While the file is not shared, the daemon buffers writes in its own memory and
+   acknowledges at once, as long as its *space grant* covers them
+   ([below](#a-full-pool-space-grants)). It flushes a chunk as soon as it is full, and the rest on
+   `fsync`, `close`, a recall or when its fixed-size buffer fills, in whole blocks where it can
+   ([below](#small-writes-truncate-and-the-end-of-file)). As with the kernel's dirty pages, a crash
+   loses what has not been flushed; the [restart section](#daemon-restart-and-upgrade) shows how
+   that loss is reported instead of hidden.
 3. **Whether a handle is cached is decided at `open` and cannot change.** The kernel fixes a
    handle's direct-I/O flag when the file is opened. The daemon chooses it per open, from the
    file's cache mode at that moment. Handles already open with caching need other means, which
@@ -271,9 +267,9 @@ The three rules, each from the [FUSE coherence spike](../docs/design.md#appendix
 #### How it works: whole blocks from the daemon, merges at the primary
 
 Without `writeback_cache`, the kernel hands the daemon each `write()` with exactly its offset and
-length, so the daemon accepts any byte range. In Exclusive mode no other node can write the file, and the bytes past
-its end are zero on disk (next part), so a flush widens a partial block to a whole one whenever
-the daemon holds the block's other bytes or they lie past the end of file:
+length, so the daemon accepts any byte range. In Exclusive mode no other node can write the file,
+and the bytes past its end are zero on disk (next part), so a flush widens a partial block to a
+whole one whenever the daemon holds the block's other bytes or they lie past the end of file:
 
 - a new 1.5 KiB file goes out as one 4 KiB block padded with zeros;
 - after a flush the daemon keeps the file's last partial block, so a log file that appends a line
@@ -296,12 +292,16 @@ old bytes, which a test that only reads memory could not see.
 
 rock-solid keeps one rule instead: **once a file's purge has run, every byte past its size is zero
 on disk.** A truncate commits, in one transaction, the new size, `alloc_end` lowered to the new
-end, and a purge entry that starts at the new size's *byte offset*, not at a chunk boundary. The purge's first punch zeroes the rest of the block
-holding the new end, by a merge at the primary, and the rest of its chunk; the daemon runs it
-before `truncate` returns, and the purger runs it again if a crash came first. Any extension
-finishes a pending purge before it writes. So growing a file again writes nothing to the gap:
-blocks never written read as zeros, and the old last block's tail already is zero. Reads are
-clamped to the size as well.
+end, and a purge entry that starts at the new size's *byte offset*, not at a chunk boundary; then
+`truncate` returns. The background purger first asks the inode's owner to drain the file: every
+other node with it open flushes its buffer and answers once each write it sent under the old size
+has returned, so none can land past the cut afterwards. Then the purger's first punch zeroes the
+rest of the block holding the new end, by a merge at the primary, and the rest of its chunk. The
+truncating daemon does not send that punch itself: it could land after the purger finished and
+another node extended the file, and zero that write. Anything that extends the file over a range
+with a pending purge waits for it. So growing a file again writes nothing to the gap: blocks
+never written read as zeros, and the old last block's tail already is zero. Reads are clamped to
+the size as well.
 
 ### A full pool: space grants
 
@@ -322,18 +322,16 @@ after discarding what it had buffered, JuiceFS at the next `write()` or flush
 rock-solid's daemon buffers only against a **space grant**: bytes of a pool its node may hold
 unflushed, counted in whole blocks, so a 100-byte append is charged a 4 KiB block per copy. The
 heartbeat every node already sends the control-plane leader, the one that renews its session,
-reports what the node has buffered and asks for roughly a second's worth of its recent writes; the
-reply sets the grant. The leader keeps a pool's grants to a fraction of what the pool can still
-take, so they shrink as it fills, and shares them out evenly when nodes ask for more, so one heavy
-writer cannot crowd out the small ones.
+reports what the node has buffered and asks for more; the reply sets the grant. The leader keeps
+a pool's grants to a fraction of what the pool can still take, so they shrink as it fills, and
+shares them out evenly, so one heavy writer cannot crowd out the small ones.
 
-The daemon reuses its grant as its flushes complete, but only for a bounded number of grants'
-worth between answered heartbeats, and the leader keeps that bound's worth of every node's grant
-within the room each disk has above `write_limit`, because a granted flush is admitted past the
-limit. So whatever happens to heartbeats or to the control plane, what a node can write unseen is
-capped. Without that budget, a node cut off from the leader but not from storage could keep
-flushing for a whole session lease and fill a small pool's disks. A new leader, which knows no
-grants, counts every live session as holding full buffers until it hears from it.
+The daemon reuses its grant as its flushes complete, but only a bounded amount between answered
+heartbeats, and the leader keeps that bound within the room each disk has above the pool's write
+limit, the disk fill past which writes that add data are refused, because a granted flush is
+admitted past the limit. So what a node can write unseen is capped even when it is cut
+off from the leader but not from storage. A new leader, which knows no grants, counts every live
+session as holding full buffers until it hears from it.
 
 ```mermaid
 flowchart TD
@@ -341,19 +339,18 @@ flowchart TD
     Q -- "yes" --> E1["ENOSPC"]
     Q -- "no" --> G{"does the node's space grant<br/>cover it?"}
     G -- "yes" --> B["take it from the grant, buffer,<br/>acknowledge in about 5 µs"]
-    B --> F["flushed later; admitted past write_limit,<br/>never refused for space"]
+    B --> F["flushed later; admitted past the write limit,<br/>never refused for space"]
     G -- "no" --> T["flush the chunk's buffered writes,<br/>send this write to the primary"]
-    T --> P{"pool past write_limit<br/>for a write that adds data?"}
+    T --> P{"pool past its write limit<br/>for a write that adds data?"}
     P -- "no" --> OK["acknowledge, about 1 ms"]
     P -- "yes" --> E2["ENOSPC from write()"]
 ```
 
 *Near full, buffering turns into writing through, and the error arrives where programs look for it.*
 
-A quiet node sends no extra message, and a node streaming fast sends its heartbeats a little
-early, each a memory update at the leader. The price is speed near full: a write that goes through
-costs a round trip and a flush, about a millisecond on NVMe, against microseconds buffered. CephFS
-pays the same once its pool is nearly full, when its client makes every write synchronous. Writes
+A quiet node sends no extra message. The price is speed near full: a write that goes through
+costs a round trip and a flush against microseconds buffered. CephFS pays the same once its pool
+is nearly full, when its client makes every write synchronous. Writes
 through `mmap` cannot be granted, since the kernel sends them at writeback; a refusal reaches
 `msync` or `fsync`.
 
@@ -398,8 +395,8 @@ sequenceDiagram
   the FUSE `keep_cache` flag, and the kernel drops the stale pages.
 - **On `close` and `fsync`:** the daemon flushes buffered writes and commits size and `mtime`.
   The next open on any node sees them.
-- **Metadata:** attributes and most directory entries are cached in the kernel for a second by
-  default. A `strict` mount option turns that caching off. No timeout the daemon hands the
+- **Metadata:** attributes and most directory entries are cached in the kernel briefly. A
+  `strict` mount option turns that caching off. No timeout the daemon hands the
   kernel reaches past its session lease (see [Sessions and fencing](#sessions-and-fencing)).
 - **flock and whole-file `fcntl` locks:** MetaStore keys owned by the client's session, so they
   end with the session.
@@ -415,28 +412,26 @@ under Tier 1 alone `web` can read the old bytes until it reopens. Tier 2 closes 
 
 ### The coherence tiers
 
-> **In plain words.** Coherence ships in steps, each a usable release that is correct for a named
-> set of workloads, so nobody is told it is safe for something it is not.
+> **In plain words.** Coherence comes in tiers, each correct for a named set of workloads, so
+> nobody is told it is safe for something it is not.
 
-| Tier | What | Correct for | Effort |
-| --- | --- | --- | --- |
-| 0 | RWX block: multi-attach, no daemon-side cache, fencing | KubeVirt live migration, cluster-aware apps | Small |
-| 1 | Close-to-open consistency, short attribute and directory-entry timeouts, flock, unlink and rename of open files, fencing | One writer per file at a time: media, configs, uploads, datasets, CI caches | Medium |
-| 2 | Per-file cache mode switch: cache while one node holds the file or all are readers; uncached once two or more nodes share it and one has written | Concurrent writers on a file, automatically, with no tuning | Medium |
-| 3 | Byte-range locks, directory caching with pushed invalidations | SQLite-style apps that lock byte ranges; large directory trees | Large |
+| Tier | What | Correct for |
+| --- | --- | --- |
+| 0 | RWX block: multi-attach, no daemon-side cache, fencing | KubeVirt live migration, cluster-aware apps |
+| 1 | Close-to-open consistency, short attribute and directory-entry timeouts, flock, unlink and rename of open files, fencing | One writer per file at a time: media, configs, uploads, datasets, CI caches |
+| 2 | Per-file cache mode switch: cache while one node holds the file or all are readers; uncached once two or more nodes share it and one has written | Concurrent writers on a file, automatically, with no tuning |
+| 3 | Byte-range locks, directory caching with pushed invalidations | SQLite-style apps that lock byte ranges; large directory trees |
 
-Tier 0 belongs to block volumes ([10-block-snapshots-and-clones.md](10-block-snapshots-and-clones.md)).
-Tier 3 comes last.
+Tier 0 belongs to block volumes
+([10-block-snapshots-and-clones.md](10-block-snapshots-and-clones.md)).
 
 ### Tier 2: the per-file cache mode switch
 
 > **In plain words.** Each file has a referee, the inode owner, who knows which nodes have it
-> open and whether any of them has written to it. While only one node uses the file, or several
-> nodes only read it, everyone may cache, because no cached copy can go stale. The moment a
-> second node is involved and somebody writes, the referee tells every other node to throw away
-> its copies and stop caching that one file, and the daemons make sure even handles that were
-> already open stop trusting their copies. When all but one node have closed the file, caching
-> comes back. Nobody configures anything: the switch follows how the file is actually used.
+> open and whether any of them has written to it. While one node uses the file, or several only
+> read it, everyone may cache, because no cached copy can go stale. Once a second node is
+> involved and somebody writes, the referee tells every other node to throw away its copies and
+> stop caching that one file, until all but one node have closed it. Nobody configures anything.
 
 The three states and the events that move a file between them are below; caching is off only in
 WriteShared.
@@ -532,15 +527,13 @@ sequenceDiagram
     K-->>W: fresh bytes
 ```
 
-The attribute answer needs no network trip, only the FUSE trip. The data read then goes to the chunk primary, like every read in this mode.
+The attribute answer needs no network trip, only the FUSE trip. The data read then goes to the chunk
+primary, like every read in this mode.
 
-The other way into WriteShared, from Exclusive, follows the same rule: the owner recalls every
-other member. If node A has written the file and node B opens it, the owner recalls A; A flushes
-its buffered writes and drops its pages. The owner answers B's open, uncached, only once A has
-acknowledged or been fenced, so B never reads storage before A's buffered writes reach it. If A
-is unreachable, B's open waits up to A's session lease plus the time to fence A's session; if A
-still renews its session but does not answer, the owner gives up on it after a recall timeout and
-has it fenced.
+The other way in, from Exclusive, follows the same rule. If node A has written the file and node
+B opens it, the owner recalls A and answers B's open, uncached, only once A has acknowledged or
+been fenced, so B never reads storage before A's buffered writes reach it. If A still renews its
+session but does not answer, the owner gives up on it after a recall timeout and has it fenced.
 
 #### How it works: while WriteShared
 
@@ -553,19 +546,20 @@ has it fenced.
   file don't touch the MetaStore.
 - **Appends** (`O_APPEND`) from several nodes use a MetaStore compare-and-set on the size, so
   two nodes appending at once never pick the same offset.
-- **mmap:** a program that maps a file into memory reads it with plain memory loads the kernel
-  never revalidates, and FUSE does not tell the daemon a file is mapped. So after
-  each write it commits, the writing node tells the other members' daemons, and each calls
-  `notify_inval_inode` on its own kernel. Mapped readers see the write within one message delay,
-  not instantly. A mount option makes each write wait for those invalidations instead. Shared-writable `mmap` across nodes stays a non-goal.
+- **mmap:** a program that maps a file into memory reads it with plain memory loads the kernel never
+  revalidates, and FUSE does not tell the daemon a file is mapped. So after each write it commits,
+  the writing node tells the other members' daemons, and each calls `notify_inval_inode` on its own
+  kernel. Mapped readers see the write within one message delay, not instantly. A mount option makes
+  each write wait for those invalidations instead. Shared-writable `mmap` across nodes stays a
+  non-goal.
 
 #### How it works: leaving WriteShared
 
-When all but one node have closed the file, the owner returns it to Exclusive. No recall is
-needed, since no other node is caching. New opens on the remaining node are cached again, and its
-writes are buffered again. The `mtime` a node shows never goes backwards across the switch. A file that two nodes touched
-for a minute pays the uncached price for that minute, plus any handle opened with `direct_io` during it, which stays uncached until it is
-reopened.
+When all but one node have closed the file, the owner returns it to Exclusive. No recall is needed,
+since no other node is caching. New opens on the remaining node are cached again, and its writes are
+buffered again. The `mtime` a node shows never goes backwards across the switch. A file that two
+nodes touched for a minute pays the uncached price for that minute, plus any handle opened with
+`direct_io` during it, which stays uncached until it is reopened.
 
 ### Sessions and fencing
 
@@ -587,7 +581,7 @@ node B daemon      heartbeat, renewed ... [ paused: frozen VM, partition, long s
 B's lease          [================================================)
                                                           ^         ^ the leader's count
                                                           |           runs out
-         B stops writing here, lease_drift before its own count runs out, and no
+         B stops writing here, a small margin before its own count runs out, and no
          kernel cache timeout it handed out reaches past it
 
 control-plane                                                         commits B's session
@@ -606,34 +600,29 @@ B wakes up         its writes are rejected -> it starts a new session and reopen
 #### How it works
 
 Each client daemon holds one session, for its FUSE mounts and block devices alike. Its locks, open
-registrations and cache rights all belong to the session.
+registrations and cache rights all belong to the session. Post 03b tells the rules in full
+([Fencing client sessions](03b-leases-failure-detection-and-fencing.md#6-fencing-client-sessions));
+what matters for files is:
 
-- **The control plane keeps the lease.** The session is a key in the control-plane group, and
-  its lease is renewed by the heartbeat each node already sends the control-plane leader;
-  renewals change only the leader's memory. Only that leader declares a session expired, on its
-  own clocks, so the inode owners a node talks to never disagree about it, and an owner that fails
-  over leaves sessions alone. A new leader gives every live session a full lease before it
-  expires any ([03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md#who-decides-that-a-session-has-expired)).
-- **The client limits itself.** It counts its lease from when it sent the last answered
-  heartbeat, which is before the leader counted it, and stops writing a margin early on whichever
-  of its two clocks runs faster, or at once when it learns its machine was suspended, restored
-  from a snapshot or migrated ([03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md#two-clocks-because-a-time-daemon-can-bend-either-one)).
-  No timeout it gives the kernel reaches past that instant, so a paused client's next `read()`
+- **One referee.** Only the control-plane leader declares a session expired, on its own clocks, so
+  the inode owners a node talks to never disagree about it, and an owner that fails over leaves
+  sessions alone ([Who
+  decides](03b-leases-failure-detection-and-fencing.md#who-decides-that-a-session-has-expired)).
+- **The client stops first.** It stops writing a margin before its own count runs out, on whichever
+  of its two clocks runs faster ([Two
+  clocks](03b-leases-failure-detection-and-fencing.md#two-clocks-because-a-time-daemon-can-bend-either-one)),
+  and no timeout it gives the kernel reaches past that instant. So a paused client's next `read()`
   asks the daemon for attributes, and the daemon, seeing its lease has lapsed, drops the file's
-  pages first. A client that merely lost touch with the control plane holds its requests until a
-  new leader answers, so a control-plane failover is a pause, not an error.
-- **The cluster fences before it reassigns.** The leader commits every session due at that moment
-  as fenced in one new version of the *session table*, which is published like the placement
-  table. Every storage node applies it, acknowledges it, and from then on rejects writes carrying
-  a fenced session's ID, including ones already queued. Only once every storage node has
-  acknowledged, or has been marked down, do owners release the session's rights. So a write the
-  fenced client got applied is ordered before every write of the next lock holder.
-- **A node that answers the control plane but not an owner.** Its session stays alive, so a
-  recall to it could wait forever. After a recall timeout the owner asks the control plane to
-  stop renewing it, and it is fenced once its lease runs out. It is never fenced sooner, because a
-  client that still renews trusts its cached pages and locks until its own lease ends.
+  pages first. A client that merely lost touch with the control plane holds its requests until a new
+  leader answers, so a control-plane failover is a pause, not an error.
+- **Fence, then reassign.** Every storage node rejects the fenced session's writes, including ones
+  already queued, before any owner releases its locks, opens and recalls. So a write the fenced
+  client got applied is ordered before every write of the next lock holder.
+- **A node that answers the control plane but not an owner** is never fenced sooner than its lease
+  allows, since it still trusts its cache: after a recall timeout the owner asks the control plane
+  to stop renewing it.
 - **A fenced client starts over** with a new session. Every call on a handle opened under the old
-  one fails with `EIO`, so applications get errors rather than silently stale data.
+  one fails with `EIO`.
 
 The same machinery serves flock (Tier 1), recalls (Tier 2), snapshot cuts and RWX block
 (Tier 0). It is also why a recall can safely wait for a dead node: the wait ends with an ack or
@@ -751,33 +740,28 @@ What survives a restart, in one table:
 | Write-back buffer | Flushed before handover | Lost; the next `write()`, `fsync` or `close` on each affected handle fails with `EIO` |
 | Kernel `INIT` parameters | Unchanged; a release that changes them needs a remount | Unchanged |
 
-On the write-back row: unflushed writes die with the process, as dirty pages die in a kernel
-crash, but here the application keeps running and would never know. So the memfd lists the
-handles holding unflushed data, and the successor fails their next call with `EIO`.
+The memfd lists the handles holding unflushed data, which is how the successor knows whose next
+call fails: the application keeps running after a crash and would otherwise never know.
 
 ## Evidence
 
 Four spikes decided the shape of this frontend:
 
-- **FUSE is enough for Tier 2.** The [FUSE coherence spike](../spikes/fuse-coherence/) (two FUSE
-  mounts of one file standing in for two nodes, on a recent Linux kernel) showed stale reads
-  without a protocol; a fresh read after `notify_inval_inode`; an old cached handle going stale
-  again after one drop, and staying stale even when new opens use direct I/O; and the
-  `auto_inval_data` plus changing-`mtime` trick keeping old handles fresh on every `read()`, but
-  not through `mmap`. It also showed `writeback_cache` defeating that trick, which is why the
-  kernel cache is for reads only. Every Tier 2 step answers one of those findings, and none needs
-  a kernel module.
+- **FUSE is enough for Tier 2.** The [FUSE coherence spike](../spikes/fuse-coherence/), two FUSE
+  mounts of one file standing in for two nodes, produced every finding the Tier 2 steps answer:
+  stale reads without a protocol, an old cached handle going stale again after one drop, the
+  changing-`mtime` trick keeping it fresh except through `mmap`, and `writeback_cache` defeating
+  that trick. None of the steps needs a kernel module.
 - **A mount can outlive its daemon.** The [FUSE restart spike](../spikes/fuse-restart/) and the
   [FUSE handoff spike](../spikes/fuse-handoff/) handed descriptors between processes without a new
-  `INIT`, had the kernel resend unanswered requests, confirmed that closing the last descriptor
-  aborts the mount, and killed a daemon mid-request with a holder keeping the mount: no
-  application error, the successor serving within milliseconds. Run across four mount namespaces,
-  the mount survived its daemon's namespace, which is what makes the Kubernetes layout safe.
+  `INIT`, had the kernel resend unanswered requests, and killed a daemon mid-request with a holder
+  keeping the mount: no application error. Across mount namespaces the mount survived its
+  daemon's namespace, which is what makes the Kubernetes layout safe.
 - **Partial blocks merge at the primary, on its newest ordered version.** The
   [sub-block writes spike](../spikes/sub-block-writes/) checked every placement of the merge
   against an oracle of acknowledged bytes: only the primary merging onto the newest version it had
   ordered never lost bytes; merging onto the committed version, or in the client without
-  compare-and-set, lost bytes on every seed. The
+  compare-and-set, lost bytes. The
   [sub-block writes study](../studies/sub-block-writes/README.md) reads how CephFS, VitastorFS,
   JuiceFS and local filesystems handle the same cases.
 - **Tier 2 has the right shape for SMB too.** The [Samba gateway spike](../spikes/samba/) found
@@ -791,23 +775,18 @@ Four spikes decided the shape of this frontend:
   copy, and a write-shared write that covers part of a block can wait for a 4 KiB read at the
   primary.
 - **Write-shared files cost a round trip per I/O** instead of 0.3 µs from the page cache, on the
-  bet that write-sharing is rare in homelab workloads.
-- **`mtime` changes on every `stat` of a write-shared file**, which tools comparing mtimes may
-  notice.
-- **mmap readers lag by one message delay** unless `mmap_sync` is on, and shared-writable `mmap`
-  across nodes is not supported.
-- **A recall waits for the slowest member.** If a member's node is unreachable, the first write
-  on a ReadShared file, or a second node's open of a file another node has written, waits until
-  that node acknowledges or its session expires and it is fenced at every storage node.
+  bet that write-sharing is rare in homelab workloads, and their `mtime` changes on every `stat`.
+- **mmap readers lag by one message delay** unless a mount option makes each write wait for the
+  invalidations, and shared-writable `mmap` across nodes is not supported.
+- **A recall waits for the slowest member**, up to an unreachable node's lease and its fence.
 - **An owner crash pauses new opens** for one session lease; **a daemon crash loses unflushed
   writes**, reported as `EIO` but still lost.
-- **Near a full pool, writes slow down to a round trip each**, because space grants shrink and
-  writes go through; small disks leave little room for grants.
+- **Near a full pool, writes slow down to a round trip each**, as space grants shrink.
 - **The daemon container is privileged**, and the descriptor holder is sensitive: a descriptor is
   the whole filesystem.
 - **FUSE parameters are frozen per mount**; changing them needs a remount.
 - **SMB goes through one Samba gateway per volume**, and shares that pods on other nodes also
-  write need `oplocks = no`, since a gateway's SMB leases are not yet tied to recalls.
+  write need `oplocks = no`, since a gateway's SMB leases are not tied to recalls.
 
 ## Open directions
 
@@ -844,5 +823,6 @@ From the [roadmap and open questions](../docs/design.md#roadmap-and-open-questio
 - Glossary: [Files and caching](../docs/glossary.md#files-and-caching),
   [Coordination and failure](../docs/glossary.md#coordination-and-failure).
 - Other posts: [03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md),
+  [03b-leases-failure-detection-and-fencing.md](03b-leases-failure-detection-and-fencing.md),
   [08-the-metastore.md](08-the-metastore.md),
   [10-block-snapshots-and-clones.md](10-block-snapshots-and-clones.md).
