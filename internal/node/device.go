@@ -30,7 +30,8 @@ const MetaTimer core.TimerID = 0x6d657461 << 32
 // MetaStore replicas the disk may hold, one per group: a store opened restores each replica its
 // manifest names, under the group, replica ID and owner the disk records, with the rest of the
 // settings of its group's entry here, or closed if none (Unmapped); and Meta the settings Plans
-// gives a new replica its own on, its tree's and the leases of the device's loop.
+// gives a new replica its own on, its tree's and the leases of the device's loop, which every
+// replica the device hosts and its chunk replica share.
 type DeviceConfig struct {
 	Device uint64
 	Blocks uint64
@@ -133,6 +134,10 @@ type Device struct {
 	// deleted are the replicas a delete removed, which no plan hosts again, as a stale one may
 	// still name them.
 	deleted []meta.ReplicaRef
+	// halts are the replicas halted at the last report, each since the first report that found it
+	// halted; peers the loops hosting their peers, which the chunk replica renews leases with.
+	halts []meta.Halt
+	peers []core.NodeID
 	// unmapped are the replicas a restart restored of a group Metas has no settings for, as the
 	// shard map no longer names it: hosted with no peers, so the store keeps their runs and
 	// checkpoints, but closed, taking no timer and no Raft message, so none votes, appends or
@@ -268,6 +273,9 @@ func (d *Device) host(cfg meta.RoundConfig) {
 		d.metas = append(d.metas, nil)
 	}
 	cfg.Shard.Raft.Timer, cfg.Answered = MetaTimer+core.TimerID(i), d.sv.Reply
+	if d.cfg.Meta.Shard.Raft.Holder != nil {
+		cfg.Shard.Raft.Holder, cfg.Shard.Raft.Grantor = d.cfg.Meta.Shard.Raft.Holder, d.cfg.Meta.Shard.Raft.Grantor
+	}
 	a := meta.NewRoundShard(d.cfg.Host, d.cfg.Rounds, cfg)
 	d.st.AddRemote(cfg.Owner, int(d.cfg.Loop), uint32(a.ID()), disklog.Replica{Group: cfg.Shard.Raft.Group, ID: cfg.Shard.Raft.ID})
 	d.metas[i] = a
@@ -499,7 +507,8 @@ func (d *Device) Disks(ctx *core.Context, ds []meta.DiskAddr, gs []meta.PoolGran
 		if i < 0 {
 			return
 		}
-		d.rep = chunkstore.NewReplica(chunkstore.ReplicaConfig{Disk: ds[i].Disk, Seed: d.rng.Uint64(), Start: d.start, Log: d.log, Restarted: d.restarted}, d.st)
+		d.rep = chunkstore.NewReplica(chunkstore.ReplicaConfig{Disk: ds[i].Disk, Seed: d.rng.Uint64(), Start: d.start, Log: d.log, Restarted: d.restarted,
+			Holder: d.cfg.Meta.Shard.Raft.Holder, Grantor: d.cfg.Meta.Shard.Raft.Grantor}, d.st)
 		TakeMembership(ctx, d.rep, ds, gs)
 		if d.hasAuth {
 			d.rep.SetAuthority(ctx, d.auth, &d.rout)
@@ -582,7 +591,8 @@ func (d *Device) Take(ctx *core.Context, o *Output, out *DeviceOutput) {
 	}
 	if o.Member {
 		d.Plans(o.Plans, o.Disks)
-		d.report(out)
+		d.report(ctx, out)
+		d.sharePeers(ctx, out)
 	}
 	for i := range o.Hands {
 		if o.Hands[i].Device == d.cfg.Device {
@@ -645,14 +655,59 @@ func (d *Device) freeOwner() uint32 {
 	return o
 }
 
-// report has the device report each MetaStore replica it hosts that runs.
-func (d *Device) report(out *DeviceOutput) {
+// report has the device report each MetaStore replica it hosts that runs, and those of them halted.
+func (d *Device) report(ctx *core.Context, out *DeviceOutput) {
 	out.Reported = true
-	for i, a := range d.metas {
-		if a != nil && a.Shard() != nil && !slices.ContainsFunc(d.removed, func(r removedMeta) bool { return !r.reported && r.slot == i }) {
-			out.Metas = append(out.Metas, a.Shard().Report(nil))
+	seen := d.halts
+	d.halts = nil
+	for i := range d.metas {
+		sh := d.running(i)
+		if sh == nil {
+			continue
+		}
+		r := sh.Report(nil)
+		out.Metas = append(out.Metas, r)
+		if at := sh.Halted(); at != 0 {
+			h := meta.Halt{Group: r.Group, ID: r.ID, Index: at, Since: ctx.Now}
+			if j := slices.IndexFunc(seen, func(o meta.Halt) bool { return o.Group == h.Group && o.ID == h.ID && o.Index == h.Index }); j >= 0 {
+				h.Since = seen[j].Since
+			}
+			d.halts = append(d.halts, h)
 		}
 	}
+	out.Halts = append(out.Halts, d.halts...)
+}
+
+// running is the shard of the replica in slot i if it runs and the device has not removed it, or nil.
+func (d *Device) running(i int) *meta.Shard {
+	a := d.metas[i]
+	if a == nil || a.Shard() == nil || slices.ContainsFunc(d.removed, func(r removedMeta) bool { return !r.reported && r.slot == i }) {
+		return nil
+	}
+	return a.Shard()
+}
+
+// sharePeers has the chunk replica renew the loop's leases with every loop hosting a member of a
+// running replica's configuration, on which the replicas' leader leases rest.
+func (d *Device) sharePeers(ctx *core.Context, out *DeviceOutput) {
+	if d.rep == nil {
+		return
+	}
+	d.peers = d.peers[:0]
+	for i := range d.metas {
+		sh := d.running(i)
+		if sh == nil {
+			continue
+		}
+		_, cs := sh.Raft().Applied()
+		for _, id := range slices.Concat(cs.Voters, cs.VotersOutgoing, cs.Learners) {
+			if at, ok := sh.Raft().Node(id); ok && id != d.metas[i].ReplicaID() {
+				d.peers = append(d.peers, at)
+			}
+		}
+	}
+	d.rep.SetLeasePeers(ctx, d.peers, &d.rout)
+	d.take(ctx, out)
 }
 
 // MetaSettings is the settings of group g's replica on a device: tmpl's, with g's voters as its

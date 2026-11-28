@@ -8,21 +8,34 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/lease"
 )
 
-// noteGrantors lists the loops this disk needs leases from: the other up members of each PG it leads.
+// noteGrantors lists the loops this disk needs leases from: the other up members of each PG it leads, and the loops SetLeasePeers named.
 func (r *Replica) noteGrantors() {
 	r.grantors = r.grantors[:0]
 	for _, l := range r.leads {
 		_, e := r.table.entry(l.pg)
 		for _, m := range e.Members {
-			if m.Mark != MarkUp || m.Disk == r.cfg.Disk {
-				continue
-			}
-			a := r.addr(m.Disk)
-			if i, ok := slices.BinarySearchFunc(r.grantors, a, compareNode); !ok {
-				r.grantors = slices.Insert(r.grantors, i, a)
+			if m.Mark == MarkUp && m.Disk != r.cfg.Disk {
+				r.noteGrantor(r.addr(m.Disk))
 			}
 		}
 	}
+	for _, a := range r.shared {
+		r.noteGrantor(a)
+	}
+}
+
+func (r *Replica) noteGrantor(a core.NodeID) {
+	if i, ok := slices.BinarySearchFunc(r.grantors, a, compareNode); !ok {
+		r.grantors = slices.Insert(r.grantors, i, a)
+	}
+}
+
+// SetLeasePeers names the loops the other shards on the replica's loop need its leases from, which
+// it renews from then on beside its PGs' members.
+func (r *Replica) SetLeasePeers(ctx *core.Context, peers []core.NodeID, out *ReplicaOutput) {
+	r.shared = append(r.shared[:0], peers...)
+	r.noteGrantors()
+	r.armLease(ctx, out)
 }
 
 func compareNode(a, b core.NodeID) int {

@@ -38,6 +38,9 @@ type ReplicaConfig struct {
 	Seed  uint64
 	Start lease.Time
 	Lease lease.Config
+	// Holder and Grantor are its loop's node-pair leases, which the other shards on the loop read and the replica renews, or nil for leases of its own.
+	Holder  *lease.Holder
+	Grantor *lease.Grantor
 	// Log is the log ID of the disk's store, which its heartbeats and probe answers carry.
 	Log uint64
 	// Restarted is set when the store was opened rather than formatted: an earlier run may have writes in flight, so the replica asks for a new interval of each PG it is a member of in its first table, and as primary peers in it before it serves.
@@ -261,12 +264,13 @@ type Replica struct {
 	// ask of the parked write being taken again.
 	wantSessions                   bool
 	sessionAsk, answered, unparked uint64
-	// holder is the leases this disk holds as a primary, from the loops in grantors; grantor the grants it gives; leaseAt when LeaseTimer is armed for, 0 when it is not; beatAt when the next heartbeat to its holders is due.
+	// holder is the leases this disk holds as a primary, from the loops in grantors, which also holds the loops in shared; grantor the grants it gives; leaseAt when LeaseTimer is armed for, 0 when it is not; beatAt when the next heartbeat to its holders is due.
 	holder   *lease.Holder
 	grantor  *lease.Grantor
 	lcfg     lease.Config
 	rng      *core.Rand
 	grantors []core.NodeID
+	shared   []core.NodeID
 	holders  []core.NodeID
 	leaseAt  core.Tick
 	leaseID  uint64
@@ -603,8 +607,14 @@ func NewReplica(cfg ReplicaConfig, st *Store) *Replica {
 		lc = lease.DefaultConfig
 	}
 	lc.Resume = max(lc.Resume, lease.DefaultConfig.Resume)
-	rng := core.NewRand(cfg.Seed)
-	return &Replica{cfg: cfg, st: st, lcfg: lc, rng: rng, holder: lease.NewHolder(lc), grantor: lease.NewGrantor(lc, rng.Uint64(), cfg.Start)}
+	r := &Replica{cfg: cfg, st: st, lcfg: lc, rng: core.NewRand(cfg.Seed), holder: cfg.Holder, grantor: cfg.Grantor}
+	if r.holder == nil {
+		r.holder = lease.NewHolder(lc)
+	}
+	if r.grantor == nil {
+		r.grantor = lease.NewGrantor(lc, r.rng.Uint64(), cfg.Start)
+	}
+	return r
 }
 
 // Store is the replica's store.

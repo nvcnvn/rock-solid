@@ -137,10 +137,13 @@ type Node struct {
 	delta   chunkstore.Delta
 	epoch   uint64
 	disks   meta.Membership
-	// metas are the metadata replicas as each device last reported them, reps their report, dels a
-	// delete received, and mapV the newest shard map version received.
+	// metas are the metadata replicas as each device last reported them, reps their report, halts
+	// and haltRep those of them halted, dels a delete received, and mapV the newest shard map
+	// version received.
 	metas   []heldMeta
 	metaRep []meta.ReplicaReport
+	halts   []heldHalt
+	haltRep []meta.HaltReport
 	dels    []meta.ReplicaRef
 	mapV    uint64
 	// sess is the client session, if the node holds one, startAt when its start request sent may go
@@ -240,6 +243,22 @@ func (n *Node) Remove(device uint64) {
 	n.reps = slices.DeleteFunc(n.reps, func(r replica) bool { return r.device == device })
 	n.opened = slices.DeleteFunc(n.opened, func(d meta.OpenedDisk) bool { return d.Device == device })
 	n.metas = slices.DeleteFunc(n.metas, func(h heldMeta) bool { return h.device == device })
+	n.halts = slices.DeleteFunc(n.halts, func(h heldHalt) bool { return h.device == device })
+}
+
+// heldHalt is a halted metadata replica a device reported.
+type heldHalt struct {
+	device uint64
+	halt   meta.Halt
+}
+
+// Halts reports the halted metadata replicas on device, each since when the device found it
+// halted, which the node's heartbeats carry from then on.
+func (n *Node) Halts(device uint64, hs []meta.Halt) {
+	n.halts = slices.DeleteFunc(n.halts, func(h heldHalt) bool { return h.device == device })
+	for _, h := range hs {
+		n.halts = append(n.halts, heldHalt{device: device, halt: h})
+	}
 }
 
 // heldMeta is a metadata replica a device reported.
@@ -489,6 +508,7 @@ func (n *Node) Take(ctx *core.Context, device uint64, o *DeviceOutput, out *Outp
 	n.HeldEpoch(device, o.Epoch)
 	if o.Reported {
 		n.Replicas(device, o.Metas)
+		n.Halts(device, o.Halts)
 	}
 }
 
@@ -501,7 +521,12 @@ func (n *Node) heartbeat(ctx *core.Context, out *Output) {
 	for _, h := range n.metas {
 		n.metaRep = append(n.metaRep, h.rep)
 	}
-	*nr = meta.NodeReport{Node: n.cfg.Node, Release: n.cfg.Release, Meta: !n.cfg.Client, MetaOnly: n.cfg.MetaOnly, Epoch: n.epoch, Sessions: n.table.Version, Opened: n.opened, Failed: n.failed, Replicas: n.metaRep}
+	n.haltRep = n.haltRep[:0]
+	for _, h := range n.halts {
+		n.haltRep = append(n.haltRep, meta.HaltReport{Group: h.halt.Group, ID: h.halt.ID, Index: h.halt.Index, Age: ctx.Now - min(h.halt.Since, ctx.Now)})
+	}
+	*nr = meta.NodeReport{Node: n.cfg.Node, Release: n.cfg.Release, Meta: !n.cfg.Client, MetaOnly: n.cfg.MetaOnly, Epoch: n.epoch, Sessions: n.table.Version, Opened: n.opened, Failed: n.failed,
+		Halts: n.haltRep, Replicas: n.metaRep}
 	for _, r := range n.reps {
 		if r.runs {
 			nr.Sessions, nr.Epoch = min(nr.Sessions, r.held), min(nr.Epoch, r.epoch)

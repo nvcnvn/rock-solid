@@ -28,6 +28,8 @@ type metaTrio struct {
 	reads   []meta.ReadAnswer
 	answers map[uint64]error
 	corrupt uint32
+	// beatAt is when the devices next take their membership, 0 before the first.
+	beatAt core.Tick
 }
 
 const trioGroup = 20
@@ -165,12 +167,24 @@ func newMetaTrio(t *testing.T) *metaTrio {
 	return tr
 }
 
-// take has every device take its membership.
+// take has every device take its membership now and every trioBeat from then on, as a node hands
+// its devices each answer to its heartbeat.
 func (tr *metaTrio) take() {
-	for _, m := range tr.ds {
-		m.l.Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: nodeMetaTake})
-	}
+	tr.beatAt = tr.s.Time()
 	tr.run(10_000)
+}
+
+const trioBeat core.Tick = 1_000_000
+
+// step runs the trio's next step, first handing the devices their membership once it is due.
+func (tr *metaTrio) step() bool {
+	if tr.beatAt != 0 && tr.s.Time() >= tr.beatAt {
+		tr.beatAt += trioBeat
+		for _, m := range tr.ds {
+			m.l.Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: nodeMetaTake})
+		}
+	}
+	return tr.s.Step()
 }
 
 // until runs the trio until done holds, failing it past a minute of its time.
@@ -178,7 +192,7 @@ func (tr *metaTrio) until(done func() bool) {
 	tr.t.Helper()
 	end := tr.s.Time() + 60_000_000
 	for !done() {
-		if tr.s.Time() > end || !tr.s.Step() {
+		if tr.s.Time() > end || !tr.step() {
 			tr.t.Fatal("the trio never got there")
 		}
 	}
@@ -187,7 +201,7 @@ func (tr *metaTrio) until(done func() bool) {
 // run runs the trio for d of its time.
 func (tr *metaTrio) run(d core.Tick) {
 	end := tr.s.Time() + d
-	for tr.s.Time() < end && tr.s.Step() {
+	for tr.s.Time() < end && tr.step() {
 	}
 }
 

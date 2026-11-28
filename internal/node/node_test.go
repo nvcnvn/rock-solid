@@ -753,6 +753,22 @@ func TestADevicesOutputFeedsTheNode(t *testing.T) {
 	}
 }
 
+// The heartbeat reports each halted replica a device reported, aged since the device found it
+// halted, until the device's next report leaves it out.
+func TestTheHeartbeatReportsTheHaltedReplicasADeviceReported(t *testing.T) {
+	r := newRun(t, 1)
+	r.ctx.Now = 5 * Interval
+	r.n.Take(&r.ctx, 10, &DeviceOutput{Reported: true, Halts: []meta.Halt{{Group: 4, ID: 2, Index: 9, Since: 2 * Interval}}}, &r.out)
+	r.n.Take(&r.ctx, 11, &DeviceOutput{Reported: true}, &r.out)
+	if nr := r.report(); !slices.Equal(nr.Halts, []meta.HaltReport{{Group: 4, ID: 2, Index: 9, Age: 3 * Interval}}) {
+		t.Fatalf("the heartbeat reports halts %+v", nr.Halts)
+	}
+	r.n.Take(&r.ctx, 10, &DeviceOutput{Reported: true}, &r.out)
+	if nr := r.report(); len(nr.Halts) != 0 {
+		t.Fatalf("the heartbeat reports halts %+v after the device's report left them out", nr.Halts)
+	}
+}
+
 // A client-only node, with no device, starts its session, sending the same start again until it is
 // answered, renews it rate_gap after its first answer and every second after, holds its lease from
 // its second answer until it lapses, takes it back on the next answer, ends it on Resumed, and
