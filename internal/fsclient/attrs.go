@@ -237,7 +237,7 @@ func (m *Machine) open(o *op, out *Output) {
 // only when the attributes are those of the node's previous open. An open registered under a
 // session the mount has since left fails EIO, as its handle would.
 func (m *Machine) handOut(o *op, n *node, ino uint64, create bool, out *Output) {
-	if o.mreq.Session != m.cfg.Session {
+	if o.mreq.Session != m.cfg.Session && !m.plant.handOutStale {
 		m.fail(o, EIO, out)
 		return
 	}

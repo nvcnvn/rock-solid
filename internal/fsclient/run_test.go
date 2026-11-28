@@ -249,6 +249,10 @@ func (r *fsRun) run() error {
 			break
 		}
 		for _, d := range r.ds {
+			if d.takeAt != 0 && d.takeOnOpen && d.registering() && d.n.Up() {
+				r.take(d)
+				r.ds[0].churnAt = now
+			}
 			if d.takeAt != 0 && now >= d.takeAt && d.n.Up() {
 				r.take(d)
 			}
@@ -803,11 +807,18 @@ type daemon struct {
 	ctx     *core.Context
 	acts    []core.Action
 	// crashAt is when the daemon crashes next and fenceAt when its session is fenced. session is
-	// the node's, takeAt when the daemon takes one the devices have first, 0 if none waits, and
-	// refusedIDs the IDs of the writes the devices refused the old session's client since.
+	// the node's, takeAt when the daemon takes one the devices have first, 0 if none waits, or
+	// earlier, while an open's registration is in flight, if takeOnOpen; and refusedIDs the IDs of
+	// the writes the devices refused the old session's client since.
 	crashAt, fenceAt, takeAt core.Tick
+	takeOnOpen               bool
 	session                  uint64
 	refusedIDs               map[core.RequestID]bool
+}
+
+// registering reports an OPEN of d's mount whose registration is in flight.
+func (d *daemon) registering() bool {
+	return d.g.m != nil && slices.ContainsFunc(d.g.m.ops, func(o *op) bool { return o.req.Opcode == fuseproto.OpOpen && o.step == 1 })
 }
 
 // heldSend is a Read's send, or with recv a Read's answer, that the daemon holds until at.
@@ -1224,13 +1235,15 @@ func (r *fsRun) injects(id uint32) bool {
 
 // fence starts a new session on d's node, fencing the old one: half the time the daemon takes it
 // at once and tend hands it the devices after, and half the time tend hands it the devices first
-// and the daemon takes it up to fenceLag later.
+// and the daemon takes it up to fenceLag later, half of those times at an open's registration in
+// flight if one comes first.
 func (r *fsRun) fence(d *daemon) {
 	r.session++
 	d.session = r.session
 	if r.rng.Chance(1, 2) {
 		if d.takeAt == 0 {
 			d.takeAt = r.s.Time() + 1 + core.Tick(r.rng.Below(uint64(fenceLag)))
+			d.takeOnOpen = r.rng.Chance(1, 2)
 		}
 		return
 	}
@@ -1279,8 +1292,6 @@ type runProc struct {
 	name   string
 	ino    uint64
 	openAt core.Tick
-	// usedAt is when it sent the last write or fsync of its handle that succeeded.
-	usedAt core.Tick
 }
 
 func (pr *runProc) Ready() bool {
@@ -1313,11 +1324,6 @@ func (pr *runProc) next() {
 		pr.ino = r.hist.Ops()[pr.op].Output[1]
 		if pr.id != 0 {
 			pr.size = max(pr.size, r.sizes[pr.ino])
-		}
-	}
-	if pr.open && p.Errno == 0 {
-		if op := r.hist.Ops()[pr.op]; op.Input[0]&0xff == sim.FileWrite || op.Input[0]&0xff == sim.FileFsync {
-			pr.usedAt = op.Invoke
 		}
 	}
 	if p.Errno != 0 {
@@ -1455,8 +1461,7 @@ func within(ts []core.Tick, from, to core.Tick) bool {
 }
 
 // orphansKept checks that no file a process of a running daemon holds, not closing, is freed while
-// its handle is of its daemon's session: opened, or written or synced, since the daemon last took
-// a new session. It counts the orphans freed.
+// the mount counts its handle under the mount's session. It counts the orphans freed.
 func (r *fsRun) orphansKept() error {
 	if r.current() == nil {
 		return nil
@@ -1479,14 +1484,17 @@ func (r *fsRun) orphansKept() error {
 			r.frees++
 		}
 	}
-	now := r.s.Time()
 	for _, d := range r.ds {
-		if d == nil || !d.n.Up() {
+		if d == nil || !d.n.Up() || d.g.m == nil {
 			continue
 		}
+		m := d.g.m
 		for _, pr := range d.procs {
-			if pr.open && !pr.closing && pr.ino != 0 && !r.inodes[pr.ino] && !within(r.takes[d.k], max(pr.openAt, pr.usedAt), now) {
-				return fmt.Errorf("at %d inode %x was freed while daemon %d's client %d has it open", now, pr.ino, d.k, pr.client)
+			if !pr.open || pr.closing || pr.ino == 0 || r.inodes[pr.ino] {
+				continue
+			}
+			if h := m.handles[pr.p.Fh()]; h != nil && h.session == m.cfg.Session {
+				return fmt.Errorf("at %d inode %x was freed while daemon %d's client %d has it open", r.s.Time(), pr.ino, d.k, pr.client)
 			}
 		}
 	}
@@ -1563,9 +1571,9 @@ func TestAMountsHistoriesKeepTheirInvariantsAcrossCrashes(t *testing.T) {
 // the other's close; attributes fetched before another node's commit written for a LOOKUP
 // read after it, their answer held up behind that LOOKUP; on the second mount, a Read answered
 // with an error that lasts taken as finding no key, an open failing ENOENT outside any gap of its
-// name; an open not registered at the owner and an open holding its inode only behind a release in
-// flight, each letting the owner free an orphan a process holds through a handle of its daemon's
-// session; and a handle of a session the mount left still served, whose read finds its file freed
+// name; an open not registered at the owner, an open holding its inode only behind a release in
+// flight, and an open handed out though registered under a session the mount has since left, each
+// letting the owner free an orphan a process holds through a handle of its daemon's session; and a handle of a session the mount left still served, whose read finds its file freed
 // and fails ENOENT.
 func TestPlantedMountBugsFailTheMountsRun(t *testing.T) {
 	for _, c := range []struct {
@@ -1578,11 +1586,12 @@ func TestPlantedMountBugsFailTheMountsRun(t *testing.T) {
 		{plants{dropRefused: true}, 2, invLive},
 		{plants{retryLasting: true}, 1, invReadErr},
 		{plants{entryCached: true}, 1, invCloseToOpen},
-		{plants{staleKept: true}, 11, invCloseToOpen},
+		{plants{staleKept: true}, 25, invCloseToOpen},
 		{plants{lastingMissing: true}, 1, invErrno},
 		{plants{noRegister: true}, 1, invOrphanOpen},
-		{plants{openUnheld: true}, 4, invOrphanOpen},
-		{plants{fencedServed: true}, 1, invErrno},
+		{plants{openUnheld: true}, 32, invOrphanOpen},
+		{plants{handOutStale: true}, 7, invOrphanOpen},
+		{plants{fencedServed: true}, 2, invErrno},
 	} {
 		r := newFSRun(t, c.seed, c.p)
 		r.inv.Only(c.inv)

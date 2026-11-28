@@ -487,6 +487,29 @@ func TestAGetattrInFlightAcrossAFenceFailsEIO(t *testing.T) {
 	h.errno(u, EIO)
 }
 
+// An OPEN registered under session 7 and answered after the mount takes 8 fails EIO: the owner
+// holds the open as session 7's, which closes at 7's fence, so a handle under 8 could outlive it.
+func TestAnOpenAnsweredAfterASessionChangeFailsEIO(t *testing.T) {
+	h := newMount(t, Config{})
+	ino, fh := h.create(meta.RootInode, "f")
+	h.ok(h.send(fuseproto.Request{Opcode: fuseproto.OpRelease, NodeID: ino, Fh: fh}))
+	h.regs = nil
+	h.held = true
+	u := h.send(fuseproto.Request{Opcode: fuseproto.OpOpen, NodeID: ino})
+	h.m.SetSession(8)
+	h.held = false
+	reads := h.reads
+	h.reads = nil
+	for _, rd := range reads {
+		h.answerRead(rd)
+	}
+	h.serve()
+	if len(h.regs) != 1 || h.regs[0].Reg != meta.RegOpen || h.regs[0].Session != 7 {
+		t.Fatalf("registrations %+v, want one open under session 7", h.regs)
+	}
+	h.errno(u, EIO)
+}
+
 // A CREATE whose file another node unlinks between its Txn and its registering Read answers
 // ENOENT: the owner takes no open of an orphan, as purge.tla's Open needs a link, so the mount
 // has no handle to give.

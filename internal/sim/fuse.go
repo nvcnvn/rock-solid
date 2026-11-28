@@ -309,6 +309,14 @@ func (m *Mount) Process(client uint32) *Process { return &Process{m: m, client: 
 // Busy reports whether the process's system call has not returned.
 func (p *Process) Busy() bool { return p.busy }
 
+// Fh is the handle of the process's open file, zero when it has none.
+func (p *Process) Fh() uint64 {
+	if p.file == nil {
+		return 0
+	}
+	return p.file.fh
+}
+
 // Open opens the root directory's file name with open(2) flags, which the daemon gets as they are.
 func (p *Process) Open(name string, flags uint32) {
 	if p.file != nil {

@@ -137,9 +137,10 @@ type plants struct {
 	// lastingMissing takes a Read answered with an error that lasts as finding no key.
 	lastingMissing bool
 	// noRegister registers no open at the owner, openUnheld holds an open's or CREATE's inode only
-	// behind a release in flight, not until its registration is answered, and fencedServed serves a
-	// handle of a session the mount has left.
-	noRegister, openUnheld, fencedServed bool
+	// behind a release in flight, not until its registration is answered, fencedServed serves a
+	// handle of a session the mount has left, and handOutStale hands out a handle for an open
+	// registered under a session the mount has since left.
+	noRegister, openUnheld, fencedServed, handOutStale bool
 }
 
 // Machine serves one mount. Each request names its inodes by FUSE node ID, which is the inode ID.
