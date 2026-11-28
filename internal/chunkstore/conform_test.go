@@ -330,6 +330,8 @@ func TestConformResendSeeds(t *testing.T) {
 }
 
 // conformPlants are the plants of the rule map and of the oracle test that scripts/conform.sh runs in the primary-change run.
+// refillSoleHolder is not among them: the run is too short for a member merely down to go missing, so
+// TestPlantedPeeringBugsBreakTheOracle breaks that rule through the simulator's invariant.
 var conformPlants = []struct {
 	name string
 	set  func(r *primaryRun)

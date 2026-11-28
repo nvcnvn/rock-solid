@@ -609,6 +609,7 @@ func oneMark(a, b *entry) (disk, to uint64, ok bool) {
 	return disk, to, n == 1
 }
 
+// load reads the records from the first table on: that table is the spec's Init, which starts interval 1 activated, so the bootstrap peering of interval 1 has no line.
 func (g *gen) load(path string) []trace.Record {
 	f, err := os.Open(path)
 	if err != nil {
@@ -823,6 +824,7 @@ func (g *gen) run(recs []trace.Record) {
 			}
 			g.lineAt(at, `k |-> "%s", n |-> %d, l |-> %d, c |-> %d, v |-> %s, s |-> %d, iv |-> %d`, kind, n, g.primary[f], g.chunk(r.Fields[0]), ver(r.Fields[1]), s, r.Fields[3])
 		case trace.OutReported:
+			// No traced run splits a PG, so the line leaves out the report's split count.
 			g.line(`k |-> "reported", n |-> %d, p |-> %d, iv |-> %d`, n, g.pg(r.Fields[0]), r.Fields[1])
 		case trace.OutAsk:
 			if n > g.nodes {
@@ -986,6 +988,8 @@ func (g *gen) answered(w int) string {
 	return g.answer[w]
 }
 
+// decide writes the peer line of decision r. Peer reads each reply from the state of the disk that sent it, and Format
+// gives a node a new spec disk, so the line goes before the format of any disk that answered.
 func (g *gen) decide(n int, r *trace.Record, kept, listed []string) {
 	key := [3]uint64{uint64(n), r.Fields[0], r.Fields[1]}
 	g.decisions[key] = true

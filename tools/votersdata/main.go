@@ -577,10 +577,15 @@ func (g *gen) support(id int, pass uint64, f [trace.MaxFields]uint64) {
 	c := g.confAt(r, r.state[3])
 	grown := fort &^ r.fort & (c.in | c.out)
 	r.fort = fort
+	// A count that grows with no answer in the pass came back on the node-pair lease, which has no spec step.
 	if grown == 0 || r.fortPass != pass {
 		return
 	}
 	g.stutter(`[k |-> "fortify", i |-> %d, f |-> %s]`, id, set(grown))
+	// The leader's count itself is never compared, so a leader that counts a supporter it never had passes: the
+	// simulator's lease invariants check that. A fortify line that falls between a supporter's vote for another
+	// replica and the win that vote helps lapses the supporter and hides the vote; skipping the replicas whose support
+	// a term move ended would instead refuse a legal trace in which the same leader leads again.
 	for j, o := range g.reps {
 		if j+1 != id && o.sup != uint64(id) {
 			g.stutter(`[k |-> "lapse", j |-> %d, i |-> %d]`, j+1, id)

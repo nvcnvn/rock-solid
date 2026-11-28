@@ -181,11 +181,20 @@ coverage() {
 			if ("voters" in m) {
 				n = split("Replicate Fortify Commit Leave Apply Restart AskLeader AddLearner Swap Delete DeleteOnPlan Crash Halt Die " \
 					"Notice Elect Transfer HandOffFails Lapse", a)
+				# Untaken, with why: DeleteOnPlan, enabled only with DeleteOnCommitted off; HandOffFails, which needs a
+				# halted leader stepping down in the term its hand-off failed in, as the halted-silent plant baseline does.
 				never = ""
 				for (i = 1; i <= n; i++) if (!(a[i] in done)) never = never " " a[i]
 				print "voters never taken:" never
 			}
 			if (!("epoch" in m)) exit
+			# Untaken, with why: Persist, compressed into Peer; CounterOut, which needs a chunk at 1,000,000 versions;
+			# MemberFail, taken only on a refusal by a store not serving, and Stale, which no traced run reaches;
+			# AskNext, whose lines find the ask already made; GoneRefusesRecovery, whose refusals land after the
+			# interval ended; Refuse, which has no record; SetMinLive, Die, Isolate, Split and GiveUp, which no
+			# traced run does; the lease half (OpenGrant to EndWait), whose time moves by Tick only when no
+			# protocol step is enabled; Fortify to StepDown, as MaxTerm is 0; and the clock and network faults,
+			# as Clocks is off.
 			never = ""
 			n = split("Fold Renew Adopt Peer Activate CounterOut AskNext RestartAsk ReportRecovered Persist Recover Send Order Refuse Deliver PastRefuses OwnLogged Answer " \
 				"Fortify BootUp MarkDisk Replace Rotate Add Remove Drop Stay Refill Lost GiveUp SetMinLive Split Edit Die Isolate MemberFail GoneRefuses GoneRefusesRecovery OwnFail " \
