@@ -9,8 +9,8 @@ drivers and event loops does all the real I/O. The core is what makes determinis
 possible, and the runtime is where Go is bent into the shape of a C or Rust storage engine: one
 epoll loop per core, no allocation per operation, bulk data off the Go heap.
 
-Every number below comes from `docs/design.md`, most of them from its spikes: throwaway
-experiments that each answered one design question by measurement.
+A number below is there because a decision rests on it, and each names its spike: a throwaway
+experiment that answered one design question by measurement.
 
 ## Words you need
 
@@ -33,8 +33,6 @@ The [glossary](../docs/glossary.md#runtime-and-drivers) has more.
   and `GOMAXPROCS` is the number of Ps.
 - **Slab, handle.** A big fixed area of memory carved into equal slots, and a small number
   (slot plus generation) that names one slot instead of a pointer.
-- **Queue depth (QD).** How many I/O requests are in flight at once: QD 1 measures latency,
-  QD 32 throughput.
 - **CFS quota, throttling.** A Kubernetes CPU limit becomes a CFS (Completely Fair Scheduler)
   quota of CPU time per 100 ms period; spend it early and every thread stops until the next.
 - **Latency knee.** The offered load at which latency suddenly shoots up.
@@ -95,50 +93,48 @@ reproduced on demand.*
 
 #### How it works
 
-The spikes measured the ordinary shape directly. On one 4-vCPU cloud VM with Go 1.27.0 and
-Rust 1.99.1, a replicated 4K write (client to primary to two replicas and back, over loopback
-TCP, 16 connections) cost 22.3 µs of CPU in a Rust epoll loop and **37.8 µs (1.70×) in Go with a
-goroutine per connection** ([tuned Go spike](../docs/design.md#appendix-tuned-go-spike)).
-Atomics in place of mutexes and channels barely helped: 36.3 µs.
+The spikes measured the ordinary shape directly. A replicated 4K write (client to primary to
+two replicas and back, over loopback TCP) cost **1.5 to 1.7 times the CPU in Go with a
+goroutine per connection** as in a Rust epoll loop, whatever the synchronization: atomics in
+place of mutexes and channels barely helped ([tuned Go spike](../spikes/go-tuned/)).
 
 **Why a hand-written loop beats Go's netpoller.** `net.Conn` already uses epoll underneath, so
 why is it slower? With `net.Conn`, every socket that becomes ready wakes *its own* goroutine. One
 replicated write passes from the client's goroutine to the replicas' goroutines and back, and
 each handoff is a scheduler wakeup. Because each goroutine writes its own socket when it gets
-round to it, frames that could go out together are written separately. Go made 3.69 socket
-writes per operation against Rust's 2.78, and spent about 9% of its CPU in the scheduler ([Go CPU
-spike](../docs/design.md#appendix-go-cpu-per-operation-spike)). With one loop, one goroutine
-handles every ready descriptor in a pass and gathers each socket's frames into one `writev`.
-It is the same move Java servers made from thread-per-request servlets to Netty's event loops.
+round to it, frames that could go out together are written separately, so Go made a third more
+socket writes per operation than Rust ([Go CPU spike](../spikes/go-cpu-per-op/)). With one loop,
+one goroutine handles every ready descriptor in a pass and gathers each socket's frames into one
+`writev`. It is the same move Java servers made from thread-per-request servlets to Netty's event
+loops.
 
 Memory has the same problem. Take a memtable (the in-memory sorted table at the front of
 an index, see [06-the-lsm-tree.md](06-the-lsm-tree.md)) built as an ordinary Go B-tree with one
-pointer per entry, one entry per file. Under request load it made the collector take **23% of
-process CPU at 10 million entries and 35% at 20 million**, while pauses stayed under 1 ms ([Go
-memtable spike](../docs/design.md#appendix-go-memtable-spike)). Short pauses do not make
-collection cheap.
+pointer per entry, one entry per file. Under request load it made the collector take **a quarter
+to a third of the process's CPU at 10 to 20 million entries**, while pauses stayed under 1 ms
+([Go memtable spike](../spikes/go-memtable/)). Short pauses do not make collection cheap.
 
 The third failure hits both languages: a loop that reads each socket until it would block
 collapses under overload. Seeing it needs the right benchmark. A *closed-loop* benchmark sends a
 request, waits for the reply and sends the next. When the server slows down, the benchmark slows
 with it, and the queue you would see in production never forms. An *open-loop* generator sends
 on a fixed schedule and times each write from its **scheduled** send, so a stall shows up as
-latency for every request that should have gone out during it. The [open-loop latency
-spike](../docs/design.md#appendix-open-loop-latency-spike) drove both servers this way:
+latency for every request that should have gone out during it. The
+[open-loop latency spike](../spikes/open-loop-latency/) drove both servers this way:
 
 ```text
-Go server, loop reads every socket until EAGAIN, offered load rising
+Server loop reads every socket until it would block, offered load rising
 
 pass N     read all queued requests ...... queue replication output ...... write
 pass N+1   more queued, so read more ..... output buffer grows ............ write
 pass N+2   even more queued .............. append() regrows the slice:
-                                           copy the whole buffer (memmove)
+                                           copy the whole buffer
   ...      each pass slower than the last, so more queues up before the next
 
-Go outcome:  buffered writes to a replica of 81 to 196 MB, 61% of CPU in memmove and
-             13% in memclr, TCP backoff stretching stalls to seconds.
-             Go dropped requests from 30,000 or 50,000 writes/s, depending on the host;
-             Rust's loop of the same design hit the same runaway above 90,000.
+Outcome:   up to 200 MB buffered for a replica, most of the CPU spent copying
+           buffers, TCP backoff stretching stalls to seconds, most cores idle.
+           Go fell over first, since growing a slice copies it; Rust's loop of the
+           same design followed at a higher load.
 ```
 
 *Read it top to bottom: the more that is queued, the longer a pass takes, and the longer a pass
@@ -179,12 +175,11 @@ per-request syscall, and the last column takes the kernel out of the request pat
 - **epoll:** you register descriptors once, and `epoll_wait` sleeps until some are ready.
   Linux makes other things into descriptors so they fit the same set: a **timerfd** fires at a
   deadline, and an **eventfd** is a counter another thread bumps to wake you.
-- **io_uring:** one `io_uring_enter` call submits many requests, and completions can signal an
-  eventfd, so the ring fits in an epoll set. Disk I/O that bypasses the page cache
-  (**`O_DIRECT`**) needs page-aligned buffers. For each request the kernel **pins** the
-  buffer's pages so the device can copy into them directly (DMA, direct memory access), then
-  unpins them. **Registering** buffers once (*fixed buffers*) skips that. Go's standard
-  library has no io_uring.
+- **io_uring:** one call submits many requests, and completions can signal an eventfd, so the
+  ring fits in an epoll set. For each request the kernel **pins** the buffer's pages so the
+  device can copy into them directly (DMA, direct memory access), then unpins them;
+  **registering** buffers once (*fixed buffers*) skips that. Go's standard library has no
+  io_uring.
 - **Kernel bypass:** the hardware can only DMA to memory it was told about, typically
   **hugepages** (large pages that stay put), and the classic way to notice completions is
   **polling**, a core spinning at 100%.
@@ -200,8 +195,7 @@ per-request syscall, and the last column takes the kernel out of the request pat
 
 #### How it works
 
-The [codegen spike](../docs/design.md#appendix-go-and-rust-codegen-spike) traced four busy
-loop goroutines on four Ps:
+The [codegen spike](../spikes/go-rust-codegen/) traced four busy loop goroutines on four Ps:
 
 ```text
 GOMAXPROCS = 4, four event-loop goroutines, no idle P
@@ -223,11 +217,10 @@ GOMAXPROCS above the loop count: a P is idle, so sysmon skips the retake
 *Compare the two cases: with a spare P the retake never happens, and the loop wakes on the
 thread and CPU it slept on.*
 
-Per write, Go's loops saw 0.84 context switches and 0.137 CPU migrations against Rust's 0.51 and
-0.003. The spike broke down Go's extra CPU on the same epoll design:
+The spike broke down Go's extra CPU on the same epoll design, with the same syscall counts:
 
 ```text
-Where Go's extra CPU per replicated write went (same epoll design, same syscall counts)
+Where Go's extra CPU per replicated write went
 
 runtime scheduling (sysmon retakes)  ##############################  61%
 syscall wrappers                     ########                        16%
@@ -239,11 +232,9 @@ read/write vs recv/send              ##                               5%
 *The biggest bar is not the compiler and not the collector: it is the scheduler fighting a
 loop that blocks on purpose.*
 
-The syscall wrappers cost 64 to 123 ns per call on the test VM. Spare Ps help in two ways.
-Running 8 Ps for 4 loops saved about 2.9 µs of CPU per write in the codegen spike. In the
-[GOMAXPROCS quota spike](../docs/design.md#appendix-gomaxprocs-under-a-cpu-quota-spike), one
-spare P (5 for 4 loops) changed CPU only a little, 34.5 against 35.0 µs per message, but cut the
-scheduler's p99 from 5.2 ms to 0.46 ms.
+A spare P is the fix. In the codegen spike it removed most of that scheduling cost, and in the
+[GOMAXPROCS quota spike](../spikes/gomaxprocs-quota/) one spare P barely changed CPU but cut the
+scheduler's p99 delay tenfold, to under half a millisecond.
 
 ### The garbage collector
 
@@ -256,39 +247,37 @@ scheduler's p99 from 5.2 ms to 0.46 ms.
 
 #### How it works
 
-A cycle starts when the heap reaches `GOGC` percent above the live heap, pointer-free memory
-included; `GOMEMLIMIT` caps the total. In the memtable spike, one full collection of a `[]byte`
-B-tree took 0.56 to 0.64 s of
-CPU at 10 million entries and 1.25 s at 20 million. The same data as pointer-free 4 KiB pages
-took 0.3 to 0.9 ms at 20 million. Go 1.27's Green Tea collector, on by default, cut collection
-CPU by 7 to 14% against the previous one and changed nothing else. The **layout** of memory,
-not the version of the collector, decides the cost.
+A cycle starts when the heap grows a set percentage (`GOGC`) above the live heap, pointer-free
+memory included; `GOMEMLIMIT` caps the total. In the memtable spike, one full collection of a
+B-tree with a pointer per entry took over a CPU-second at 20 million entries; the same data as
+pointer-free 4 KiB pages took under a millisecond. Go's newer Green Tea collector trimmed
+collection CPU by about a tenth and changed nothing else. The **layout** of memory, not the
+version of the collector, decides the cost.
 
 ## The options
 
 Ordinary Go is the shape of go-fuse (a goroutine per request) and of hashicorp/raft and
 etcd-raft's `Node`. An event loop per core is the shape of the Rust harness and of
 [Seastar](https://seastar.io/), ScyllaDB's C++ framework. Rust has no garbage collector and
-reaches SPDK and RDMA through bindgen; OpenEBS Mayastor is Rust plus SPDK. The design's
-alternatives table lists Weka, Mayastor and Longhorn v2 as making DPDK and SPDK mandatory.
+reaches SPDK and RDMA through bindgen; OpenEBS Mayastor is Rust plus SPDK. Weka, Mayastor and
+Longhorn v2 make DPDK and SPDK mandatory.
 
-| Approach | CPU per replicated 4K write, 16 connections | Deterministic replay | Code style | Install burden |
+| Approach | CPU per replicated 4K write, against Rust | Deterministic replay | Code style | Install burden |
 | --- | --- | --- | --- | --- |
-| Go, goroutine per connection | 37.8 µs, 1.70× Rust | No | Idiomatic Go | None |
-| Go, goroutines plus atomics | 36.3 µs, 1.63× Rust | No | Idiomatic Go | None |
-| **Go, sans-IO core plus epoll loop per core (chosen)** | **27.1 µs, 1.21× Rust; tuned 1.07× (1.26× before tuning, same host)** | **Yes** | Plain Go in the core, a strict dialect in the runtime | None by default |
-| Rust epoll loop | 22.3 µs, baseline | Only if built sans-IO | Harder to review than Go | None by default |
+| Go, goroutine per connection | 1.5 to 1.7× | No | Idiomatic Go | None |
+| **Go, sans-IO core plus epoll loop per core (chosen)** | **1.21×; 1.07× with the runtime tuned** | **Yes** | Plain Go in the core, a strict dialect in the runtime | None by default |
+| Rust epoll loop | Baseline | Only if built sans-IO | Harder to review than Go | None by default |
 | C++ (Ceph, 3FS) | Not measured | Depends on the design | Harder to review than Go | Varies |
 | Mandatory SPDK/DPDK (Weka, Mayastor, Longhorn v2) | Not measured; buys latency, not throughput | Depends on the design | Any language | Hugepages, pinned cores |
 
-Ratios compare only within one host. The tuning was measured later, in the codegen spike, on a
-faster host where the same epoll design started at 1.26× Rust, and the tuning took it to 1.07×.
+Ratios compare only runs on one host ([tuned Go](../spikes/go-tuned/) and
+[codegen](../spikes/go-rust-codegen/) spikes).
 
 **Why Go at all.** Per the design's [alternatives
 table](../docs/design.md#alternatives-considered), Go is easier to read, review and extend, and
 it is the language of etcd-raft, the Kubernetes CSI (Container Storage Interface) tooling and
-Porcupine, the history checker the tests use. The price is 1.07× on the write path, 1.1 to 1.25× on
-compute-bound code, and a set of rules that keep Go there.
+Porcupine, the history checker the tests use. The price is 1.07× on the write path, 1.1 to 1.25×
+on compute-bound code, and a set of rules that keep Go there.
 
 ## What rock-solid picked
 
@@ -308,108 +297,72 @@ never do I/O, and a **runtime** of event loops and drivers that does all of it.
 
 Every component on the data path is a state machine with one entry point: the disk log, the
 LSM index, the chunk replica, the Raft shard (one consensus group of the metadata store) and the
-MetaStore ([08-the-metastore.md](08-the-metastore.md)). In the design, the entry point looks like
-this:
+MetaStore ([08-the-metastore.md](08-the-metastore.md)). The entry point looks like this
+([`internal/core/event.go`](../internal/core/event.go) holds the shared types):
 
 ```go
 func (r *ChunkReplica) OnEvent(ctx *Context, ev *Event, out []Action) []Action
 ```
 
-The types already exist in [`internal/core/event.go`](../internal/core/event.go):
+An event is a received message, a lost peer, a finished disk I/O, a timer or `Resumed` (below).
+An action is a send, a disk read, write, flush or trim, or a timer to set. The context carries
+the time on two clocks and the driver's buffer pool. Things to notice:
 
-```go
-type Event struct {
-	Kind  EventKind // EvNetRecv, EvPeerLost, EvDiskDone, EvTimer
-	Peer  NodeID
-	Msg   Msg
-	IO    IOID
-	Err   DiskError
-	Timer TimerID
-}
-
-type Action struct {
-	Kind   ActionKind // ActNetSend, ActDiskRead, ActDiskWrite, ActDiskFsync, ActDiskTrim, ActSetTimer
-	Peer   NodeID
-	Msg    Msg
-	IO     IOID
-	LBA    LBA
-	Buf    IOBuf
-	Vec    []IOVec
-	Len    uint64
-	Linked bool
-	Timer  TimerID
-	At     Tick
-}
-
-type Context struct {
-	Now  Tick // 1 tick = 1 µs
-	Pool BufPool
-}
-```
-
-Things to notice:
-
-- **Tagged structs, not interfaces**, so passing one never allocates. `LBA` is the block
-  address on disk, `Vec` lists the buffers one vectored write gathers, and `Linked` makes an
-  fsync wait for the write just before it. Messages up to 256 bytes ride inline in `Msg`;
-  bigger data travels as an `IOBuf` handle.
+- **Tagged structs, not interfaces**, so passing one never allocates. Messages up to 256 bytes
+  ride inline in the event; bigger data travels as a buffer handle.
 - **The caller owns the output.** `OnEvent` appends to a slice the caller reuses, so a call
-  allocates nothing. The disk log does the same with an `Output` struct the caller resets.
-- **Time comes in, waiting goes out.** A machine reads time only from `ctx.Now` and never
-  blocks. It emits `ActDiskWrite` with an `IOID` it chose, and the matching `EvDiskDone`
-  resumes it; `ActSetTimer` works the same way for time. Timers have no cancel, so the machine
-  checks its own deadline against `ctx.Now` when a `Timer` event arrives.
+  allocates nothing.
+- **Time comes in, waiting goes out.** A machine reads time only from the context and never
+  blocks. It emits a disk write under an ID it chose, and the matching completion event resumes
+  it; timers work the same way. Timers have no cancel, so the machine checks its own deadline
+  when a timer event arrives.
 - **Leases read two clocks.** A time daemon can make `CLOCK_BOOTTIME` run up to 22.6% fast or
-  slow, so the design's `Context` also carries `Raw`, the time on `CLOCK_MONOTONIC_RAW`, and every
-  lease is counted on both. Its event kinds add `Resumed`, which the loop delivers after a suspend
-  or a VM restore, and on which a lease holder ends every lease it holds
+  slow, the most Linux lets it adjust the clock, so the context also carries the time on
+  `CLOCK_MONOTONIC_RAW`, and every lease is counted on both. The loop delivers `Resumed` after a
+  suspend or a VM restore, and a lease holder then ends every lease it holds
   ([03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md#two-clocks-because-a-time-daemon-can-bend-either-one)).
-  The built `Context` above carries `Now` alone; `Raw` and `Resumed` are the open "Lease clocks
-  in the context" item of the build checklist.
 - **Errors are data.** A corrupt message or a failed disk is an event to handle; a panic is
   only for a broken invariant of the machine's own state.
-- **Randomness is owned.** [`internal/core/rng.go`](../internal/core/rng.go) wraps
-  `math/rand/v2`'s ChaCha8, seeded from 64 bits.
+- **Randomness is owned.** Each machine draws from a seeded source of its own. In the simulator
+  each machine's source is forked from its node's, and each node's from the run's seed, so a
+  draw added in one machine shifts no other machine's stream.
 
 Here is one group-commit round of the disk log ([04-one-log-per-disk.md](04-one-log-per-disk.md))
-as the core sees it. `BenchmarkGroupCommitRound` drives exactly this: eight 1-block writes and a
-300-byte blob, through submit, write completion and flush completion.
+as the core sees it: eight 1-block writes and a Raft entry, through submit, write completion and
+flush completion.
 
 ```mermaid
 sequenceDiagram
     participant DR as Driver or simulator
-    participant L as disklog.Log state machine
-    DR->>L: Submit 8 chunk writes and a Raft blob
-    L-->>DR: ActDiskWrite IO=41, one vectored write of the record
-    L-->>DR: ActDiskFsync IO=42, Linked to the write
+    participant L as disk log state machine
+    DR->>L: Submit 8 chunk writes and a Raft entry
+    L-->>DR: disk write IO=41, one vectored write of the record
+    L-->>DR: flush IO=42, linked to the write
     Note over DR: io_uring, SPDK, or the simulated<br/>disk with its fault model
-    DR->>L: EvDiskDone IO=41
-    DR->>L: EvDiskDone IO=42
+    DR->>L: disk done IO=41
+    DR->>L: disk done IO=42
     L-->>DR: durable events for the round's items
 ```
 
 *The state machine never learns which disk it is talking to. The same two actions and two
-events cross the line whether the driver is real or simulated. The `IOID` values are
-illustrative.*
+events cross the line whether the driver is real or simulated. The IDs are illustrative.*
 
 **A tool checks the rules, not reviewers.** `tools/sansio` is a `go vet` analyzer that
 `scripts/lint.sh` runs on every sans-IO package: everything under `internal/` except `loop`,
 `driver/…`, `frontend/…` and `csi`. It rejects `go` statements, channels, `range` over a map,
-`time.Now` and timers. It also rejects imports of `os`, `net`, `syscall`, `unsafe`, `sync`,
-`sync/atomic`, `context`, `runtime`, `math/rand`, `crypto/rand`, `log` and `log/slog`. Each
-rejection gives its reason, such as "use ctx.Now". The loop and driver packages, which must do
-I/O, are to get a narrower rule set of their own: no clock read, `time.Sleep`, timer, channel,
-`select` or `range` over a map anywhere outside the one interface described below.
+clock reads and timers, and imports such as `os`, `net`, `syscall`, `unsafe`, `sync` and
+`sync/atomic`, each rejection with its reason, such as "use ctx.Now". The loop and driver
+packages, which must do I/O, get a narrower rule set: no clock read or timer outside the one
+file that reads the clocks, and no channel, `select` or `range` over a map anywhere.
 
 **Why this makes deterministic simulation possible.** Nothing inside a machine does real I/O or
 reads a real clock, so a simulator can play every driver at once: all nodes, disks, clients and
 the network in one goroutine, with one seeded generator deciding which message is delivered,
 dropped or delayed, which disk write survives a crash, and when each timer fires. A seed that
 finds a bug tonight replays as a regression test tomorrow
-([12-testing-for-trust.md](12-testing-for-trust.md)). Drivers, which cannot be sans-IO, do
+([12-testing-for-trust.md](12-testing-for-trust.md)). Drivers cannot be sans-IO, but they do
 everything that involves time or waiting through one small interface, the *kernel seam* below,
-so a test can give a loop scripted clocks and let the same simulator step many loops over real
-sockets, with the worker goroutines' jobs run inline as steps of its scheduler.
+so the same simulator can step real event loops on scripted clocks.
 
 ```mermaid
 flowchart LR
@@ -454,7 +407,8 @@ FUSE, ublk or S3 requests into events and actions.
 | --- | --- | --- | --- |
 | Disk | `io_uring` on a file or raw device | SPDK on a dedicated NVMe drive | Simulated disk with fault model |
 | Network | Kernel TCP | RDMA (on a capable card, or Soft-RoCE, a software RDMA for testing); DPDK as an experiment | Simulated network |
-| Clock and timers | `CLOCK_BOOTTIME`, which counts through suspend, and `CLOCK_MONOTONIC_RAW`, which no time daemon slews, read together each pass for leases (1 tick = 1 µs), with the VMClock disruption marker from a mapped `/dev/vmclock0` where the VM has one; timers on `CLOCK_BOOTTIME` | Same | Simulated time: per-node oscillator drift, time-daemon slews, suspends and VM pauses |
+| Clock and timers | `CLOCK_BOOTTIME`, which counts through suspend, and `CLOCK_MONOTONIC_RAW`, which no time daemon slews, read together each pass, with the VMClock disruption marker where the VM has one | Same | Simulated time: per-node drift, time-daemon slews, suspends and VM pauses |
+| Frontend | FUSE client; ublk and the CSI driver | NVMe-oF/TCP for remote block clients | Simulated clients with a model page cache |
 
 Chunk data, Raft logs and indexes all live in the one log per disk, so the disk driver is the
 only code that touches storage, and swapping it swaps everything.
@@ -464,31 +418,32 @@ does: a 10 GbE link carries about 1.2 GB/s, and the kernel TCP stack saturates 1
 with one or two cores. So DPDK buys almost no throughput and stays a learning experiment, while
 SPDK and RDMA buy latency and CPU for people with the hardware.
 
-The [kernel-bypass drivers spike](../docs/design.md#appendix-kernel-bypass-drivers-spike) found
-that SPDK and RDMA fit the slot without changing the core, *but only if the contract held from
-the first default driver*. The contract has four rules:
+The [kernel-bypass drivers spike](../spikes/bypass-drivers/) found that SPDK and RDMA fit the
+slot without changing the core, *but only if the contract held from the first default driver*.
+The contract has four rules:
 
-1. **Data buffers come from the driver's pool, and the core frees them.** An `IOBuf` is a handle
-   (`Slot uint32, Gen uint32`) into a pool the driver owns, never a heap slice. SPDK and RDMA
-   can only use registered memory: one RDMA send from outside it broke the connection, and
-   registering per I/O cost 2.3 µs for 4 KB. A buffer named in an action stays with the driver
-   until the action is over:
+1. **Data buffers come from the driver's pool, and the core frees them.** A buffer is a handle
+   (a slot number and a generation) into a pool the driver owns, never a heap slice. SPDK and
+   RDMA can only use memory registered with them: in the spike one RDMA send from outside it
+   broke the connection, and registering per I/O cost as much as the I/O. A buffer named in an
+   action stays with the driver until the action is over:
 
    | Action | The driver is done with the buffer when |
    | --- | --- |
-   | `DiskRead`, `DiskWrite` | its `DiskDone` arrives |
-   | `NetSend` | the peer's reply arrives, or `PeerLost` for that peer |
+   | Disk read or write | its completion arrives |
+   | Send of a request | the peer's reply arrives, or the peer is lost |
+   | Send of a reply or one-way message | it is sent, or the peer is lost |
 
    An exhausted pool is an error the machine handles, typically by retrying on a timer, never a
    panic or a fallback to the heap.
 2. **Every driver exposes a readiness descriptor and defaults to event mode**, an fd in the
    loop's epoll set; busy polling is an opt-in for dedicated cores. In the spike, SPDK in
-   interrupt mode matched polling's latency (write 13 µs, read 17 µs at p50 on a file-backed
-   device) at 2.9 µs of CPU per I/O against 43 µs. On some setups SPDK silently falls back to
-   polling ([SPDK NVMe interrupt spike](../docs/design.md#appendix-spdk-nvme-interrupt-spike)),
+   interrupt mode matched polling's latency at a fifteenth of the CPU per I/O. When enabling it
+   fails, SPDK silently falls back to polling ([SPDK NVMe interrupt spike](../spikes/spdk-nvme-interrupt/)),
    so the driver reads the mode back after attach and refuses the disk rather than hang.
-3. **Network connections fail as a unit.** Any transport error becomes one `PeerLost` event,
-   every outstanding request on it fails, and the driver reconnects.
+3. **Network connections fail as a unit and deliver in order.** Any transport error becomes one
+   lost-peer event, every outstanding request on it fails, and the driver reconnects; between
+   two such events a peer's messages arrive once each, in the order sent.
 4. **Every pass of an event loop does bounded work**, the lesson of the overload collapse.
 
 Loops connect over TCP first and upgrade to RDMA if both ends can. cgo (Go's bridge to C)
@@ -522,62 +477,53 @@ flowchart LR
 *Every arrow into `epoll_wait` is a file descriptor: the loop sleeps in exactly one place, and
 everything that can wake it is in that set.*
 
-- **One loop per core, owning its data outright.** A goroutine runs epoll through
-  `golang.org/x/sys/unix` on raw non-blocking descriptors and owns its shards, its disks' logs
-  and indexes, and its connections.
+- **One loop per core, owning its data outright.** A goroutine runs epoll on raw non-blocking
+  descriptors and owns its shards, its disks' logs and indexes, and its connections.
 - **A loop waits only on its epoll set.** A goroutine blocked in `epoll_wait` cannot also wait
   on a channel. So the data path has no channels, `select`, `time.Timer` or `time.AfterFunc`.
   Timers live in a heap per loop, with one timerfd armed for the earliest deadline. Other loops
   and worker goroutines hand over work through a lock-free queue and write the inbox's eventfd
-  **only when the queue was empty**, so a burst costs one wakeup.
-- **Wakeups are expensive, so batch them.** One inbox hop with one item cost 13.6 µs of CPU,
-  almost all of it spent waking a loop blocked in `epoll_wait`. With 8 items per hop it fell to
-  0.73 µs per item, and with 64 to 0.07 µs ([log per core
-  spike](../docs/design.md#appendix-log-per-core-spike)). So a loop sends each peer loop at most
-  one message per pass, holding everything it has for that loop.
+  **only when no wake is pending**, so a burst costs one wakeup.
+- **Wakeups are expensive, so batch them.** Waking a loop blocked in `epoll_wait` costs far more
+  than the item it carries: one item per hop cost about 200 times the CPU per item of 64 items
+  per hop ([log per core spike](../spikes/log-per-core/)). So a loop sends each peer loop at
+  most one message per pass, holding everything it has for that loop.
 - **One `writev` per descriptor per pass**, gathering every frame ready for that descriptor.
-  Syscalls set the cost of a write. When both wrote every frame separately, Go and Rust cost the
-  same 55 µs per write. Batching halved Rust's cost and cut Go's by 29%.
-- **Bounded passes.** A pass reads at most a fixed budget per connection (256 KiB in the
-  spike), replication queues are capped, and output buffers are rings rather than grown slices.
-  With the budget, neither language dropped a request up to 100,000 writes/s.
-- **Raw syscalls where nothing blocks.** Non-blocking reads, writes and sends use
-  `unix.RawSyscall`, skipping the scheduler's bookkeeping (−1.4 µs per write); anything that
-  can block, such as `epoll_wait`, uses `unix.Syscall`.
-- **Loops are not locked to OS threads.** In a smoke run, `runtime.LockOSThread` cost 35 µs per
-  write against 29 µs unlocked. The exception is a C library that needs its own thread, as
-  SPDK's does.
+  Syscalls set the cost of a write: batching halved Rust's cost and cut Go's by 29%.
+- **Bounded passes.** A pass reads at most a fixed budget per connection, the bytes queued for
+  sending are capped, and output buffers are rings rather than grown slices. With the budget,
+  neither language dropped a request up to 100,000 writes/s.
+- **Raw syscalls where nothing blocks.** Non-blocking reads, writes and sends skip the
+  scheduler's bookkeeping, which saved over a microsecond per write; anything that can block,
+  such as `epoll_wait`, goes through the scheduler as usual.
+- **Never wait inside io_uring.** The ring signals completions on its eventfd, so the loop still
+  sleeps in one place; waiting in the ring instead would need its own way for timers, the inbox
+  and sockets to end the wait, and gave no consistent latency gain.
+- **Loops are not locked to OS threads.** Locking one cost about a fifth more CPU per write. The
+  exception is a C library that needs its own thread, as SPDK's does.
+- **Traces, not logs.** A loop records every event, action and syscall as a fixed-field trace
+  record and never writes a free-form log line, so its behaviour can be checked afterwards.
 - **Time and waiting go through one seam.** Everything a loop asks of the kernel that involves
-  time or waiting is one small interface in `internal/loop`, so a test can put a stepped kernel
-  with scripted clocks behind it (`internal/loop/looptest`):
-
-  ```go
-  type Kernel interface {
-  	Wait(ready []Ready, block bool) []Ready // epoll_wait; block is the loop's own decision
-  	Clocks() core.Clocks                    // BOOTTIME, MONOTONIC_RAW, MONOTONIC, VMClock marker
-  	Arm(deadline core.Tick)                 // the loop's timerfd, an absolute deadline
-  }
-  ```
-
-  It costs three interface calls per pass, a few ns by estimate, and allocates nothing.
+  time or waiting (watch descriptors, wait, wake, read every clock together, arm the timerfd) is
+  one small interface, so a test can put a stepped kernel with scripted clocks behind it.
 - **A pass waits first, then reads the clocks.** Go's own monotonic clock is `CLOCK_MONOTONIC`,
   neither of the two that leases need, so after its wait each pass reads `CLOCK_BOOTTIME` and
-  `CLOCK_MONOTONIC_RAW` directly, about 140 ns each, between two cheap `CLOCK_MONOTONIC` reads,
-  and the VMClock marker from a mapped page, 3 ns. Then it delivers `Resumed` if needed, fires
-  every timer due, handles peer messages before client reads, executes actions and arms the
-  timerfd, as FoundationDB's loop does. Reading the clocks *before* the wait would be unsafe for
-  leases: a suspend during the wait would surface a pass late, after it served the reads that woke
-  it on the old lease. The two `CLOCK_MONOTONIC` reads bracket the others, and the reads are taken
-  again if the bracket is too wide, so a stall between them, from descheduling or CFS throttling,
-  never looks like a suspend and ends every lease. `Resumed` comes when `CLOCK_BOOTTIME` gains on
-  `CLOCK_MONOTONIC`, which happens only across a suspend, or when the marker changes. Handling
-  peer messages first means a holder that missed time while its VM was stopped learns it from the
-  heartbeats queued during the stop before it serves a read that waited behind them.
-- **The loop decides when to block.** It blocks in `Wait` only when it has no queued inbox item,
-  deferred submission or unspent read budget. Timers don't wait for the timerfd to become ready:
-  every pass fires the ones its heap holds due, and re-arms the timerfd only when the earliest
-  deadline changed, so a pass makes at most one `timerfd_settime` and usually none. The timer heap
-  and the `Resumed` detector are pure code in `internal/core`, shared with the simulator.
+  `CLOCK_MONOTONIC_RAW` directly, and the VMClock marker from a mapped page. Then it delivers
+  `Resumed` if needed, fires every timer due, handles peer messages before client reads,
+  executes actions and arms the timerfd, as FoundationDB's loop does. Reading the clocks *before*
+  the wait would be unsafe for leases: a suspend during the wait would surface a pass late, after
+  it served the reads that woke it on the old lease. Two cheap `CLOCK_MONOTONIC` reads bracket the
+  others, and the reads are taken again if the bracket is too wide, so a stall between them, from
+  descheduling or CFS throttling, never looks like a suspend. `Resumed` comes when
+  `CLOCK_BOOTTIME` gains on `CLOCK_MONOTONIC`, which happens only across a suspend, when the
+  marker changes, or when a clock reads below its last value. Handling peer messages first means
+  a holder that lost time while its VM was stopped learns it from the heartbeats queued during
+  the stop before it serves a read that waited behind them.
+- **The loop decides when to block.** It blocks only when it has no work left; I/O merely in
+  flight does not count, since its completion wakes the loop. Timers fire from the heap, not from
+  the timerfd's readiness, and the timerfd is re-armed only when the earliest deadline changed.
+  The timer heap and the `Resumed` detector are pure code in `internal/core`, shared with the
+  simulator.
 
 **Connections are per loop pair.** Each node publishes which loop owns each of its disks and
 shard replicas. A loop opens one connection to each peer loop it needs, on demand, as Seastar's
@@ -601,15 +547,18 @@ flowchart LR
 *The write and its reply touch exactly two cores. With one connection per node pair, nearly
 every request and reply would also cross an inbox on each side, adding two cross-core wakeups.*
 
-A request that reaches the wrong loop, after a shard moved, is forwarded through the inbox, so
-the owner map is a hint for speed, never a condition for correctness.
+A request that reaches the wrong loop, after a shard moved, is forwarded through the inbox, its
+reply naming the new owner, so the owner map is a hint for speed, never a condition for
+correctness. Leases are kept per loop pair too: a primary's read lease and a Raft leader's
+lease are held by one loop from another loop, not by a node from a node
+([03](03-epochs-leases-and-failures.md)).
 
 **Each disk belongs to one loop**, so it gets one flush per round; other loops hand it their
 records through its inbox once per pass ([04-one-log-per-disk.md](04-one-log-per-disk.md)).
 **CPU-heavy background work** (cleaner copies, erasure coding, compaction) runs on worker
 goroutines that send results to the owning loop's inbox, so each index keeps one writer. **Off
-the data path**, the CSI gRPC server, metrics, the admin API and the FUSE descriptor holder are
-ordinary Go, with goroutines, `net/http` and `context`.
+the data path**, the CSI gRPC server, metrics, the admin API, the FUSE descriptor holder and
+the S3 gateway's HTTP handling are ordinary Go, with goroutines, `net/http` and `context`.
 
 ### Sizing loops and GOMAXPROCS under a CPU limit
 
@@ -634,21 +583,21 @@ CPU limit 2 = 200 ms of CPU time per 100 ms period, shared by all threads
 
 *The bottom line shows the danger: every request on a frozen loop waits until the next period.*
 
-The [quota spike](../docs/design.md#appendix-gomaxprocs-under-a-cpu-quota-spike) measured
-throttling in 3.3 to 6.5% of periods at 2 CPUs, up to 174 ms of stall per 6 s, with more Ps than
-the quota. With as many Ps as loops, background work starved and the scheduler's p99 reached 7
-to 25 ms. Loops = Go's default `GOMAXPROCS` − 1 was never throttled. Go 1.27 sets that default
-from the cgroup, `min(CPUs, max(2, ceil(quota)))`, but does not export the limit, so the daemon
-reads `cpu.max` itself:
+The [quota spike](../spikes/gomaxprocs-quota/) found what the arithmetic predicts. With more Ps
+than the quota, the daemon was throttled in a few percent of periods, each stall up to a whole
+period. With as many Ps as loops, background work starved and the scheduler's tail grew to tens
+of milliseconds. Loops = Go's default `GOMAXPROCS` − 1 was never throttled. Go sets that default
+from the cgroup's CPU limit, rounded up and at least 2, but does not export the limit, so the
+daemon reads it itself:
 
 | Pod | Go's default `GOMAXPROCS` | Loops | `GOMAXPROCS` |
 | --- | --- | --- | --- |
 | No limit, 4 CPUs | 4 | 4 | 5, set by the daemon |
-| Limit 2.5 CPUs | `max(2, ceil(2.5))` = 3 | 2 | 3, left to the runtime |
-| Limit 2 CPUs | `max(2, 2)` = 2 | 1 | 2, left to the runtime |
+| Limit 2.5 CPUs | 3 | 2 | 3, left to the runtime |
+| Limit 2 CPUs | 2 | 1 | 2, left to the runtime |
 
-A limit costs a core of loop capacity, and in the spike a single loop on 2 CPUs dropped 30,055
-of 312,000 messages at 65% load. So the chart asks for an integer limit of at least 3 CPUs, or
+A limit costs a core of loop capacity, and in the spike a single loop on 2 CPUs dropped
+messages well short of full load. So the chart asks for an integer limit of at least 3 CPUs, or
 none.
 
 ### Memory: pointer-free, off-heap, handles
@@ -669,9 +618,9 @@ budgeted by GOMEMLIMIT                        never hold a Go pointer
 | state machine structs               |      | I/O slab, registered once with io_uring    |
 | control-plane code: CSI, metrics    |      |  +--------+--------+--------+--------+     |
 |                                     |      |  | slot 0 | slot 1 | slot 2 | slot 3 | ... |
-| IOBuf{Slot: 2, Gen: 7}  ------------+----> |  +--------+--------+--------+--------+     |
+| buffer handle {slot 2, gen 7} ------+----> |  +--------+--------+--------+--------+     |
 |   8 bytes, no pointer               |      |                                            |
-|                                     |      | memtable: 4 KiB pages, linked by uint32    |
+|                                     |      | memtable: 4 KiB pages, linked by number    |
 | placement table via atomic.Pointer  |      | index tables: slices of integers           |
 +-------------------------------------+      | retained Raft entries                      |
                                              +--------------------------------------------+
@@ -681,28 +630,27 @@ budgeted by GOMEMLIMIT                        never hold a Go pointer
 generation, so a handle to a freed and reused slot is caught.*
 
 - **Long-lived bulk structures hold no pointers.** The memtable is a copy-on-write B+-tree of
-  4 KiB pages that refer to each other by `uint32` page number, and other tables are slices of
-  integers: 0.3 to 0.9 ms per full collection at 20 million entries, against 1.25 CPU-seconds.
-  Go arenas were no substitute: a memtable in one still spent 9.3% of CPU in collection.
+  4 KiB pages that refer to each other by page number, and other tables are slices of integers,
+  so a full collection at 20 million entries costs milliseconds instead of over a CPU-second.
+  Go arenas were no substitute: a memtable in one still spent about a tenth of the CPU in
+  collection ([Go memtable spike](../spikes/go-memtable/)).
 - **Bulk memory lives outside the Go heap**, in slabs mapped with `unix.Mmap`, for three
-  reasons. First, the heap goal counts pointer-free memory too, so 16 GiB of memtable on the heap
-  would let the heap grow toward 32 GiB before a cycle. Second, `O_DIRECT` and io_uring need
-  page-aligned buffers, which the Go heap does not promise. Third, a mapped slab is registered
-  once with io_uring, SPDK or RDMA.
+  reasons. First, the collector's heap goal counts pointer-free memory too, so 16 GiB of
+  memtable on the heap would let the heap grow toward 32 GiB before a cycle. Second, direct I/O
+  (`O_DIRECT`) and io_uring need page-aligned buffers, which the Go heap does not promise. Third,
+  a mapped slab is registered once with io_uring, SPDK or RDMA. `GOMEMLIMIT` then budgets only
+  what is left of the daemon's memory after its slabs.
 - **Registered once, it saves the pinning on every I/O.** The io_uring driver registers each
-  loop's slab (`IORING_REGISTER_BUFFERS`, in regions of at most 1 GiB, so a slab that grows adds
-  regions to a sparse table) and issues `READ_FIXED` and `WRITE_FIXED`. On a
-  consumer NVMe drive, fixed buffers saved 0.1 µs of CPU per 4 KiB `O_DIRECT` I/O at QD 32 and
-  0.2 to 0.3 µs at QD 1, 5 to 8% of the CPU per I/O, for a registration paid once ([io_uring
-  registered buffers spike](../docs/design.md#appendix-io_uring-registered-buffers-spike)). Pinned memory counts
-  against the memory-lock limit: with the default 8 MiB, registering 64 MiB failed. So the
-  daemon pod carries `IPC_LOCK`. Without it, the driver falls back to plain reads and writes on
-  the same buffers and reports the fallback.
-- **Manual memory, so it is checked.** A page used after it is freed reads another page's data
-  instead of crashing, so handles carry a generation, and the simulator's pool
-  ([`internal/sim/pool.go`](../internal/sim/pool.go)) poisons fresh buffers and panics on a
-  stale handle. `sync.Pool` is never used for I/O buffers: it empties at collections, has no
-  bound and cannot be registered for DMA.
+  loop's slab with the ring, so the kernel need not pin and unpin a buffer's pages per request.
+  On a consumer NVMe drive that saved 5 to 8% of the CPU per 4 KiB direct I/O, for a
+  registration paid once ([io_uring registered buffers spike](../spikes/uring-registered/)).
+  Registered memory counts against the memory-lock limit, which by default is far too small, so
+  the daemon pod carries the `IPC_LOCK` capability. Without it, the driver falls back to plain
+  reads and writes on the same buffers and reports the fallback.
+- **Manual memory, so it is checked.** A buffer used after it is freed reads another buffer's
+  data instead of crashing, so handles carry a generation and a stale one panics in every build,
+  and the simulator's pool poisons fresh buffers. `sync.Pool` is never used for I/O buffers: it
+  empties at collections, has no bound and cannot be registered for DMA.
 
 ### Hand-written encodings, zero allocations
 
@@ -715,8 +663,8 @@ generation, so a handle to a freed and reused slot is caught.*
 
 Encodings use `encoding/binary`'s `Append*` and `PutUint*` functions into caller-provided
 buffers. There is no `gob`, `json` or `binary.Read` on the data path, and every decoder has a
-native fuzz test (`go test -fuzz`). Hot-path benchmarks call `b.ReportAllocs`, and CI fails any
-that allocates per operation. The pattern is to reuse the destination, as in
+native fuzz test (`go test -fuzz`). Tests fail when a hot-path call allocates, and hot-path
+benchmarks report allocations (`b.ReportAllocs`). The pattern is to reuse the destination, as in
 [`internal/disklog/bench_test.go`](../internal/disklog/bench_test.go):
 
 ```go
@@ -728,118 +676,93 @@ for b.Loop() {
 }
 ```
 
-The group-commit round and the LSM tree's `Get`, `Floor`, `Put` and iterator are held to the same
-bar ([`internal/lsm/bench_test.go`](../internal/lsm/bench_test.go)).
+The group-commit round and the LSM tree's reads, writes and iterators are held to the same bar
+([`internal/lsm/bench_test.go`](../internal/lsm/bench_test.go)).
 
 ## Evidence
 
-The Go and Rust measurements come from one 4-vCPU cloud VM with Go 1.27.0 and Rust 1.99.1, and the
-appendices note where a restart moved the VM to another host. The kernel-bypass and SPDK spikes ran
-on a laptop with one consumer NVMe drive, and the io_uring registered buffers spike on a bare-metal
-host and a Firecracker VM. Each spike's design appendix and code:
-[tuned Go](../docs/design.md#appendix-tuned-go-spike) ([code](../spikes/go-tuned/)),
-[Go and Rust codegen](../docs/design.md#appendix-go-and-rust-codegen-spike)
-([code](../spikes/go-rust-codegen/)),
-[Go CPU per operation](../docs/design.md#appendix-go-cpu-per-operation-spike)
-([code](../spikes/go-cpu-per-op/)),
-[open-loop latency](../docs/design.md#appendix-open-loop-latency-spike)
-([code](../spikes/open-loop-latency/)),
-[Go memtable](../docs/design.md#appendix-go-memtable-spike) ([code](../spikes/go-memtable/)),
-[GOMAXPROCS under a CPU quota](../docs/design.md#appendix-gomaxprocs-under-a-cpu-quota-spike)
-([code](../spikes/gomaxprocs-quota/)),
-[io_uring registered buffers](../docs/design.md#appendix-io_uring-registered-buffers-spike)
-([code](../spikes/uring-registered/)),
-[kernel-bypass drivers](../docs/design.md#appendix-kernel-bypass-drivers-spike)
-([code](../spikes/bypass-drivers/)),
-[SPDK NVMe interrupt](../docs/design.md#appendix-spdk-nvme-interrupt-spike)
-([code](../spikes/spdk-nvme-interrupt/)) and
-[log per core](../docs/design.md#appendix-log-per-core-spike) ([code](../spikes/log-per-core/)).
-
-Two of these deserve a closer look.
+The Go and Rust measurements come from one cloud VM, the bypass spikes from a laptop with one
+consumer NVMe drive. Each spike is linked where its result is used above, and the design's
+[appendices](../docs/design.md#appendix-tuned-go-spike) summarize each. Two deserve a closer
+look.
 
 **Go against Rust codegen.** The compilers share nothing: Go's `gc` has its own backend with no
-auto-vectorization, and rustc uses LLVM. The frame-parse loop is 46 instructions and 3 bounds checks per frame in Go, against 30 and
-1 in Rust. Yet summed over a whole write, the code differences came to about zero, and Go's
-CRC32C was faster. The gap is the runtime, which is why the fixes are runtime fixes: a spare P,
-raw syscalls, and memory touched before use. One lesson cuts the other way. LLVM deleted two of
-the Rust harness's three 4 KiB ring copies per write because nothing read them, worth 1.07 µs.
-Benchmarks must read what they write.
+auto-vectorization, and rustc uses LLVM. Go's frame-parse loop runs more instructions and more
+bounds checks per frame. Yet summed over a whole write, the code differences came to about zero,
+and Go's CRC32C was faster. The gap is the runtime, which is why the fixes are runtime fixes: a
+spare P, raw syscalls, and memory touched before use. One lesson cuts the other way. LLVM deleted
+two of the Rust harness's three ring copies per write because nothing read them, flattering Rust
+by about a microsecond per write. Benchmarks must read what they write.
 
 **Latency under rising load.** With bounded passes, both servers carried the same throughput up
-to 100,000 writes/s. Before the runtime tuning above, Go's p99 knee came 1.2× earlier:
+to 100,000 writes/s. Before the runtime tuning above, Go's tail latency started to climb at a
+lower load than Rust's:
 
 ```text
 Offered load rising, both servers with bounded passes (open-loop latency spike,
 measured before the runtime tuning)
 
 writes/s     10k ............ 50k ......... 60k ...................... 100k
-Go   p99     flat ............ ^ knee: the tail starts to climb ......... 50 ms
-Rust p99     flat .......................... ^ knee ................... 10.6 ms
+Go   p99     flat ............ ^ knee: the tail starts to climb ......... high
+Rust p99     flat .......................... ^ knee ................... lower
 
-at 100,000 writes/s     p50: Rust 440 us, Go 875 us    no request dropped by either
-p50 knee                Rust 120,000, Go 80,000 writes/s
+no request dropped by either
 ```
 
 *Both languages carry the same throughput. What differs is how close to the edge you can run
 before the tail grows.*
 
-Server CPU per write *fell* as load rose, because batches grow, and the servers used only 1.3 to
-1.5 cores. So an event loop's busy cores do not measure its headroom. Capacity is planned per
+Server CPU per write *fell* as load rose, because batches grow, and the servers used well under
+two cores. So an event loop's busy cores do not measure its headroom. Capacity is planned per
 serial owner, from latency against offered load.
 
 ## Trade-offs and what it costs us
 
-- **Go is still a little slower.** It costs 1.07× Rust on the replicated write path when fully
-  tuned, 1.1 to 1.25× on compute-bound code, and 1.12 to 1.24× for the cleaner's copies. Each
-  serial owner reaches its ceiling and latency knee somewhat earlier than in Rust. Examples are a
-  hot placement-group primary ([02-chunks-and-placement.md](02-chunks-and-placement.md)), a
-  disk's commit loop and a busy MetaStore shard. So headroom is planned per owner.
+- **Go is still a little slower:** 1.07× Rust on the write path when tuned, 1.1 to 1.25× on
+  compute-bound code. Each serial owner, such as a hot placement-group primary, a disk's commit
+  loop or a busy MetaStore shard, reaches its latency knee somewhat earlier than in Rust.
 - **The data path is not idiomatic Go.** It has no `net.Conn`, channels, `context` or
   `time.Timer`, uses raw syscalls, and passes handles instead of pointers. New contributors have
   to learn the dialect. The analyzer and the allocation checks exist because review alone would
   not hold the line.
-- **Manual memory brings back manual-memory bugs.** The type system does not track who owns an
-  `IOBuf`. Generations, poison bytes and the simulator catch these bugs in tests, not at compile
-  time.
-- **A CPU limit costs a core.** At a 2-CPU limit, that is half the loop capacity.
+- **Manual memory brings back manual-memory bugs.** The type system does not track who owns a
+  buffer handle. Generations, poison bytes and the simulator catch these bugs in tests, not at
+  compile time.
+- **A CPU limit costs a core,** half the loop capacity at a 2-CPU limit.
 - **Privileges.** Registered buffers need `IPC_LOCK` on the daemon pod. SPDK on real NVMe needs
   root, `vfio-pci` and very likely hugepages on a dedicated drive, which is why it stays opt-in.
-- **Two runtime [tech debts](../docs/tech-debts.md).** Until the loop's off-heap slabs exist, the LSM
-  pages sit on the Go heap as pointer-free slices: not scanned (0.24 ms per collection at 20
-  million entries in this shortcut) but counted toward the heap goal. And the Go toolchain is
-  pinned, because the scheduler and collector these rules were measured against change between
-  releases.
+- **Two runtime [tech debts](../docs/tech-debts.md).** Sorted index runs and retained Raft
+  entries still sit on the Go heap as pointer-free slices: not scanned, but counted toward the
+  heap goal. And the Go toolchain is pinned, because the scheduler and collector these rules
+  were measured against change between releases.
 
 ## Open directions
 
-From the design's [open questions](../docs/design.md#roadmap-and-open-questions) and roadmap:
+From the design's [open questions](../docs/design.md#roadmap-and-open-questions):
 
-- **CPU limits below 3 cores:** would one loop with `GOMAXPROCS` 2 serve a 2-CPU limit better?
-- **Polled completions on NVMe:** on a drive with poll queues, does `IORING_SETUP_IOPOLL` save or
-  add CPU per 4 KiB I/O at QD 1 and 32, and do fixed buffers still save their 0.1 to 0.3 µs?
-- **VM stops the marker misses:** a QEMU guest on kvm-clock stopped and continued in place changes
-  no clock and no marker, so a holder notices only from a peer's heartbeat. Does the hypervisor's
-  network queue keep those heartbeats under load, and with one loop per core, how does a lost-time
-  signal seen on one loop's connection reach the loops serving reads before they serve the next
-  request?
-- **The clock bracket:** how wide may the two `CLOCK_MONOTONIC` reads lie apart and still count
-  as one reading, and how large a jump of `CLOCK_BOOTTIME` counts as a suspend (above that width,
-  at most 2 s)? And what should a loop do if the kernel ever returns a clock reading below the
-  last one: hold the last value, end its leases, or stop, as TigerBeetle panics?
+- **CPU limits below 3 cores:** would one loop with `GOMAXPROCS` 2 serve a 2-CPU limit better,
+  and how far would the cleaner fall behind?
+- **Polled completions on NVMe:** does asking io_uring to poll the drive instead of taking
+  interrupts save or add CPU per 4 KiB I/O, and do fixed buffers still save what they save now?
+- **VM stops no clock shows:** a QEMU guest stopped and continued in place changes no clock and
+  no marker, so a holder notices only from a peer's heartbeat queued during the stop. Does the
+  hypervisor's network queue keep those heartbeats under load, and how does a lost-time signal
+  seen on one loop reach the loops serving reads before they serve the next request?
+- **The clock bracket:** how wide may the bracketing reads lie apart and still count as one
+  reading, and how large a jump counts as a suspend? And does Linux ever return a clock reading
+  below the last one, often enough that holding the last value costs availability?
 - **io_uring under Kubernetes' default seccomp profile** (the filter on which system calls a
-  container may make): Docker's refuses `io_uring_setup`;
-  whether containerd's and Kubernetes' defaults also refuse it, so that the chart must set a
-  profile, was not checked.
-- **SPDK interrupt mode on a real drive:** its latency at QD 1 and interrupts per I/O at QD 32
-  and 128, needed before phase 9.
+  container may make): Docker's refuses io_uring; do containerd's and Kubernetes' defaults, so
+  that the chart must set a profile?
+- **SPDK interrupt mode on a real drive:** its latency with one I/O in flight and its interrupts
+  per I/O with many requests in flight.
 - **One loop per disk on a fast drive:** with power-loss protection, does the disk's loop
   become CPU-bound? If so, the drive can be split into two partitions with a loop each.
 - **`/dev/fuse` across loops:** does every loop read its own clone of each mount, or one loop
   read for all?
-- **Roadmap.** Phase 5 builds the event-loop runtime (epoll loops behind the kernel seam,
-  stepped on scripted clocks in tests, inboxes, timer heaps, off-heap slabs), then io_uring and
-  kernel TCP behind the `Event`/`Action` contract. Phase 9 adds SPDK and RDMA. DPDK stays a side experiment, to be
-  compared with AF_XDP, a Linux socket type that skips most of the kernel network stack.
+- **The loop's cost after idling:** a durable write after an idle gap takes longer though neither
+  the drive nor the loop's CPU accounts for it. Is it the CPU waking from a deep sleep state, and
+  would holding cores in shallow states win it back, at what power?
 
 ## Further reading
 
@@ -856,7 +779,6 @@ From the design's [open questions](../docs/design.md#roadmap-and-open-questions)
   [`internal/lsm/bench_test.go`](../internal/lsm/bench_test.go),
   [`tools/sansio`](../tools/sansio/).
 - Project docs: [glossary](../docs/glossary.md#runtime-and-drivers),
-  [build checklist, phase 5](../docs/build-checklist.md#phase-5-default-drivers),
   [tech debts](../docs/tech-debts.md).
 - Other posts: [01-the-big-picture.md](01-the-big-picture.md),
   [02-chunks-and-placement.md](02-chunks-and-placement.md),
