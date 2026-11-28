@@ -82,6 +82,7 @@ var everyName = []string{
 	"1000260 2 output pass=86 Heard id=5 version=4294967298",
 	"1000261 2 output pass=87 Resends disk=1",
 	"1000262 2 output pass=88 ResendEntry disk=1 chunk=9 version=4294967298 identity=4294967297 request=5",
+	"1000263 2 output pass=89 PastRefused chunk=9 version=4294967298",
 }
 
 const scenarioExample = `1000250 2 syscall pass=81 epoll_wait ready=3
