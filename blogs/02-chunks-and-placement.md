@@ -105,17 +105,7 @@ chunk_id = (volume_id, inode_id, offset / CHUNK_SIZE)
 
 A write at offset 10 MiB into block volume 1 lands in chunk `(1, 0, 2)`, because 10 MiB ÷ 4 MiB
 rounds down to 2. The same offset in the file with inode 42 on filesystem volume 7 lands in
-`(7, 42, 2)`. The ID packs into 128 bits, a frozen disk format:
-
-```text
- byte:  0           4                                   12          16
-        +-----------+-----------------------------------+-----------+
-        | volume_id |             inode_id              |   index   |
-        |  32 bits  |              64 bits              |  32 bits  |
-        +-----------+-----------------------------------+-----------+
-
- index = offset / 4 MiB, a 32-bit number -> files up to 2^32 x 4 MiB = 16 PiB
-```
+`(7, 42, 2)`. The ID packs into 128 bits, a frozen disk format, with room for files up to 16 PiB.
 
 Volume and inode IDs are never handed out twice, so an ID always names the same data. Inode numbers
 are per volume, and a [restored or cloned](../docs/design.md#snapshots-and-clones) volume keeps
@@ -273,13 +263,11 @@ network, disk or clock access, so tests drive it directly), in two steps:
    above its target to the eligible disk furthest below. Only one move runs across the cluster at a
    time, since a move copies a whole PG while it serves, as Ceph limits backfills.
 
-A member that is merely down is not missing. It stays in its PG, marked down, for some minutes, so a
-reboot or a network hiccup costs only the writes it missed, never a copy of everything the node
-holds and a second copy back. RADOS draws the same line between a device that is *down* and one that
-is *out*. A member is missing once it has been down that long, or at once when its disk lost its log
-or left the pool; a PG below its pool's `min_live` (the fewest live members it may write with)
-replaces its down members sooner. An operator who reboots a node on purpose puts it in `maintenance`
-first, and nothing is copied.
+A member that is merely down is not missing: it stays in its PG for some minutes, so a reboot costs
+only the writes it missed ([post 03b](03b-leases-failure-detection-and-fencing.md#4-failure-detection)).
+It is missing once it has been down that long, or at once when its disk lost its log or left the
+pool, and sooner in a PG below its pool's `min_live` (the fewest live members it may write with).
+An operator who reboots a node on purpose puts it in `maintenance` first, and nothing is copied.
 
 **A move adds before it removes.** Refill and balance both add the new member first and mark the one
 it replaces *leaving*. Until the new member has every chunk, the PG is one member wider: the leaving
@@ -699,9 +687,8 @@ Longhorn, CockroachDB and MinIO report capacity).
   CockroachDB's replication admission control returns tokens from followers?
 - **The base read's cost** at queue depth 1 on NVMe and SATA, and how big a cache of recently merged
   blocks keeps write-shared appenders and 512-byte block writes from reading at all.
-- **Short last blocks.** Storing only the bytes up to a small file's end would cut a tiny file's
-  space several times over, at the cost of a stored length per extent. How much of a homelab volume
-  is files under 4 KiB?
+- **Short last blocks** for small files, weighed in
+  [post 04](04-one-log-per-disk.md#whole-blocks-only-small-files-and-small-appends).
 
 ## Further reading
 

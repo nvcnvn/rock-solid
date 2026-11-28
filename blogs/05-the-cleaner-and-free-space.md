@@ -633,8 +633,7 @@ From the design's [Roadmap and open questions](../docs/design.md#roadmap-and-ope
   then miss the block cache and read the disk.
 - **Regrouping chunks overwritten at random**, for example rewriting a chunk with too many extents
   whole into a chunk slot. Each regroup writes 4 MiB, so it needs traces.
-- **Admission across a placement group**, so one cleaning disk does not fill a primary's whole
-  replication queue.
+- **Admission across a placement group**, as in [post 02](02-chunks-and-placement.md#open-directions).
 - **Cleaning-debt thresholds.** Does the measured-rate bucket keep latency bounded under bursty
   overwrites at 90 to 95% full, and should the thresholds scale with the current WA?
 - **Deletes on a full disk.** Punches pass the pool's write limit, but with no free segment
