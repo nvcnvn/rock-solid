@@ -54,7 +54,8 @@ around it:
   writes while it re-peers.
 
 The lease is deliberately shorter than failure detection (below), so by the time a crashed primary
-is marked down its leases have run out, and a crash adds no lease wait.
+is marked down its leases have run out, and a crash adds no lease wait unless a time daemon slows a
+grantor's clock.
 
 ### Counting on clocks that never agree
 
@@ -313,8 +314,8 @@ Here is a primary crash, end to end:
                 sooner, it would have been marked up and caught up on what it missed.
 ```
 
-*The lease is shorter than detection, so by the time A is marked down its leases have run out:
-failure detection, not the lease, sets the pause.*
+*The lease is shorter than detection, so A's leases have usually run out by the time it is marked
+down: failure detection, not the lease, sets the pause.*
 
 **Down is not gone.** A member marked down stays in its PGs for some minutes before anything is
 copied elsewhere, so a reboot or a network hiccup costs only the writes it missed; RADOS makes the
@@ -329,8 +330,8 @@ disk nor restarts its wait.
 it has been normal for a while, so a flapping node cannot keep restarting its PGs' intervals; Ceph
 stops an OSD at the same count. The one exception is a PG that cannot serve without the member and
 has no disk to refill onto, such as `rep2` on two storage nodes: there the damped member comes back
-at its first normal heartbeat. rock-solid keeps a damped node's process running, so it still serves
-its clients and rejoins by itself.
+at its first normal heartbeat. Unlike Ceph, rock-solid does not stop a damped node's daemon, so the
+node rejoins by itself once its heartbeats have stayed normal.
 
 One crash is slower than the rest: the control-plane leader's own. Nobody counts silence while the
 control plane elects a new leader, and the new leader starts the count from its own lease, so that

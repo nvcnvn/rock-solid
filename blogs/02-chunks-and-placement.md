@@ -251,9 +251,10 @@ Its size follows the pools' PG counts and widths: tens of KiB for a typical `rep
 hundred for a wide erasure-coded one, whether the cluster holds 1 GB or 100 TB.
 
 So the table is **not sharded**. It lives in the control-plane Raft group, every node caches a full
-copy, and it changes only on pool, disk and node events, never on the I/O path. Every change raises
-the table epoch, but only a change to a PG's own members, their order or their live marks starts a
-new interval of that PG, and a member turns away only requests tagged with an earlier interval of
+copy, and it changes on control events, such as a pool, disk or node change or a primary's report
+that a PG has taken over or recovered, never on the I/O path. Every change raises the table epoch,
+but only a change that touches a PG itself, such as its members, their order or their live marks,
+starts a new interval of that PG, and a member turns away only requests tagged with an earlier interval of
 their PG. A rebalance step that moves one member of PG 7 leaves the writes in flight to every other
 PG alone. How a PG moves safely from one interval to the next while writes are in flight is where
 the hardest bugs live, and [post 03](03-epochs-leases-and-failures.md) is about exactly that.
