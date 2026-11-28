@@ -1290,18 +1290,20 @@ S3 is HTTP, so the gateway talks to ChunkStore and MetaStore directly rather tha
 | Hot cost | Metadata round trips | Latency at queue depth 1 | Throughput, listing |
 ## Modularity: sans-IO core, pluggable drivers
 
-All protocol and replication logic, including the coherence protocol, is written as pure state machines that take events and return actions. They never touch real I/O, so the simulator can stand in for every driver, one seed replays a whole cluster run, and every input/output (I/O) backend is swappable. The shared types live in `internal/core`:
+All protocol and replication logic, including the coherence protocol, is written as pure state machines that take events and return actions. They never touch real I/O, so the simulator can stand in for every driver, one seed replays a whole cluster run, and every input/output (I/O) backend is swappable. The shared types live in `internal/core`; the chunk replica's entry point is:
 
 ```go
-// OnEvent appends its actions to out and returns it; the caller reuses out, so a call allocates nothing.
-func (r *ChunkReplica) OnEvent(ctx *Context, ev *Event, out []Action) []Action
+// OnEvent fills out, which the caller owns, resets and reuses, so a call allocates nothing.
+func (r *Replica) OnEvent(ctx *core.Context, ev *core.Event, out *ReplicaOutput)
 ```
+
+Each machine's output type holds its actions plus what it asks of its host, such as the replica's request for a newer placement table.
 
 `Context` carries the time on both clocks (`Now` on `CLOCK_BOOTTIME`, `Raw` on `CLOCK_MONOTONIC_RAW`, 1 tick = 1 µs) and the driver's buffer pool. An `Event` is a received message, a lost peer, a disk completion, a timer or `Resumed`; an `Action` is a send, a disk read, write, flush or trim, or a timer to set. Both are tagged structs, not interfaces, so passing one never allocates.
 
 **Rules for state machines:**
 
-- **No allocation per call.** `OnEvent` appends to a slice the caller owns and reuses, and hot-path structs are filled in place rather than built as temporaries and copied: a frame literal copied into a slice cost 534 ns, filled in place 177 ns ([codegen spike](#appendix-go-and-rust-codegen-spike)).
+- **No allocation per call.** `OnEvent` fills an output the caller owns and reuses, and hot-path structs are filled in place rather than built as temporaries and copied: a frame literal copied into a slice cost 534 ns, filled in place 177 ns ([codegen spike](#appendix-go-and-rust-codegen-spike)).
 - **Time comes in, waiting goes out.** A machine reads time only from `ctx.Now` and `ctx.Raw` and never blocks: it records what it waits for under an `IOID` or `TimerID`, and the matching event resumes it. `Resumed` says the node may have stood still; a machine that holds no lease ignores it, emitting nothing and keeping its deadlines and rounds in flight.
 - **Deterministic.** No goroutine, channel, `select`, `sync` or `sync/atomic`; no clock, `os`, `net`, `syscall` or `unsafe`; no `range` over a map, which Go randomizes on purpose and which would shape the order of emitted actions. Randomness comes only from a seeded `math/rand/v2` source the machine owns. In the simulator each machine's source is forked from its node's, and each node's from the run seed, in creation order (`Rand.Fork`), so a draw added in one machine shifts no other machine's stream.
 - **Errors are data.** A corrupt message or a failed disk is an event to handle. A panic is only for a broken invariant of the machine's own state, never for peer or disk input.
