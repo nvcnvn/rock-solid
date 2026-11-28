@@ -25,6 +25,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/disklog"
 	"github.com/nvcnvn/rock-solid/internal/meta"
 	"github.com/nvcnvn/rock-solid/internal/node"
+	"github.com/nvcnvn/rock-solid/internal/ops"
 )
 
 // minHeap is the least GOMEMLIMIT a budget sets: at 0 the collector would run back to back.
@@ -90,6 +91,9 @@ type ctlConfig struct {
 	Memory int64
 	// MaxReplayBytes is the log's max_replay_bytes.
 	MaxReplayBytes uint64
+	// Admin is the admin port's address, "" for none; Flags every flag's value, which it reports.
+	Admin string
+	Flags []ops.Flag
 }
 
 type voter struct {
@@ -120,6 +124,9 @@ type nodeConfig struct {
 	// Mount is the volume the node mounts at MountPath, 0 for none.
 	Mount     uint32
 	MountPath string
+	// Admin is the admin port's address, "" for none; Flags every flag's value, which it reports.
+	Admin string
+	Flags []ops.Flag
 }
 
 // release is the format level this build's nodes report.
@@ -199,10 +206,12 @@ func parseCtl(args []string) (ctlConfig, error) {
 	fs.BoolVar(&cfg.Format, "format", false, "create the disk file and format it, as at a voter's first start; a file already there is made again only if its superblocks were never written")
 	fs.Int64Var(&cfg.DiskBytes, "disk-bytes", 1<<30, "the size of the disk file -format creates")
 	fs.Int64Var(&cfg.Memory, "memory", 0, "the daemon's memory budget in MiB, which GOMEMLIMIT is held at less the slabs mapped outside the Go heap; 0 leaves GOMEMLIMIT alone")
+	fs.StringVar(&cfg.Admin, "admin", "", "the address of the admin port, which answers GET /facts from this daemon's own state; empty for none")
 	fs.Uint64Var(&cfg.MaxReplayBytes, "max-replay-bytes", disklog.DefaultConfig().MaxReplayBytes, "the bytes of log records after the last checkpoint that begin the next, at most a quarter of the disk; a restart replays at most twice this")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
+	cfg.Flags = flagsOf(fs)
 	if *node >= daemonNodes {
 		return cfg, fmt.Errorf("-node %d is not below %d, where a daemon's node lies", *node, daemonNodes)
 	}
@@ -233,6 +242,13 @@ func parseCtl(args []string) (ctlConfig, error) {
 		cfg.Listen = ap
 	}
 	return cfg, nil
+}
+
+// flagsOf is the value of each of fs's flags.
+func flagsOf(fs *flag.FlagSet) []ops.Flag {
+	var fl []ops.Flag
+	fs.VisitAll(func(f *flag.Flag) { fl = append(fl, ops.Flag{Name: f.Name, Value: f.Value.String()}) })
+	return fl
 }
 
 // replayFits refuses a max_replay_bytes above a quarter of a disk of diskBytes: the log's reserve
@@ -289,10 +305,12 @@ func parseNode(args []string) (nodeConfig, error) {
 	pool := fs.Uint("pool", 1, "the pool the node's stores serve")
 	fs.Int64Var(&cfg.Memory, "memory", 0, "the daemon's memory budget in MiB, which GOMEMLIMIT is held at less the slabs mapped outside the Go heap; 0 leaves GOMEMLIMIT alone")
 	role := fs.String("role", "storage", "storage, holding PG members and metadata, meta, holding metadata alone, or client, holding a client session and no device")
+	fs.StringVar(&cfg.Admin, "admin", "", "the address of the admin port, which answers GET /facts from this daemon's own state; empty for none")
 	mount := fs.String("mount", "", "a volume to mount through FUSE as volume:path, such as 1:/mnt/vol1")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
+	cfg.Flags = flagsOf(fs)
 	if *mount != "" {
 		v, path, ok := strings.Cut(*mount, ":")
 		id, err := strconv.ParseUint(v, 10, 32)

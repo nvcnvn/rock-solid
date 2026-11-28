@@ -259,6 +259,9 @@ func (s *Shard) Report(dst []uint64) ReplicaReport {
 		Voters: append(dst[:0], cs.Voters...)}
 }
 
+// Name is the replica's group and replica ID.
+func (s *Shard) Name() (group, id uint64) { return s.group, s.id }
+
 // Halted is the index of the committed entry the replica could not decode and stopped applying at, or 0.
 func (s *Shard) Halted() uint64 { return s.halted }
 

@@ -329,6 +329,15 @@ func (h *Holder) end(p *held, t Time) core.Tick {
 	return min(p.csB+left, t.Boot+sub(p.cs+left, t.Raw))
 }
 
+// Left is the time left of the lease from g at t, on the clock that ends it first, or 0 when none runs.
+func (h *Holder) Left(g core.NodeID, t Time) core.Tick {
+	i, ok := slices.BinarySearchFunc(h.peers, g, func(x held, g core.NodeID) int { return compareNode(x.peer, g) })
+	if !ok || !h.valid(&h.peers[i], t) {
+		return 0
+	}
+	return h.end(&h.peers[i], t) - t.Boot
+}
+
 // Margin is the margin of the lease from g's last grant, in parts per million, and whether it widened past lease_drift, which the holder reports with the pair; a margin of max_margin or more gave no lease.
 func (h *Holder) Margin(g core.NodeID) (m uint64, widened bool) {
 	p := h.find(g)

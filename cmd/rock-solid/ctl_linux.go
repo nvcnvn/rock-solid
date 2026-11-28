@@ -22,6 +22,8 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/loop"
 	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/meta"
+	"github.com/nvcnvn/rock-solid/internal/node"
+	"github.com/nvcnvn/rock-solid/internal/ops"
 	"github.com/nvcnvn/rock-solid/internal/raftshard"
 )
 
@@ -43,9 +45,10 @@ type ctl struct {
 	// the same process can listen on its port.
 	lfd int
 	// Port is the port the voter listens on.
-	Port int
-	mu   sync.Mutex
-	err  error
+	Port  int
+	mu    sync.Mutex
+	err   error
+	facts facts
 }
 
 // ctlMachine boots the host on the loop's first event and hands it every event.
@@ -117,6 +120,11 @@ func newCtl(cfg ctlConfig) (_ *ctl, err error) {
 		return nil, err
 	}
 	p.Port = port
+	p.facts = facts{node: cfg.Node, flags: cfg.Flags, hosts: hostsOf(cfg.Voters, true), mails: []*mail{&p.mail},
+		fill: func(_ int, ctx *core.Context, f *ops.Facts) { node.CtlFacts(ctx, p.m.h, cfg.Node, release, f) }, pg: func(int, *ops.PGFacts) {}}
+	if err := p.facts.listen(cfg.Admin); err != nil {
+		return nil, err
+	}
 	if !p.l.Inbox().Post(&core.Event{Kind: core.EvTimer, Timer: bootTimer}) {
 		return nil, errors.New("ctl: the loop's inbox is full at start")
 	}
@@ -176,6 +184,7 @@ func neverWritten(path string) (bool, error) {
 
 // Run runs the loop until Stop or the host stops for good, which it returns.
 func (p *ctl) Run() error {
+	p.facts.serve()
 	p.l.Run()
 	p.close()
 	p.mu.Lock()
@@ -201,6 +210,7 @@ func (p *ctl) fail(err error) {
 }
 
 func (p *ctl) close() {
+	p.facts.close()
 	if p.lfd > 0 {
 		_ = unix.Close(p.lfd)
 	}

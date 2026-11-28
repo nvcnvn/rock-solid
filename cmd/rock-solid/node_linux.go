@@ -19,6 +19,7 @@ import (
 	"github.com/nvcnvn/rock-solid/internal/lsm"
 	"github.com/nvcnvn/rock-solid/internal/meta"
 	"github.com/nvcnvn/rock-solid/internal/node"
+	"github.com/nvcnvn/rock-solid/internal/ops"
 	"github.com/nvcnvn/rock-solid/internal/raftshard"
 )
 
@@ -31,6 +32,7 @@ type storageNode struct {
 	addrs map[uint32]netip.AddrPort
 	loops []*nodeLoop
 	nm    *nodeMachine
+	facts facts
 }
 
 type nodeLoop struct {
@@ -68,7 +70,53 @@ func newNode(cfg nodeConfig) (_ *storageNode, err error) {
 	if err := p.limit.check(int64(len(cfg.Devices)) * pageRegion); err != nil {
 		return nil, err
 	}
+	p.facts = facts{node: cfg.Node, flags: cfg.Flags, hosts: append(hostsOf(cfg.Ctls, true), hostsOf(cfg.Peers, false)...),
+		paths: append([]string{""}, cfg.Devices...), fill: p.fill, pg: p.pgFacts}
+	if cfg.Mount != 0 {
+		p.facts.mounts = []ops.Mount{{Volume: cfg.Mount, Path: cfg.MountPath}}
+	}
+	for _, nl := range p.loops {
+		p.facts.mails = append(p.facts.mails, &nl.mail)
+	}
+	if err := p.facts.listen(cfg.Admin); err != nil {
+		return nil, err
+	}
 	return p, nil
+}
+
+// hostsOf is the hosts vs name, as voters if ctl.
+func hostsOf(vs []voter, ctl bool) []ops.Host {
+	var hs []ops.Host
+	for _, v := range vs {
+		hs = append(hs, ops.Host{Node: v.Node, Addr: v.Addr.String(), Ctl: ctl})
+	}
+	return hs
+}
+
+// fill copies loop i's part of the node's facts into f, on loop i: the node machine's on loop 0,
+// a device's on its own, which until its first membership starts it holds only its identity.
+func (p *storageNode) fill(i int, ctx *core.Context, f *ops.Facts) {
+	if i == 0 {
+		p.nm.n.Facts(ctx, f)
+		return
+	}
+	dm := p.loops[i].dm
+	if dm.d != nil {
+		dm.d.Facts(ctx, f)
+		return
+	}
+	state := "waiting"
+	if dm.cfg.Err != nil {
+		state = "failed"
+	}
+	f.Disks = append(f.Disks, ops.Disk{Loop: uint32(i), Device: dm.cfg.Device, State: state})
+}
+
+// pgFacts copies loop i's part of a PG's facts into pf, on loop i.
+func (p *storageNode) pgFacts(i int, pf *ops.PGFacts) {
+	if dm := p.loops[i].dm; dm != nil && dm.d != nil {
+		dm.d.PGFacts(pf)
+	}
 }
 
 // deviceID is the device's stable identity: its path, which names the same drive at every start,
@@ -154,6 +202,7 @@ func (p *storageNode) dial(peer core.NodeID) (int, error) {
 
 // Run runs every loop until Stop, and returns why a mount that failed to start stopped them.
 func (p *storageNode) Run() error {
+	p.facts.serve()
 	var wg sync.WaitGroup
 	for _, nl := range p.loops[1:] {
 		wg.Go(nl.l.Run)
@@ -175,6 +224,7 @@ func (p *storageNode) Stop() {
 }
 
 func (p *storageNode) close() {
+	p.facts.close()
 	for _, nl := range p.loops {
 		if nl.ring != nil {
 			nl.ring.Close()

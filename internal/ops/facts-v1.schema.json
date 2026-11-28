@@ -1,0 +1,330 @@
+{
+  "$id": "rock-solid.io/facts/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "cluster_map": {
+      "properties": {
+        "format_level": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reports_to": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "session_table_version": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "shard_map_version": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "table_epoch": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "disks": {
+      "items": {
+        "properties": {
+          "blocks": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "device": {
+            "pattern": "^[0-9]+$",
+            "type": "string",
+            "x-rock-solid-name": false
+          },
+          "disk": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "fill_blocks": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "log": {
+            "pattern": "^[0-9]+$",
+            "type": "string",
+            "x-rock-solid-name": false
+          },
+          "loop": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "member_ack_p99": {
+            "items": {
+              "properties": {
+                "disk": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "us": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "oldest_io_age_us": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string",
+            "x-rock-solid-name": true
+          },
+          "reserve_blocks": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "run": {
+            "pattern": "^[0-9]+$",
+            "type": "string",
+            "x-rock-solid-name": false
+          },
+          "session_table_version": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "state": {
+            "type": "string",
+            "x-rock-solid-name": false
+          },
+          "table_epoch": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "members": {
+      "items": {
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "disk": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "interval": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "lacking": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "pg": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "pool": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "role": {
+            "type": "string",
+            "x-rock-solid-name": false
+          },
+          "unfound": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "mounts": {
+      "items": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "x-rock-solid-name": true
+          },
+          "volume": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "node": {
+      "properties": {
+        "boottime_us": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "flags": {
+          "items": {
+            "properties": {
+              "name": {
+                "type": "string",
+                "x-rock-solid-name": false
+              },
+              "value": {
+                "type": "string",
+                "x-rock-solid-name": true
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "hosts": {
+          "items": {
+            "properties": {
+              "addr": {
+                "type": "string",
+                "x-rock-solid-name": true
+              },
+              "ctl": {
+                "type": "boolean"
+              },
+              "node": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "id": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "monotonic_raw_us": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "release": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "roles": {
+          "items": {
+            "type": "string",
+            "x-rock-solid-name": false
+          },
+          "type": "array"
+        },
+        "run": {
+          "pattern": "^[0-9]+$",
+          "type": "string",
+          "x-rock-solid-name": false
+        },
+        "uptime_us": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "wall": {
+          "type": "string",
+          "x-rock-solid-name": false
+        }
+      },
+      "type": "object"
+    },
+    "replicas": {
+      "items": {
+        "properties": {
+          "applied": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "commit": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "followers": {
+            "items": {
+              "properties": {
+                "id": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "match": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "group": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "halt_age_us": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "halt_index": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "leader": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "leader_lease": {
+            "type": "boolean"
+          },
+          "loop": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "term": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "schema": {
+      "type": "string",
+      "x-rock-solid-name": false
+    },
+    "session": {
+      "properties": {
+        "id": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "incarnation": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lease_left_us": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "renewal_age_us": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "type": "object"
+}
