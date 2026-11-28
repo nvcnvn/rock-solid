@@ -337,6 +337,9 @@ func TestAClientOnlyNodeWithNoMountStartsNoSessionOverTCP(t *testing.T) {
 	p := runCtl(t, testDir(t))
 	var out output
 	cmd := startNode(t, fmt.Sprintf("-node 2 -ctl 1=127.0.0.1:%d -group %d -listen 127.0.0.1:%d -role client", p.Port, ctlGroup, freeBase(t, 1)), &out)
+	if !within(30*time.Second, func() bool { return onCtl(t, p, func(_ *core.Context, c *meta.Control) bool { return c != nil }) }) {
+		t.Fatal("the control plane elected no leader")
+	}
 	time.Sleep(3 * time.Second)
 	if cmd.ProcessState != nil {
 		t.Fatalf("the node exited; it said:\n%s", out.String())
