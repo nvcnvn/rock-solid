@@ -595,9 +595,11 @@ type replicaPlants struct {
 	freshGrantNoCheck bool
 	noLeaseCheck      bool
 	// noResendTable orders a client write sent again as a new one; resendAtOnce answers one a
-	// pending version took with that version at once, before it commits.
-	noResendTable bool
-	resendAtOnce  bool
+	// pending version took with that version at once, before it commits; resendBeforeHolds answers
+	// one from the resend table before the holds every write waits on.
+	noResendTable     bool
+	resendAtOnce      bool
+	resendBeforeHolds bool
 }
 
 // NewReplica runs st, a serving store, as disk cfg.Disk, drawing its first run ID; it grants no lease until its restart wait is over.
@@ -1332,6 +1334,9 @@ func (r *Replica) clientUpdate(ctx *core.Context, ev *core.Event, u *Update, out
 	r.st.SeeIncarnation(u.Session, u.Incarnation)
 	p, e, wait := r.namedFor(u.PG, u.Chunk)
 	i := r.lead(u.PG.PG)
+	if r.plant.resendBeforeHolds && e != nil && i >= 0 && r.st.Index() != nil && r.resent(ctx, ev, u, uint32(len(p.PGs)), out) {
+		return
+	}
 	switch {
 	case wait || e != nil && i < 0 && u.PG.Interval > e.Interval && u.PG.Epoch > r.table.Epoch:
 		r.park(ctx, ev, u.PG.Epoch, out)

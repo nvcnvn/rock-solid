@@ -425,6 +425,7 @@ var resendPlants = []struct {
 }{
 	{"noResendTable", func(r *primaryRun) { r.c.replicaPlants.noResendTable = true }},
 	{"resendAtOnce", func(r *primaryRun) { r.c.replicaPlants.resendAtOnce = true }},
+	{"resendBeforeHolds", func(r *primaryRun) { r.c.replicaPlants.resendBeforeHolds = true }},
 	{"writerAtLog", func(r *primaryRun) { r.c.storePlants.writerAtLog = true }},
 	{"noWatermark", func(r *primaryRun) { r.c.storePlants.noWatermark = true }},
 	{"trimOnAnswer", func(r *primaryRun) { r.c.storePlants.trimOnAnswer = true }},

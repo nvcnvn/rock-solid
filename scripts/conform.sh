@@ -261,7 +261,7 @@ each() {
 }
 
 # The resend table's plants, set in the resending primary-change run.
-rplants="noResendTable resendAtOnce writerAtLog noWatermark trimOnAnswer recoveryForgetsIds recoveryLiveOnly"
+rplants="noResendTable resendAtOnce resendBeforeHolds writerAtLog noWatermark trimOnAnswer recoveryForgetsIds recoveryLiveOnly"
 
 if [ "${1:-}" = plants ]; then
 	# The plants' 40 seeds take 450 s of go test on the M4 Pro and past go test's default 10 minutes on a
@@ -310,7 +310,7 @@ if [ "${1:-}" = plants ]; then
 	# on a few seeds in 40, so another window may have none, and some pass on a seed they fire on.
 	ecaught="ackOnLoneCopy activateEarly mergeWhileLacking mergeOnDropped editKeepsInterval relistNever peerInOldInterval oldReport
 		recoverFromListed listerVetoes listerOrders noDegradedHold ownInterval reportDecided removeOnActivation sendEpoch goneWhileUp
-		noResendTable resendAtOnce writerAtLog trimOnAnswer recoveryForgetsIds recoveryLiveOnly"
+		noResendTable resendAtOnce resendBeforeHolds writerAtLog trimOnAnswer recoveryForgetsIds recoveryLiveOnly"
 	for plant in $ecaught; do
 		[ -z "${PLANTS:-}" ] || case " $PLANTS " in *" $plant "*) ;; *) continue ;; esac
 		fired=0 rejected=0
