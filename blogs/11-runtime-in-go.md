@@ -297,11 +297,11 @@ never do I/O, and a **runtime** of event loops and drivers that does all of it.
 
 Every component on the data path is a state machine with one entry point: the disk log, the
 LSM index, the chunk replica, the Raft shard (one consensus group of the metadata store) and the
-MetaStore ([08-the-metastore.md](08-the-metastore.md)). The entry point looks like this
-([`internal/core/event.go`](../internal/core/event.go) holds the shared types):
+MetaStore ([08-the-metastore.md](08-the-metastore.md)). The chunk replica's entry point looks
+like this ([`internal/core/event.go`](../internal/core/event.go) holds the shared types):
 
 ```go
-func (r *ChunkReplica) OnEvent(ctx *Context, ev *Event, out []Action) []Action
+func (r *Replica) OnEvent(ctx *core.Context, ev *core.Event, out *ReplicaOutput)
 ```
 
 An event is a received message, a lost peer, a finished disk I/O, a timer or `Resumed` (below).
@@ -310,17 +310,17 @@ the time on two clocks and the driver's buffer pool. Things to notice:
 
 - **Tagged structs, not interfaces**, so passing one never allocates. Messages up to 256 bytes
   ride inline in the event; bigger data travels as a buffer handle.
-- **The caller owns the output.** `OnEvent` appends to a slice the caller reuses, so a call
-  allocates nothing.
+- **The caller owns the output.** `OnEvent` fills an output struct the caller resets and reuses:
+  its actions, plus what the machine asks of its host. So a call allocates nothing.
 - **Time comes in, waiting goes out.** A machine reads time only from the context and never
   blocks. It emits a disk write under an ID it chose, and the matching completion event resumes
   it; timers work the same way. Timers have no cancel, so the machine checks its own deadline
   when a timer event arrives.
-- **Leases read two clocks.** A time daemon can make `CLOCK_BOOTTIME` run up to 22.6% fast or
-  slow, the most Linux lets it adjust the clock, so the context also carries the time on
+- **Leases read two clocks.** A time daemon can make `CLOCK_BOOTTIME` run up to 22.6% fast or slow,
+  the most Linux lets it adjust the clock, so the context also carries the time on
   `CLOCK_MONOTONIC_RAW`, and every lease is counted on both. The loop delivers `Resumed` after a
   suspend or a VM restore, and a lease holder then ends every lease it holds
-  ([03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md#two-clocks-because-a-time-daemon-can-bend-either-one)).
+  ([03b](03b-leases-failure-detection-and-fencing.md#two-clocks-because-a-time-daemon-can-bend-either-one)).
 - **Errors are data.** A corrupt message or a failed disk is an event to handle; a panic is
   only for a broken invariant of the machine's own state.
 - **Randomness is owned.** Each machine draws from a seeded source of its own. In the simulator
@@ -436,11 +436,11 @@ The contract has four rules:
 
    An exhausted pool is an error the machine handles, typically by retrying on a timer, never a
    panic or a fallback to the heap.
-2. **Every driver exposes a readiness descriptor and defaults to event mode**, an fd in the
-   loop's epoll set; busy polling is an opt-in for dedicated cores. In the spike, SPDK in
-   interrupt mode matched polling's latency at a fifteenth of the CPU per I/O. When enabling it
-   fails, SPDK silently falls back to polling ([SPDK NVMe interrupt spike](../spikes/spdk-nvme-interrupt/)),
-   so the driver reads the mode back after attach and refuses the disk rather than hang.
+2. **Every driver exposes a readiness descriptor and defaults to event mode**, an fd in the loop's
+   epoll set; busy polling is an opt-in for dedicated cores. In the spike, SPDK in interrupt mode
+   matched polling's latency at a fifteenth of the CPU per I/O. When enabling it fails, SPDK
+   silently falls back to polling ([SPDK NVMe interrupt spike](../spikes/spdk-nvme-interrupt/)), so
+   the driver reads the mode back after attach and refuses the disk rather than hang.
 3. **Network connections fail as a unit and deliver in order.** Any transport error becomes one
    lost-peer event, every outstanding request on it fails, and the driver reconnects; between
    two such events a peer's messages arrive once each, in the order sent.
@@ -507,23 +507,16 @@ everything that can wake it is in that set.*
   time or waiting (watch descriptors, wait, wake, read every clock together, arm the timerfd) is
   one small interface, so a test can put a stepped kernel with scripted clocks behind it.
 - **A pass waits first, then reads the clocks.** Go's own monotonic clock is `CLOCK_MONOTONIC`,
-  neither of the two that leases need, so after its wait each pass reads `CLOCK_BOOTTIME` and
-  `CLOCK_MONOTONIC_RAW` directly, and the VMClock marker from a mapped page. Then it delivers
-  `Resumed` if needed, fires every timer due, handles peer messages before client reads,
-  executes actions and arms the timerfd, as FoundationDB's loop does. Reading the clocks *before*
-  the wait would be unsafe for leases: a suspend during the wait would surface a pass late, after
-  it served the reads that woke it on the old lease. Two cheap `CLOCK_MONOTONIC` reads bracket the
-  others, and the reads are taken again if the bracket is too wide, so a stall between them, from
-  descheduling or CFS throttling, never looks like a suspend. `Resumed` comes when
-  `CLOCK_BOOTTIME` gains on `CLOCK_MONOTONIC`, which happens only across a suspend, when the
-  marker changes, or when a clock reads below its last value. Handling peer messages first means
-  a holder that lost time while its VM was stopped learns it from the heartbeats queued during
-  the stop before it serves a read that waited behind them.
+  neither of the two that leases need, so after its wait each pass reads `CLOCK_BOOTTIME`,
+  `CLOCK_MONOTONIC_RAW` and the VMClock marker directly, delivers `Resumed` if they show a
+  suspend, restore or migration, and only then serves, peer messages before client reads, as
+  FoundationDB's loop does. Reading the clocks *before* the wait would be unsafe: a suspend
+  during the wait would surface a pass late, after it served the reads that woke it on the old
+  lease. Handling peer messages first means a holder whose VM was stopped learns it from the
+  heartbeats queued during the stop before it serves a read that waited behind them.
 - **The loop decides when to block.** It blocks only when it has no work left; I/O merely in
-  flight does not count, since its completion wakes the loop. Timers fire from the heap, not from
-  the timerfd's readiness, and the timerfd is re-armed only when the earliest deadline changed.
-  The timer heap and the `Resumed` detector are pure code in `internal/core`, shared with the
-  simulator.
+  flight does not count, since its completion wakes the loop. The timer heap and the `Resumed`
+  detector are pure code in `internal/core`, shared with the simulator.
 
 **Connections are per loop pair.** Each node publishes which loop owns each of its disks and
 shard replicas. A loop opens one connection to each peer loop it needs, on demand, as Seastar's
@@ -551,7 +544,7 @@ A request that reaches the wrong loop, after a shard moved, is forwarded through
 reply naming the new owner, so the owner map is a hint for speed, never a condition for
 correctness. Leases are kept per loop pair too: a primary's read lease and a Raft leader's
 lease are held by one loop from another loop, not by a node from a node
-([03](03-epochs-leases-and-failures.md)).
+([03b](03b-leases-failure-detection-and-fencing.md#one-lease-per-pair-of-event-loops-not-per-pg)).
 
 **Each disk belongs to one loop**, so it gets one flush per round; other loops hand it their
 records through its inbox once per pass ([04-one-log-per-disk.md](04-one-log-per-disk.md)).
@@ -748,8 +741,9 @@ From the design's [open questions](../docs/design.md#roadmap-and-open-questions)
   no marker, so a holder notices only from a peer's heartbeat queued during the stop. Does the
   hypervisor's network queue keep those heartbeats under load, and how does a lost-time signal
   seen on one loop reach the loops serving reads before they serve the next request?
-- **The clock bracket:** how wide may the bracketing reads lie apart and still count as one
-  reading, and how large a jump counts as a suspend? And does Linux ever return a clock reading
+- **The clock bracket:** a pass brackets its clock reads with two cheap `CLOCK_MONOTONIC` reads, so
+  a stall between them never looks like a suspend. How wide may the bracket be and still count as
+  one reading, and how large a jump counts as a suspend? And does Linux ever return a clock reading
   below the last one, often enough that holding the last value costs availability?
 - **io_uring under Kubernetes' default seccomp profile** (the filter on which system calls a
   container may make): Docker's refuses io_uring; do containerd's and Kubernetes' defaults, so
