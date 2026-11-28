@@ -9718,8 +9718,9 @@ and chunk devices.
   and half of those times earlier, at an open's registration in flight, with the first node
   unlinking a file next, so an open straddles the change and may outlive its file;
   one pool allocation in 100 refused, which fails a chunk write the client cannot take; and one
-  `Read` in 200 answered `ErrMalformed`, `ErrTooLarge`, `ErrOverloaded` or `ErrHalted`. Then 3 s
-  without faults. Histories of both nodes pass one close-to-open check, a read such a fault
+  `Read` in 200 answered `ErrMalformed`, `ErrTooLarge`, `ErrOverloaded` or `ErrHalted`. Then 7 s
+  without faults, a lease and 3 s, so a leader a partition cut off at the end loses its lease to
+  an election in time. Histories of both nodes pass one close-to-open check, a read such a fault
   overlaps, or one in a handle opened before its daemon's last new session, may come back short;
   every system call succeeds or, overlapped by a fence, a refused allocation or a lasting `Read`
   error on its node, fails `EIO`, after which its process goes on and writes again what did not

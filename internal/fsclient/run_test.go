@@ -44,9 +44,6 @@ const (
 	runGroup  = 5
 	runBlocks = 1 << 18
 	runFor    = core.Tick(30_000_000)
-	// quietFor is the run's time without faults after them, long enough for an election and the
-	// router's wait to retry a Txn it held for one.
-	quietFor = core.Tick(3_000_000)
 	// faultGap is the most time between two daemon crashes, and between two reboots, and fenceGap
 	// between two fences.
 	faultGap = core.Tick(8_000_000)
@@ -167,6 +164,11 @@ type runFile struct {
 	ino    uint64
 	writer *runProc
 }
+
+// quietFor is the run's time without faults after them, long enough for the followers of a leader
+// a partition cut off at runFor to see its lease end, an election, and the router's wait to retry a
+// Txn it held for one.
+var quietFor = lease.DefaultConfig.Lease + core.Tick(3_000_000)
 
 // rebootsEnd is when replicas' nodes stop rebooting: one rebooted then is down a heartbeat and
 // grants no vote for its restart wait, so a quorum votes again from runFor.
