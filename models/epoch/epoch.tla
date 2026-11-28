@@ -1719,9 +1719,10 @@ MemberFail(m) ==
 \* A member that moved on to a later interval of the PG refuses a version of an
 \* earlier one, logged or not, as it accepts only its current interval's, and
 \* the primary hears the refusal as any other, maybe after the member went down.
-\* The member records no failure: that interval is over for it. The primary
-\* takes it as a member's refusal, which "mfail" plans explore, so only traces
-\* and plans that set "past" take it.
+\* The member records no failure: that interval is over for it. Every plan
+\* that moves a member on while a write is in flight reaches it, which takes the
+\* liveness configurations past their time budget, so only traces and the plans
+\* that set "past", those whose configurations stay within it, take it.
 PastRefuses(m) ==
     /\ "past" \in plan.f
     /\ dnode[m.to] # 0
@@ -2932,7 +2933,7 @@ Refilled(x) == [x EXCEPT !.f = {"restart", "format"}]
 \* write; the -second configurations of the last two have the other.
 OneWrite(x) == [x EXCEPT !.w = <<Partial2[1]>>]
 SecondWrite(x) == [x EXCEPT !.w = <<Partial2[2]>>]
-RefillPlans == {Refilled(RefillDone)}
+RefillPlans == WithFlags({Refilled(RefillDone)}, {"past"})
 \* ci-image: Y on the primary alone, dropped while the member is down, so the
 \* primary lists the chunk; the member's disk is formatted and replaced, and
 \* only the removed disk 3 holds X clean.
@@ -2960,14 +2961,14 @@ ReplayDropsPlans == {[Plan(<<AddM(2, 3, 1), RemoveM(2)>>, Partial2, {"restart", 
 RefillBackDownPlans == {Refilled(RefillBack)}
 \* ci-refills-down splits deep-refills-down by fault, and the restart by write.
 RefillDownFormatPlans == {[RefillBack EXCEPT !.f = {"format"}]}
-RefillDownRestartPlans == {[OneWrite(RefillBack) EXCEPT !.f = {"restart"}]}
-RefillDownRestartSecond == {[SecondWrite(RefillBack) EXCEPT !.f = {"restart"}]}
+RefillDownRestartPlans == WithFlags({[OneWrite(RefillBack) EXCEPT !.f = {"restart"}]}, {"past"})
+RefillDownRestartSecond == WithFlags({[SecondWrite(RefillBack) EXCEPT !.f = {"restart"}]}, {"past"})
 \* deep-refills-stay restarts any node; ci-refills-stay node 2, the first primary,
 \* and ci-refills-stay-node1 node 1, with the plan's faults otherwise kept. Node 3's
 \* restart does not fit 5 minutes, with or without folds or with a chunk counter
 \* of 1, and is left to deep-refills-stay.
 RefillStayPlans == {OneWrite(Refilled(RefillStay))}
-RefillStayAt(x) == {[OneWrite(Refilled(RefillStay)) EXCEPT !.f = @ \cup {x}]}
+RefillStayAt(x) == {[OneWrite(Refilled(RefillStay)) EXCEPT !.f = @ \cup {x, "past"}]}
 RefillStay1 == RefillStayAt("aimed1")
 RefillStay2 == RefillStayAt("aimed")
 \* ci-refills-back: the primary refilled and back, which it comes behind the others;
@@ -2977,7 +2978,7 @@ RefillPrimary == Plan(<<Mark(2, "down"), AddM(2, 2, 1), Mark(2, "up"), RemoveM(2
 RefillReturn == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"),
                        Tab(2, <<1, 3, 2>>, <<"up", "up", "down">>, {2}), RemoveM(2)>>, Partial2, {})
 RefillLost == Plan(<<Mark(3, "down"), AddM(2, 3, 1), LostM(3), DropM(2)>>, Partial2, {})
-RefillPrimaryPlans == WithFlags({OneWrite(RefillPrimary)}, {"late"})
+RefillPrimaryPlans == WithFlags({OneWrite(RefillPrimary)}, {"past", "late"})
 RefillBackPlans == {RefillReturn, RefillLost}
 \* ci-refills-two, on 4 nodes: both members refilled, one after the other or in
 \* one table; and the first declared lost, leaving by the table that refills the
@@ -2987,10 +2988,10 @@ RefillTogether == Plan(<<Mark(3, "down"), Mark(2, "down"),
                          Tab(2, <<1, 3, 4, 2>>, <<"up", "down", "up", "down">>, {2, 3}), RemoveM(2)>>, Partial2, {})
 RefillLostSecond == Plan(<<Mark(3, "down"), AddM(2, 3, 1), Mark(2, "down"), LostM(3),
                            Tab(2, <<1, 4, 2>>, <<"up", "up", "down">>, {2}), Mark(2, "up"), RemoveM(2)>>, Partial2, {})
-RefillTwoPlans == {OneWrite(RefillSecond)}
-RefillTwoSecond == {SecondWrite(RefillSecond)}
+RefillTwoPlans == WithFlags({OneWrite(RefillSecond)}, {"past"})
+RefillTwoSecond == WithFlags({SecondWrite(RefillSecond)}, {"past"})
 RefillSecondPlans == {RefillSecond}
-RefillTogetherPlans == {RefillTogether}
+RefillTogetherPlans == WithFlags({RefillTogether}, {"past"})
 RefillLostPlans == {RefillLostSecond}
 \* neg-drop-all-leaving: both members leaving, one lost, and the other holds what
 \* no member can serve.
@@ -3007,8 +3008,8 @@ ParkFullLost == Plan(<<Mark(3, "down"), AddM(2, 3, 1), AddM(2, 1, 4), Mark(2, "d
 ParkDownLost == Plan(<<Mark(3, "down"), AddM(2, 3, 1),
                        Tab(2, <<2, 1, 3, 4>>, <<"down", "up", "down", "up">>, {1, 3}), LostM(2)>>, Partial2, {})
 ParkPlans == {ParkFull, ParkFullLost}
-ParkOnePlans == {OneWrite(ParkFull)}
-ParkLostOnePlans == {OneWrite(ParkDownLost)}
+ParkOnePlans == WithFlags({OneWrite(ParkFull)}, {"past"})
+ParkLostOnePlans == WithFlags({OneWrite(ParkDownLost)}, {"past"})
 ParkFullLostOnePlans == {OneWrite(ParkFullLost)}
 ParkLostPlans == {ParkFullLost}
 \* neg-park-unpaired: with disk 3 leaving, a table parks disks 1 and 2 too and
@@ -3023,7 +3024,7 @@ GiveUpM(p) == [k |-> "giveup", p |-> p]
 \* whose members are gone. Else the chunk is unfound, held only by the lost
 \* disks. A give-up ends either.
 TwoLost == <<Tab(2, <<1, 4, 2, 3>>, <<"up", "up", "down", "down">>, {2, 3}), LostM(2), LostM(3), GiveUpM(2)>>
-GiveUpStoppedPlans == {Plan(TwoLost, Partial2, {})}
+GiveUpStoppedPlans == WithFlags({Plan(TwoLost, Partial2, {})}, {"past"})
 \* neg-give-up-found gives up the chunk W1 is acknowledged on; neg-give-up-candidate
 \* gives it up while disks 2 and 3, down, still hold it; neg-skip-past-give-up
 \* has W2 acknowledged on node 1 alone after the give-up, while node 4 is in
@@ -3036,7 +3037,7 @@ GiveUpNotStoppedPlans == {Plan(<<Repl(2, 3, 1), GiveUpM(2)>>, <<Partial2[1]>>, {
 \* ci-giveup-two-chunks: TwoLost with W1 on chunk 2 and a write to chunk 1, both
 \* chunks in PG 2, so an unfound give-up of one must keep the other.
 ChunksInPG2 == [c \in Chunks2 |-> 2]
-GiveUpTwoChunksPlans == {Plan(TwoLost, <<Partial2[1], [Partial[1] EXCEPT !.c = 1]>>, {})}
+GiveUpTwoChunksPlans == WithFlags({Plan(TwoLost, <<Partial2[1], [Partial[1] EXCEPT !.c = 1]>>, {})}, {"past"})
 \* heavy-giveup-second: node 1 joins, so peering lists the chunk on it for W1,
 \* and may take W2 before recovery; then node 4 joins as disks 2 and 3 go
 \* down, and they are lost. A give-up of the stopped PG keeps what node 1
@@ -3047,8 +3048,8 @@ GiveUpSecondPlans == {Plan(<<AddM(2, 3, 1), Tab(2, <<1, 4, 2, 3>>, <<"up", "up",
 \* ci-giveup-removed: disk 4 joins in disk 3's place and disk 3 is removed on
 \* the recovered report; then both members are lost and the stopped PG given
 \* up while disk 3, removed, still holds W1.
-GiveUpRemovedPlans == {Plan(<<AddM(2, 3, 4), RemoveM(2), Mark(2, "down"), Mark(4, "down"), LostM(2), LostM(4),
-                              GiveUpM(2)>>, <<Partial2[1]>>, {})}
+GiveUpRemovedPlans == WithFlags({Plan(<<AddM(2, 3, 4), RemoveM(2), Mark(2, "down"), Mark(4, "down"), LostM(2), LostM(4),
+                                        GiveUpM(2)>>, <<Partial2[1]>>, {})}, {"past"})
 SkipPastPlans == {Plan(TwoLost \o <<Mark(4, "maint"), Tab(2, <<4, 1>>, <<"up", "maint">>, {})>>, <<Partial2[2]>>, {})}
 
 \* ci-sources, each with a primary restart: a move whose removed member lacks Y;
@@ -3063,7 +3064,7 @@ LoneListerWrites ==
 ListerOrders == Plan(<<ML(1, 2), Mark(3, "down"), Mark(3, "up")>>, LoneListerWrites, {})
 \* ci-sources-lister-one and neg-lister-orders: the same at min_live 1, where
 \* the source counts as min_live clean copies.
-ListerOrder1Plans == {Plan(<<ML(1, 1), Mark(3, "down"), Mark(3, "up")>>, LoneListerWrites, {})}
+ListerOrder1Plans == WithFlags({Plan(<<ML(1, 1), Mark(3, "down"), Mark(3, "up")>>, LoneListerWrites, {})}, {"past"})
 MoveSourcePlans == {MoveRestarted}
 MoveAnswer == {[MoveRestarted EXCEPT !.w = <<Partial2[2]>>]}
 ListerAnswer == {[ListerRestarted EXCEPT !.w = <<Partial[2]>>]}
@@ -3074,16 +3075,16 @@ ListerAnswer1 == ListerAnswerAt("aimed1")
 ListerAnswer2 == ListerAnswerAt("aimed")
 ListerAnswer3 == ListerAnswerAt("stop2")
 ListerPlans == {ListerRestarted}
-LateAskPlans == {[ListerRestarted EXCEPT !.f = {"restart", "lateask"}]}
+LateAskPlans == WithFlags({[ListerRestarted EXCEPT !.f = {"restart", "lateask"}]}, {"past"})
 ListerOrderPlans == {ListerOrders}
 \* ci-held and neg-no-degraded-hold: disk 3 returns listing chunk 1, then disk 2
 \* goes down, leaving disk 1 the chunk's one clean copy, so a write waits for
 \* recovery to reach disk 3.
-HeldPlans == {Plan(<<Mark(3, "down"), Mark(3, "up"), Mark(2, "down")>>, Partial, {})}
+HeldPlans == WithFlags({Plan(<<Mark(3, "down"), Mark(3, "up"), Mark(2, "down")>>, Partial, {})}, {"past"})
 \* ci-held-live, under fairness: PG 2's member 3 in maintenance, so W1 lands on
 \* disk 2 alone, then back listing the chunk, which leaves disk 2 its one clean
 \* copy, so W2, sent once W1 is acknowledged, waits for recovery.
-HeldLivePlans == {Plan(<<Mark(3, "maint"), Mark(3, "up")>>, <<Partial2[1], [Partial2[2] EXCEPT !.after = 1]>>, {})}
+HeldLivePlans == WithFlags({Plan(<<Mark(3, "maint"), Mark(3, "up")>>, <<Partial2[1], [Partial2[2] EXCEPT !.after = 1]>>, {})}, {"past"})
 \* ci-held-rotated, at min_live 1: the same, then the primary moved to disk 3, so
 \* W2 waits for recovery of the primary's own copy alone.
 HeldLiveRotPlans == {Plan(<<Mark(3, "maint"), Mark(3, "up"), Rot(2)>>, <<Partial2[1], [Partial2[2] EXCEPT !.after = 1]>>, {})}
@@ -3112,8 +3113,8 @@ ListerPrimaryPlans == {Plan(<<Mark(3, "down"), Mark(3, "up"), Rot(1)>>, Partial,
 Resend == <<[c |-> 1, blk |-> 1, whole |-> TRUE, inc |-> 0, re |-> 0, after |-> 0],
             [c |-> 1, blk |-> 1, whole |-> TRUE, inc |-> 0, re |-> 0, after |-> 0]>>
 ResendPlans == {Plan(<<Rot(1)>>, Resend, {"lose"}), Plan(<<>>, Resend, {"lose", "restart"})}
-ResendFailPlans == {Plan(<<>>, Resend, {"lose", "mfail"})}
-ResendHeldPlans == {Plan(<<Mark(3, "down"), Mark(3, "up"), Mark(2, "down")>>, <<Resend[1]>>, {"lose"})}
+ResendFailPlans == WithFlags({Plan(<<>>, Resend, {"lose", "mfail"})}, {"past"})
+ResendHeldPlans == WithFlags({Plan(<<Mark(3, "down"), Mark(3, "up"), Mark(2, "down")>>, <<Resend[1]>>, {"lose"})}, {"past"})
 ResendRecoveredPlans == {Plan(<<Mark(2, "down"), Mark(2, "up"), Rot(1)>>, <<Resend[1]>>, {"lose", "past"})}
 ResendOverwrittenPlans == {Plan(<<Mark(2, "down"), Tab(1, <<2, 1, 3>>, <<"up", "up", "up">>, {})>>, Resend, {})}
 TrimPlans == {Plan(<<>>, Resend, {"lose", "mfail", "trim"}),
@@ -3147,7 +3148,7 @@ RestartPlansStill == RestartPlans \ RestartPlansMoved
 DroppedRecoveryPlans ==
     WithFlags({[DownBackMoved EXCEPT !.f = {"restart", "aimed"},
                                      !.w = <<[c |-> 1, blk |-> 1, whole |-> TRUE, inc |-> 0, re |-> 0, after |-> 0],
-                                             [c |-> 1, blk |-> 1, whole |-> TRUE, inc |-> 0, re |-> 0, after |-> 1]>>]}, {"late"})
+                                             [c |-> 1, blk |-> 1, whole |-> TRUE, inc |-> 0, re |-> 0, after |-> 1]>>]}, {"past", "late"})
 \* The liveness variant that breaks renewals runs the restart plan alone.
 RestartedPlans == {Restarted}
 \* ci-gates-left: PG 2's replica 3 moved to node 1 and marked down in one table,
@@ -3194,7 +3195,7 @@ MovePlans == {MoveReplica, MovePrimary, MoveLeavingDown, MoveRestart, MoveMaint,
 \* ci-moves-faults splits off the moves with a restart or a format, each config
 \* under the 300 s budget.
 MoveCleanPlans == {MoveReplica, MovePrimary, MoveLeavingDown, MoveMaint}
-MoveFaultPlans == {MoveRestart, MoveRefill}
+MoveFaultPlans == WithFlags({MoveRestart, MoveRefill}, {"past"})
 \* ci-stays splits the stays off, each config under the 300 s budget.
 StayForPrimaryPlans == {StayForPrimary}
 StayAsPrimaryPlans == WithFlags({StayAsPrimary}, {"late"})
@@ -3206,14 +3207,14 @@ StayNewPlans == {StayForNew}
 \* leaving member's mark down in one table; heavy-stays-stale has them apart, and
 \* the plan with two partial writes instead of W. With them apart, neither no
 \* fold nor a chunk counter of 1 fits.
-StayStalePlans == {Plan(<<Tab(2, <<2, 3, 1>>, <<"up", "down", "up">>, {3}),
-                          Mark(3, "up"), Mark(2, "down"), StayM(2, 3, 2)>>, Session, {})}
+StayStalePlans == WithFlags({Plan(<<Tab(2, <<2, 3, 1>>, <<"up", "down", "up">>, {3}),
+                                    Mark(3, "up"), Mark(2, "down"), StayM(2, 3, 2)>>, Session, {})}, {"past"})
 StayStrandPlans == {[StayStale EXCEPT !.w = Partial2]}
 StayStaleDeepPlans == {StayStale} \cup StayStrandPlans
 \* ci-stays-gone and neg-stay-keeps-interval: a primary still marked up once its
 \* disk is formatted away, two versions in flight, the member that left going
 \* with the move.
-StayPlans == {Plan(<<AddM(2, 3, 1), StayM(2, 3, 2)>>, Partial2, {"format"})}
+StayPlans == WithFlags({Plan(<<AddM(2, 3, 1), StayM(2, 3, 2)>>, Partial2, {"format"})}, {"past"})
 
 \* ci-faults: versions that fail, disks formatted around peering and recovery,
 \* and a min_live change.
@@ -3267,8 +3268,8 @@ EditPlans == {EditAway, EditReorder}
 AskPlans == {MemberFails, OwnFails, FailMoved, OwnFailMoved}
 \* ci-faults and ci-faults-more split FaultPlans, each under the 300 s budget:
 \* MinLiveRaised fits only with PG 2 alone, and deep-faults-more checks it with both.
-FaultPlansFail == {MemberFails, MemberFails3, FailRestart, OwnFails, RefusedOwnFails, FailMoved, OwnFailMoved,
-                   FailDown, OwnFailDown, FailMaint, OwnFailMaint, RotBack, FormatAtPeering, FormatAtRecovery}
+FaultPlansFail == WithFlags({MemberFails, MemberFails3, FailRestart, OwnFails, RefusedOwnFails, FailMoved, OwnFailMoved,
+                             FailDown, OwnFailDown, FailMaint, OwnFailMaint, RotBack, FormatAtPeering, FormatAtRecovery}, {"past"})
 FaultPlansMore == {MinLiveRaised}
 FaultPlans == FaultPlansFail \cup FaultPlansMore
 
@@ -3366,14 +3367,14 @@ NoMaint == [p \in PGs |-> FALSE]
 SplitM == [k |-> "split"]
 \* ci-split: a split with a write to each PG in flight, alone with a restart,
 \* and while a member shared by both PGs is down.
-SplitPlans == {Plan(<<SplitM>>, <<Partial[1], Partial2[1]>>, {"restart"}),
-               Plan(<<Mark(2, "down"), SplitM, Mark(2, "up")>>, <<Partial[1], Partial2[1]>>, {})}
+SplitPlans == WithFlags({Plan(<<SplitM>>, <<Partial[1], Partial2[1]>>, {"restart"}),
+                         Plan(<<Mark(2, "down"), SplitM, Mark(2, "up")>>, <<Partial[1], Partial2[1]>>, {})}, {"past"})
 \* ci-split-report and neg-report-across-split, at min_live 1 on nodes 1 and
 \* 2: PG 1's write lands, disk 2 goes down and back, so PG 2's interval 2 or 3
 \* may activate under one primary or the other, and the pool splits. PG 2's
 \* report from before the split names number 1, which is PG 1's after it.
 Nodes2 == {1, 2}
 MemPool2 == [p \in PGs |-> IF p = 1 THEN <<1, 2>> ELSE <<2, 1>>]
-SplitReportPlans == {Plan(<<Mark(2, "down"), Mark(2, "up"), SplitM>>, <<Partial[1]>>, {})}
+SplitReportPlans == WithFlags({Plan(<<Mark(2, "down"), Mark(2, "up"), SplitM>>, <<Partial[1]>>, {})}, {"past"})
 
 =============================================================================
