@@ -1,22 +1,21 @@
 # Testing for trust: how rock-solid proves its storage keeps your data
 
-Storage people wait years before trusting a new storage system, and they are right to: a filesystem that loses one acknowledged write in a million has failed at the one job it has. rock-solid's design says it directly: **trust is the adoption gate, so correctness work is the product.** The plan to earn that trust is a deterministic simulator that replays a whole run from one seed, a simulated disk that crashes and corrupts on purpose, invariants checked after every step, metamorphic tests for the indexes, a fuzz test on every decoder, and a rule that every bug a seed finds becomes a regression test before it is fixed. This post explains each piece, what it catches and what it costs.
-
-Nothing in rock-solid runs yet; the README says so. What exists is phase 1 code: the disk log, with seeded property, torn-write, fuzz and golden-file tests; the LSM tree, with property tests and a fuzz test; and the chunk index, with property tests. All of it runs against a simulated disk. The full cluster simulator, the node-wide crash oracle, the invariant checker and the metamorphic tests are designed and listed in the [build checklist](../docs/build-checklist.md), but not built. The post marks which is which.
+Storage people wait years before trusting a new storage system, and they are right to: a filesystem that loses one acknowledged write in a million has failed at the one job it has. rock-solid's design says it directly: **trust is the adoption gate, so correctness work is the product.** This post explains how rock-solid tests itself and, more than that, why it tests this way: a deterministic simulator that replays a whole cluster from one seed, a simulated disk that crashes and corrupts on purpose, invariants and a crash oracle checked against independent models, protocol models checked by TLC with the code's own runs checked against them, metamorphic tests for the indexes, and a rule that every bug a seed finds becomes a regression test before it is fixed.
 
 ## Words you need
 
 - **Sans-IO state machine, event, action, driver.** Code that never does input or output itself. It has one function, `OnEvent`: it takes an event ("disk write finished", "message arrived", "timer fired") and returns actions ("write these blocks", "send this", "wake me at T"). A **driver** carries the actions out, for real or in a simulator. See the [glossary](../docs/glossary.md#runtime-and-drivers).
-- **Deterministic simulation, seed.** Running nodes, disks, network and clients inside one process, driven by one random number generator. The same **seed** (the 64-bit number that starts the generator) gives exactly the same run, so any bug it finds can be replayed. See the [glossary](../docs/glossary.md#testing).
+- **Deterministic simulation, seed.** Running nodes, disks, network and clients inside one process, driven by one random number generator. The same **seed** (the number that starts the generator) gives exactly the same run, so any bug it finds can be replayed. See the [glossary](../docs/glossary.md#testing).
 - **Invariant.** A rule that must hold at every step, such as "every acknowledged write is readable".
 - **Flush (`fsync`), acknowledged write.** A flush tells a drive to move what sits in its volatile cache onto stable media; it covers only writes that completed before it ran. A write is **acknowledged** once the system tells the caller it is durable. Losing an acknowledged write is the cardinal sin. See [Drives and durability](../docs/glossary.md#drives-and-durability).
 - **Torn write.** A write of several blocks of which only some landed when power failed.
 - **Log, record, LSN.** rock-solid stores everything on a disk in one append-only log. Each append is a record, numbered by a log sequence number (LSN) that only goes up. See [04-one-log-per-disk.md](04-one-log-per-disk.md).
 - **Group commit, round.** Collecting every write that arrived while the previous flush ran and making them all durable with one write and one flush. Each batch is a round.
-- **Checkpoint, manifest, recovery.** A checkpoint writes the in-memory indexes to the log and then a small **manifest** record saying where they are and from which LSN to replay. Recovery either starts from the newest manifest (**open** mode) or rereads the whole log (**rebuild** mode); both must agree, and both must be a **prefix**: every record up to some LSN and none after it.
+- **Recovery, prefix.** After a crash, a disk rebuilds its indexes from the log. What it recovers must be a **prefix**: every record up to some LSN and none after it, with no hole.
 - **LSM tree.** The index structure rock-solid uses: writes go to an in-memory table, which is **flushed** out as an immutable sorted **run**; runs are merged in the background (**compaction**). See [06-the-lsm-tree.md](06-the-lsm-tree.md).
 - **Property test, fuzz test.** A property test generates many random inputs from a seed and checks a rule that must hold for all of them. A fuzz test lets Go's fuzzer generate inputs, mostly malformed bytes, to find one that breaks a function.
 - **Metamorphic test.** Running the same operations under configurations that must not change the results, and comparing what each run read.
+- **TLA+, TLC, spec.** TLA+ is a language for describing a protocol as a state machine: the variables each node holds and every step any node, message or fault can take. That description is the **spec** (or model). TLC is the tool that walks every reachable state of a small instance of it and prints a step-by-step trace of any state that breaks a property.
 
 ## The problem: storage bugs hide in orderings you cannot replay
 
@@ -26,7 +25,7 @@ Think of a kitchen inspector who only visits on quiet afternoons. The kitchen al
 
 ### How it goes wrong: a real bug from rock-solid's own history
 
-The disk log batches writes into rounds. With `commit_depth` 2 it may have two rounds in flight at once. When every earlier write has completed, the log emits a round's write and its flush together, **linked**: the driver starts the flush only when that write completes (io_uring's `IOSQE_IO_LINK`). Otherwise the flush is sent later, unlinked, and then it covers only writes already finished. So the rule is: a round's flush may go out only once its own write and every earlier round's write have completed.
+The disk log batches writes into rounds, and may have two rounds in flight at once. When every earlier write has completed, the log emits a round's write and its flush together, **linked**: the driver starts the flush only when that write completes (io_uring's `IOSQE_IO_LINK`). Otherwise the flush is sent later, unlinked, and then it covers only writes already finished. So the rule is: a round's flush may go out only once its own write and every earlier round's write have completed.
 
 An early version of group commit got this wrong. It sent round 2's flush as soon as round 1's write completed, without waiting for round 2's own write. Follow round 2's write in the diagram and notice that its flush finishes while that write is still outstanding. (An LBA, logical block address, is a block's number on the disk; `io104` and so on are the IDs the log gives its disk actions.)
 
@@ -47,42 +46,43 @@ sequenceDiagram
     Note over GC,D: an acknowledged write is gone
 ```
 
-On a real machine nothing visibly goes wrong. Round 2's write usually completes a moment later and sits in the drive's volatile cache, covered by no flush. Only a power cut in that window loses it, and afterwards nobody could say which order of completions caused it, let alone repeat it. In rock-solid it was found by **seed 1** of a property test, `TestEveryAcceptedItemDecodes`, one of whose checks is "no record is reported durable before a flush that ran after its write completed". Because a seed found it, it replayed exactly, became a regression test and was fixed. We come back to that test below.
+On a real machine nothing visibly goes wrong. Round 2's write usually completes a moment later and sits in the drive's volatile cache, covered by no flush. Only a power cut in that window loses it, and afterwards nobody could say which order of completions caused it, let alone repeat it. In rock-solid it was found by an early seed of a property test whose checks include "no record is reported durable before a flush that ran after its write completed". Because a seed found it, it replayed exactly, became a regression test and was fixed. That is the whole argument of this post in one bug: the order was rare, the damage silent, and only a replayable run made it fixable.
 
 ## The options: how storage projects test themselves
 
 > **In plain words.** There are three broad ways to hunt ordering bugs: break a real cluster and watch (realistic, but you cannot replay what you find), run the code inside a deterministic virtual machine (replayable, but someone else's machine and fault model), or write the system so that a simulator can drive it (replayable and cheap, but the code must be built for it from day one). Mature storage engines add their own tricks on top.
 
-The design weighs these in its [testing spike](../docs/design.md#appendix-metamorphic-testing-spike) and [alternatives table](../docs/design.md#alternatives-considered). Pebble is CockroachDB's Go storage engine.
+Pebble is CockroachDB's Go storage engine.
 
 | Approach | Used by | What it gets right | What it costs |
 | --- | --- | --- | --- |
 | Real-cluster fault injection only | Jepsen-only testing | Real kernels, firmware and networks | A failure cannot be replayed; a rare order may never recur |
 | Deterministic hypervisor | Antithesis | Replays a whole run | Not on our own machines; not our disk and page-cache fault model |
 | Random stress plus expected state | RocksDB crash test | Checks recovery is a prefix with no hole | Options random per run, no comparison between configurations |
-| Metamorphic ops plus `errorfs`, which injects errors by kind, k-th operation and seeded probability | Pebble | Finds bugs nobody wrote a scenario for; crash or fail at every k-th operation | Its crash model never keeps an older overwrite without the newer one; `invariants.Sometimes` draws from a global random source |
+| Metamorphic ops plus injected errors | Pebble | Finds bugs nobody wrote a scenario for | Its crash model never keeps an older overwrite without the newer one |
 | State machine plus data-driven tests and TLA+ | etcd-raft | Protocol tested without real I/O | One protocol, not a whole node |
-| Own simulator over a sans-IO core | **rock-solid** | Every component replayable from one seed; own fault model; thousands of seeds per commit | The whole codebase must obey strict rules from day one; the simulator is ours to build |
+| Model checking of the design | Amazon (DynamoDB, S3), MongoDB, CockroachDB | Finds deep bugs in fault and recovery paths before code exists | Checks the design, not the code that claims to follow it |
+| Own simulator over a sans-IO core, checked against TLA+ specs | **rock-solid** | Every component replayable from one seed; own fault model; the code's runs checked against the checked design | The whole codebase must obey strict rules from day one; the simulator is ours to build |
 
-The design rejects Antithesis because it needs "a detailed disk and page-cache fault model and thousands of seeds per commit on our own machines", and Jepsen alone because it "can't reproduce failures". From the others it borrows: RocksDB's expected state becomes the crash oracle, Pebble's metamorphic test and `errorfs` predicates become the index tests and injected disk errors, etcd-raft's data-driven files hold regression cases, and Jepsen-style runs and TLA+ models sit beside the simulator rather than replacing it.
+The design rejects Antithesis because it needs a detailed disk and page-cache fault model and thousands of seeds per commit on our own machines, and Jepsen alone because it cannot reproduce failures ([Alternatives considered](../docs/design.md#alternatives-considered)). From the others it borrows: RocksDB's expected state becomes the crash oracle, Pebble's metamorphic test and error injection become the index tests and injected disk errors, etcd-raft's data-driven files hold regression cases, and model checking sits beside the simulator, joined to it by a conformance check, rather than replacing it.
 
 ## What rock-solid picked: simulation first
 
-> **In plain words.** Most testing happens in a simulator that can replay anything, because that is where ordering bugs die cheaply. Real hardware then confirms what a simulator cannot model: kernels, firmware that lies about flushes, real power cuts.
+> **In plain words.** Most testing happens in a simulator that can replay anything, because that is where ordering bugs die cheaply. Protocol models check the design itself, and the simulator's runs are checked against those models, so the code is known to follow a design that was checked. Real hardware then confirms what neither can model: kernels, firmware that lies about flushes, real power cuts.
 
 The [Testing strategy](../docs/design.md#testing-strategy) stacks seven layers:
 
 | Layer | What it catches |
 | --- | --- |
 | 1. Deterministic simulation | Bugs in the order of crashes, partitions and disk faults, replayable from a seed |
-| 2. Protocol model checking | Design bugs before code exists: failover (per-PG intervals, peering, read leases), sessions and fencing, cache recalls and purges in phase 2; snapshot cuts and pool moves in phase 11; cross-shard commit in phase 13 |
+| 2. Protocol models | Design bugs before code exists, and code that drifts from the checked design |
 | 3. Consistency checking | Reads that no valid order of operations could produce |
 | 4. Real-cluster fault injection | Kernel, firmware and fsync behaviour no simulator knows |
 | 5. Matrix and property tests | Placement bugs on mixed hardware; malformed bytes, via fuzzing |
 | 6. Conformance suites | Gaps against POSIX (the standard Unix file API), the kernel's file-mapping corner cases and Kubernetes storage tests |
 | 7. Performance regression | Latency, CPU and recovery slowdowns, measured nightly |
 
-The order is deliberate: "Build order puts the simulator before any real driver." The simulator is phase 1; the real io_uring driver is phase 5.
+The order is deliberate: the simulator was built before any real driver, so every component was born replayable.
 
 ### Sans-IO is what makes simulation possible
 
@@ -90,90 +90,45 @@ The order is deliberate: "Build order puts the simulator before any real driver.
 
 #### How it works
 
-Every machine has one entry point; here is the disk log's, in `internal/disklog`:
+Every core package is a state machine with one entry point. Time arrives as part of the event's context, from two clocks (one a time daemon may slew and one it cannot), and randomness from a seeded source the machine owns. The rules, enforced by a static analyzer that fails the build ([post 11](11-runtime-in-go.md)):
 
-```go
-func (l *Log) OnEvent(ctx *core.Context, ev *core.Event, out *Output)
-```
+- no goroutine, channel, `select`, `sync` or `sync/atomic`;
+- no clock, `os`, `net`, `syscall` or `unsafe`;
+- no `range` over a map, because Go randomizes map iteration order, and one random order is enough to make two runs of a seed differ.
 
-`ctx.Now` carries the time (1 tick = 1 µs); events are `NetRecv`, `PeerLost`, `DiskDone` or `Timer`, actions `NetSend`, `DiskRead`, `DiskWrite`, `DiskFsync`, `DiskTrim` or `SetTimer` ([Modularity](../docs/design.md#modularity-sans-io-core-pluggable-drivers)). For leases the design adds a second time, `ctx.Raw` from `CLOCK_MONOTONIC_RAW`, and a `Resumed` event after a suspend or a VM restore, both still to be built; they matter here because the simulator can then set a node's two clocks apart. The machine cannot tell whether a production driver or the simulator is on the other side. The diagram shows the swap; the box in the middle is the same code in both worlds.
+A corrupt message or a failed disk is an event the machine handles, never a reason to crash; a panic is kept for a broken invariant of the machine's own state.
+
+The same code then runs under two drivers. In production, an event loop per core feeds it real completions from io_uring and epoll. In the simulator, one scheduler feeds every machine of every node in one goroutine, in an order drawn from the seed. The protocol code cannot tell which.
 
 ```mermaid
 flowchart LR
-    subgraph PROD["Production drivers, phase 5"]
-        URING["io_uring disk"]
-        TCP["kernel TCP"]
-        CLK["CLOCK_BOOTTIME timers"]
-    end
-    SM["Sans-IO state machine<br/>OnEvent: events in, actions out"]
-    subgraph SIM["Simulator, scheduler planned in phase 1"]
-        SDISK["simulated disk<br/>crashes and bit flips today"]
-        SNET["simulated network<br/>planned, phase 3"]
-        STIME["simulated time"]
-    end
-    PROD -- "events" --> SM
-    SM -- "actions" --> PROD
-    SIM -- "events" --> SM
-    SM -- "actions" --> SIM
+    S["Scheduler<br/>one seeded RNG"] -->|event| M["Sans-IO machine<br/>chunk store, Raft shard,<br/>FUSE frontend ..."]
+    M -->|actions| S
+    S --> D["Simulated disks"]
+    S --> N["Simulated network"]
+    S --> C["Simulated clocks"]
+    D -->|completions| S
+    N -->|deliveries| S
+    C -->|timers| S
 ```
-
-The rules for these machines each exist to keep a run replayable. No goroutine, channel, `select`, `sync`, clock, `os`, `net`, `syscall` or `unsafe`, since any of them lets the Go runtime or the OS choose an order. No `range` over a map, since Go randomizes map iteration order on purpose and that order would shape the emitted actions. Randomness only from `core.Rand`, ChaCha8 keyed from a 64-bit seed, whose golden-stream test must fail before anyone changes it, because "a change to the generator breaks replay of every recorded regression seed". A machine never blocks: it records what it waits for under an I/O or timer ID, and the matching event resumes it. And errors are data: a corrupt message or a failed disk is an event to handle, never a panic.
-
-Rules nobody checks erode, so a `go vet` analyzer, `tools/sansio`, enforces them on every sans-IO package (everything under `internal/` except `loop`, `driver/…`, `frontend/…` and `csi`); the loop and driver packages are to get a narrower rule set of their own. The same rules make the data path fast; [11-runtime-in-go.md](11-runtime-in-go.md) covers that side.
 
 ### Drivers: stepped by the same scheduler
 
-> **In plain words.** The event loops and drivers must do real I/O, so they cannot be pure state machines. But almost everything they decide comes from what one pass of the loop read: which descriptors were ready and what the clocks said. Put those two behind a small interface, and a test can hand a real loop scripted clocks while it talks over real sockets.
+> **In plain words.** The parts that cannot be sans-IO, the event loop and the drivers that talk to the kernel, are tested too, by making most of what they decide come from what they just read, so a test can hand them readings instead of a real kernel.
 
-Each event loop reaches the kernel's waiting and clocks through one interface, the *kernel seam* ([11-runtime-in-go.md](11-runtime-in-go.md)). The driver tests come in three tiers, all planned with the phase 5 event loop:
-
-| Tier | Runs | What it covers |
-| --- | --- | --- |
-| Stepped | Every commit, seeded | `internal/loop/looptest` polls the loop's real epoll set without blocking and returns clock readings from the simulator's per-node clock model; scripted suspends, slews, VM pauses and marker changes land inside the wait. The simulator's scheduler steps many loops and their worker jobs over real Unix socketpairs from one goroutine, so a seed gives the same results and per-loop event order twice |
-| Real kernel | Every commit in CI, where the container allows io_uring | Syscall counts per pass, allocations and goroutines under 1,000 connections, a loop that really sleeps and wakes, no false `Resumed` under CPU throttling, cgroup sizing; counts and orderings, never exact timings |
-| VM, nightly | The VM pause harness on QEMU and Firecracker | The real VMClock marker, a wall-clock step, device-mapper targets |
-
-A stepped loop that tries to block while it still has work fails the test at once. Go's `testing/synctest` cannot do this job, since it fakes only Go's own `time` package and a goroutine inside `epoll_wait` stops its clock; it is kept for goroutines off the data path, such as the CSI server's timeouts.
+The event loop and its drivers are tested in three tiers ([driver testing study](../studies/driver-testing/README.md)): stepped runs on every commit, in which a stepped kernel stands behind the loop's kernel interface and a seed fixes every completion; runs against a real Linux kernel in the gate, which count syscalls and allocations per pass; and nightly runs in virtual machines that really pause, step their wall clock or fail their devices. Stepped runs check what a pass decides; the real tiers check that the kernel and the clocks behave the way the stepped model assumed.
 
 ### The deterministic simulator
 
-> **In plain words.** One random number generator decides everything that happens in the run: which disk action completes next, when to submit more work, when to pull the plug and which unflushed blocks survive. Give it the same seed and you get the same run, down to the last byte.
+> **In plain words.** One program plays an entire cluster: every node, disk, network link and client. A single seed decides every coin flip, so a run that fails can be played again, step for step, as often as needed.
 
 #### How it works
 
-In the design, "all nodes, disks, clients and the network run in one goroutine from one seeded random number generator", which drops, delays, reorders and duplicates messages and crashes nodes. Once built, it will run thousands of seeds per commit in continuous integration (CI) and millions overnight on idle homelab machines, and two runs of a seed must produce byte-identical traces. What exists today is the simulator's buffer pool and disk, and test harnesses in `internal/disklog` that already work the way the scheduler will: a seeded generator picks each step, the harness executes the chosen disk action against `sim.Disk` and feeds the completion back as an event.
+All nodes, disks, clients and the network run in one goroutine from one seeded random number generator. The simulator drops, delays, reorders and duplicates messages, partitions the network, crashes, restarts, reboots and pauses nodes, and runs each node's clocks at rates of their own. A failing seed replays exactly, and two runs of a seed give byte-identical traces, across processes, CPU counts and the race detector.
 
-Here is one real seed of `TestRandomCrashesKeepAcknowledgedRecords`, the disk log's random crash test. The setup values are what seed 17 actually draws, and the outcome is what it actually did; the ranges in brackets are what other seeds can draw.
+Every seeded test takes its seeds from one place: a few on every `go test`, thousands under a seed script that CI runs on every push. A failing seed prints the one-line command that replays it. A change that adds a seeded test runs it over many more seeds once, as Pebble stresses every test a pull request adds, because a new test is the most likely to hide a seed it fails on.
 
-```text
-seed 17 ──► core.NewRand(17): every choice below comes from this one stream
- │
- ├─ setup:  disk 65,536 blocks        [1,024 / 4,096 / 65,536]
- │          max record 10 blocks      [3..32]
- │          checkpoint due every 9 blocks of records   [4..200]
- │          commit_depth 1            [1..2]
- │          run pieces whole          [whole or 512 B]
- │
- └─ 4 cycles, each:
-     ├─ 300 steps; each step either
-     │    • submits 1-4 items (when nothing is pending, else with p = 2/5):
-     │      60% chunk writes, 10% punches, 20% small blobs, 10% larger cold blobs
-     │    • or completes one pending disk action, picked at random
-     │    and the stand-in node starts a checkpoint whenever one is due
-     ├─ end: a crash with p = 3/4 (each unflushed block lands with p = 1/2),
-     │       otherwise a clean restart
-     ├─ recover in rebuild mode, crashing inside recovery's own writes (p = 1/4 each)
-     ├─ recover in open mode, its reads completing in random order
-     └─ check: recovered LSN between acknowledged and acknowledged + in flight;
-               open and rebuild agree; index = model; every block reads back
-
-seed 17 did: 3 crashes, 1 restart, 3 crashes inside recovery, 4 recoveries
-             from a manifest, in-flight rounds dropped 4 times, 1 header erased
-```
-
-A short legend: a **punch** erases a chunk's blocks; a **blob** is an opaque record such as a batch of Raft entries; **hot** and **cold** are two of the log's streams, each writing into segments of its own; the **stand-in node** is a small model of the chunk store that applies every durable record and checkpoints.
-
-Run seed 17 twice and both runs report exactly that line. A failure message names the seed and cycle (`seed %d cycle %d: ...`), and rerunning that one seed repeats it exactly. Fifty seeds run in every `go test`, and the test then asserts it reached the hard cases; over seeds 1 to 50 it logs 27 in-flight rounds kept and 128 dropped, 44 `NoSpace` errors and 100 crashes inside recovery. A random test that never reaches the interesting paths would report green and prove nothing.
+**Planted bugs.** A simulator that finds nothing might be blind, so it proves itself on a toy primary-backup protocol whose bugs are known. Settings plant one of two bugs: acknowledging a value once only the primary has it, and mistaking a reply to an earlier incarnation's write for one to the restarted primary's write, which only a primary crash with that reply in flight exposes. Each must be found within the seeds every commit runs, replay to a byte-identical trace, and vanish when the protocol is fixed. The same idea, a known bug the check must catch, recurs below for invariants, the crash oracle and conformance.
 
 ### The simulated disk: a hostile drive on purpose
 
@@ -181,7 +136,7 @@ Run seed 17 twice and both runs report exactly that line. A failure message name
 
 #### How it works
 
-`sim.Disk` keeps two views of every block: what reads see now, and what is durable. A write updates the first at once and joins a list of unflushed block writes; a flush makes every write executed so far durable. On a crash, **each unflushed block write lands or not on its own, in the order it was executed.** This example from the [test scenarios](../docs/test-scenarios.md) shows a hole: block 1 of a write lands while block 2 does not, and block 0 keeps its old contents.
+The simulated disk keeps two views of every block: what reads see now, and what is durable. A write updates the first at once and joins a list of unflushed block writes; a flush makes every write executed so far durable. On a crash, **each unflushed block write lands or not on its own, in the order it was executed.** A worked example of a hole: block 1 of a three-block write lands, its neighbours do not.
 
 ```text
 before:   LBA 0 = 1111 (flushed)    LBA 1 = 0000           LBA 2 = 0000
@@ -201,13 +156,11 @@ Pebble crash FS    old         B          random unsynced blocks of the latest c
 RocksDB fault FS   old         B          a random prefix of the unsynced data
 ```
 
-Only rock-solid's model can keep A without B. Holes like the one above are another matter: Pebble's model makes them too, since it keeps each unsynced 4 KiB block at random, while RocksDB's prefix never does. The design chose its model because "the device's volatile cache can persist any subset", so recovery has to survive every subset.
+Only rock-solid's model can keep A without B. The design chose it because a device's volatile cache can persist any subset of what it holds, so recovery has to survive every subset, not just the convenient ones.
 
-The design's full fault model adds torn sectors, bit flips, misdirected writes, a disk 100× slower that never errors, and injected errors chosen by action kind, block range, action index and a seeded probability, including a read that "succeeds" with one changed byte. The rule for errors is blunt: "A failed write or flush is final for the open log"; the node runs recovery again rather than retrying, since nobody knows which unflushed blocks reached the media.
+The full fault model adds torn sectors, bit flips, misdirected writes, a disk that turns very slow without ever erroring, and injected errors chosen by action kind, block range, action index and a seeded probability, including a read that "succeeds" with one changed byte. The rule for errors is blunt: a failed write or flush is final for the open log, and the node runs recovery again rather than retrying, because after a failed flush nobody knows what the drive kept.
 
-Today `sim.Disk` implements crashes, bit flips and failed reads of chosen blocks, and the test harness can fail any chosen action; the rest is the planned "Simulated disk" checklist item.
-
-The buffer pool is hostile too. `sim.Pool` fills every buffer from `Alloc` with the poison byte `0xA5`, so code that assumes zeroed memory fails, and every handle carries a generation, so using a freed or reallocated buffer panics instead of silently reading someone else's data.
+The buffer pool is hostile too. It fills every new buffer with a poison byte, so code that assumes zeroed memory fails, and every handle carries a generation, so using a freed or reused buffer fails loudly instead of silently reading someone else's data.
 
 ### The simulated world: networks, clocks, paused VMs and a full pool
 
@@ -215,159 +168,75 @@ The buffer pool is hostile too. `sim.Pool` fills every buffer from `Alloc` with 
 
 #### How it works
 
-The design names the faults each protocol must survive, and the simulated network, clocks and clients will inject them; the simulated network is a phase 3 item, none of it is built yet. A sample, by what they attack:
+- **Network:** drops, delays, duplicates, reorders, one-way and full partitions, and a connection that resets with bytes still queued, which is how a dead daemon's stray write reaches a primary ([post 09](09-rwx-filesystem-and-cache-coherence.md#daemon-restart-and-upgrade)).
+- **Clocks:** each node's two clocks run at rates of their own, within the drift the design allows and with the slew a time daemon may add, so every lease is tested on its worst legal clock ([post 03](03-epochs-leases-and-failures.md#two-clocks-because-a-time-daemon-can-bend-either-one)).
+- **Pauses:** a node frozen for longer than any lease, then resumed, with or without the signal that it was suspended, the case that separates a lease that is safe from one that only looks safe.
+- **Capacity:** pools driven to full while daemons hold space grants, so the promise that a buffered write never fails later for space is tested at the edge where it matters.
 
-| Attacks | Faults the simulator injects |
-| --- | --- |
-| Failover | An old primary partitioned with clients that have not seen the new table; a PG's interval changing in bursts faster than peering; a node flapping every few seconds; a member returning just before or just after `refill_after`; a member removed and added back within one recovery; a Raft voter replaced while another voter is down |
-| Leases | A holder's or grantor's `CLOCK_BOOTTIME` slewed by up to ±22.6% while its `CLOCK_MONOTONIC_RAW` drifts by up to ±4%; a grantor that reboots with its raw clock's rate changed; round trips from 50 µs to 10 ms; grants delayed by up to 50 ms in one direction only; a suspend whose length the kernel rounded to whole seconds; a VM stopped for longer than a lease with every clock frozen, the messages sent to it queued or lost, and its VMClock marker changed or not |
-| Partial blocks | Unaligned writes from two nodes into one 4 KiB block, pipelined, across a primary change while the primary's read of the old block is in flight, and an old block that fails its checksum |
-| A full pool | The pool reaching `write_limit` while daemons buffer writes; a heartbeat carrying a space grant lost or delayed; a control-plane failover while daemons stream under their grants; a client cut off from the control-plane leader but not from storage, still streaming; a snapshot cut while a volume overwrites near full; a held block write released by a discard, a purge or a new disk |
-| The disk log | Crashes while merges write beside checkpoint flushes, before and after a merge step's manifest; a freed segment reused before and after a segment header names the manifest that freed it, its new header landed or not, with TRIM run, not run, or reading back as ones |
-| Freeing space | A truncate followed by an unlink before the purger runs; an entry added inside the run of entries the purger is consuming; a purger's transaction repeated after a leader election |
-| Restarts | A daemon crash with requests read but unanswered, then resent, including a dead daemon's late write arriving after its successor's reissue and the pod's next write |
-
-Some of these need a word. ±22.6% is the most a time daemon can legally bend Linux's adjustable clocks (the tick by ±10%, the frequency by 500 ppm, plus a slew of up to 0.5 s), so a lease protocol that survives it survives any daemon. A VM pause is the nastiest: from inside, no clock moved, so only the hypervisor's VMClock marker or a peer's clock can tell a lease holder it was asleep. A *space grant* is the control plane's promise that a node may hold some bytes of buffered writes on a nearly full pool and flush them later without being refused. The reasoning behind each is in [03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md) for leases and clocks, [09-rwx-filesystem-and-cache-coherence.md](09-rwx-filesystem-and-cache-coherence.md) for space grants and [10-block-snapshots-and-clones.md](10-block-snapshots-and-clones.md) for block volumes on a full pool.
+Each area's runs inject their faults at the step the protocol is least ready for: a crash between a write and its acknowledgment, a partition during peering, a pause while a lease is about to be renewed.
 
 ### Tests feed events and assert actions, with no mocks
 
-> **In plain words.** You do not need a fake disk to test a state machine. You hand it the event "write 104 finished" and look at what it asks for next. The test reads like a transcript: given this, it must say that.
+> **In plain words.** A mock is a fake object that pretends to be a disk or a network and checks it was called in some expected way. Mocks test what the author expected, which is rarely where the bug is. Because rock-solid's code takes events and returns actions, a test can feed it real events and look at the real actions, with nothing faked.
 
 #### How it works
 
-The project rule: "Unit tests feed events and assert on the returned actions, with no mocks." The regression test for the seed-1 bug is a complete example:
+A unit test builds a machine, feeds it a sequence of events, and asserts on the actions it returned: "after these three writes and one completion, emit exactly one flush, linked to the second write". The same assertion runs again inside the simulator over thousands of seeds, where the events arrive in orders nobody wrote by hand. Cases whose input is data, such as which runs a compaction picks, live in data-driven files, as etcd-raft and Pebble keep theirs, so adding a case is adding a few lines of text.
 
-```go
-// Seed 1 of TestEveryAcceptedItemDecodes once flushed a round as soon as the rounds before
-// it were written, before its own write completed, so the flush covered nothing of it.
-func TestAFlushSentLaterWaitsForItsOwnWrite(t *testing.T) {
-	cfg := testConfig(0)
-	cfg.CommitDepth = 2
-	h := formatted(t, gib, cfg)
-	h.submit(disklog.Hot, h.write(0, 1, 1))
-	h.submit(disklog.Cold, h.write(1, 1, 2))
-	h.step(0)
-	h.wantTrace("write 64+3 io104", "fsync io105", "write 128+3 io106")
-	h.step(1)
-	h.wantTrace("write 64+3 io104", "fsync io105", "write 128+3 io106", "fsync io107")
-	h.run()
-	if len(h.eventsOf(disklog.Durable)) != 2 {
-		t.Fatalf("events %+v", h.events)
-	}
-}
-```
-
-`h.step(0)` completes round 1's write, and the trace must not grow. `h.step(1)` completes round 2's write, and only now may `fsync io107` appear.
-
-The design generalizes this into **traces, not logs**: the data path will write fixed-field trace records, one format for simulator and daemon, so "exactly one `DiskFsync` per round" becomes a scan over a trace.
+The design's [Testing the design decisions](../docs/design.md#testing-the-design-decisions) table assigns each kind of decision the test that holds it: a byte layout to golden files and fuzzing, what a state machine emits to trace checks, what must hold across a run to invariants and a TLA+ model, an internal choice that must not change results to a metamorphic test, a rule about the runtime to a static analyzer, and a number the design relies on to a benchmark with the spike's figure as its bar. The test is written with the decision, so a decision nobody can test is a decision nobody has really made.
 
 ### Invariants registered with the simulator
 
-> **In plain words.** A test checks what its author thought of. An invariant checks a rule after every step of every seed, including steps nobody imagined. It is a smoke detector, not a fire drill.
+> **In plain words.** An invariant is a sentence about the whole system that must be true after every step: "every acknowledged write is readable", "a placement group has one primary". The simulator checks every registered sentence after every step, so a bug is caught at the step that caused it, not hours later when a user notices.
 
 #### How it works
 
-Each state machine registers its invariants with the simulator's checker "in the same change" that adds the machine. The design's full list covers placement, leases, caching, free space and the cleaner ([Testing strategy](../docs/design.md#testing-strategy)); a few that need little from other posts:
+Each invariant is registered by name as its component is built, most specific first, so a bug that breaks several is named by the one closest to it. Some hold of what a store contains, and are checked whenever its disk goes quiet and after every recovery; some hold of a moment, such as two primaries serving at once, and are checked after every step, because the violation can end before the run goes quiet.
 
-- every acknowledged write is readable, and no read returns a version that is later lost;
-- every read returns exactly the bytes of the acknowledged writes and punches applied in version order, live and at every snapshot. The judge is a **byte-range oracle**: a plain model that keeps each chunk's bytes as the writes left them, so a merged or mis-ordered partial block shows as a diff;
-- a truncated or punched range reads as zeros;
-- a chunk index rebuilt from the log equals the one recovered from its manifest;
-- a replayed request returns its first final result and changes nothing, and an internal transaction repeated after an election changes nothing it did not read;
-- no write tagged with a PG's interval (the number of that placement group's current membership) completes after a later interval of the PG has activated, and table epochs and interval numbers never go backwards on any node;
-- no file's modification time goes backwards, except by an explicit `utimensat`, whatever the writers' wall clocks show;
-- no block write that needs new space completes with an error while the pool is full, unless an operator failed it.
+The rule that makes invariants worth having: **no check shares the code's own bookkeeping.** The byte-range oracle is a plain model of the bytes each acknowledged request sent, not a reading of the store's index; a check on reused space decodes what is on disk rather than asking the allocator. If a check and the code shared a data structure, a bug in it would fool both, and the run would pass with the bug inside.
 
-The invariant checker is planned; one of its checks already exists, `chunkstore.(*Index).Check`, which verifies that a chunk's map never holds two entries for one block.
-
-Some checks live inside the code itself. Group commit has a `Check` setting: with it on, every record is decoded right after it is encoded, and group commit panics unless it holds exactly the submitted items, so an encoder bug fails in the round that made it instead of in a recovery months later. `TestDecodeCheckCatchesABrokenEncoder` proves the check works: it breaks the encoder five ways and requires a decode-check panic on every one of 100 seeds for each. The LSM tree will get the same kind of check in the planned "Run checks" item.
-
-It is a setting rather than a build tag, as Pebble's is, so that "the simulator chooses per run with the same binary"; Pebble's `invariants.Sometimes` was rejected because its global random source "breaks seed replay". Release builds will keep only cheap checks on: entry counts on every flush and merge, and a CRC32C checksum of each in-memory piece a merge reads, 3.8 to 5.1% of the merge's CPU.
+A new invariant arrives in the same change as the component it guards. A component without its invariants is not finished, however well its unit tests pass.
 
 ### The crash oracle
 
-> **In plain words.** After a crash, "recovery didn't error" is not good enough. You need to know exactly what the disk should contain, and compare. The crash oracle is the referee who wrote down every acknowledged write and every write in flight before the plug was pulled.
+> **In plain words.** After a simulated power cut, how do you know recovery got the right answer? You keep, on the side, an independent record of what was written and acknowledged, and after the crash you work out what the disk should hold and compare.
 
 #### How it works
 
-The oracle follows RocksDB's crash test. Per disk, the simulator will keep the state every index had at the last acknowledged LSN, plus the items submitted since, in LSN order. After a crash, recovery reports an LSN somewhere between the acknowledged one and the last in flight. The oracle replays its trace to that LSN, and every index on the disk must equal the result. The number line shows the window recovery may land in.
+As RocksDB's crash test does with its expected state, the simulator keeps, per disk, the state every index had at the last acknowledged LSN and the records written since, in LSN order. After a crash, recovery reports the LSN it reached, which must lie between the last acknowledged one and the last one in flight. The oracle replays its own record to that LSN, and every index on the disk, the chunk index and each Raft shard replica, must equal the result, with no hole.
 
 ```text
-LSN:    1   2   3   4   5   6   7 │  8   9  │ 10
-        ──────────────────────────┼─────────┼────►
-        acknowledged durable      │in flight│ never submitted
-                          acked=7    7+2=9
-
-recovery may report 7, 8 or 9           (any prefix that keeps every acknowledged write)
-recovery may NOT report 6               (lost an acknowledged write)
-recovery may NOT keep 9 without 8       (a hole: no prefix)
-oracle: replay items 8..recovered onto the state at 7, compare every index on the disk
+records written:    101  102  103  104  105  106
+acknowledged:       ---------------->|
+in flight:                            105  106
+crash, recovery reports LSN 105
+oracle:             replay its own copy of 101..105
+check:              every index on disk == oracle's state at 105
+                    nothing of 106, nothing missing before 105
 ```
 
-For the disk log alone this already runs: `TestRandomCrashesKeepAcknowledgedRecords` checks `acked ≤ recovered ≤ acked + in flight`, replays the records past the acknowledged LSN onto its model, and requires both recovered indexes to equal it. The planned oracle extends this to every index on a node's disk, and phase 5's real-disk crash test will keep it in a file outside the daemon it kills with `kill -9`.
-
-Random crashes can miss a rare action, such as one particular manifest write, so a planned second test, after Pebble's `TestErrors`, crashes at and separately fails the k-th disk action of a short workload, for every k.
+The oracle's record is independent of the code under test: it decodes each round from the write as it goes to the disk, and checks every decoded entry against what was submitted, so a codec bug that the oracle shared with recovery would still fail. A crash can be injected at every single disk action of a run, so recovery meets every point at which power can fail.
 
 ### Metamorphic tests for the indexes
 
-> **In plain words.** Bake the same cake in a gas oven, an electric oven and a camp stove. The baking differs, but if one cake tastes of fish, something is wrong, and you never needed to know what the cake should taste like. A metamorphic test runs the same operations against an index configured in wildly different ways that must not change any answer, and compares the answers.
+> **In plain words.** An index has many internal choices: how big its pieces are, when it flushes, when it merges. None of them may change what a read returns. So the same list of operations is run under many settings at their extremes, and every run must read exactly the same thing.
 
 #### How it works
 
-An LSM tree makes many internal choices: how big the pieces of a run are, when to flush, when and what to merge, whether to consult its Bloom filters. None of them may change what a read returns. So `internal/lsm` and the chunk index are to get a metamorphic test, modelled on Pebble's. A seed generates one ops file: puts, removals (`del`), range removals, gets, `floor` (the largest key at or below a given key: `floor aca` asks for the largest key ≤ `aca`), scans, point-in-time views, flushes, failed flushes, compactions and restarts. Keys are reused three times in four, so ops collide. The ops run under several **option sets**, each pushing one choice to an extreme, and each run writes one history line per op; the histories must equal each other and a plain map model's.
+As Pebble's metamorphic test does, a seed generates one operations file of writes, removals, range removals, gets, scans and point-in-time views, with flushes, failed checkpoints, compactions and restarts as operations too, and keys reused so operations collide. The file runs under a list of option sets, each pushing one choice to an extreme: tiny pieces, constant flushes, merges held back or restarted, filters off or always answering "maybe", flushes that fail. Each run writes one history line per operation, and the histories must equal each other and a plain map model's. One runner serves both the LSM tree and the chunk index.
 
-```text
-seed ─► ops file (3,000 ops)            the spike's option sets (abridged)
-        put aa v26x                     F  memtable only: no flush, restart replays all
-        get e                           A  1 MiB pieces, the generated flushes and merges
-        flush                     ──►   C  256 B pieces, flush every 10 writes, never merge
-        del aa                          E  every flush fails once, restart after each
-        compact                         G  flush every 2 writes, merge only at 40 runs
-        restart                         ...
-        floor aca                              │
-                                               ▼
-                      one history line per op, per set ──► all equal? equal to the model?
-```
-
-Here is what a failure looks like, from the [metamorphic testing spike](../docs/design.md#appendix-metamorphic-testing-spike), which planted a bug that makes a flush drop removals. Among the ops before #109, seed 0's file put `aa`, flushed it into a run, deleted `aa` and flushed again. The bug drops the removal in that second flush, so the older run's `aa` comes back to life:
-
-```text
-op #109  floor aca
-  model, and set F (memtable only, the bug never runs):   none
-  set A (flushes run, removal dropped):                    aa=v26x    <── the diff
-```
-
-No one had to write a test for "a deleted key reappears after two flushes". The diff found it.
-
-The map model stays, because a bug every option set shares (say, in the memtable) would show in no diff; the diff checks ops, such as views and range removals, that nobody has to model. The metamorphic test is the open "Metamorphic index tests" checklist item; its prototype is the spike harness in [spikes/lsm-study-testing](../spikes/lsm-study-testing/), which drives the real `internal/lsm`.
+The [metamorphic testing spike](../spikes/lsm-study-testing/) set the two rules that make this work. An option set must push its choice to the extreme, because some planted bugs showed only under one extreme setting and under no moderate one. And flushes and restarts must be operations in the file, not timers, or a failing run cannot be reduced to a short case.
 
 ### A seed that finds a bug becomes a regression test
 
-> **In plain words.** A failing seed is a gift: a replayable recipe for a bug. The rule is to save the recipe as a permanent test *before* fixing the bug, so you watch the test go from red to green, know the fix is real, and the bug cannot quietly return.
+> **In plain words.** When a seed finds a bug, the first thing written is not the fix, but a test that fails because of the bug. Then the fix makes it pass. The bug can never quietly come back.
 
 #### How it works
 
-The planned flow, from the design and the "Seed runner in CI" checklist item:
-
-```mermaid
-flowchart TD
-    A["CI runs thousands of seeds per commit"] --> B{"Any invariant<br/>or check fails?"}
-    B -- "no" --> A
-    B -- "yes" --> C["Print a one-line replay command<br/>for the failing seed"]
-    C --> D["Reduce: drop ops while it still fails"]
-    D --> E["Save as a regression case<br/>under testdata"]
-    E --> F["Confirm the new test fails"]
-    F --> G["Fix the code"]
-    G --> H["New test passes, all seeds pass"]
-    R["Separate rule: a change that adds a seeded test<br/>runs it over 10,000 seeds once"]
-```
-
-Today's two regressions came from seeded property tests in plain `go test`, without a CI runner or a reducer. Seed 1 of `TestEveryAcceptedItemDecodes` gave the flush-ordering bug above. Seed 1 of `TestAnythingSubmitAcceptsDecodes`, which submits items with random kinds and stray fields, found that "a freeze entry carrying an owner was accepted and decoded without it": the record on disk silently differed from what was submitted. Each was turned into a hand-written unit test named for its seed.
-
-**Reduction** matters because a 3,000-op failure is useless to a human: the planned runner removes chunks of ops while the failure persists. In the spike, the planted bug above reduced to five ops, saved in the `datadriven` format Pebble and etcd-raft use (commands, a `----` separator, the expected output):
+A failing seed prints the command that replays it, and for a test with an operations file, a reduced file of the fewest operations that still fail. That case, or a test of the failing seed, lands in the change before the fix and fails without it. Reduced cases become data-driven regression files, readable by a person:
 
 ```text
-# P1, seed 0 under A: a flush dropped a removal that hid a key in an older run.
+# A flush dropped a removal that hid a key in an older run.
 run set=A
 put aa v26x
 flush
@@ -378,85 +247,85 @@ floor aca
 floor aca: none
 ```
 
+That case came from a planted bug in the metamorphic spike, reduced from thousands of operations to five, in the `datadriven` format Pebble and etcd-raft use: commands, a `----` separator, the expected output.
+
+The order matters for a reason: a test written after the fix may pass for the wrong reason, and nobody would know. Seeing it fail first proves it exercises the bug.
+
 ### Byte layouts: golden files, torn writes and fuzzing
 
-> **In plain words.** Anything written to disk will be read back years later by newer code, possibly after a crash tore it or a bit flipped. So on-disk formats get the most paranoid tests: the exact bytes are frozen in a file, every way of tearing a record is tried, every single bit is flipped, and a fuzzer throws garbage at every decoder.
+> **In plain words.** Everything rock-solid writes to disk or sends over the network has a byte layout, and a layout that changes by accident makes old disks unreadable. So each layout is pinned by golden files, attacked by torn writes and bit flips, and fed garbage by a fuzzer.
 
 #### How it works
 
-**Golden files.** `internal/disklog/testdata/log_format_golden.txt` holds the exact bytes of a superblock, a segment header and a record header. Its first line reads: "Frozen on-disk format of the disk log (FormatVersion 1). Changing any line is a format break that needs a FormatVersion bump." The encoder must reproduce it byte for byte. `internal/core/testdata/chunk_id_golden.txt` freezes the chunk ID packing and placement hash in 10 rows, since a change there would move every chunk.
-
-**Torn writes, exhaustively.** `TestTornBlocksSeed4` takes 40 records of up to 10 blocks and tries every subset of landed blocks over three kinds of old content (zeros, random bytes, another valid record). Decoding must return the whole new record, the whole old one, or an error, never a mixture: more than 1,000 cases. Flipping any single bit of a segment header must make it fail to decode, checked for every bit.
-
-**Fuzzing every decoder.** Every encoding is hand-written, with no reflection, so every decoder is code the project can get wrong, and each gets a native Go fuzz test. The disk log's share one short property: anything the decoder accepts must re-encode to the same bytes.
-
-```go
-f.Fuzz(func(t *testing.T, img []byte) {
-	d, err := DecodeRecord(img, testPlace, math.MaxUint32, nil)
-	if err != nil {
-		return
-	}
-	again, err := AppendRecord(nil, d.Record, d.Entries, d.Data)
-	if err != nil || !bytes.Equal(again, img[:len(again)]) {
-		t.Fatalf("re-encoding %+v differs: %v", d.Record, err)
-	}
-	...
-})
-```
-
-`FuzzRecover` flips bits wherever the fuzzer says in a log of 40 writes and checkpoints, and requires recovery to either fail with `Corrupt`, `CopyOnly` or `NotFormatted`, or resume a log whose next write survives a restart. `FuzzLoadRun` in `internal/lsm` feeds arbitrary bytes as a sorted run: loading must never panic, and any run it accepts must iterate in strictly increasing key order.
+- **Golden files** under `testdata/` hold the exact bytes of superblocks, record headers, manifests, keys and chunk IDs; the code must reproduce them byte for byte, so a layout change shows up as a failed test, not as an unreadable disk next year.
+- **Bit flips and torn writes:** an exhaustive test flips every single bit of a record and checks the checksum catches it; a property test lands every subset of a record's blocks and checks recovery stops cleanly at the tear.
+- **Fuzzing:** every decoder has a native Go fuzz test, because a decoder takes bytes from disks and networks, and those bytes can be anything.
+- **Checks inside the code:** group commit decodes each record it is about to write and asserts that it holds exactly the submitted items, so an encoder bug fails in the round that made it instead of in a later recovery, as RocksDB's paranoid checks do. These run in tests and the simulator, not in release builds.
 
 ### Models, histories, real hardware and numbers
 
-> **In plain words.** A simulator tests code. A model checker tests the idea before code exists. A history checker tests what clients actually saw. Real hardware tests what no simulator can know, like a drive that claims it flushed when it did not. And benchmarks hold the code to the numbers the design relies on.
+> **In plain words.** A simulator checks the code, but only in the states its seeds happen to reach. A protocol model checks the design in every state of a small cluster, including ones a simulator would need years to stumble on. The two are joined: the code's simulated runs are replayed against the model, step by step, so passing tests mean the code follows a design that was checked, not merely that no seed found a bug.
 
 #### How it works
 
-These layers are all planned. "A new protocol is modeled in TLA+ before it is written." A TLA+ model describes a protocol as the variables each node holds and every step any node, message or fault can take; the TLC model checker walks every reachable state of a small instance and prints a step-by-step trace of any state that breaks a property. It checks the design, as the simulator checks the code, and it reaches fault paths a simulator rarely does: Amazon's models found a 35-step data loss in DynamoDB that had passed design reviews, code reviews and fault injection. Phase 2 models failover, sessions and fencing, cache recalls and purges; snapshot cuts and pool moves are modelled in phase 11 and cross-shard commit in phase 13, each before its code. Each model gets a `ci` configuration that CI checks exhaustively in under 5 minutes on every change, together with negative variants that each remove one rule and must fail; a `deep` one with one more node, crash or term, checked for up to 4 hours once per change; and an hour of random exploration every night. A spec too big for one `ci` run gets several, each heavy on one part: the failover model's "no two primaries serve reads" needs peering and leases together, so it has `ci-leases` and `ci-peering`. A model-to-simulator map in the build checklist names, for each property, the simulator invariant that checks it in the real code. Every client operation will be recorded as `(invoke_time, complete_time, op, result)` so Porcupine can search for a linearizable order (each operation taking effect at one instant between its start and end). Nightly Jepsen-style runs will inject kills, partitions, disk errors and slow disks, the errors through device-mapper and through eBPF error injection, which makes a chosen kernel function return an error. Conformance suites will pin the file behaviour: `pjdfstest` for POSIX, `fsx` with one and several clients, including its mapped operations and its `-e` mode, which writes past the end of a file through a memory mapping and checks that those bytes do not reappear when the file grows, and xfstests `generic/029` and `generic/030`, which mix mapped writes with truncates. Power cuts, through a server's management port or a smart power strip, with `fio --verify=crc32c` before and after, are "the only honest fsync test", because "some consumer NVMe drives acknowledge flushes they haven't done".
+**Why models.** The bugs model checking finds lie deep in fault and recovery paths: Amazon's models found a 35-step data loss in DynamoDB's replication protocol that had passed design reviews, code reviews and fault injection ([protocol models study](../studies/protocol-models/README.md)). No seed budget reliably reaches 35 precise steps. So every protocol is modelled in TLA+ under `models/` before its code, and TLC checks its properties, such as "an acknowledged write survives every failover", over every reachable state of a small instance.
 
-Numbers are decisions too: each is held by a nightly benchmark with the spike's figure as its bar, such as `BenchmarkCRC32CBlock` against 167 ns, and "a 20% regression is a bug". Hot-path benchmarks call `b.ReportAllocs` and must report zero allocations per operation; `BenchmarkGroupCommitRound` and the `internal/lsm` lookup benchmarks already call it. [Testing the design decisions](../docs/design.md#testing-the-design-decisions) maps every kind of decision, from byte layouts to runtime rules, to the test that holds it.
+**From spec to code.** A model checks the design, not the code that claims to follow it, and the gap between the two is where a checked design quietly stops protecting anyone. rock-solid's measure of success is therefore not how many bugs the models find, but whether **the code runs a protocol TLC has checked**. That splits into two questions with two checks:
+
+```mermaid
+flowchart LR
+    Spec["TLA+ spec"] -->|TLC, every state| Q1{"Is the protocol sound?"}
+    Code["Go code"] -->|simulator run| Trace["Trace of protocol steps"]
+    Trace -->|replayed against the spec| Q2{"Does the code run it?"}
+    Spec --> Q2
+```
+
+The conformance check answers the second. A simulator run records each protocol step as a fixed-field trace record; a small tool turns the trace into data TLC can read; and a trace spec takes each line as the spec action it names and checks that the state the code reported is one that action can produce, with every safety property intact. It holds only when all three parts hold:
+
+- **Every trace passes,** as a behavior of the spec.
+- **Traces can fail:** removing a rule from the code (a *plant*) makes a trace fail, so the check is not silently accepting everything.
+- **Traces cover the spec:** every action of the spec appears in some trace, and any that does not is listed.
+
+A discrepancy is settled as one of four kinds: the code is wrong, the spec left out or got wrong a detail, a spec action compresses steps the code takes apart, or the logging is wrong. The code is fixed, or the spec is patched, and the work goes on. A patched spec is the protocol kept, not thrown away: a spec is right until shown wrong, and code follows it. A clean run is the result wanted, not a sign the check is idle.
+
+A *model gate* runs on every commit: a commit that changes a protocol file must change a spec too, or say why not (a timer, a buffer or accounting needs no model; a new step, message or rule does). And each property a model checks names the simulator invariant that asserts it on the code, so a property TLC proved of the design is also checked on every seeded run.
+
+**Histories.** Every client operation is recorded with when it started and when it finished, from simulation and real clusters alike, and a checker (Porcupine) searches for an order of operations that explains every result: linearizable for chunks and write-shared files, close-to-open for the rest. A history no valid order explains is a bug, whatever the invariants said.
+
+**Real hardware.** Simulation knows only what we told it. Jepsen-style nemesis runs kill, partition and slow a real multi-node cluster under a file workload; POSIX and file suites (`pjdfstest`, single and multi-client `fsx`), Kubernetes' `csi-sanity` and a subset of Samba's smbtorture catch gaps against the standards; real power cuts on real drives test firmware that lies about flushes.
+
+**Numbers.** A number the design relies on, such as the cost of a checksum per block, becomes a benchmark with the spike's figure as its bar, run nightly, and a large regression is a bug. Hot-path benchmarks must report zero allocations per operation ([post 11](11-runtime-in-go.md)).
+
+**The gate.** A change reaches main only through a passing CI run on its exact commit: lint and the model gate, the tests, the seeded tests over their per-commit seeds, each protocol model's CI configurations and, for a change to a protocol's code, its conformance traces.
 
 ## Evidence
 
-The [metamorphic testing spike](../docs/design.md#appendix-metamorphic-testing-spike) ([spikes/lsm-study-testing](../spikes/lsm-study-testing/)) ran a harness over the real `internal/lsm` with seven option sets, and five one-line bugs planted in copies of the package, on Go 1.27.0 in a virtual machine with 4 shared virtual CPUs:
-
-| Test | Result |
-| --- | --- |
-| `internal/lsm`, 200 seeds × 3,000 ops × 7 option sets | No divergence from the map model or between option sets; about 99 ms per option set per seed |
-| Planted bugs, 20 seeds each | All five found, four on all 20 seeds and one (reads skipping the frozen memtable) on 18 |
-| Two of them | A merge installing its output as the oldest run, and a merge dropping removals that hide keys in older runs, showed **only under the set that lets 40 runs wait before a merge** |
-| History diff against the model | Every divergence from the model also showed between option sets |
-| Reduction | 5 and 7 ops from 3,000 when flushes, failed flushes and restarts are ops; 76 to 354 when an option sets the cadence |
-
-The package's hand-written unit tests also caught all five plants, three of them with a single test. That is the point, not a disappointment: those scenarios existed because someone had thought of these bugs. The metamorphic test found the same five without knowing where to look, which is what it is for: the net under the scenarios nobody wrote.
-
-The spike also showed that an option set must push each choice to its extreme, or whole bug classes never show, and that a failure reduces well only when structural steps such as flushes are explicit ops.
+- **Metamorphic tests find what scenario tests miss.** The [metamorphic testing spike](../spikes/lsm-study-testing/) planted five one-line bugs in copies of the LSM tree and found all five without knowing where to look; two showed only under one extreme option set. The package's hand-written tests also caught all five, which is the point rather than a disappointment: those tests existed because someone had thought of those bugs, and the metamorphic test is the net under the scenarios nobody wrote.
+- **Crash models differ in what they allow,** and only the subset model keeps an older overwrite without the newer one ([LSM study: durability spike](../spikes/lsm-study-durability/)).
+- **Model checking finds deep bugs:** the [protocol models study](../studies/protocol-models/README.md) reads how Amazon, MongoDB and CockroachDB found bugs at depths no test reached, which is why every rock-solid protocol gets its model before its code.
+- **The group-commit bug** at the top of this post is the case for seeded property tests: found by a seed, replayed exactly, fixed behind a regression test.
 
 ## Trade-offs and what it costs us
 
 - **The code pays a tax everywhere.** No goroutines, channels, clocks or map iteration in the core; every wait is an ID; every buffer a pool handle. Contributors must learn the rules, and the analyzer makes them unavoidable.
-- **We own a simulator.** Choosing it over Antithesis means building and maintaining the scheduler, disk, network, simulated clients, invariant checker and history recorder. Most of it is still phase 1 work.
+- **We own a simulator.** Choosing it over Antithesis means building and maintaining the scheduler, disk, network, clients, invariant checker, crash oracle and history recorder.
 - **A simulator only knows what we tell it.** A lying drive or a kernel quirk is invisible to it, which is why real-hardware tests and power cuts exist.
-- **Seeds cost CI minutes.** A 3,000-op metamorphic seed costs about 99 ms per option set, and each set added costs a run of every seed.
+- **Models cost machine time and care.** A model's full search can take hours, so heavy runs happen at milestones, not per commit; conformance traces are expensive enough to run in the gate rather than on every save. A spec states the protocol, not every line, so its details need patching as code meets them.
+- **Seeds cost CI minutes,** and every option set added to a metamorphic test costs a run of every seed.
 - **Expensive checks are off in release.** The decode check and full run checks run in tests and the simulator only; production data meets only the cheap ones.
-- **Option sets need judgement.** Two of five planted bugs hid unless one specific option was at an extreme. Nobody can prove the list of extremes is complete; it grows with the tree.
+- **Option sets need judgement.** Some bugs hide unless one specific option is at an extreme. Nobody can prove the list of extremes is complete; it grows with the tree.
 
 ## Open directions
 
-From the [Roadmap and open questions](../docs/design.md#roadmap-and-open-questions) and the [build checklist](../docs/build-checklist.md):
+From the [Roadmap and open questions](../docs/design.md#roadmap-and-open-questions):
 
-- **Phase 1 items still open:** the second clock and `Resumed` event in the core's context, the scheduler and trace records, the full simulated disk, crash at every action, the crash oracle, the invariant checker, the history recorder, the seed runner, data-driven regression files, the metamorphic tests and the LSM run checks.
-- **Metamorphic cost in CI** is an open question: how many option sets per seed, and how many of them random (Pebble runs as many random sets as standard ones), find the most planted bugs per CI minute?
-- **Incarnation fencing in the epoch-change model** is an open question for phase 2's TLA+ work. The design expects no per-primary table that survives a primary change to be needed, since every chunk write carries its incarnation, checked when the write is ordered, and a held write is reordered only if no other primary led the PG meanwhile; the model is to confirm it, and to fail without either rule.
-- **Cross-version runs** start with phase 6: from the first usable release on, the simulator opens the previous release's saved disk images before its own seeds run, as Pebble's cross-version test does.
-
-One entry in [`docs/tech-debts.md`](../docs/tech-debts.md) covers the testing machinery: TLC is pinned to release 1.7.4, because a new release can change what a configuration explores, and the 1.8 line is a pre-release whose jar is rebuilt in place.
+- **Metamorphic cost in CI:** how many option sets per seed, and how many of them random (Pebble runs as many random sets as standard ones), find the most planted bugs per CI minute?
+- **Where overnight runs of millions of seeds live,** and how their failures reach a person.
+- **Cross-version runs:** from the first usable release on, the simulator opens the previous release's saved disk images before its own seeds run, as Pebble's cross-version test does.
 
 ## Further reading
 
-- Design: [Testing strategy](../docs/design.md#testing-strategy), [Testing the design decisions](../docs/design.md#testing-the-design-decisions), [Modularity: sans-IO core, pluggable drivers](../docs/design.md#modularity-sans-io-core-pluggable-drivers), [Alternatives considered](../docs/design.md#alternatives-considered) (rows "Testing the indexes", "Regression cases from data", "Checks inside the code", "Crash model of the simulated disk", "Simulation"), [Roadmap and open questions](../docs/design.md#roadmap-and-open-questions), [Landscape and positioning](../docs/design.md#landscape-and-positioning).
-- Appendices: [metamorphic testing spike](../docs/design.md#appendix-metamorphic-testing-spike), [LSM study: durability spike](../docs/design.md#appendix-lsm-study-durability-spike).
-- Spikes: [spikes/lsm-study-testing](../spikes/lsm-study-testing/), [spikes/lsm-study-durability](../spikes/lsm-study-durability/).
-- Scenarios and checklist: [docs/test-scenarios.md](../docs/test-scenarios.md), [docs/build-checklist.md](../docs/build-checklist.md), the [glossary's testing terms](../docs/glossary.md#testing).
-- Code: [internal/sim](../internal/sim/), [internal/disklog](../internal/disklog/) (`property_test.go`, `recovery_property_test.go`, `torn_test.go`, `fuzz_test.go`, `groupcommit_test.go`), [internal/lsm](../internal/lsm/), [internal/core/rng.go](../internal/core/rng.go), [tools/sansio](../tools/sansio/).
-- Other posts: [01-the-big-picture.md](01-the-big-picture.md), [04-one-log-per-disk.md](04-one-log-per-disk.md) for group commit and recovery, [06-the-lsm-tree.md](06-the-lsm-tree.md) for the index the metamorphic test exercises, [03-epochs-leases-and-failures.md](03-epochs-leases-and-failures.md) for the protocols the TLA+ models cover, [11-runtime-in-go.md](11-runtime-in-go.md) for why the same sans-IO rules make the data path fast.
+- Design: [Testing strategy](../docs/design.md#testing-strategy), [Testing the design decisions](../docs/design.md#testing-the-design-decisions), [Modularity: sans-IO core, pluggable drivers](../docs/design.md#modularity-sans-io-core-pluggable-drivers), [Alternatives considered](../docs/design.md#alternatives-considered), [Roadmap and open questions](../docs/design.md#roadmap-and-open-questions).
+- Spikes and studies: [spikes/lsm-study-testing](../spikes/lsm-study-testing/), [spikes/lsm-study-durability](../spikes/lsm-study-durability/), [studies/protocol-models](../studies/protocol-models/README.md), [studies/driver-testing](../studies/driver-testing/README.md).
+- Models: [`models/`](../models/).
+- The [build checklist](../docs/build-checklist.md) and the [glossary's testing terms](../docs/glossary.md#testing).
