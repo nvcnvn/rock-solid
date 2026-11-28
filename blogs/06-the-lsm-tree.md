@@ -9,8 +9,6 @@ any other key-value engine for this. It builds its own small log-structured merg
 memory, compacted with RocksDB's universal rules. This post explains why an LSM tree, why our own,
 and how each part works, with the measurements that shaped it.
 
-
-
 ## Words you need
 
 - **Chunk, extent.** A chunk is a 4 MiB unit of user data. An extent is a run of consecutive
@@ -28,7 +26,7 @@ and how each part works, with the measurements that shaped it.
   **memtable**, later written out whole as an immutable **sorted run**; **compaction** merges runs
   in the background. RocksDB and Pebble call their on-disk sorted files **sstables**
   ([glossary](../docs/glossary.md#on-disk-structures)).
-- **Piece.** A sorted run is written to the log in pieces of at most one log record (1 MiB) each.
+- **Piece.** A sorted run is written to the log in pieces of at most one log record each.
 - **Amplification.** *Write*: bytes written to the drive per byte the user changed. *Read*: runs a
   lookup searches. *Space*: bytes stored per byte of live data.
 - **Removal, range removal, fragment.** A removal is the entry that deletes a key (other engines
@@ -52,9 +50,8 @@ and how each part works, with the measurements that shaped it.
 
 There is one tree per index: the disk's chunk index, and one per MetaStore shard replica on that
 disk. Each tree belongs to one event loop, its *owner* ([post 11](11-runtime-in-go.md)), so it
-never needs a lock. Both users see one interface: `Put`, `Delete`, `Get`, `Floor` (the greatest
-key at or below a key), ordered iteration and point-in-time views
-([`tree.go`](../internal/lsm/tree.go)).
+never needs a lock. Both users see one interface: put, delete, get, floor (the greatest key at or
+below a key), ordered iteration and point-in-time views ([`tree.go`](../internal/lsm/tree.go)).
 
 ## The problem: keeping a sorted index on disk
 
@@ -92,9 +89,9 @@ The diagram shows why a small change drags whole pages with it.
 ```
 
 The obvious fix inside a log, "keep the whole index in memory and write a full copy at every
-checkpoint", fails differently. A checkpoint is due every `max_replay_bytes` (default 64 MiB) of
-log, so a full copy of a 16 GiB shard writes its entries 256 times over for every 64 MiB of new
-ones. A checkpoint should cost what changed since the last one, which is exactly what a sorted run
+checkpoint", fails differently. A checkpoint is due every few tens of MiB of log, to keep crash
+replay short, so a full copy of a 16 GiB shard each time would write hundreds of times the bytes
+that changed. A checkpoint should cost what changed since the last one, which is exactly what a sorted run
 is.
 
 No design is free. Every index trades three costs, and at most two can be cheap:
@@ -125,9 +122,9 @@ kept 179 MB on disk for 4.9 MB live and took 2.8 s to replay a 64 MB journal.
 
 The deeper problem is shared by every embedded engine: it flushes its own files through the
 kernel. It cannot run on a drive that SPDK owns (kernel bypass, [post 11](11-runtime-in-go.md)),
-the deterministic simulator cannot crash it, and its flushes come on top of the chunk log's. One
-combined commit for 100 shards took 1.2 ms in a shared log; 100 separate commits took 114 to
-120 ms, and neither engine merged concurrent commits on its own.
+the deterministic simulator cannot crash it, and its flushes come on top of the chunk log's, which
+cost a hundred shards two orders of magnitude
+([post 04](04-one-log-per-disk.md#the-problem-durability-is-expensive-and-the-obvious-stack-pays-for-it-many-times)).
 
 Inside the log, three compaction shapes were weighed: **leveled** (Pebble, RocksDB's default: runs
 cut into key ranges, merged level by level), **size-tiered buckets** (Cassandra: merge runs of
@@ -159,7 +156,7 @@ The flow of one write through the tree:
 flowchart LR
     W["Put or Delete"] --> M["Memtable<br/>copy-on-write B+-tree<br/>of 4 KiB pages"]
     M -->|"checkpoint: freeze"| F["Frozen memtable"]
-        F -->|"stream piece by piece"| L[("Disk log<br/>metadata stream")]
+    F -->|"stream piece by piece"| L[("Disk log<br/>metadata stream")]
     F -->|"same bytes kept in RAM"| R["Sorted runs in RAM<br/>fence pointers<br/>Bloom filter"]
     R -->|"universal picker"| C["Merge on a<br/>worker goroutine"]
     C -->|"output in steps"| R
@@ -179,23 +176,19 @@ lives; that is the biggest difference from RocksDB and Pebble.
 
 #### How it works
 
-A page is 4 KiB: a 16-byte header, then 2-byte slot offsets growing up from the front, and entries
-growing down from the end ([`page.go`](../internal/lsm/page.go)). A leaf entry is
-`key_len | value_len | key | kind | value`, where the kind byte says "set" or "removal". An inner
-entry is `key_len | child page number | key`.
+A page is 4 KiB of raw bytes laid out as a database's *slotted page*: a small header, then an
+array of entry offsets growing from the front and the entries themselves growing from the end
+([`page.go`](../internal/lsm/page.go)). Pages are allocated in large slabs, and an inner page names
+its children by page number:
 
 ```text
  one 4 KiB page
- +--------+------------------------+.................+----------------------------+
- | header | slot0 slot1 slot2 ...  |   free space    | ..entry2 | entry1 | entry0 |
- | 16 B   | u16 offsets, grow  --> |                 | <-- entries grow from end  |
- +--------+------------------------+.................+----------------------------+
-   kind, count, free, dead bytes, generation, left child
+ +--------+-------------------------+...............+----------------------------+
+ | header | entry offsets, grow --> |  free space   | <-- entries grow from end  |
+ +--------+-------------------------+...............+----------------------------+
 
- slab = 256 pages (1 MiB)         page number 517 = slab 2, page 5
- +-------+-------+-------+----+   inner entries name children by number, so a page
- | p0    | p1    | p2    | .. |   holds no Go pointer and the collector never scans it
- +-------+-------+-------+----+
+ inner entries name their children by page number, never by Go pointer,
+ so a slab of pages holds nothing the garbage collector needs to scan
 ```
 
 Why go to this trouble? The [Go memtable spike](../docs/design.md#appendix-go-memtable-spike)
@@ -221,11 +214,10 @@ Three details make the page tree work as an LSM memtable:
   is open, a write copies any page that view can reach instead of changing it; the old page is
   freed when the last view that could reach it closes.
 
-A key is at most 1,032 bytes and a value at most 1,000, so two entries always fit a page: room for
-an S3 key of 1,024 bytes plus its prefix. A range removal stores both its ends, so each end is kept
-to 1,000 bytes, and the MetaStore splits a larger value, such as a 64 KiB extended attribute, over
-several keys. An entry too large to fit one run piece (next section) is refused with `ErrTooLarge`
-when it is written, not later when a flush meets it.
+Keys and values are capped at about a kilobyte, so two entries always fit a page, with room for
+the longest S3 key plus its prefix; the MetaStore splits a larger value, such as a big extended
+attribute, over several keys. An entry too large is refused when it is written, not later when a
+flush meets it.
 
 ### Flushes: streaming a sorted run into the log, one piece at a time
 
@@ -236,48 +228,46 @@ when it is written, not later when a flush meets it.
 
 #### How it works
 
-A checkpoint is due once `max_replay_bytes` of records follow the last manifest. It flushes the
-memtable of every index on the disk that holds anything, then writes a manifest. A flush freezes
-the memtable and starts an empty one, so writes never wait. It streams the frozen tree out as a
-sorted run in pieces of at most one log record (1 MiB, `max_group_commit_bytes`), each built at its
-final size and handed to the log only once the piece before it is durable. The last piece, the
+A checkpoint is due once a set amount of log follows the last manifest
+([post 04](04-one-log-per-disk.md#checkpoints-and-manifests)). It flushes the memtable of every
+index on the disk that holds anything, then writes a manifest. A flush freezes the memtable and
+starts an empty one, so writes never wait. It streams the frozen tree out as a sorted run in pieces
+of at most one log record, each built at its final size and handed to the log only once the piece before it is durable. The last piece, the
 **root**, lists the earlier ones, so a manifest names a whole run by its root.
 
 ```mermaid
 sequenceDiagram
     participant O as Index owner loop
-    participant T as lsm.Tree
+    participant T as The tree
     participant G as Group commit
-    O->>T: BeginFlush, freeze memtable
+    O->>T: start a flush: freeze the memtable
     loop each piece
-        O->>T: NextPiece
-        T-->>O: piece = version, one block, trailer
+        O->>T: next piece
+        T-->>O: one piece of the run
         O->>G: append to the log
         G-->>O: durable
-        O->>T: PieceDurable
+        O->>T: piece durable
     end
     Note over T: last piece is the root,<br/>listing the earlier ones
     O->>G: manifest naming each run by its root
     G-->>O: durable
-    O->>T: CheckpointDone, free frozen pages
+    O->>T: checkpoint done: free the frozen pages
 ```
 
 Read it top to bottom: only one piece is ever in flight, so a flush's memory peak is one piece
 above the frozen tree and the run it becomes, 1.0004× the tree for 10 million files in the
-[MetaStore memory spike](../docs/design.md#appendix-metastore-memory-spike). A root lists up to about
-58,000 pieces, so a run holds up to about 58 GiB ([`run.go`](../internal/lsm/run.go)).
+[MetaStore memory spike](../docs/design.md#appendix-metastore-memory-spike)
+([`run.go`](../internal/lsm/run.go)).
 
 A checkpoint names again the runs already durable and writes only the frozen memtable and any runs
 a merge made since. A failed checkpoint keeps the frozen memtable, and the next one writes it again
-from its first piece. Once the records after the newest manifest reach twice the checkpoint
-interval, group commit takes items only from the checkpoint and the cleaner until a manifest is
-durable, as Pebble and RocksDB stop writes at two memtables. That bounds memtables and kept Raft
-entries per disk.
+from its first piece. A checkpoint that lags far enough holds back ordinary writes until its
+manifest is durable, which bounds memtables and kept Raft entries per disk.
 
 Run checks, always on, catch a bad run before it spreads: a flush checks that the run holds
 as many entries and range-removal fragments as the frozen memtable, a merge that its output and
 what it dropped add up to its inputs, as RocksDB does by default, and every piece in memory keeps a
-CRC32C of its bytes that a merge verifies before reading it (4 bytes per piece, 167 ns per 4 KiB).
+checksum of its bytes that a merge verifies before reading it.
 Runs are never read back from disk, so without that check a flipped bit in RAM would be merged into
 the next run. A failed check fails the flush or merge, and the index is rebuilt from the log.
 
@@ -286,13 +276,13 @@ the next run. A failed check fails the flush or merge, and the index is rebuilt 
 > **In plain words.** A booklet has a thumb index: the first name on each page printed on the
 > edge. You jump to the right page by the thumb index, then scan a few lines. Inside a page, a name
 > that shares a beginning with the one before is written as "same first 8 letters, then ...", with
-> every 16th name spelled out in full so you can start reading there.
+> a name spelled out in full every few lines so you can start reading there.
 
 #### How it works
 
 Runs stay in memory, pointer-free, as the blocks of their pieces. Each block uses LevelDB's
 format, which Pebble keeps ([`block.go`](../internal/lsm/block.go)): entries prefix-compressed
-against the one before, a *restart* every 16 entries storing its key whole, and the restart
+against the one before, a *restart* every few entries storing its key whole, and the restart
 offsets at the block's end. A block's first key and its restart keys are its fence pointers.
 
 ```text
@@ -309,7 +299,7 @@ offsets at the block's end. A block's first key and its restart keys are its fen
 
  lookup("fs/1/7351"): binary search fence pointers -> block 1
                       binary search restarts      -> restart 0
-                      step forward <= 16 entries  -> found or absent
+                      step forward a few entries  -> found or absent
 ```
 
 The diagram shows a lookup that never leaves memory: two binary searches and a short walk. A cold
@@ -375,11 +365,10 @@ memory, and misses (a `create` checking that a name is free, a read of unwritten
 
 **What the filter holds depends on the index.** The chunk index reads by *floor* ("the extent at or
 below block 37 of chunk X"), and block 37 is usually not a key, so its filter holds each chunk's
-prefix `(pool, h, chunk_id)`, where `h` is the hash that picks the chunk's placement group. The
-MetaStore's filter holds whole keys plus each inode's prefix, which also serves `readdir`. A read of
+key prefix instead. The MetaStore's filter holds whole keys plus each inode's prefix, which also serves `readdir`. A read of
 several blocks of one chunk takes one reader for the chunk: it probes the filters once with the
 chunk's prefix, then serves ascending blocks by stepping forward from the last one, as Pebble's
-`TrySeekUsingNext` does.
+iterators do when a seek moves forward.
 
 | Lookup over 24 runs | No filter | Bloom, 10 bits per key |
 | --- | --- | --- |
@@ -413,44 +402,43 @@ output in their place. So **entries carry no sequence number**: the newest value
 newest run that has it, and each run's own sequence number orders the runs. Merging runs that are
 not neighbours would need 8 more bytes per entry.
 
-Once an index holds four runs, the picker tries three rules in order, as RocksDB's does:
+Once an index holds a few runs, the picker tries three rules in order, as RocksDB's does:
 
-1. **Size amplification.** Merge every run once the runs newer than the oldest hold 200% of its
-   bytes. This bounds space.
-2. **Size ratio.** Walk from the newest run; take the next one while it is at most 1% larger than
-   the runs taken so far; merge the first span of two or more.
+1. **Size amplification.** Merge every run once the newer runs together outweigh the oldest twice
+   over. This bounds space.
+2. **Size ratio.** Walk from the newest run, taking the next one while it is no larger than the
+   runs taken so far (give or take a sliver); merge the first span of two or more.
 3. **Run limit.** If neither applies and there are more runs than the limit, merge the newest runs
-   beyond it, whatever their sizes. The limit is RocksDB's auto-tuned `max_read_amp`, about
-   2 + log2(largest run ÷ 1 MiB): 8 runs for a 44 MB chunk index, 13 for a 1.6 GB shard, 16 for
-   16 GiB.
+   beyond it, whatever their sizes. The limit grows with the logarithm of the largest run's size,
+   as RocksDB's auto-tuned limit does, so a large index may keep a few more runs than a small one.
 
-An illustration of rule 2 with invented sizes in MiB, newest first, to show the rule; the study's
-measured results follow:
+An illustration with invented sizes in MiB, newest first, to show the rules; the study's measured
+results follow:
 
 ```text
  runs (newest -> oldest):   [4]  [4]  [8]  [20]  [100]
 
- rule 1, size amplification: newer runs 4+4+8+20 = 36 MiB = 36% of 100  -> no
+ rule 1, size amplification: newer runs 4+4+8+20 = 36 MiB, not twice 100  -> no
  rule 2, size ratio:          take 4
-                              next 4  <= 4  x 1.01  -> take, total 8
-                              next 8  <= 8  x 1.01  -> take, total 16
-                              next 20 >  16 x 1.01  -> stop
-                              span of 3 runs        -> merge [4][4][8]
+                              next 4  <= 4   -> take, total 8
+                              next 8  <= 8   -> take, total 16
+                              next 20 >  16  -> stop
+                              span of 3 runs -> merge [4][4][8]
 
  after:                     [16]  [20]  [100]
 ```
 
 **Why not Cassandra's buckets?** Size-tiered buckets merge four neighbouring runs of similar size.
 That works only while flushes are steady, and checkpoints are not: in the study's model a flush
-carrying a cleaner pass's index moves is 25 times one carrying ordinary writes. At the
-study's S4 scale (a 44 MB index, flushes alternating 1.3 MB and 33 MB):
+carrying a cleaner pass's index moves is 25 times one carrying ordinary writes. With flushes
+alternating between the two:
 
 ```text
  newest -> oldest
- [1.3] [33] [1.3] [33] [1.3] [33] [1.3] [33] ...
-   ^     ^
+ [small] [large] [small] [large] [small] [large] [small] [large] ...
+   ^       ^
    a small run between two large ones splits them; four similar neighbours never form
-   => no merge ever runs: 2,001 runs after 2,000 flushes, 419x the live index in space
+   => no merge ever runs: one run per flush, 419x the live index in space
 ```
 
 The [LSM compaction study](../docs/design.md#appendix-lsm-compaction-study) found one run per flush
@@ -479,7 +467,8 @@ universal score).
 
 #### How it works
 
-A step merges a bounded amount of output and raises each input's **bound** to the step's last key; the next checkpoint writes the step's pieces
+A step merges a bounded amount of output and raises each input's **bound** to the step's last
+key; the next checkpoint writes the step's pieces
 and a manifest edit holding the bounds. A run holds only its keys above its bound, so output
 and inputs never hold the same key, and still no sequence number is needed.
 
@@ -501,11 +490,10 @@ Each key lives in exactly one of O or the inputs at any moment, and a restart re
 bound. An input piece wholly below the bound is dead once the manifest naming that bound is
 durable, and leaves memory too unless a view holds it, so a merge's memory peak is also one step;
 the piece the bound falls in stays whole. Each merge worker writes its output into a lane of its
-own in the metadata stream, one segment at a time that its next merge continues, so a later
-merge's steps free whole segments: sharing the open segment with
-flush pieces left 30 to 57 segments stranded instead of 8 to 10. The [LSM space
-spike](../docs/design.md#appendix-lsm-space-spike) measured space held beyond what the manifests
-name: installed whole, a merge of everything held up to the whole index, 258 segments of 64 MiB on
+own, so a merge's steps free whole segments
+([post 05](05-the-cleaner-and-free-space.md#three-streams-keep-data-that-dies-together)). The
+[LSM space spike](../docs/design.md#appendix-lsm-space-spike) measured space held beyond what the
+manifests name: installed whole, a merge of everything held up to the whole index, 258 segments on
 a 256 GiB disk; in steps, 2 segments. This is ScyllaDB's incremental compaction.
 
 ### Deletions: removals and range removals
@@ -539,8 +527,8 @@ extents leaves 1,023 removals for every floor to step over:
 ```
 
 The [LSM runs spike](../docs/design.md#appendix-lsm-runs-spike) measured both rows. With point
-removals the cost lasted: 731 µs per lookup after 192 GiB of further writes, because size tiering
-never merged the removals into the old extents' run.
+removals the cost lasted long after the rewrite, because size tiering never merged the removals
+into the old extents' run.
 
 A memtable keeps its range removals as non-overlapping fragments in a second copy-on-write page
 tree, and a later write cuts its key out of its fragment. A fragment hides every older layer and
@@ -548,8 +536,7 @@ none of its own layer's entries. A get stops at a covering fragment; a floor or 
 it in one search. In a run, fragments are stored after the entries in blocks of their own, and the
 run's own entries win over them. A flush or merge drops a fragment unless an older run holds a key
 it hides, checking each older run with a cursor that only moves forward, since removals arrive in
-key order.
-Range removals also delete a punched chunk's extents, a released snapshot version, a dropped
+key order. Range removals also delete a punched chunk's extents, a released snapshot version, a dropped
 volume's keys and a queue's consumed head
 ([LSM deletions study](../docs/design.md#appendix-lsm-deletions-study)).
 
@@ -565,14 +552,15 @@ volume's keys and a queue's consumed head
 The disk log *is* value separation, as the WiscKey research paper introduced it and RocksDB's
 BlobDB, TiKV's Titan and Pebble ship it: the index holds locations, the data stays in a log, and a
 cleaner copies live data and updates the index
-([value separation spike](../docs/design.md#appendix-value-separation-spike)). A tree value is
-capped at 1,000 bytes and MetaStore values are small (92 B per inode's attributes), so the tree has
-no blob layer of its own.
+([value separation spike](../docs/design.md#appendix-value-separation-spike)). Tree values are
+capped at about a kilobyte and MetaStore values are small, so the tree has no blob layer of its
+own.
 
 When the cleaner ([post 05](05-the-cleaner-and-free-space.md)) moves a block, the index learns the
 new location as in WiscKey and Titan: one index write per move, applied only if the key still
-points at the old place. The index is in memory, so that is one put, 42 to 72 ns. At 90% full under uniform overwrites the cleaner's moves cause 76% of the chunk index's entries, yet
-the index's runs add only about 6% to the disk's total writes.
+points at the old place. The index is in memory, so that is one put. At 90% full under uniform
+overwrites the cleaner's moves cause 76% of the chunk index's entries, yet the index's runs add
+only about 6% to the disk's total writes.
 
 ### The block cache that comes later
 
@@ -585,8 +573,8 @@ the index's runs add only about 6% to the disk's total writes.
 It comes before the block frontend at the latest, because a block volume's chunk index outgrows
 memory: a chunk overwritten at random 4 KiB holds one extent per write, so a 1 TB disk can reach
 toward 270 million entries, more than 10 GB. Fence pointers and filters stay in memory outside
-the cache, as RocksDB keeps them by default. Those runs cut each piece into data blocks of 4 to
-32 KiB, so a miss reads one block rather than a 1 MiB piece, and each piece's filter becomes a
+the cache, as RocksDB keeps them by default. Those runs cut each piece into small data blocks, so
+a miss reads one block rather than a whole piece, and each piece's filter becomes a
 partition of its own. The cache is one CLOCK cache (a cheap
 approximation of least-recently-used eviction) over off-heap buffers, owned by the index's event
 loop, so it needs no locks.
@@ -631,7 +619,7 @@ appendix links its spike directory under [`spikes/`](../spikes/).
   [value separation](../docs/design.md#appendix-value-separation-spike),
   [LSM space](../docs/design.md#appendix-lsm-space-spike): the filter, removal, cleaner and
   merge-step figures above. The durability study also found that RocksDB counts entries on every
-    flush and compaction, and both engines verify block checksums on compaction reads; the run checks
+  flush and compaction, and both engines verify block checksums on compaction reads; the run checks
   copy that.
 - [Metamorphic testing](../docs/design.md#appendix-metamorphic-testing-spike): running the same
   operations under settings that must not change any read, and comparing the results, found every
@@ -661,14 +649,10 @@ From the design's [Roadmap and open questions](../docs/design.md#roadmap-and-ope
 
 - **Block-volume reads.** Would a finer prefix filter (a chunk plus a range of its blocks), or
   merges triggered by reads, bring the 7 of 24 runs near one?
-- **One hash per lookup.** Hashing the key once for every run's filter, instead of once per run:
-  does it bring a miss over 16 runs under 0.5 µs?
+- **One hash per lookup.** Hashing the key once for every run's filter, instead of once per run.
 - **Pieces shared between runs.** Dropping the blocks a range removal covers, as Pebble drops whole
-  tables, freed 22 of a dropped volume's 28 MB at the first checkpoint, but pays only once a run can
-  share pieces with the run it replaces; written again whole, the kept blocks cost 85.6 MB.
-- **Merge lanes shared between merges.** A merge worker's next merge continues the segment its last
-  one left, so one segment can hold the end of one merge and the start of another; the LSM space
-  spike measured a segment per merge, not this mixing.
+  tables, frees most of a dropped volume's space at once, but pays only once a run can share pieces
+  with the run it replaces; written again whole, the kept blocks cost more than they free.
 - **Regrouping fragmented chunks** into a whole-chunk slot once their extent map grows too long.
 - **Revisit leveled** when runs are read from disk.
 - **Tech debt:** sorted runs and the Raft entries a shard keeps still live on the Go heap; they
@@ -677,7 +661,8 @@ From the design's [Roadmap and open questions](../docs/design.md#roadmap-and-ope
 ## Further reading
 
 - Design: [On-disk format](../docs/design.md#on-disk-format) (the "log is the source of truth"
-  and "The LSM tree" bullets), [Runtime in Go](../docs/design.md#runtime-in-go), [Alternatives considered](../docs/design.md#alternatives-considered).
+  and "The LSM tree" bullets), [Runtime in Go](../docs/design.md#runtime-in-go),
+  [Alternatives considered](../docs/design.md#alternatives-considered).
 - Code: [`internal/lsm/`](../internal/lsm/) ([`memtable.go`](../internal/lsm/memtable.go),
   [`page.go`](../internal/lsm/page.go), [`run.go`](../internal/lsm/run.go),
   [`block.go`](../internal/lsm/block.go), [`compact.go`](../internal/lsm/compact.go),
