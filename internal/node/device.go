@@ -51,7 +51,7 @@ type DeviceConfig struct {
 // once its start ends, the disk Opened for Node.Opened, or Failed for Node.Failed; from its
 // replica, a session ask for Node.Ask, a table fetch for Node.FetchTable, and the session version
 // and placement epoch it holds when they changed, for Node.Held and Node.HeldEpoch; and, if
-// Reported, its MetaStore replicas' reports, for Node.Replicas.
+// Reported, its MetaStore replicas' reports and their halts, for Node.Replicas and Node.Halts.
 type DeviceOutput struct {
 	Actions  []core.Action
 	Opened   *meta.OpenedDisk
@@ -62,10 +62,13 @@ type DeviceOutput struct {
 	Epoch    uint64
 	Reported bool
 	Metas    []meta.ReplicaReport
+	Halts    []meta.Halt
 }
 
 // Reset empties the output for reuse.
-func (o *DeviceOutput) Reset() { *o = DeviceOutput{Actions: o.Actions[:0], Metas: o.Metas[:0]} }
+func (o *DeviceOutput) Reset() {
+	*o = DeviceOutput{Actions: o.Actions[:0], Metas: o.Metas[:0], Halts: o.Halts[:0]}
+}
 
 // Clone is o without its actions, for the node's loop; false when it holds nothing for the node.
 func (o *DeviceOutput) Clone() (DeviceOutput, bool) {
@@ -75,7 +78,7 @@ func (o *DeviceOutput) Clone() (DeviceOutput, bool) {
 		d := *o.Opened
 		c.Opened = &d
 	}
-	c.Metas = slices.Clone(o.Metas)
+	c.Metas, c.Halts = slices.Clone(o.Metas), slices.Clone(o.Halts)
 	return c, c.Opened != nil || c.Failed || c.Ask != 0 || c.Fetch || c.Held != 0 || c.Epoch != 0 || c.Reported
 }
 
